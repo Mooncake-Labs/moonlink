@@ -1,0 +1,13 @@
+services:
+  devcontainer:
+    image: mcr.microsoft.com/devcontainers/rust
+    volumes:
+      - ..:/workspaces/pg_moonlink:cached
+    network_mode: service:postgres
+    command: sleep infinity
+
+  postgres:
+    image: postgres
+    environment:
+      POSTGRES_PASSWORD: postgres
+    command: ["-c", "wal_level=logical"]
