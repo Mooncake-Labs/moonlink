@@ -1,0 +1,6 @@
+[package]
+name = "moonlink"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
