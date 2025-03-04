@@ -9,3 +9,7 @@ version = "0.0.1"
 edition = "2021"
 
 [workspace.dependencies]
+async-trait = "0.1"
+pg_replicate = { git = "https://github.com/Mooncake-Labs/pg_replicate", branch = "mooncake" }
+tokio.version = "1.38"
+tokio-postgres = { git = "https://github.com/imor/rust-postgres", rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
