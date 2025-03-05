@@ -1,4 +1,7 @@
+mod error;
 mod sink;
+mod storage;
+mod util;
 
 use pg_replicate::pipeline::{
     batching::{data_pipeline::BatchDataPipeline, BatchConfig},
@@ -19,7 +22,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         TableNamesFrom::Publication("moonlink_pub".to_string()),
     )
     .await?;
-    let sink = Sink;
+    let sink = Sink::new();
     let batch_config = BatchConfig::new(1000, Duration::from_secs(1));
     let mut pipeline = BatchDataPipeline::new(source, sink, PipelineAction::Both, batch_config);
     pipeline.start().await?;

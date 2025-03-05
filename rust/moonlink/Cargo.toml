@@ -8,3 +8,5 @@ async-trait.workspace = true
 pg_replicate.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+arrow.workspace = true
+thiserror.workspace = true

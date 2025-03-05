@@ -1,4 +1,7 @@
+use crate::storage::memtable::MemTable;
+use crate::util::table_schema_to_arrow_schema;
 use async_trait::async_trait;
+use pg_replicate::conversions::Cell;
 use pg_replicate::{
     conversions::{cdc_event::CdcEvent, table_row::TableRow},
     pipeline::{
@@ -9,9 +12,17 @@ use pg_replicate::{
 };
 use std::collections::{HashMap, HashSet};
 use tokio_postgres::types::PgLsn;
+pub struct Sink {
+    tables: HashMap<TableId, MemTable>,
+}
 
-pub struct Sink;
-
+impl Sink {
+    pub fn new() -> Self {
+        Self {
+            tables: HashMap::new(),
+        }
+    }
+}
 #[async_trait]
 impl BatchSink for Sink {
     type Error = InfallibleSinkError;
@@ -26,7 +37,12 @@ impl BatchSink for Sink {
         &mut self,
         table_schemas: HashMap<TableId, TableSchema>,
     ) -> Result<(), Self::Error> {
-        println!("{table_schemas:?}");
+        for (table_id, table_schema) in table_schemas {
+            self.tables.insert(
+                table_id,
+                MemTable::new(table_schema_to_arrow_schema(&table_schema)),
+            );
+        }
         Ok(())
     }
 
@@ -36,8 +52,25 @@ impl BatchSink for Sink {
         _table_id: TableId,
     ) -> Result<(), Self::Error> {
         for row in rows {
-            println!("{row:?}");
+            if let Cell::I64(id) = row.values[0] {
+                self.tables
+                    .get_mut(&_table_id)
+                    .unwrap()
+                    .append(id, &row)
+                    .unwrap();
+            } else {
+                println!("Invalid primary key type: {:?}", row.values[0]);
+            }
         }
+        println!(
+            "{:?}",
+            self.tables
+                .get(&_table_id)
+                .unwrap()
+                .column_store
+                .export()
+                .unwrap()
+        );
         Ok(())
     }
 
@@ -47,18 +80,49 @@ impl BatchSink for Sink {
                 CdcEvent::Begin(begin_body) => println!("Begin {begin_body:?}"),
                 CdcEvent::Commit(commit_body) => println!("Commit {commit_body:?}"),
                 CdcEvent::Insert((table_id, table_row)) => {
-                    println!("Insert {table_id:?} {table_row:?}")
+                    if let Cell::I64(id) = table_row.values[0] {
+                        self.tables
+                            .get_mut(table_id)
+                            .unwrap()
+                            .append(id, table_row)
+                            .unwrap();
+                    } else {
+                        println!("Invalid primary key type: {:?}", table_row.values[0]);
+                    }
                 }
                 CdcEvent::Update((table_id, old_table_row, new_table_row)) => {
-                    println!("Update {table_id:?} {old_table_row:?} {new_table_row:?}")
+                    if let Cell::I64(id) = old_table_row.as_ref().unwrap().values[0] {
+                        self.tables.get_mut(table_id).unwrap().delete(id);
+                    } else {
+                        println!(
+                            "Invalid primary key type: {:?}",
+                            old_table_row.as_ref().unwrap().values[0]
+                        );
+                    }
+                    if let Cell::I64(id) = new_table_row.values[0] {
+                        self.tables
+                            .get_mut(table_id)
+                            .unwrap()
+                            .append(id, new_table_row)
+                            .unwrap();
+                    } else {
+                        println!("Invalid primary key type: {:?}", new_table_row.values[0]);
+                    }
                 }
                 CdcEvent::Delete((table_id, table_row)) => {
-                    println!("Delete {table_id:?} {table_row:?}")
+                    if let Cell::I64(id) = table_row.values[0] {
+                        self.tables.get_mut(table_id).unwrap().delete(id);
+                    } else {
+                        println!("Invalid primary key type: {:?}", table_row.values[0]);
+                    }
                 }
                 CdcEvent::Relation(relation_body) => println!("Relation {relation_body:?}"),
                 CdcEvent::Type(type_body) => println!("Type {type_body:?}"),
                 CdcEvent::KeepAliveRequested { .. } => {}
             }
+        }
+        for table in self.tables.values_mut() {
+            println!("{:?}", table.column_store.export().unwrap());
         }
         Ok(PgLsn::from(0))
     }
