@@ -1,3 +1,39 @@
+[package]
+name = "pg_mooncake"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_pg_mooncake"
+path = "./src/bin/pgrx_embed.rs"
+
+[features]
+default = ["pg17"]
+pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15" ]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16" ]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17" ]
+pg_test = []
+
+[dependencies]
+pgrx.workspace = true
+
+[dev-dependencies]
+pgrx-tests.workspace = true
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
 [workspace]
 members = [
     "rust/moonlink",
@@ -11,5 +47,7 @@ edition = "2021"
 [workspace.dependencies]
 async-trait = "0.1"
 pg_replicate = { git = "https://github.com/Mooncake-Labs/pg_replicate", branch = "mooncake" }
+pgrx = "0.13.1"
+pgrx-tests = "0.13.1"
 tokio.version = "1.38"
 tokio-postgres = { git = "https://github.com/imor/rust-postgres", rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }

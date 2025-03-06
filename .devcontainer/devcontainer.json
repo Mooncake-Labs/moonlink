@@ -1,11 +1,14 @@
 {
-    "dockerComposeFile": "docker-compose.yml",
-    "service": "devcontainer",
-    "workspaceFolder": "/workspaces/pg_moonlink",
-    "features": {
-        "ghcr.io/robbert229/devcontainer-features/postgresql-client": {
-            "version": "17"
-        }
+    "build": {
+        "dockerfile": "Dockerfile"
     },
-    "postCreateCommand": "git config devcontainers-theme.show-dirty 1 && echo \"alias psql='psql -h localhost -U postgres'\" >> ~/.bashrc"
+    "postCreateCommand": "git config devcontainers-theme.show-dirty 1",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "eamodio.gitlens",
+                "rust-lang.rust-analyzer"
+            ]
+        }
+    }
 }
