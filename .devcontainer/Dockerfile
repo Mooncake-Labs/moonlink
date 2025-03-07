@@ -11,3 +11,5 @@ USER vscode
 
 RUN cargo install --locked cargo-pgrx \
  && cargo pgrx init
+
+RUN echo '\\i /workspaces/pg_moonlink/.devcontainer/.psqlrc' > ~/.psqlrc
