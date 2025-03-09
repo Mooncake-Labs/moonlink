@@ -1,3 +1,5 @@
+mod mooncakeam_handler;
+
 use pgrx::prelude::*;
 
 ::pgrx::pg_module_magic!();
