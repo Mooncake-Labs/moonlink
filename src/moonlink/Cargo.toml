@@ -13,6 +13,7 @@ parquet.workspace = true
 uuid.workspace = true
 futures.workspace = true
 multimap.workspace = true
+bitstream-io.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 iceberg.workspace = true

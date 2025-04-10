@@ -1,4 +1,5 @@
 pub mod test_in_memory_index;
+pub mod hash_index;
 
 use crate::row::{MoonlinkRow, RowValue};
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};

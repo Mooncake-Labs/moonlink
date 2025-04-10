@@ -34,3 +34,4 @@ iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev
 url = "2.5"
 roaring = { version = "0.10.12", git = "https://github.com/RoaringBitmap/roaring-rs.git" }
 crc32fast = "1.3"
+bitstream-io = "3.1.0"
