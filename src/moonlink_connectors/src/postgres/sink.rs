@@ -1,8 +1,4 @@
-use crate::postgres::util::table_schema_to_arrow_schema;
-use crate::postgres::util::PostgresTableRow;
-use async_trait::async_trait;
-use moonlink::{TableEvent, TableHandler};
-use pg_replicate::{
+use crate::pg_replicate::{
     conversions::{cdc_event::CdcEvent, table_row::TableRow},
     pipeline::{
         sinks::{BatchSink, InfallibleSinkError},
@@ -10,6 +6,10 @@ use pg_replicate::{
     },
     table::{TableId, TableSchema},
 };
+use crate::postgres::util::table_schema_to_arrow_schema;
+use crate::postgres::util::PostgresTableRow;
+use async_trait::async_trait;
+use moonlink::{TableEvent, TableHandler};
 use std::collections::{HashMap, HashSet};
 use std::fs::create_dir_all;
 use std::path::PathBuf;
@@ -117,7 +117,7 @@ impl BatchSink for Sink {
                         table_id_in_transaction = None;
                     }
                 }
-                CdcEvent::Insert((table_id, table_row)) => {
+                CdcEvent::Insert((table_id, table_row, _xact_id)) => {
                     if let Some(prev_id) = table_id_in_transaction {
                         assert!(
                             prev_id == table_id,
@@ -133,7 +133,7 @@ impl BatchSink for Sink {
                         .await
                         .unwrap();
                 }
-                CdcEvent::Update((table_id, old_table_row, new_table_row)) => {
+                CdcEvent::Update((table_id, old_table_row, new_table_row, _xact_id)) => {
                     if let Some(prev_id) = table_id_in_transaction {
                         assert!(
                             prev_id == table_id,
@@ -156,7 +156,7 @@ impl BatchSink for Sink {
                         .await
                         .unwrap();
                 }
-                CdcEvent::Delete((table_id, table_row)) => {
+                CdcEvent::Delete((table_id, table_row, _xact_id)) => {
                     if let Some(prev_id) = table_id_in_transaction {
                         assert!(
                             prev_id == table_id,
@@ -176,6 +176,18 @@ impl BatchSink for Sink {
                 CdcEvent::Relation(relation_body) => println!("Relation {relation_body:?}"),
                 CdcEvent::Type(type_body) => println!("Type {type_body:?}"),
                 CdcEvent::KeepAliveRequested { .. } => {}
+                CdcEvent::StreamStart(stream_start_body) => {
+                    println!("Stream start {stream_start_body:?}");
+                }
+                CdcEvent::StreamStop(stream_stop_body) => {
+                    println!("Stream stop {stream_stop_body:?}");
+                }
+                CdcEvent::StreamCommit(stream_commit_body) => {
+                    println!("Stream commit {stream_commit_body:?}");
+                }
+                CdcEvent::StreamAbort(stream_abort_body) => {
+                    println!("Stream abort {stream_abort_body:?}");
+                }
             }
         }
         Ok(PgLsn::from(0))
