@@ -13,15 +13,22 @@ edition = "2021"
 [workspace.dependencies]
 async-trait = "0.1"
 
-pg_replicate = { git = "https://github.com/Mooncake-Labs/pg_replicate", rev = "b80f6905239e04a150bb788ba0f5b1f1ae0b9b15" }
-tokio.version = "1.38"
-tokio-postgres = { git = "https://github.com/imor/rust-postgres", rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
+tokio-postgres = { git = "ssh://git@github.com/Mooncake-labs/rust-postgres.git"}
 arrow = "54.2.1"
 thiserror = "2.0.12"
 parquet = "54.2.1"
 tempfile = "3.18.0"
-uuid = "1.15.1"
 futures = "0.3.31"
 multimap = "0.10.0"
 chrono = "0.4.40"
 num-traits = "0.2.19"
+postgres-replication = { git = "ssh://git@github.com/Mooncake-labs/rust-postgres.git" }
+pg_escape = "0.1.1"
+pin-project-lite = "0.2"
+tracing = { version = "0.1", default-features = true }
+bigdecimal = { version = "0.4.6", features = ["std"] }
+uuid = { version = "1.10.0", features = ["v4"] }
+serde_json = { version = "1.0", features = ["std"] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros"] }
+bytes = "1.0"
+byteorder = "1.5.0"
