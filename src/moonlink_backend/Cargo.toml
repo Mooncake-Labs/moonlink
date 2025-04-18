@@ -7,6 +7,7 @@ edition.workspace = true
 moonlink = { path = "../moonlink" }
 moonlink_connectors = { path = "../moonlink_connectors" }
 tokio.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio-postgres.workspace = true

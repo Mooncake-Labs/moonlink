@@ -1,6 +1,5 @@
 use arrow::error::ArrowError;
 use parquet::errors::ParquetError;
-use pg_replicate::pipeline::sources::postgres::PostgresSourceError;
 use std::io;
 use std::result;
 use thiserror::Error;
@@ -16,9 +15,6 @@ pub enum Error {
 
     #[error("Parquet error: {0}")]
     Parquet(#[from] ParquetError),
-
-    #[error("Postgres source error: {0}")]
-    PostgresSource(#[from] PostgresSourceError),
 }
 
 pub type Result<T> = result::Result<T, Error>;
