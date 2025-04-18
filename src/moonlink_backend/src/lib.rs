@@ -25,6 +25,7 @@ impl<T: TableIdentifier> MoonlinkBackend<T> {
 
     pub async fn create_table(
         &self,
+        table_id: T,
         host: &str,
         port: u16,
         username: &str,
@@ -32,7 +33,6 @@ impl<T: TableIdentifier> MoonlinkBackend<T> {
         database: &str,
         schema: &str,
         table: &str,
-        table_id: T,
     ) -> Result<()> {
         let metadata = PostgresSourceMetadata::new(
             host.to_string(),
@@ -59,7 +59,7 @@ impl<T: TableIdentifier> MoonlinkBackend<T> {
         return Ok(());
     }
 
-    pub async fn drop_table(&mut self, _table_id: T) -> Result<()> {
+    pub async fn drop_table(&self, _table_id: T) -> Result<()> {
         todo!()
     }
 
@@ -89,7 +89,7 @@ impl<T: TableIdentifier> MoonlinkBackend<T> {
         Ok(result)
     }
 
-    pub async fn scan_table_end(&mut self, _table_id: T, _lsn: u64) -> Result<()> {
+    pub async fn scan_table_end(&self, _table_id: T, _lsn: u64) -> Result<()> {
         todo!()
     }
 }
@@ -122,13 +122,13 @@ mod tests {
         println!("created table");
         service
             .create_table(
+                "test",
                 "localhost",
                 5432,
                 "postgres",
                 "postgres",
                 "postgres",
                 "public",
-                "test",
                 "test",
             )
             .await
