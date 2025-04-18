@@ -1,16 +1,12 @@
-use crate::pg_replicate::{
-    conversions::{numeric::PgNumeric, table_row::TableRow, Cell},
-    table::TableSchema,
-};
 use arrow::datatypes::{DataType, Field, Schema};
 use chrono::Timelike;
 use moonlink::row::MoonlinkRow;
 use moonlink::row::RowValue;
 use num_traits::cast::ToPrimitive;
-// use crate::pg_replicate::conversions::numeric::PgNumeric;
-// use pg_replicate::conversions::table_row::TableRow;
-// use pg_replicate::conversions::Cell;
-// use pg_replicate::table::TableSchema;
+use pg_replicate::conversions::numeric::PgNumeric;
+use pg_replicate::conversions::table_row::TableRow;
+use pg_replicate::conversions::Cell;
+use pg_replicate::table::TableSchema;
 use std::collections::HashMap;
 use tokio_postgres::types::Type;
 
@@ -160,11 +156,11 @@ impl From<PostgresTableRow> for MoonlinkRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableName, TableSchema};
     use arrow::array::{Date32Array, StringArray, TimestampMicrosecondArray};
     use arrow::datatypes::DataType;
     use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     use moonlink::row::RowValue;
+    use pg_replicate::table::{ColumnSchema, LookupKey, TableName, TableSchema};
 
     #[test]
     fn test_table_schema_to_arrow_schema() {

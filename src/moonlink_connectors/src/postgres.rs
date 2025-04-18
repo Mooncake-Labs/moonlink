@@ -1,14 +1,14 @@
 mod sink;
 mod util;
 
-use crate::error::Result;
-use crate::pg_replicate::pipeline::batching::data_pipeline::BatchDataPipeline;
-use crate::pg_replicate::pipeline::batching::BatchConfig;
-use crate::pg_replicate::pipeline::sinks::InfallibleSinkError;
-use crate::pg_replicate::pipeline::sources::postgres::PostgresSourceError;
-use crate::pg_replicate::pipeline::sources::postgres::{PostgresSource, TableNamesFrom};
-use crate::pg_replicate::pipeline::PipelineAction;
-use crate::pg_replicate::pipeline::PipelineError;
+use moonlink::Result;
+use pg_replicate::pipeline::batching::data_pipeline::BatchDataPipeline;
+use pg_replicate::pipeline::batching::BatchConfig;
+use pg_replicate::pipeline::sinks::InfallibleSinkError;
+use pg_replicate::pipeline::sources::postgres::PostgresSourceError;
+use pg_replicate::pipeline::sources::postgres::{PostgresSource, TableNamesFrom};
+use pg_replicate::pipeline::PipelineAction;
+use pg_replicate::pipeline::PipelineError;
 use sink::*;
 use std::path::PathBuf;
 use std::time::Duration;

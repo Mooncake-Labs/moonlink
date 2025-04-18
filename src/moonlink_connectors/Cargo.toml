@@ -5,20 +5,10 @@ edition.workspace = true
 
 [dependencies]
 moonlink = { path = "../moonlink" }
+pg_replicate.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 async-trait.workspace = true
 arrow.workspace = true
 chrono.workspace = true
 num-traits.workspace = true
-futures.workspace = true
-pin-project-lite.workspace = true
-tracing.workspace = true
-thiserror.workspace = true
-postgres-replication.workspace = true
-pg_escape.workspace = true
-bigdecimal.workspace = true
-uuid.workspace = true
-serde_json.workspace = true
-bytes.workspace = true
-byteorder.workspace = true

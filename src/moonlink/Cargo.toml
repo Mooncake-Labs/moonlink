@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+pg_replicate.workspace = true
 tokio.workspace = true
 arrow.workspace = true
 thiserror.workspace = true
