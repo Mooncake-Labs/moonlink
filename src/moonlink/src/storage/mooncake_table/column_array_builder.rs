@@ -6,7 +6,7 @@ use arrow::array::{ArrayRef, FixedSizeBinaryBuilder};
 use arrow::datatypes::DataType;
 use std::sync::Arc;
 /// A column array builder that can handle different types
-pub enum ColumnArrayBuilder {
+pub(super) enum ColumnArrayBuilder {
     Boolean(BooleanBuilder),
     Int32(PrimitiveBuilder<Int32Type>),
     Int64(PrimitiveBuilder<Int64Type>),
@@ -18,7 +18,7 @@ pub enum ColumnArrayBuilder {
 
 impl ColumnArrayBuilder {
     /// Create a new column array builder for a specific data type
-    pub fn new(data_type: DataType, capacity: usize) -> Self {
+    pub(super) fn new(data_type: DataType, capacity: usize) -> Self {
         match &data_type {
             DataType::Boolean => {
                 ColumnArrayBuilder::Boolean(BooleanBuilder::with_capacity(capacity))
@@ -49,7 +49,7 @@ impl ColumnArrayBuilder {
     }
 
     /// Append a value to this builder
-    pub fn append_value(&mut self, value: &RowValue) -> Result<(), Error> {
+    pub(super) fn append_value(&mut self, value: &RowValue) -> Result<(), Error> {
         match self {
             ColumnArrayBuilder::Boolean(builder) => {
                 match value {
@@ -112,7 +112,7 @@ impl ColumnArrayBuilder {
         }
     }
     /// Finish building and return the array
-    pub fn finish(&mut self) -> ArrayRef {
+    pub(super) fn finish(&mut self) -> ArrayRef {
         match self {
             ColumnArrayBuilder::Boolean(builder) => Arc::new(builder.finish()),
             ColumnArrayBuilder::Int32(builder) => Arc::new(builder.finish()),

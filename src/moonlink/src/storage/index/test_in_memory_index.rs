@@ -1,5 +1,5 @@
 use crate::storage::index::*;
-use crate::storage::table_utils::{RawDeletionRecord, RecordLocation};
+use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use std::collections::HashSet;
 use std::sync::Arc;
 impl Index for MemIndex {

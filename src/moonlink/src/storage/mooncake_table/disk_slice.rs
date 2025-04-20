@@ -1,7 +1,7 @@
+use super::data_batches::BatchEntry;
 use crate::error::{Error, Result};
-use crate::storage::data_batches::BatchEntry;
 use crate::storage::index::{FileIndex, MemIndex, ParquetFileIndex};
-use crate::storage::table_utils::{FileId, ProcessedDeletionRecord, RecordLocation};
+use crate::storage::storage_utils::{FileId, ProcessedDeletionRecord, RecordLocation};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
-pub struct DiskSliceWriter {
+pub(crate) struct DiskSliceWriter {
     /// The schema of the DiskSlice.
     ///
     schema: Arc<Schema>,
@@ -41,7 +41,7 @@ impl DiskSliceWriter {
     #[cfg(not(debug_assertions))]
     const PARQUET_FILE_SIZE: usize = 1024 * 1024 * 128; // 128MB
 
-    pub fn new(
+    pub(super) fn new(
         schema: Arc<Schema>,
         dir_path: PathBuf,
         batches: Vec<BatchEntry>,
@@ -61,7 +61,7 @@ impl DiskSliceWriter {
         }
     }
 
-    pub fn write(&mut self) -> Result<()> {
+    pub(super) fn write(&mut self) -> Result<()> {
         let mut filtered_batches = Vec::new();
         for (id, entry) in self.batches.iter().enumerate() {
             let filtered_batch = entry.batch.get_filtered_batch()?;
@@ -75,19 +75,19 @@ impl DiskSliceWriter {
         Ok(())
     }
 
-    pub fn lsn(&self) -> u64 {
+    pub(super) fn lsn(&self) -> u64 {
         self.writer_lsn
     }
 
-    pub fn input_batches(&self) -> &Vec<BatchEntry> {
+    pub(super) fn input_batches(&self) -> &Vec<BatchEntry> {
         &self.batches
     }
     /// Get the list of files in the DiskSlice
-    pub fn output_files(&self) -> &[(PathBuf, usize)] {
+    pub(super) fn output_files(&self) -> &[(PathBuf, usize)] {
         self.files.as_slice()
     }
 
-    pub fn old_index(&self) -> &Arc<MemIndex> {
+    pub(super) fn old_index(&self) -> &Arc<MemIndex> {
         &self.old_index
     }
     /// Write record batches to parquet files
@@ -179,8 +179,8 @@ impl DiskSliceWriter {
 mod tests {
     use super::*;
     use crate::row::{MoonlinkRow, RowValue};
-    use crate::storage::mem_slice::MemSlice;
-    use crate::storage::table_utils::RawDeletionRecord;
+    use crate::storage::mooncake_table::mem_slice::MemSlice;
+    use crate::storage::storage_utils::RawDeletionRecord;
     use arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::tempdir;
@@ -210,7 +210,7 @@ mod tests {
 
         mem_slice.append(1, &row1)?;
         mem_slice.append(2, &row2)?;
-        let (_new_batch, entries, _index) = mem_slice.flush().unwrap();
+        let (_new_batch, entries, _index) = mem_slice.drain().unwrap();
         let mut old_index = MemIndex::new();
         old_index.insert(1, RecordLocation::MemoryBatch(0, 0));
         old_index.insert(2, RecordLocation::MemoryBatch(0, 1));
@@ -304,7 +304,7 @@ mod tests {
             lsn: 1,
         }); // Delete David (ID 4)
 
-        let (_new_batch, entries, index) = mem_slice.flush().unwrap();
+        let (_new_batch, entries, index) = mem_slice.drain().unwrap();
 
         let mut disk_slice = DiskSliceWriter::new(
             schema,

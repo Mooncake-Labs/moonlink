@@ -5,7 +5,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
 
 #[derive(Debug)]
-pub struct BatchDeletionVector {
+pub(super) struct BatchDeletionVector {
     /// Boolean array tracking deletions (false = deleted, true = active)
     deletion_vector: Option<Vec<u8>>,
 
@@ -15,7 +15,7 @@ pub struct BatchDeletionVector {
 
 impl BatchDeletionVector {
     /// Create a new delete buffer with the specified capacity
-    pub fn new(max_rows: usize) -> Self {
+    pub(super) fn new(max_rows: usize) -> Self {
         Self {
             deletion_vector: None,
             max_rows,
@@ -23,7 +23,7 @@ impl BatchDeletionVector {
     }
 
     /// Mark a row as deleted
-    pub fn delete_row(&mut self, row_idx: usize) -> bool {
+    pub(super) fn delete_row(&mut self, row_idx: usize) -> bool {
         // Set the bit at row_idx to 1 (deleted)
         if self.deletion_vector.is_none() {
             self.deletion_vector = Some(vec![0xFF; self.max_rows / 8 + 1]);
@@ -39,7 +39,7 @@ impl BatchDeletionVector {
     }
 
     /// Apply the deletion vector to filter a record batch
-    pub fn apply_to_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
+    pub(super) fn apply_to_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         if self.deletion_vector.is_none() {
             return Ok(batch.clone());
         }
@@ -50,7 +50,7 @@ impl BatchDeletionVector {
         Ok(filtered_batch)
     }
 
-    pub fn is_deleted(&self, row_idx: usize) -> bool {
+    pub(super) fn is_deleted(&self, row_idx: usize) -> bool {
         if self.deletion_vector.is_none() {
             false
         } else {
@@ -58,7 +58,7 @@ impl BatchDeletionVector {
         }
     }
 
-    pub fn collect_active_rows(&self) -> Vec<usize> {
+    pub(super) fn collect_active_rows(&self) -> Vec<usize> {
         let Some(bitmap) = &self.deletion_vector else {
             return (0..self.max_rows).collect();
         };

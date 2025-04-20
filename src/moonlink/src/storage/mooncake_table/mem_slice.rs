@@ -1,8 +1,8 @@
+use super::data_batches::{BatchEntry, ColumnStoreBuffer};
 use crate::error::Result;
 use crate::row::MoonlinkRow;
-use crate::storage::data_batches::{BatchEntry, ColumnStoreBuffer};
 use crate::storage::index::{Index, MemIndex};
-use crate::storage::table_utils::{RawDeletionRecord, RecordLocation};
+use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use arrow::array::RecordBatch;
 use arrow::datatypes::Schema;
 use std::mem::swap;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// Reader will create a snapshot of the current state of the table,
 /// by applying all deletions to column store buffer
 ///
-pub struct MemSlice {
+pub(super) struct MemSlice {
     /// Column store buffer for storing data
     ///
     column_store: ColumnStoreBuffer,
@@ -26,14 +26,14 @@ pub struct MemSlice {
 }
 
 impl MemSlice {
-    pub fn new(schema: Arc<Schema>, max_rows_per_buffer: usize) -> Self {
+    pub(super) fn new(schema: Arc<Schema>, max_rows_per_buffer: usize) -> Self {
         Self {
             column_store: ColumnStoreBuffer::new(schema, max_rows_per_buffer),
             mem_index: MemIndex::new(),
         }
     }
 
-    pub fn delete(&mut self, record: &RawDeletionRecord) -> Option<(u64, usize)> {
+    pub(super) fn delete(&mut self, record: &RawDeletionRecord) -> Option<(u64, usize)> {
         let locations = self.mem_index.find_record(&record)?;
 
         for location in locations {
@@ -47,7 +47,7 @@ impl MemSlice {
         None
     }
 
-    pub fn append(
+    pub(super) fn append(
         &mut self,
         primary_key: i64,
         row: &MoonlinkRow,
@@ -58,21 +58,21 @@ impl MemSlice {
         Ok(new_batch)
     }
 
-    pub fn get_num_rows(&self) -> usize {
+    pub(super) fn get_num_rows(&self) -> usize {
         self.column_store.get_num_rows()
     }
 
-    pub fn flush(
+    pub(super) fn drain(
         &mut self,
     ) -> Result<(Option<(u64, Arc<RecordBatch>)>, Vec<BatchEntry>, MemIndex)> {
         let batch = self.column_store.finalize_current_batch()?;
-        let entries = self.column_store.flush();
+        let entries = self.column_store.drain();
         let mut index = MemIndex::new();
         swap(&mut index, &mut self.mem_index);
         Ok((batch, entries, index))
     }
 
-    pub fn get_commit_check_point(&self) -> RecordLocation {
+    pub(super) fn get_commit_check_point(&self) -> RecordLocation {
         self.column_store.get_commit_check_point()
     }
 }

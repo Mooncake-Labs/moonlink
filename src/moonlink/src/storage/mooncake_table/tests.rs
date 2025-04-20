@@ -10,7 +10,8 @@ async fn test_append_commit_snapshot() -> Result<()> {
     append_rows(&mut table, vec![test_row(1, "A", 20), test_row(2, "B", 21)])?;
     table.commit(1);
     snapshot(&mut table).await;
-    let (paths, _deletions) = table.request_read()?;
+    let snapshot = table.snapshot.read().unwrap();
+    let (paths, _deletions) = snapshot.request_read()?;
     verify_file_contents(&paths[0], &[1, 2], Some(2));
     Ok(())
 }
@@ -21,7 +22,8 @@ async fn test_flush_basic() -> Result<()> {
     let mut table = test_table(&context, "flush_table");
     let rows = vec![test_row(1, "Alice", 30), test_row(2, "Bob", 25)];
     append_commit_flush_snapshot(&mut table, rows, 1).await?;
-    let (paths, _deletions) = table.request_read()?;
+    let snapshot = table.snapshot.read().unwrap();
+    let (paths, _deletions) = snapshot.request_read()?;
     verify_file_contents(&paths[0], &[1, 2], Some(2));
     Ok(())
 }
@@ -45,7 +47,8 @@ async fn test_delete_and_append() -> Result<()> {
     table.commit(3);
     snapshot(&mut table).await;
 
-    let (paths, _deletions) = table.request_read()?;
+    let snapshot = table.snapshot.read().unwrap();
+    let (paths, _deletions) = snapshot.request_read()?;
     // Need to manually handle deletions in the test - simulate what a real reader would do
     let mut files = paths.clone();
     files.sort(); // Ensure consistent order
@@ -89,7 +92,8 @@ async fn test_deletion_before_flush() -> Result<()> {
     table.commit(2);
     snapshot(&mut table).await;
 
-    let (paths, _deletions) = table.request_read()?;
+    let snapshot = table.snapshot.read().unwrap();
+    let (paths, _deletions) = snapshot.request_read()?;
     verify_file_contents(&paths[0], &[1, 3], None);
     Ok(())
 }
@@ -105,7 +109,8 @@ async fn test_deletion_after_flush() -> Result<()> {
     table.commit(2);
     snapshot(&mut table).await;
 
-    let (paths, _deletions) = table.request_read()?;
+    let snapshot = table.snapshot.read().unwrap();
+    let (paths, _deletions) = snapshot.request_read()?;
     // Need to manually handle deletions in the test - simulate what a real reader would do
     let mut ids = read_ids_from_parquet(&paths[0]);
 

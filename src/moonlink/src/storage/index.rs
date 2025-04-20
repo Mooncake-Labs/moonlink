@@ -1,7 +1,7 @@
 pub mod test_in_memory_index;
 
 use crate::row::{MoonlinkRow, RowValue};
-use crate::storage::table_utils::{RawDeletionRecord, RecordLocation};
+use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use multimap::MultiMap;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
