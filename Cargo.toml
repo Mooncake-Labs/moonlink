@@ -23,7 +23,7 @@ multimap = "0.10.0"
 chrono = "=0.4.39"
 num-traits = "0.2.19"
 postgres-replication = { git = "ssh://git@github.com/Mooncake-labs/rust-postgres.git" }
-tokio = { version = "1.38", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "sync", "time"] }
 uuid = { version = "1.15.1", features = ["v4"] }
 arrow-array = "54.2.1"
 arrow-schema = "54.2.1"

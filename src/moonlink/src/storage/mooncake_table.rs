@@ -14,12 +14,13 @@ use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
-use snapshot::SnapshotTableState;
+pub(crate) use snapshot::SnapshotTableState;
 use std::collections::HashMap;
 use std::mem::take;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::spawn;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 pub(crate) struct TableConfig {
     /// mem slice size
@@ -196,6 +197,10 @@ impl MooncakeTable {
         table
     }
 
+    pub(crate) fn get_table_state(&self) -> Arc<RwLock<SnapshotTableState>> {
+        self.snapshot.clone()
+    }
+
     pub fn append(&mut self, row: MoonlinkRow) -> Result<()> {
         let lookup_key = (self.metadata.get_lookup_key)(&row);
         if let Some(batch) = self.mem_slice.append(lookup_key, &row)? {
@@ -312,7 +317,7 @@ impl MooncakeTable {
         })
     }
 
-    pub fn flush_transaction_stream(
+    pub(crate) fn flush_transaction_stream(
         &mut self,
         xact_id: u32,
         lsn: u64,
@@ -327,6 +332,8 @@ impl MooncakeTable {
             }
 
             let snapshot_task = &mut self.next_snapshot_task;
+
+            snapshot_task.new_lsn = lsn;
 
             for deletion in snapshot_task.new_deletions.iter_mut() {
                 if deletion.xact_id == Some(xact_id) {
@@ -349,7 +356,7 @@ impl MooncakeTable {
 
     // UNDONE(BATCH_INSERT):
     // flush uncommitted batches from big batch insert
-    pub fn flush(&mut self, lsn: u64) -> JoinHandle<Result<DiskSliceWriter>> {
+    pub(crate) fn flush(&mut self, lsn: u64) -> JoinHandle<Result<DiskSliceWriter>> {
         Self::inner_flush(
             &mut self.mem_slice,
             &mut self.next_snapshot_task,
@@ -358,14 +365,14 @@ impl MooncakeTable {
         )
     }
 
-    pub fn commit_flush(&mut self, disk_slice: DiskSliceWriter) -> Result<()> {
+    pub(crate) fn commit_flush(&mut self, disk_slice: DiskSliceWriter) -> Result<()> {
         self.next_snapshot_task.new_disk_slices.push(disk_slice);
         Ok(())
     }
 
     // Create a snapshot of the last committed version
     //
-    pub fn create_snapshot(&mut self) -> Option<JoinHandle<()>> {
+    pub(crate) fn create_snapshot(&mut self) -> Option<JoinHandle<()>> {
         if !self.next_snapshot_task.should_create_snapshot() {
             return None;
         }
@@ -380,15 +387,7 @@ impl MooncakeTable {
         snapshot: Arc<RwLock<SnapshotTableState>>,
         next_snapshot_task: SnapshotTask,
     ) {
-        snapshot
-            .write()
-            .unwrap()
-            .update_snapshot(next_snapshot_task);
-    }
-
-    pub fn request_read(&self) -> Result<(Vec<PathBuf>, Vec<(usize, usize)>)> {
-        let snapshot = self.snapshot.read().unwrap();
-        snapshot.request_read()
+        snapshot.write().await.update_snapshot(next_snapshot_task);
     }
 }
 
@@ -396,4 +395,4 @@ impl MooncakeTable {
 mod tests;
 
 #[cfg(test)]
-mod test_utils;
+pub(crate) mod test_utils;

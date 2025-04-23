@@ -2,10 +2,7 @@ use crate::error::Result;
 use crate::row::MoonlinkRow;
 use crate::storage::DiskSliceWriter;
 use crate::storage::MooncakeTable;
-use arrow_schema::Schema;
-use std::path::PathBuf;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 
@@ -29,10 +26,6 @@ pub enum TableEvent {
     StreamCommit { lsn: u64, xact_id: u32 },
     /// Abort current stream with given xact_id
     StreamAbort { xact_id: u32 },
-    /// Prepare the table for reading
-    PrepareRead {
-        response_channel: oneshot::Sender<(Vec<PathBuf>, Vec<(usize, usize)>)>,
-    },
     /// Flush the table to disk
     Flush { lsn: u64 },
     /// Shutdown the handler
@@ -50,36 +43,20 @@ pub struct TableHandler {
 
 impl TableHandler {
     /// Create a new TableHandler for the given schema and table name
-    pub fn new(schema: Schema, table_name: String, table_id: u64, path: PathBuf) -> Self {
-        // Create the table
-        let table = MooncakeTable::new(schema, table_name, table_id, path);
-
+    pub fn new(table: MooncakeTable) -> Self {
         // Create channel for events
         let (event_sender, event_receiver) = mpsc::channel(100);
 
-        // Create oneshot channel to send the table to the task
-        let (tx, rx) = oneshot::channel();
-
         // Spawn the task with the oneshot receiver
         let event_handle = Some(tokio::spawn(async move {
-            match rx.await {
-                Ok(table) => Self::event_loop(event_receiver, table).await,
-                Err(_) => println!("Failed to receive table in event loop task"),
-            }
+            Self::event_loop(event_receiver, table).await;
         }));
 
         // Create the handler
-        let handler = Self {
+        Self {
             _event_handle: event_handle,
             event_sender,
-        };
-
-        // Send the table to the task
-        if tx.send(table).is_err() {
-            println!("Failed to send table to event loop task");
         }
-
-        handler
     }
 
     /// Get the event sender to send events to this handler
@@ -91,7 +68,7 @@ impl TableHandler {
     async fn event_loop(mut event_receiver: Receiver<TableEvent>, mut table: MooncakeTable) {
         let mut snapshot_handle: Option<JoinHandle<()>> = None;
         let mut flush_handle: Option<JoinHandle<Result<DiskSliceWriter>>> = None;
-        let mut periodic_snapshot_interval = time::interval(Duration::from_secs(1));
+        let mut periodic_snapshot_interval = time::interval(Duration::from_millis(500));
 
         // Process events until the receiver is closed or a Shutdown event is received
         loop {
@@ -109,14 +86,12 @@ impl TableHandler {
                                 println!("Failed to append row: {}", e);
                             }
                         }
-
                         TableEvent::Delete { row, lsn, xact_id } => {
                             match xact_id {
                                 Some(xact_id) => table.delete_in_stream_batch(row, xact_id),
                                 None => table.delete(row, lsn),
                             };
                         }
-
                         TableEvent::Commit { lsn } => {
                             table.commit(lsn);
                             if table.should_flush() {
@@ -138,37 +113,9 @@ impl TableHandler {
                         TableEvent::StreamAbort { xact_id } => {
                             table.abort_in_stream_batch(xact_id);
                         }
-
-                        TableEvent::PrepareRead { response_channel } => {
-                            // Wait for any pending snapshot to complete first
-                            if let Some(handle) = &mut snapshot_handle {
-                                match handle.await {
-                                    Ok(()) => {
-                                        println!("Snapshot creation completed successfully before prepare read");
-                                        snapshot_handle = None;
-                                    }
-                                    Err(e) => {
-                                        println!("Snapshot task was cancelled before prepare read: {}", e);
-                                        snapshot_handle = None;
-                                    }
-                                }
-                            }
-
-                            // Request read and return the file path
-                            match table.request_read() {
-                                Ok((file_paths, deletions)) => {
-                                    let _ = response_channel.send((file_paths, deletions));
-                                }
-                                Err(e) => {
-                                    println!("Failed to prepare read: {}", e);
-                                }
-                            }
-                        }
-
                         TableEvent::Flush { lsn } => {
                             flush_handle = Some(table.flush(lsn));
                         }
-
                         TableEvent::_Shutdown => {
                             println!("Shutting down table handler");
                             break;
@@ -234,9 +181,30 @@ impl TableHandler {
 mod tests {
     use super::*;
     use crate::row::RowValue;
-    use arrow::datatypes::{DataType, Field};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::fs::File;
+    use crate::storage::read_ids_from_parquet;
+    use crate::union_read::ReadStateManager;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::path::Path;
+    async fn check_read_snapshot(read_manager: &ReadStateManager, expected_ids: &[i32]) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let read_state = read_manager.try_read().await.unwrap();
+        if read_state.files.is_empty() {
+            assert!(false, "No snapshot files returned");
+        }
+
+        let mut res = vec![];
+        for (i, path) in read_state.files.iter().enumerate() {
+            let mut ids = read_ids_from_parquet(Path::new(path));
+            for deletion in &read_state.deletions {
+                if deletion.0 == i as u32 {
+                    ids[deletion.1 as usize] = None;
+                }
+            }
+            res.extend(ids.into_iter().filter_map(|id| id));
+        }
+        res.sort();
+        assert_eq!(res, expected_ids);
+    }
 
     #[tokio::test]
     async fn test_table_handler() {
@@ -251,7 +219,9 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let handler = TableHandler::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let read_state_manager = ReadStateManager::new(&table);
+        let handler = TableHandler::new(table);
         let event_sender = handler.get_event_sender();
 
         // Test append operation
@@ -275,45 +245,7 @@ mod tests {
             .await
             .unwrap();
 
-        // wait for 1 second
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Test prepare read operation - with response channel
-        let (tx, rx) = oneshot::channel();
-        event_sender
-            .send(TableEvent::PrepareRead {
-                response_channel: tx,
-            })
-            .await
-            .unwrap();
-
-        // Wait for the response
-        match tokio::time::timeout(Duration::from_secs(1), rx).await {
-            Ok(Ok((paths, _deletions))) => {
-                println!("Received snapshot paths: {:?}", paths);
-
-                if paths.is_empty() {
-                    println!("Warning: No snapshot files returned");
-                }
-
-                // Verify that the paths exist
-                for path in paths {
-                    if path.exists() {
-                        println!("Confirmed snapshot file exists: {:?}", path);
-                        let file = File::open(&path).unwrap();
-                        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-                        println!("Converted arrow schema is: {}", builder.schema());
-                        let mut reader = builder.build().unwrap();
-                        let record_batch = reader.next();
-                        println!("Record batch: {:?}", record_batch);
-                    } else {
-                        println!("Warning: Snapshot file does not exist at {:?}", path);
-                    }
-                }
-            }
-            Ok(Err(_)) => println!("Response channel was dropped"),
-            Err(_) => println!("Timed out waiting for prepare read response"),
-        }
+        check_read_snapshot(&read_state_manager, &[1]).await;
 
         // Test shutdown
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -339,7 +271,9 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let handler = TableHandler::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let read_state_manager = ReadStateManager::new(&table);
+        let handler = TableHandler::new(table);
         let event_sender = handler.get_event_sender();
 
         // Test append operations - add multiple rows
@@ -383,46 +317,7 @@ mod tests {
             .send(TableEvent::Flush { lsn: 2 })
             .await
             .unwrap();
-
-        // Wait for flush to complete
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Test prepare read operation
-        let (tx, rx) = oneshot::channel();
-        event_sender
-            .send(TableEvent::PrepareRead {
-                response_channel: tx,
-            })
-            .await
-            .unwrap();
-
-        // Wait for the response
-        match tokio::time::timeout(Duration::from_secs(1), rx).await {
-            Ok(Ok((paths, _deletions))) => {
-                println!("Received snapshot paths: {:?}", paths);
-
-                if paths.is_empty() {
-                    println!("Warning: No snapshot files returned");
-                }
-
-                // Verify that the paths exist
-                for path in paths {
-                    if path.exists() {
-                        println!("Confirmed snapshot file exists: {:?}", path);
-                        let file = File::open(&path).unwrap();
-                        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-                        println!("Converted arrow schema is: {}", builder.schema());
-                        let mut reader = builder.build().unwrap();
-                        let record_batch = reader.next();
-                        println!("Record batch: {:?}", record_batch);
-                    } else {
-                        println!("Warning: Snapshot file does not exist at {:?}", path);
-                    }
-                }
-            }
-            Ok(Err(_)) => println!("Response channel was dropped"),
-            Err(_) => println!("Timed out waiting for prepare read response"),
-        }
+        check_read_snapshot(&read_state_manager, &[1, 2, 3]).await;
 
         // Test shutdown
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -448,7 +343,9 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let handler = TableHandler::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let read_state_manager = ReadStateManager::new(&table);
+        let handler = TableHandler::new(table);
         let event_sender = handler.get_event_sender();
 
         // Test transaction append with a specific xact_id
@@ -476,55 +373,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for commit to complete
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Read and verify the data
-        let (tx, rx) = oneshot::channel();
-        event_sender
-            .send(TableEvent::PrepareRead {
-                response_channel: tx,
-            })
-            .await
-            .unwrap();
-
-        // Verify the committed transaction
-        match tokio::time::timeout(Duration::from_secs(1), rx).await {
-            Ok(Ok((paths, _deletions))) => {
-                println!("Received snapshot paths: {:?}", paths);
-
-                if paths.is_empty() {
-                    println!("Warning: No snapshot files returned");
-                } else {
-                    // Verify that the paths exist
-                    for path in paths {
-                        if path.exists() {
-                            println!("Confirmed snapshot file exists: {:?}", path);
-                            let file = File::open(&path).unwrap();
-                            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-                            println!("Converted arrow schema is: {}", builder.schema());
-                            let mut reader = builder.build().unwrap();
-                            let record_batch = reader.next();
-                            println!("Record batch: {:?}", record_batch);
-
-                            // Check that the record batch contains the expected row
-                            if let Some(Ok(batch)) = record_batch {
-                                assert_eq!(
-                                    batch.num_rows(),
-                                    1,
-                                    "Expected one row in the record batch"
-                                );
-                                // In a more robust test, we'd check the actual values
-                            }
-                        } else {
-                            println!("Warning: Snapshot file does not exist at {:?}", path);
-                        }
-                    }
-                }
-            }
-            Ok(Err(_)) => println!("Response channel was dropped"),
-            Err(_) => println!("Timed out waiting for prepare read response"),
-        }
+        check_read_snapshot(&read_state_manager, &[10]).await;
 
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -546,7 +395,9 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let handler = TableHandler::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let read_state_manager = ReadStateManager::new(&table);
+        let handler = TableHandler::new(table);
         let event_sender = handler.get_event_sender();
 
         let xact_id = 101;
@@ -598,57 +449,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for commit to complete
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Read and verify the data
-        let (tx, rx) = oneshot::channel();
-        event_sender
-            .send(TableEvent::PrepareRead {
-                response_channel: tx,
-            })
-            .await
-            .unwrap();
-
-        // Verify the committed transaction (should only have User2)
-        match tokio::time::timeout(Duration::from_secs(1), rx).await {
-            Ok(Ok((paths, deletions))) => {
-                println!("Received snapshot paths: {:?}", paths);
-                println!("Deletions: {:?}", deletions);
-
-                if paths.is_empty() {
-                    println!("Warning: No snapshot files returned");
-                } else {
-                    // Verify that the paths exist
-                    for path in paths {
-                        if path.exists() {
-                            println!("Confirmed snapshot file exists: {:?}", path);
-                            let file = File::open(&path).unwrap();
-                            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-                            println!("Converted arrow schema is: {}", builder.schema());
-                            let mut reader = builder.build().unwrap();
-                            let record_batch = reader.next();
-                            println!("Record batch: {:?}", record_batch);
-
-                            // Check that the record batch contains only User2
-                            if let Some(Ok(batch)) = record_batch {
-                                assert_eq!(
-                                    batch.num_rows(),
-                                    1,
-                                    "Expected one row in the record batch"
-                                );
-                                // In a more robust test, we'd verify that it's User2 and not User1
-                            }
-                        } else {
-                            println!("Warning: Snapshot file does not exist at {:?}", path);
-                        }
-                    }
-                }
-            }
-            Ok(Err(_)) => println!("Response channel was dropped"),
-            Err(_) => println!("Timed out waiting for prepare read response"),
-        }
-
+        check_read_snapshot(&read_state_manager, &[11]).await;
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
         if let Some(handle) = handler._event_handle {
@@ -669,7 +470,9 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let handler = TableHandler::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let read_state_manager = ReadStateManager::new(&table);
+        let handler = TableHandler::new(table);
         let event_sender = handler.get_event_sender();
 
         // First, add and commit a baseline row to verify against
@@ -724,55 +527,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for abort to complete
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Read and verify the data
-        let (tx, rx) = oneshot::channel();
-        event_sender
-            .send(TableEvent::PrepareRead {
-                response_channel: tx,
-            })
-            .await
-            .unwrap();
-
-        // Verify that only the baseline data exists and aborted transaction data is not present
-        match tokio::time::timeout(Duration::from_secs(1), rx).await {
-            Ok(Ok((paths, _deletions))) => {
-                println!("Received snapshot paths: {:?}", paths);
-
-                if paths.is_empty() {
-                    println!("Warning: No snapshot files returned");
-                } else {
-                    // Verify that the paths exist
-                    for path in paths {
-                        if path.exists() {
-                            println!("Confirmed snapshot file exists: {:?}", path);
-                            let file = File::open(&path).unwrap();
-                            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-                            println!("Converted arrow schema is: {}", builder.schema());
-                            let mut reader = builder.build().unwrap();
-                            let record_batch = reader.next();
-                            println!("Record batch: {:?}", record_batch);
-
-                            // Check that only the baseline row exists
-                            if let Some(Ok(batch)) = record_batch {
-                                assert_eq!(
-                                    batch.num_rows(),
-                                    1,
-                                    "Expected one row in the record batch"
-                                );
-                                // In a more robust test, we'd check it's the baseline row
-                            }
-                        } else {
-                            println!("Warning: Snapshot file does not exist at {:?}", path);
-                        }
-                    }
-                }
-            }
-            Ok(Err(_)) => println!("Response channel was dropped"),
-            Err(_) => println!("Timed out waiting for prepare read response"),
-        }
+        check_read_snapshot(&read_state_manager, &[1]).await;
 
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -794,7 +549,9 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let handler = TableHandler::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let read_state_manager = ReadStateManager::new(&table);
+        let handler = TableHandler::new(table);
         let event_sender = handler.get_event_sender();
 
         // Create two concurrent transactions
@@ -845,55 +602,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for operations to complete
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // Read and verify the data
-        let (tx, rx) = oneshot::channel();
-        event_sender
-            .send(TableEvent::PrepareRead {
-                response_channel: tx,
-            })
-            .await
-            .unwrap();
-
-        // Verify final state (should only have Transaction1-User, not Transaction2-User)
-        match tokio::time::timeout(Duration::from_secs(1), rx).await {
-            Ok(Ok((paths, _deletions))) => {
-                println!("Received final snapshot paths: {:?}", paths);
-
-                if paths.is_empty() {
-                    println!("Warning: No final snapshot files returned");
-                } else {
-                    for path in paths {
-                        if path.exists() {
-                            println!("Confirmed final snapshot file exists: {:?}", path);
-                            let file = File::open(&path).unwrap();
-                            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-                            println!("Final schema: {}", builder.schema());
-                            let mut reader = builder.build().unwrap();
-                            let record_batch = reader.next();
-                            println!("Final record batch: {:?}", record_batch);
-
-                            // Check that only the committed transaction data is present
-                            if let Some(Ok(batch)) = record_batch {
-                                assert_eq!(
-                                    batch.num_rows(),
-                                    1,
-                                    "Expected one row in the record batch"
-                                );
-                                // In a more robust test, we'd verify it's Transaction1-User
-                            }
-                        } else {
-                            println!("Warning: Final snapshot file does not exist at {:?}", path);
-                        }
-                    }
-                }
-            }
-            Ok(Err(_)) => println!("Response channel was dropped"),
-            Err(_) => println!("Timed out waiting for prepare read response"),
-        }
-
+        check_read_snapshot(&read_state_manager, &[30]).await;
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
         if let Some(handle) = handler._event_handle {

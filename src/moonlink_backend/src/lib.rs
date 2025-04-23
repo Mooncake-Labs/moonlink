@@ -1,16 +1,16 @@
+use moonlink::ReadStateManager;
 mod error;
 
 use error::Result;
-use moonlink::TableEvent;
 use moonlink_connectors::MoonlinkPostgresSource;
 use std::{collections::HashMap, hash::Hash};
-use tokio::sync::{mpsc::Sender, oneshot, RwLock};
+use tokio::sync::RwLock;
 
 pub use error::Error;
 
 pub struct MoonlinkBackend<T: Eq + Hash> {
     ingest_sources: RwLock<Vec<MoonlinkPostgresSource>>,
-    table_readers: RwLock<HashMap<T, Sender<TableEvent>>>,
+    table_readers: RwLock<HashMap<T, ReadStateManager>>,
 }
 
 impl<T: Eq + Hash> MoonlinkBackend<T> {
@@ -25,15 +25,21 @@ impl<T: Eq + Hash> MoonlinkBackend<T> {
         let mut ingest_sources = self.ingest_sources.write().await;
         for ingest_source in ingest_sources.iter_mut() {
             if ingest_source.check_table_belongs_to_source(uri) {
-                let sender = ingest_source.add_table(table).await?;
-                self.table_readers.write().await.insert(table_id, sender);
+                let reader_state_manager = ingest_source.add_table(table).await?;
+                self.table_readers
+                        .write()
+                        .await
+                        .insert(table_id, reader_state_manager);
                 return Ok(());
             }
         }
         let mut ingest_source = MoonlinkPostgresSource::new(uri.to_owned()).await?;
-        let sender = ingest_source.add_table(table).await?;
+        let reader_state_manager = ingest_source.add_table(table).await?;
         ingest_sources.push(ingest_source);
-        self.table_readers.write().await.insert(table_id, sender);
+        self.table_readers
+                .write()
+                .await
+                .insert(table_id, reader_state_manager);
         Ok(())
     }
 
@@ -44,26 +50,8 @@ impl<T: Eq + Hash> MoonlinkBackend<T> {
     pub async fn scan_table(&self, table_id: T) -> Result<(Vec<String>, Vec<(u32, u32)>)> {
         let table_readers = self.table_readers.read().await;
         let reader = table_readers.get(&table_id).unwrap();
-        let (sender, receiver) = oneshot::channel();
-        reader
-            .send(TableEvent::PrepareRead {
-                response_channel: sender,
-            })
-            .await
-            .unwrap();
-        let response = receiver.await.unwrap();
-        let result = (
-            response
-                .0
-                .iter()
-                .map(|p| p.to_string_lossy().to_string())
-                .collect(),
-            response
-                .1
-                .iter()
-                .map(|(start, end)| (*start as u32, *end as u32))
-                .collect(),
-        );
+        let read_state = reader.try_read().await.unwrap();
+        let result = (read_state.files.clone(), read_state.deletions.clone());
         Ok(result)
     }
 }

@@ -50,7 +50,7 @@ pub fn test_table(context: &TestContext, table_name: &str) -> MooncakeTable {
     MooncakeTable::new(test_schema(), table_name.to_string(), 1, context.path())
 }
 
-pub fn read_ids_from_parquet(file_path: &Path) -> HashSet<i32> {
+pub fn read_ids_from_parquet(file_path: &Path) -> Vec<Option<i32>> {
     let file = File::open(file_path).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
@@ -62,7 +62,7 @@ pub fn read_ids_from_parquet(file_path: &Path) -> HashSet<i32> {
         .as_any()
         .downcast_ref::<Int32Array>()
         .unwrap();
-    (0..col.len()).map(|i| col.value(i)).collect()
+    (0..col.len()).map(|i| Some(col.value(i))).collect()
 }
 
 pub fn verify_file_contents(
@@ -70,7 +70,10 @@ pub fn verify_file_contents(
     expected_ids: &[i32],
     expected_row_count: Option<usize>,
 ) {
-    let actual = read_ids_from_parquet(file_path);
+    let actual = read_ids_from_parquet(file_path)
+        .into_iter()
+        .filter_map(|id| id)
+        .collect::<HashSet<_>>();
     let expected: HashSet<_> = expected_ids.iter().copied().collect();
 
     if let Some(count) = expected_row_count {

@@ -47,6 +47,10 @@ impl SnapshotTableState {
         }
     }
 
+    pub fn get_version(&self) -> u64 {
+        self.current_snapshot.snapshot_version
+    }
+
     pub(super) fn update_snapshot(&mut self, mut next_snapshot_task: SnapshotTask) {
         let batch_size = self.current_snapshot.metadata.config.batch_size;
         if next_snapshot_task.new_mem_indices.len() > 0 {
@@ -116,8 +120,10 @@ impl SnapshotTableState {
         }
         Self::process_deletion_log(self, &mut next_snapshot_task);
         if next_snapshot_task.new_lsn != 0 {
-            self.last_commit = next_snapshot_task.new_commit_point.unwrap();
             self.current_snapshot.snapshot_version = next_snapshot_task.new_lsn;
+        }
+        if next_snapshot_task.new_commit_point.is_some() {
+            self.last_commit = next_snapshot_task.new_commit_point.unwrap();
         }
     }
 

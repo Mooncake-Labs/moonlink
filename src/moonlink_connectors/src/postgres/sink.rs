@@ -9,22 +9,22 @@ use crate::pg_replicate::{
 use crate::postgres::util::table_schema_to_arrow_schema;
 use crate::postgres::util::PostgresTableRow;
 use async_trait::async_trait;
-use moonlink::{TableEvent, TableHandler};
+use moonlink::ReadStateManager;
+use moonlink::{MooncakeTable, TableEvent, TableHandler};
 use std::collections::{HashMap, HashSet};
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
 use tokio_postgres::types::PgLsn;
-
 pub struct Sink {
     table_handlers: HashMap<TableId, TableHandler>,
     event_senders: HashMap<TableId, Sender<TableEvent>>,
-    reader_notifier: Sender<Sender<TableEvent>>,
+    reader_notifier: Sender<ReadStateManager>,
     base_path: PathBuf,
 }
 
 impl Sink {
-    pub fn new(reader_notifier: Sender<Sender<TableEvent>>, base_path: PathBuf) -> Self {
+    pub fn new(reader_notifier: Sender<ReadStateManager>, base_path: PathBuf) -> Self {
         let event_senders = HashMap::new();
         Self {
             table_handlers: HashMap::new(),
@@ -55,18 +55,17 @@ impl BatchSink for Sink {
             let table_path =
                 PathBuf::from(&self.base_path).join(table_schema.table_name.to_string());
             create_dir_all(&table_path).unwrap();
-            let table_handler = TableHandler::new(
+            let table = MooncakeTable::new(
                 table_schema_to_arrow_schema(&table_schema),
                 table_schema.table_name.to_string(),
                 table_id as u64,
                 table_path,
             );
+            let read_state_manager = ReadStateManager::new(&table);
+            let table_handler = TableHandler::new(table);
             self.event_senders
                 .insert(table_id, table_handler.get_event_sender());
-            self.reader_notifier
-                .send(table_handler.get_event_sender())
-                .await
-                .unwrap();
+            self.reader_notifier.send(read_state_manager).await.unwrap();
             table_handlers.insert(table_id, table_handler);
         }
         Ok(())
@@ -95,11 +94,8 @@ impl BatchSink for Sink {
     }
 
     async fn write_cdc_events(&mut self, events: Vec<CdcEvent>) -> Result<PgLsn, Self::Error> {
-        // TODO: support multiple tables in a transaction
-        //
-        let mut table_id_in_transaction: Option<u32> = None;
+        let mut tables_in_transaction: HashSet<u32> = HashSet::new();
         let mut lsn_in_transaction: Option<u64> = None;
-
         for event in events {
             println!("Received CDC event: {:?}", event);
             match event {
@@ -110,7 +106,7 @@ impl BatchSink for Sink {
                     println!("Stream start {stream_start_body:?}");
                 }
                 CdcEvent::Commit(commit_body) => {
-                    if let Some(table_id) = table_id_in_transaction {
+                    for table_id in &tables_in_transaction {
                         let event_sender = self.event_senders.get_mut(&table_id).unwrap();
                         event_sender
                             .send(TableEvent::Commit {
@@ -118,11 +114,11 @@ impl BatchSink for Sink {
                             })
                             .await
                             .unwrap();
-                        table_id_in_transaction = None;
                     }
+                    tables_in_transaction.clear();
                 }
                 CdcEvent::StreamCommit(stream_commit_body) => {
-                    if let Some(table_id) = table_id_in_transaction {
+                    for table_id in &tables_in_transaction {
                         let event_sender = self.event_senders.get_mut(&table_id).unwrap();
                         event_sender
                             .send(TableEvent::StreamCommit {
@@ -134,13 +130,7 @@ impl BatchSink for Sink {
                     }
                 }
                 CdcEvent::Insert((table_id, table_row, xact_id)) => {
-                    if let Some(prev_id) = table_id_in_transaction {
-                        assert!(
-                            prev_id == table_id,
-                            "Multiple tables in a transaction are not supported"
-                        );
-                    }
-                    table_id_in_transaction = Some(table_id);
+                    tables_in_transaction.insert(table_id);
                     let event_sender = self.event_senders.get_mut(&table_id).unwrap();
                     event_sender
                         .send(TableEvent::Append {
@@ -151,13 +141,7 @@ impl BatchSink for Sink {
                         .unwrap();
                 }
                 CdcEvent::Update((table_id, old_table_row, new_table_row, xact_id)) => {
-                    if let Some(prev_id) = table_id_in_transaction {
-                        assert!(
-                            prev_id == table_id,
-                            "Multiple tables in a transaction are not supported"
-                        );
-                    }
-                    table_id_in_transaction = Some(table_id);
+                    tables_in_transaction.insert(table_id);
                     let event_sender = self.event_senders.get_mut(&table_id).unwrap();
                     event_sender
                         .send(TableEvent::Delete {
@@ -176,13 +160,7 @@ impl BatchSink for Sink {
                         .unwrap();
                 }
                 CdcEvent::Delete((table_id, table_row, xact_id)) => {
-                    if let Some(prev_id) = table_id_in_transaction {
-                        assert!(
-                            prev_id == table_id,
-                            "Multiple tables in a transaction are not supported"
-                        );
-                    }
-                    table_id_in_transaction = Some(table_id);
+                    tables_in_transaction.insert(table_id);
                     let event_sender = self.event_senders.get_mut(&table_id).unwrap();
                     event_sender
                         .send(TableEvent::Delete {
@@ -200,7 +178,7 @@ impl BatchSink for Sink {
                     println!("Stream stop {stream_stop_body:?}");
                 }
                 CdcEvent::StreamAbort(stream_abort_body) => {
-                    if let Some(table_id) = table_id_in_transaction {
+                    for table_id in &tables_in_transaction {
                         let event_sender = self.event_senders.get_mut(&table_id).unwrap();
                         event_sender
                             .send(TableEvent::StreamAbort {

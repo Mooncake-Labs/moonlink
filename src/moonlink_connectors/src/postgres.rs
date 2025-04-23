@@ -1,6 +1,5 @@
 mod sink;
 mod util;
-
 use crate::pg_replicate::pipeline::{
     batching::data_pipeline::BatchDataPipeline,
     batching::BatchConfig,
@@ -8,6 +7,8 @@ use crate::pg_replicate::pipeline::{
     sources::postgres::{PostgresSource, PostgresSourceError, TableNamesFrom},
     PipelineAction, PipelineError,
 };
+use moonlink::ReadStateManager;
+
 use sink::*;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -49,7 +50,7 @@ impl MoonlinkPostgresSource {
     pub async fn add_table(
         &mut self,
         table: &str,
-    ) -> Result<mpsc::Sender<moonlink::TableEvent>, PostgresSourceError> {
+    ) -> Result<ReadStateManager, PostgresSourceError> {
         self.postgres_client
             .simple_query(&format!(
                 "ALTER PUBLICATION moonlink_pub ADD TABLE {};",
