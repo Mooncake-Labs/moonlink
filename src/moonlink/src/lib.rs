@@ -7,4 +7,4 @@ mod union_read;
 pub use error::*;
 pub use storage::MooncakeTable;
 pub use table_handler::{TableEvent, TableHandler};
-pub use union_read::ReadStateManager;
+pub use union_read::{ReadState, ReadStateManager};

@@ -1,11 +1,12 @@
 use moonlink::ReadStateManager;
+use moonlink::ReadState;
 mod error;
 
 use error::Result;
 use moonlink_connectors::MoonlinkPostgresSource;
 use std::{collections::HashMap, hash::Hash};
 use tokio::sync::RwLock;
-
+use std::sync::Arc;
 pub use error::Error;
 
 pub struct MoonlinkBackend<T: Eq + Hash> {
@@ -47,12 +48,11 @@ impl<T: Eq + Hash> MoonlinkBackend<T> {
         todo!()
     }
 
-    pub async fn scan_table(&self, table_id: T) -> Result<(Vec<String>, Vec<(u32, u32)>)> {
+    pub async fn scan_table(&self, table_id: T) -> Result<Arc<ReadState>> {
         let table_readers = self.table_readers.read().await;
         let reader = table_readers.get(&table_id).unwrap();
         let read_state = reader.try_read().await.unwrap();
-        let result = (read_state.files.clone(), read_state.deletions.clone());
-        Ok(result)
+        Ok(read_state)
     }
 }
 
@@ -89,8 +89,8 @@ mod tests {
             .unwrap();
         // wait 2 second
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let (columns, deletions) = service.scan_table("test").await.unwrap();
-        println!("columns: {:?}", columns);
-        println!("deletions: {:?}", deletions);
+        let read_state = service.scan_table("test").await.unwrap();
+        println!("files: {:?}", read_state.files);
+        println!("deletions: {:?}", read_state.deletions);
     }
 }
