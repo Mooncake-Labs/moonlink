@@ -1,8 +1,6 @@
 use super::test_utils::*;
 #[cfg(test)]
 use super::*;
-use std::collections::HashSet;
-
 #[tokio::test]
 async fn test_append_commit_snapshot() -> Result<()> {
     let context = TestContext::new("append_commit");
@@ -48,34 +46,18 @@ async fn test_delete_and_append() -> Result<()> {
     snapshot(&mut table).await;
 
     let snapshot = table.snapshot.read().await;
-    let (paths, _deletions) = snapshot.request_read()?;
-    // Need to manually handle deletions in the test - simulate what a real reader would do
-    let mut files = paths.clone();
-    files.sort(); // Ensure consistent order
-    let mut actual_ids = HashSet::new();
-
-    // First read all IDs
-    for path in &files {
-        let ids = read_ids_from_parquet(path);
-        actual_ids.extend(ids.into_iter().filter_map(|id| id));
-    }
-
-    // Then remove deleted IDs (ID 2 should be deleted)
-    for path in &files {
-        if files[0] == *path {
-            // This is the first file containing original rows
-            // Remove ID 2 which should be deleted
-            actual_ids.remove(&2);
-            break;
-        }
-    }
-
-    let expected: HashSet<_> = [1, 3, 4].iter().copied().collect();
-    assert_eq!(
-        actual_ids, expected,
-        "File contents after deletions don't match expected IDs"
+    let (paths, deletions) = snapshot.request_read()?;
+    verify_files_and_deletions(
+        &paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        &deletions
+            .iter()
+            .map(|d| (d.0 as u32, d.1 as u32))
+            .collect::<Vec<_>>(),
+        &[1, 3, 4],
     );
-
     Ok(())
 }
 
@@ -111,7 +93,7 @@ async fn test_deletion_after_flush() -> Result<()> {
 
     let snapshot = table.snapshot.read().await;
     let (paths, deletions) = snapshot.request_read()?;
-    // Need to manually handle deletions in the test - simulate what a real reader would do
+    assert_eq!(paths.len(), 1);
     let mut ids = read_ids_from_parquet(&paths[0]);
 
     for deletion in deletions {

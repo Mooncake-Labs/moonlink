@@ -115,3 +115,22 @@ pub async fn append_commit_flush_snapshot(
     snapshot(table).await;
     Ok(())
 }
+
+pub fn verify_files_and_deletions(
+    files: &[String],
+    deletions: &[(u32, u32)],
+    expected_ids: &[i32],
+) {
+    let mut res = vec![];
+    for (i, path) in files.iter().enumerate() {
+        let mut ids = read_ids_from_parquet(Path::new(path));
+        for deletion in deletions {
+            if deletion.0 == i as u32 {
+                ids[deletion.1 as usize] = None;
+            }
+        }
+        res.extend(ids.into_iter().filter_map(|id| id));
+    }
+    res.sort();
+    assert_eq!(res, expected_ids);
+}

@@ -66,7 +66,7 @@ impl TableHandler {
 
     /// Main event processing loop
     async fn event_loop(mut event_receiver: Receiver<TableEvent>, mut table: MooncakeTable) {
-        let mut snapshot_handle: Option<JoinHandle<()>> = None;
+        let mut snapshot_handle: Option<JoinHandle<u64>> = None;
         let mut flush_handle: Option<JoinHandle<Result<DiskSliceWriter>>> = None;
         let mut periodic_snapshot_interval = time::interval(Duration::from_millis(500));
 
@@ -126,8 +126,8 @@ impl TableHandler {
                 Some(()) = async {
                     if let Some(handle) = &mut snapshot_handle {
                         match handle.await {
-                            Ok(()) => {
-                                println!("Snapshot creation completed successfully");
+                            Ok(lsn) => {
+                                table.notify_snapshot_reader(lsn);
                             }
                             Err(e) => {
                                 println!("Snapshot task was cancelled: {}", e);
@@ -181,29 +181,20 @@ impl TableHandler {
 mod tests {
     use super::*;
     use crate::row::RowValue;
-    use crate::storage::read_ids_from_parquet;
+    use crate::storage::verify_files_and_deletions;
     use crate::union_read::ReadStateManager;
     use arrow::datatypes::{DataType, Field, Schema};
-    use std::path::Path;
-    async fn check_read_snapshot(read_manager: &ReadStateManager, expected_ids: &[i32]) {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let read_state = read_manager.try_read().await.unwrap();
+
+    pub async fn check_read_snapshot(
+        read_manager: &ReadStateManager,
+        target_lsn: u64,
+        expected_ids: &[i32],
+    ) {
+        let read_state = read_manager.try_read(Some(target_lsn)).await.unwrap();
         if read_state.files.is_empty() {
             assert!(false, "No snapshot files returned");
         }
-
-        let mut res = vec![];
-        for (i, path) in read_state.files.iter().enumerate() {
-            let mut ids = read_ids_from_parquet(Path::new(path));
-            for deletion in &read_state.deletions {
-                if deletion.0 == i as u32 {
-                    ids[deletion.1 as usize] = None;
-                }
-            }
-            res.extend(ids.into_iter().filter_map(|id| id));
-        }
-        res.sort();
-        assert_eq!(res, expected_ids);
+        verify_files_and_deletions(&read_state.files, &read_state.deletions, expected_ids);
     }
 
     #[tokio::test]
@@ -245,7 +236,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_read_snapshot(&read_state_manager, &[1]).await;
+        check_read_snapshot(&read_state_manager, 1, &[1]).await;
 
         // Test shutdown
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -314,10 +305,10 @@ mod tests {
 
         // Test flush operation
         event_sender
-            .send(TableEvent::Flush { lsn: 2 })
+            .send(TableEvent::Flush { lsn: 1 })
             .await
             .unwrap();
-        check_read_snapshot(&read_state_manager, &[1, 2, 3]).await;
+        check_read_snapshot(&read_state_manager, 1, &[1, 2, 3]).await;
 
         // Test shutdown
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -373,7 +364,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_read_snapshot(&read_state_manager, &[10]).await;
+        check_read_snapshot(&read_state_manager, 101, &[10]).await;
 
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -449,7 +440,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_read_snapshot(&read_state_manager, &[11]).await;
+        check_read_snapshot(&read_state_manager, 101, &[11]).await;
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
         if let Some(handle) = handler._event_handle {
@@ -527,7 +518,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_read_snapshot(&read_state_manager, &[1]).await;
+        check_read_snapshot(&read_state_manager, 100, &[1]).await;
 
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
@@ -602,7 +593,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_read_snapshot(&read_state_manager, &[30]).await;
+        check_read_snapshot(&read_state_manager, 103, &[30]).await;
         // Shutdown the handler
         event_sender.send(TableEvent::_Shutdown).await.unwrap();
         if let Some(handle) = handler._event_handle {

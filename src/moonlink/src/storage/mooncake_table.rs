@@ -20,7 +20,7 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::spawn;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tokio::task::JoinHandle;
 pub(crate) struct TableConfig {
     /// mem slice size
@@ -166,6 +166,9 @@ pub struct MooncakeTable {
 
     // Current snapshot of the table
     snapshot: Arc<RwLock<SnapshotTableState>>,
+
+    table_snapshot_watch_sender: watch::Sender<u64>,
+    table_snapshot_watch_receiver: watch::Receiver<u64>,
     next_snapshot_task: SnapshotTask,
 
     // Stream state per transaction
@@ -186,19 +189,27 @@ impl MooncakeTable {
             path: base_path,
             get_lookup_key,
         });
+        let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(0);
         let table = Self {
             mem_slice: MemSlice::new(metadata.schema.clone(), metadata.config.batch_size),
             metadata: metadata.clone(),
             snapshot: Arc::new(RwLock::new(SnapshotTableState::new(metadata))),
             next_snapshot_task: SnapshotTask::new(),
             transaction_stream_states: HashMap::new(),
+            table_snapshot_watch_sender,
+            table_snapshot_watch_receiver,
         };
 
         table
     }
 
-    pub(crate) fn get_table_state(&self) -> Arc<RwLock<SnapshotTableState>> {
-        self.snapshot.clone()
+    pub(crate) fn get_state_for_reader(
+        &self,
+    ) -> (Arc<RwLock<SnapshotTableState>>, watch::Receiver<u64>) {
+        (
+            self.snapshot.clone(),
+            self.table_snapshot_watch_receiver.clone(),
+        )
     }
 
     pub fn append(&mut self, row: MoonlinkRow) -> Result<()> {
@@ -372,7 +383,7 @@ impl MooncakeTable {
 
     // Create a snapshot of the last committed version
     //
-    pub(crate) fn create_snapshot(&mut self) -> Option<JoinHandle<()>> {
+    pub(crate) fn create_snapshot(&mut self) -> Option<JoinHandle<u64>> {
         if !self.next_snapshot_task.should_create_snapshot() {
             return None;
         }
@@ -383,11 +394,15 @@ impl MooncakeTable {
         )))
     }
 
+    pub(crate) fn notify_snapshot_reader(&self, lsn: u64) {
+        self.table_snapshot_watch_sender.send(lsn).unwrap();
+    }
+
     async fn create_snapshot_async(
         snapshot: Arc<RwLock<SnapshotTableState>>,
         next_snapshot_task: SnapshotTask,
-    ) {
-        snapshot.write().await.update_snapshot(next_snapshot_task);
+    ) -> u64 {
+        snapshot.write().await.update_snapshot(next_snapshot_task)
     }
 }
 
