@@ -16,19 +16,13 @@ pub enum RecordLocation {
     DiskFile(FileId, usize),
 }
 
-impl RecordLocation {
-    pub fn new_disk_file(path: &Path, row_offset: usize) -> Self {
-        RecordLocation::DiskFile(FileId(Arc::new(path.to_path_buf())), row_offset)
-    }
-}
-
 // UNDONE(REPLICATION IDENTITY):
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordIdentity {}
 
 #[derive(Clone, Debug)]
 pub struct RawDeletionRecord {
-    pub(crate) lookup_key: i64,
+    pub(crate) lookup_key: u64,
     pub(crate) _row_identity: Option<RecordIdentity>,
     pub(crate) pos: Option<(u64, usize)>,
     pub(crate) lsn: u64,
@@ -37,7 +31,7 @@ pub struct RawDeletionRecord {
 
 #[derive(Clone, Debug)]
 pub struct ProcessedDeletionRecord {
-    pub(crate) _lookup_key: i64,
+    pub(crate) _lookup_key: u64,
     pub(crate) pos: RecordLocation,
     pub(crate) lsn: u64,
     pub(crate) xact_id: Option<u32>,

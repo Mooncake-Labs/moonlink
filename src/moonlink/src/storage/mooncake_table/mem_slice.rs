@@ -65,12 +65,11 @@ impl MemSlice {
 
     pub(super) fn append(
         &mut self,
-        primary_key: i64,
+        lookup_key: u64,
         row: &MoonlinkRow,
     ) -> Result<Option<(u64, Arc<RecordBatch>)>> {
         let (seg_idx, row_idx, new_batch) = self.column_store.append_row(row)?;
-        self.mem_index
-            .insert(primary_key, (seg_idx, row_idx).into());
+        self.mem_index.insert(lookup_key, (seg_idx, row_idx).into());
         Ok(new_batch)
     }
 

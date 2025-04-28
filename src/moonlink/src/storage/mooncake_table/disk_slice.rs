@@ -1,6 +1,7 @@
 use super::data_batches::BatchEntry;
 use crate::error::{Error, Result};
-use crate::storage::index::{FileIndex, MemIndex, ParquetFileIndex};
+use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
+use crate::storage::index::{FileIndex, MemIndex};
 use crate::storage::storage_utils::{FileId, ProcessedDeletionRecord, RecordLocation};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -29,7 +30,7 @@ pub(crate) struct DiskSliceWriter {
     batch_id_to_idx: HashMap<u64, usize>,
     row_offset_mapping: HashMap<(usize, usize), (usize, usize)>,
 
-    new_index: Option<ParquetFileIndex>,
+    new_index: Option<FileIndex>,
 
     files: Vec<(PathBuf /* file path */, usize /* row count */)>,
 }
@@ -136,25 +137,34 @@ impl DiskSliceWriter {
     }
 
     fn remap_index(&mut self) -> Result<()> {
-        let mut new_index = FileIndex::new();
-        for (key, value) in self.old_index.iter() {
-            let RecordLocation::MemoryBatch(batch_id, row_idx) = value else {
-                panic!("Invalid record location");
-            };
-            let old_location = (*self.batch_id_to_idx.get(batch_id).unwrap(), *row_idx);
-            let new_location = self.row_offset_mapping.get(&old_location);
-            if let Some(new_location) = new_location {
-                new_index.insert(
-                    *key,
-                    RecordLocation::new_disk_file(&self.files[new_location.0].0, new_location.1),
-                );
-            }
-        }
-        self.new_index = Some(ParquetFileIndex { index: new_index });
+        let list = self
+            .old_index
+            .iter()
+            .filter_map(|(key, value)| {
+                let RecordLocation::MemoryBatch(batch_id, row_idx) = value else {
+                    panic!("Invalid record location");
+                };
+                let old_location = (*self.batch_id_to_idx.get(batch_id).unwrap(), *row_idx);
+                let new_location = self.row_offset_mapping.get(&old_location);
+                if let Some(new_location) = new_location {
+                    Some((*key, new_location.0, new_location.1))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut new_index = GlobalIndexBuilder::new();
+        new_index.set_files(
+            self.files
+                .iter()
+                .map(|(path, _)| Arc::new(path.clone()))
+                .collect(),
+        );
+        self.new_index = Some(new_index.build_for_flush(list));
         Ok(())
     }
 
-    pub fn take_index(&mut self) -> Option<ParquetFileIndex> {
+    pub fn take_index(&mut self) -> Option<FileIndex> {
         self.new_index.take()
     }
 
@@ -285,7 +295,7 @@ mod tests {
         // Insert original keys into the index
         for row in rows.iter() {
             let key = match row.values[0] {
-                RowValue::Int32(v) => v as i64,
+                RowValue::Int32(v) => v as u64,
                 _ => panic!("Expected i32"),
             };
             mem_slice.append(key, row)?;
@@ -326,21 +336,17 @@ mod tests {
 
         // Get the remapped index and verify it
         let new_index = disk_slice.take_index().unwrap();
-        assert!(
-            !new_index.index.is_empty(),
-            "Remapped index should not be empty"
-        );
 
         // Verify each key has been remapped to a disk location
         for key in [1, 3, 5] {
             // These should exist (undeleted rows)
-            let locations = new_index.index.get_vec(&key);
+            let locations = new_index.search(&key);
             assert!(
-                locations.is_some(),
+                !locations.is_empty(),
                 "Key {key} should exist in the remapped index"
             );
 
-            for location in locations.unwrap() {
+            for location in locations {
                 match location {
                     RecordLocation::DiskFile(file_id, _) => {
                         // Verify the file exists in our output files
@@ -361,9 +367,9 @@ mod tests {
         // Check that deleted rows are not in the index
         for key in [2, 4] {
             // These should not exist (deleted rows)
-            let locations = new_index.index.get_vec(&key);
+            let locations = new_index.search(&key);
             assert!(
-                locations.is_none() || locations.unwrap().is_empty(),
+                locations.is_empty(),
                 "Deleted key {key} should not exist in the remapped index"
             );
         }

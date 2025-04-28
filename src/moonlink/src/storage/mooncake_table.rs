@@ -62,7 +62,7 @@ pub struct TableMetadata {
     /// storage path
     pub(crate) path: PathBuf,
     /// function to get lookup key from row
-    pub(crate) get_lookup_key: fn(&MoonlinkRow) -> i64,
+    pub(crate) get_lookup_key: fn(&MoonlinkRow) -> u64,
 }
 
 /// Snapshot contains state of the table at a given time.

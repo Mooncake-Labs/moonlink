@@ -132,8 +132,8 @@ impl SnapshotTableState {
             }
         } else {
             let locations = self.current_snapshot.indices.find_record(&deletion);
-            for location in locations.unwrap() {
-                match location {
+            for location in locations.unwrap().into_iter() {
+                match &location {
                     RecordLocation::MemoryBatch(batch_id, row_id) => {
                         if !self
                             .batches
@@ -160,7 +160,7 @@ impl SnapshotTableState {
                         {
                             return ProcessedDeletionRecord {
                                 _lookup_key: deletion.lookup_key,
-                                pos: location.clone(),
+                                pos: location,
                                 lsn: deletion.lsn,
                                 xact_id: deletion.xact_id,
                             };
