@@ -9,11 +9,14 @@ use std::io::Cursor;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::BinaryHeap;
+use std::cmp::Reverse;
 
 // Constants
 const HASH_BITS: u32 = 64;
 const MAX_BLOCK_SIZE: u32 = 2 * 1024 * 1024 * 1024; // 2GB
 const TARGET_NUM_FILES_PER_INDEX: u32 = 4000;
+const INVALID_FILE_ID: u32 = 0xFFFFFFFF;
 
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E3779B97F4A7C15);
@@ -52,69 +55,6 @@ struct IndexBlock {
     data: Mmap,
 }
 
-struct IndexBlockIterator<'a> {
-    collection: &'a IndexBlock,
-    metadata: &'a GlobalIndex,
-    current_bucket: u32,
-    current_bucket_entry_end: u32,
-    current_entry: u32,
-    current_upper_hash: u64,
-    bucket_reader: BitReader<Cursor<&'a [u8]>, BigEndian>,
-    entry_reader: BitReader<Cursor<&'a [u8]>, BigEndian>,
-}
-
-impl<'a> IndexBlockIterator<'a> {
-    fn new(collection: &'a IndexBlock, metadata: &'a GlobalIndex) -> Self {
-        let mut bucket_reader = BitReader::endian(Cursor::new(collection.data.as_ref()), BigEndian);
-        let entry_reader = bucket_reader.clone();
-        bucket_reader
-            .seek_bits(SeekFrom::Start(collection.bucket_start_offset))
-            .unwrap();
-        let _ = bucket_reader
-            .read_unsigned_var::<u32>(metadata.bucket_bits)
-            .unwrap();
-        let current_bucket_entry_end = bucket_reader
-            .read_unsigned_var::<u32>(metadata.bucket_bits)
-            .unwrap();
-        Self {
-            collection,
-            metadata,
-            bucket_reader,
-            entry_reader,
-            current_bucket: collection.bucket_start_idx,
-            current_bucket_entry_end,
-            current_entry: 0,
-            current_upper_hash: 0,
-        }
-    }
-}
-
-impl<'a> Iterator for IndexBlockIterator<'a> {
-    type Item = (u64, usize, usize);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current_bucket == self.collection.bucket_end_idx - 1 {
-            return None;
-        }
-        while self.current_entry == self.current_bucket_entry_end {
-            self.current_bucket += 1;
-            if self.current_bucket == self.collection.bucket_end_idx - 1 {
-                return None;
-            }
-            self.current_bucket_entry_end = self
-                .bucket_reader
-                .read_unsigned_var::<u32>(self.metadata.bucket_bits)
-                .unwrap();
-            self.current_upper_hash += 1 << self.metadata.hash_lower_bits;
-        }
-        let (lower_hash, seg_idx, row_idx) = self
-            .collection
-            .read_entry(&mut self.entry_reader, self.metadata);
-        self.current_entry += 1;
-        Some((lower_hash + self.current_upper_hash, seg_idx, row_idx))
-    }
-}
-
 impl IndexBlock {
     fn new(
         bucket_start_idx: u32,
@@ -133,8 +73,8 @@ impl IndexBlock {
         }
     }
 
-    fn iter<'a>(self: &'a Self, metadata: &'a GlobalIndex) -> IndexBlockIterator<'a> {
-        IndexBlockIterator::new(self, metadata)
+    fn iter<'a>(self: &'a Self, metadata: &'a GlobalIndex, file_id_remap: &'a Vec<u32>) -> IndexBlockIterator<'a> {
+        IndexBlockIterator::new(self, metadata, file_id_remap)
     }
 
     #[inline]
@@ -212,48 +152,6 @@ impl IndexBlock {
     }
 }
 
-impl IndexBlock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, metadata: &GlobalIndex) -> fmt::Result {
-        write!(
-            f,
-            "\nIndexBlock {{ \n   bucket_start_idx: {}, \n   bucket_end_idx: {},",
-            self.bucket_start_idx, self.bucket_end_idx
-        )?;
-        let cursor = Cursor::new(self.data.as_ref());
-        let mut reader = BitReader::endian(cursor, BigEndian);
-        write!(f, "\n   Buckets: ")?;
-        let mut num = 0;
-        reader
-            .seek_bits(SeekFrom::Start(self.bucket_start_offset))
-            .unwrap();
-        for _i in 0..self.bucket_end_idx {
-            num = reader
-                .read_unsigned_var::<u32>(metadata.bucket_bits)
-                .unwrap();
-            write!(f, "{} ", num)?;
-        }
-        write!(f, "\n   Entries: ")?;
-        reader.seek_bits(SeekFrom::Start(0)).unwrap();
-        for _i in 0..num {
-            let (hash, seg_idx, row_idx) = self.read_entry(&mut reader, metadata);
-            write!(f, "\n     {} {} {}", hash, seg_idx, row_idx)?;
-        }
-        write!(f, "\n}}")?;
-        Ok(())
-    }
-}
-
-impl Debug for GlobalIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GlobalIndex {{ files: {:?}, num_rows: {}, hash_bits: {}, hash_upper_bits: {}, hash_lower_bits: {}, seg_id_bits: {}, row_id_bits: {}, bucket_bits: {} ", self.files, self.num_rows, self.hash_bits, self.hash_upper_bits, self.hash_lower_bits, self.seg_id_bits, self.row_id_bits, self.bucket_bits)?;
-        for block in &self.index_blocks {
-            block.fmt(f, self)?;
-        }
-        write!(f, "}}")?;
-        Ok(())
-    }
-}
-
 impl GlobalIndex {
     pub fn search(&self, value: &u64) -> Vec<RecordLocation> {
         let target_hash = splitmix64(*value);
@@ -266,8 +164,15 @@ impl GlobalIndex {
         }
         vec![]
     }
+
+    pub fn iter<'a>(&'a self, file_id_remap: &'a Vec<u32>) -> GlobalIndexIterator<'a> {
+        GlobalIndexIterator::new(self, file_id_remap)
+    }
 }
 
+// ================================
+// Builders
+// ================================
 struct IndexBlockBuilder {
     bucket_start_idx: u32,
     bucket_end_idx: u32,
@@ -361,7 +266,7 @@ impl GlobalIndexBuilder {
         self
     }
 
-    pub fn build_for_flush(mut self, mut entries: Vec<(u64, usize, usize)>) -> GlobalIndex {
+    pub fn build_from_flush(mut self, mut entries: Vec<(u64, usize, usize)>) -> GlobalIndex {
         self.num_rows = entries.len() as u32;
         for entry in &mut entries {
             entry.0 = splitmix64(entry.0);
@@ -370,7 +275,16 @@ impl GlobalIndexBuilder {
         self.build(entries.into_iter())
     }
 
-    pub fn build(self, iter: impl Iterator<Item = (u64, usize, usize)>) -> GlobalIndex {
+    pub fn build_from_merge(mut self, indices: Vec<GlobalIndex>) -> GlobalIndex {
+        self.num_rows = indices.iter().map(|index| index.num_rows).sum();
+        self.files = indices.iter().map(|index| index.files.clone()).flatten().collect();
+        let file_id_remap = vec![INVALID_FILE_ID; self.files.len()];
+        let iters = indices.iter().map(|index| index.iter(&file_id_remap)).collect::<Vec<_>>();
+        let merge_iter = GlobalIndexMergingIterator::new(iters);
+        self.build(merge_iter)
+    }
+
+    fn build(self, iter: impl Iterator<Item = (u64, usize, usize)>) -> GlobalIndex {
         let num_rows = self.num_rows;
         let bucket_bits = 32 - num_rows.leading_zeros();
         let num_buckets = (num_rows / 4 + 2).next_power_of_two();
@@ -396,6 +310,225 @@ impl GlobalIndexBuilder {
         index_blocks.push(index_block_builder.build(&global_index));
         global_index.index_blocks = index_blocks;
         global_index
+    }
+}
+
+// ================================
+// Iterators for merging indices
+// ================================
+struct IndexBlockIterator<'a> {
+    collection: &'a IndexBlock,
+    metadata: &'a GlobalIndex,
+    current_bucket: u32,
+    current_bucket_entry_end: u32,
+    current_entry: u32,
+    current_upper_hash: u64,
+    bucket_reader: BitReader<Cursor<&'a [u8]>, BigEndian>,
+    entry_reader: BitReader<Cursor<&'a [u8]>, BigEndian>,
+    file_id_remap: &'a Vec<u32>,
+}
+
+impl<'a> IndexBlockIterator<'a> {
+    fn new(collection: &'a IndexBlock, metadata: &'a GlobalIndex, file_id_remap: &'a Vec<u32>) -> Self {
+        let mut bucket_reader = BitReader::endian(Cursor::new(collection.data.as_ref()), BigEndian);
+        let entry_reader = bucket_reader.clone();
+        bucket_reader
+            .seek_bits(SeekFrom::Start(collection.bucket_start_offset))
+            .unwrap();
+        let _ = bucket_reader
+            .read_unsigned_var::<u32>(metadata.bucket_bits)
+            .unwrap();
+        let current_bucket_entry_end = bucket_reader
+            .read_unsigned_var::<u32>(metadata.bucket_bits)
+            .unwrap();
+        Self {
+            collection,
+            metadata,
+            bucket_reader,
+            entry_reader,
+            current_bucket: collection.bucket_start_idx,
+            current_bucket_entry_end,
+            current_entry: 0,
+            current_upper_hash: 0,
+            file_id_remap,
+        }
+    }
+}
+
+impl<'a> Iterator for IndexBlockIterator<'a> {
+    type Item = (u64, usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_bucket == self.collection.bucket_end_idx - 1 {
+                return None;
+            }
+            while self.current_entry == self.current_bucket_entry_end {
+                self.current_bucket += 1;
+                if self.current_bucket == self.collection.bucket_end_idx - 1 {
+                    return None;
+                }
+                self.current_bucket_entry_end = self
+                    .bucket_reader
+                    .read_unsigned_var::<u32>(self.metadata.bucket_bits)
+                    .unwrap();
+                self.current_upper_hash += 1 << self.metadata.hash_lower_bits;
+            }
+            let (lower_hash, seg_idx, row_idx) = self
+                .collection
+                .read_entry(&mut self.entry_reader, self.metadata);
+            self.current_entry += 1;
+            if *self.file_id_remap.get(seg_idx).unwrap() != INVALID_FILE_ID {
+                return Some((lower_hash + self.current_upper_hash, seg_idx, row_idx));
+            }
+        }
+    }
+}
+
+pub struct GlobalIndexIterator<'a> {
+    index: &'a GlobalIndex,
+    block_idx: usize,
+    block_iter: Option<IndexBlockIterator<'a>>,
+    file_id_remap: &'a Vec<u32>,
+}
+
+impl<'a> GlobalIndexIterator<'a> {
+    pub fn new(index: &'a GlobalIndex, file_id_remap: &'a Vec<u32>) -> Self {
+        let mut block_iter = None;
+        let block_idx = 0;
+        if !index.index_blocks.is_empty() {
+            block_iter = Some(index.index_blocks[0].iter(index, file_id_remap));
+        }
+        Self {
+            index,
+            block_idx,
+            block_iter,
+            file_id_remap,
+        }
+    }
+}
+
+impl<'a> Iterator for GlobalIndexIterator<'a> {
+    type Item = (u64, usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(ref mut iter) = self.block_iter {
+                if let Some(item) = iter.next() {
+                    return Some(item);
+                }
+            }
+            self.block_idx += 1;
+            if self.block_idx >= self.index.index_blocks.len() {
+                return None;
+            }
+            self.block_iter = Some(self.index.index_blocks[self.block_idx].iter(self.index, self.file_id_remap));
+        }
+    }
+}
+
+pub struct GlobalIndexMergingIterator<'a> {
+    heap: BinaryHeap<Reverse<HeapItem<'a>>>,
+}
+
+struct HeapItem<'a> {
+    value: (u64, usize, usize),
+    iter: GlobalIndexIterator<'a>,
+}
+
+impl<'a> PartialEq for HeapItem<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.0 == other.value.0
+    }
+}
+impl<'a> Eq for HeapItem<'a> {}
+
+impl<'a> PartialOrd for HeapItem<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Reverse for min-heap
+        other.value.0.partial_cmp(&self.value.0)
+    }
+}
+impl<'a> Ord for HeapItem<'a> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse for min-heap
+        other.value.0.cmp(&self.value.0)
+    }
+}
+
+impl<'a> GlobalIndexMergingIterator<'a> {
+    pub fn new(iterators: Vec<GlobalIndexIterator<'a>>) -> Self {
+        let mut heap = BinaryHeap::new();
+        for mut it in iterators {
+            if let Some(value) = it.next() {
+                heap.push(Reverse(HeapItem { value, iter: it }));
+            }
+        }
+        Self { heap }
+    }
+}
+
+impl<'a> Iterator for GlobalIndexMergingIterator<'a> {
+    type Item = (u64, usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(Reverse(mut heap_item)) = self.heap.pop() {
+            let result = heap_item.value;
+            if let Some(next_value) = heap_item.iter.next() {
+                self.heap.push(Reverse(HeapItem {
+                    value: next_value,
+                    iter: heap_item.iter,
+                }));
+            }
+            Some(result)
+        } else {
+            None
+        }
+    }
+}
+
+// ================================
+// Debug Helpers
+// ================================
+impl IndexBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, metadata: &GlobalIndex) -> fmt::Result {
+        write!(
+            f,
+            "\nIndexBlock {{ \n   bucket_start_idx: {}, \n   bucket_end_idx: {},",
+            self.bucket_start_idx, self.bucket_end_idx
+        )?;
+        let cursor = Cursor::new(self.data.as_ref());
+        let mut reader = BitReader::endian(cursor, BigEndian);
+        write!(f, "\n   Buckets: ")?;
+        let mut num = 0;
+        reader
+            .seek_bits(SeekFrom::Start(self.bucket_start_offset))
+            .unwrap();
+        for _i in 0..self.bucket_end_idx {
+            num = reader
+                .read_unsigned_var::<u32>(metadata.bucket_bits)
+                .unwrap();
+            write!(f, "{} ", num)?;
+        }
+        write!(f, "\n   Entries: ")?;
+        reader.seek_bits(SeekFrom::Start(0)).unwrap();
+        for _i in 0..num {
+            let (hash, seg_idx, row_idx) = self.read_entry(&mut reader, metadata);
+            write!(f, "\n     {} {} {}", hash, seg_idx, row_idx)?;
+        }
+        write!(f, "\n}}")?;
+        Ok(())
+    }
+}
+
+impl Debug for GlobalIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GlobalIndex {{ files: {:?}, num_rows: {}, hash_bits: {}, hash_upper_bits: {}, hash_lower_bits: {}, seg_id_bits: {}, row_id_bits: {}, bucket_bits: {} ", self.files, self.num_rows, self.hash_bits, self.hash_upper_bits, self.hash_lower_bits, self.seg_id_bits, self.row_id_bits, self.bucket_bits)?;
+        for block in &self.index_blocks {
+            block.fmt(f, self)?;
+        }
+        write!(f, "}}")?;
+        Ok(())
     }
 }
 
@@ -425,13 +558,14 @@ mod tests {
         ];
         let mut index = GlobalIndexBuilder::new();
         index.set_files(files);
-        let index = index.build_for_flush(vec);
+        let index = index.build_from_flush(vec);
         println!("{:?}", index);
         println!("{:?}", index.search(&1));
         println!("{:?}", index.search(&2));
 
+        let file_id_remap = vec![0; index.files.len()];
         for block in index.index_blocks.iter() {
-            for (hash, seg_idx, row_idx) in block.iter(&index) {
+            for (hash, seg_idx, row_idx) in block.iter(&index, &file_id_remap) {
                 println!("{} {} {}", hash, seg_idx, row_idx);
             }
         }
@@ -451,7 +585,7 @@ mod tests {
         let vec = (0..10000000).map(|i| (i as u64, 0, i)).collect::<Vec<_>>();
         let mut index = GlobalIndexBuilder::new();
         index.set_files(files);
-        let index = index.build_for_flush(vec);
+        let index = index.build_from_flush(vec);
         for i in 0..num_samples {
             if let Some(RecordLocation::DiskFile(FileId(_file_id), row_idx)) =
                 index.search(&(i as u64)).get(0)
@@ -471,4 +605,5 @@ mod tests {
             report.flamegraph(file).unwrap();
         }
     }
+
 }

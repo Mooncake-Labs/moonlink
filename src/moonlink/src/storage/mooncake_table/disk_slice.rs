@@ -160,7 +160,7 @@ impl DiskSliceWriter {
                 .map(|(path, _)| Arc::new(path.clone()))
                 .collect(),
         );
-        self.new_index = Some(new_index.build_for_flush(list));
+        self.new_index = Some(new_index.build_from_flush(list));
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // UNDONE(UPDATE_DELETE): a better way to handle file ids
