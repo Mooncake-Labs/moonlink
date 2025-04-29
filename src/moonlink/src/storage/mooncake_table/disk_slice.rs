@@ -153,14 +153,15 @@ impl DiskSliceWriter {
                 }
             })
             .collect::<Vec<_>>();
-        let mut new_index = GlobalIndexBuilder::new();
-        new_index.set_files(
+        let mut index_builder = GlobalIndexBuilder::new();
+        index_builder.set_files(
             self.files
                 .iter()
                 .map(|(path, _)| Arc::new(path.clone()))
                 .collect(),
         );
-        self.new_index = Some(new_index.build_from_flush(list));
+        index_builder.set_directory(self.dir_path.clone());
+        self.new_index = Some(index_builder.build_from_flush(list));
         Ok(())
     }
 
