@@ -7,6 +7,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("Postgres source error: {0}")]
     PostgresSource(#[from] PostgresSourceError),
+    #[error("Moonlink error: {0}")]
+    Moonlink(#[from] moonlink::Error),
 }
 
 pub type Result<T> = result::Result<T, Error>;

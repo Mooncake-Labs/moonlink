@@ -9,8 +9,8 @@ async fn test_append_commit_snapshot() -> Result<()> {
     table.commit(1);
     snapshot(&mut table).await;
     let snapshot = table.snapshot.read().await;
-    let (paths, _deletions) = snapshot.request_read()?;
-    verify_file_contents(&paths[0], &[1, 2], Some(2));
+    let ReadOutput { file_paths, .. } = snapshot.request_read()?;
+    verify_file_contents(&file_paths[0], &[1, 2], Some(2));
     Ok(())
 }
 
@@ -21,8 +21,8 @@ async fn test_flush_basic() -> Result<()> {
     let rows = vec![test_row(1, "Alice", 30), test_row(2, "Bob", 25)];
     append_commit_flush_snapshot(&mut table, rows, 1).await?;
     let snapshot = table.snapshot.read().await;
-    let (paths, _deletions) = snapshot.request_read()?;
-    verify_file_contents(&paths[0], &[1, 2], Some(2));
+    let ReadOutput { file_paths, .. } = snapshot.request_read()?;
+    verify_file_contents(&file_paths[0], &[1, 2], Some(2));
     Ok(())
 }
 
@@ -46,18 +46,12 @@ async fn test_delete_and_append() -> Result<()> {
     snapshot(&mut table).await;
 
     let snapshot = table.snapshot.read().await;
-    let (paths, deletions) = snapshot.request_read()?;
-    verify_files_and_deletions(
-        &paths
-            .iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect::<Vec<_>>(),
-        &deletions
-            .iter()
-            .map(|d| (d.0 as u32, d.1 as u32))
-            .collect::<Vec<_>>(),
-        &[1, 3, 4],
-    );
+    let ReadOutput {
+        file_paths,
+        deletions,
+        ..
+    } = snapshot.request_read()?;
+    verify_files_and_deletions(&file_paths, &deletions, &[1, 3, 4]);
     Ok(())
 }
 
@@ -75,8 +69,8 @@ async fn test_deletion_before_flush() -> Result<()> {
     snapshot(&mut table).await;
 
     let snapshot = table.snapshot.read().await;
-    let (paths, _deletions) = snapshot.request_read()?;
-    verify_file_contents(&paths[0], &[1, 3], None);
+    let ReadOutput { file_paths, .. } = snapshot.request_read()?;
+    verify_file_contents(&file_paths[0], &[1, 3], None);
     Ok(())
 }
 
@@ -92,12 +86,16 @@ async fn test_deletion_after_flush() -> Result<()> {
     snapshot(&mut table).await;
 
     let snapshot = table.snapshot.read().await;
-    let (paths, deletions) = snapshot.request_read()?;
-    assert_eq!(paths.len(), 1);
-    let mut ids = read_ids_from_parquet(&paths[0]);
+    let ReadOutput {
+        file_paths,
+        deletions,
+        ..
+    } = snapshot.request_read()?;
+    assert_eq!(file_paths.len(), 1);
+    let mut ids = read_ids_from_parquet(&file_paths[0]);
 
     for deletion in deletions {
-        ids[deletion.1] = None;
+        ids[deletion.1 as usize] = None;
     }
     let ids = ids.into_iter().flatten().collect::<Vec<_>>();
 

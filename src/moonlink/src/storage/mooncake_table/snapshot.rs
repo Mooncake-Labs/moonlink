@@ -9,7 +9,6 @@ use crate::storage::storage_utils::{ProcessedDeletionRecord, RecordLocation};
 use parquet::arrow::ArrowWriter;
 use std::collections::BTreeMap;
 use std::mem::take;
-use std::path::PathBuf;
 use std::sync::Arc;
 pub(crate) struct SnapshotTableState {
     /// Current snapshot
@@ -31,6 +30,12 @@ pub(crate) struct SnapshotTableState {
 
     /// Last commit point
     last_commit: RecordLocation,
+}
+
+pub struct ReadOutput {
+    pub file_paths: Vec<String>,
+    pub deletions: Vec<(u32, u32)>,
+    pub associated_files: Vec<String>,
 }
 
 impl SnapshotTableState {
@@ -242,13 +247,13 @@ impl SnapshotTableState {
         }
     }
 
-    fn get_deletion_records(&self) -> Vec<(usize, usize)> {
+    fn get_deletion_records(&self) -> Vec<(u32, u32)> {
         let mut ret = Vec::new();
         for deletion in self.committed_deletion_log.iter() {
             if let RecordLocation::DiskFile(file_name, row_id) = &deletion.pos {
                 for (id, (file, _)) in self.current_snapshot.disk_files.iter().enumerate() {
                     if *file == *file_name.0 {
-                        ret.push((id, *row_id));
+                        ret.push((id as u32, *row_id as u32));
                         break;
                     }
                 }
@@ -258,14 +263,25 @@ impl SnapshotTableState {
     }
 
     #[allow(clippy::type_complexity)]
-    pub(crate) fn request_read(&self) -> Result<(Vec<PathBuf>, Vec<(usize, usize)>)> {
-        let mut file_paths: Vec<PathBuf> = Vec::new();
+    pub(crate) fn request_read(&self) -> Result<ReadOutput> {
+        let mut file_paths: Vec<String> = Vec::new();
+        let mut associated_files = Vec::new();
         let deletions = self.get_deletion_records();
-        file_paths.extend(self.current_snapshot.disk_files.keys().cloned());
+        file_paths.extend(
+            self.current_snapshot
+                .disk_files
+                .keys()
+                .map(|path| path.to_string_lossy().to_string()),
+        );
         let file_path = self.current_snapshot.get_name_for_inmemory_file();
         if file_path.exists() {
-            file_paths.push(file_path);
-            return Ok((file_paths, deletions));
+            file_paths.push(file_path.to_string_lossy().to_string());
+            associated_files.push(file_path.to_string_lossy().to_string());
+            return Ok(ReadOutput {
+                file_paths,
+                deletions,
+                associated_files,
+            });
         }
         assert!(matches!(
             self.last_commit,
@@ -278,19 +294,22 @@ impl SnapshotTableState {
             let schema = self.current_snapshot.metadata.schema.clone();
             for (id, batch) in self.batches.iter() {
                 if *id < batch_id {
-                    if let Some(batch) = batch.get_filtered_batch().unwrap() {
-                        filtered_batches.push(batch);
+                    if let Some(filtered_batch) = batch.get_filtered_batch()? {
+                        filtered_batches.push(filtered_batch);
                     }
                 } else if *id == batch_id && row_id > 0 {
                     if batch.data.is_some() {
-                        let filtered_batch = batch
-                            .get_filtered_batch_with_limit(row_id)
-                            .unwrap()
-                            .unwrap();
-                        filtered_batches.push(filtered_batch);
+                        if let Some(filtered_batch) = batch.get_filtered_batch_with_limit(row_id)? {
+                            filtered_batches.push(filtered_batch);
+                        }
                     } else {
                         let rows = &self.rows[..row_id];
-                        let deletions = &self.batches.values().last().unwrap().deletions;
+                        let deletions = &self
+                            .batches
+                            .values()
+                            .last()
+                            .expect("batch not found")
+                            .deletions;
                         let batch = create_batch_from_rows(rows, schema.clone(), deletions);
                         filtered_batches.push(batch);
                     }
@@ -301,16 +320,19 @@ impl SnapshotTableState {
                 // Build a parquet file from current record batches
                 //
                 let mut parquet_writer =
-                    ArrowWriter::try_new(std::fs::File::create(&file_path).unwrap(), schema, None)
-                        .unwrap();
+                    ArrowWriter::try_new(std::fs::File::create(&file_path).unwrap(), schema, None)?;
                 for batch in filtered_batches.iter() {
                     parquet_writer.write(batch)?;
                 }
                 parquet_writer.close()?;
-                file_paths.push(file_path);
+                file_paths.push(file_path.to_string_lossy().to_string());
+                associated_files.push(file_path.to_string_lossy().to_string());
             }
         }
-
-        Ok((file_paths, deletions))
+        Ok(ReadOutput {
+            file_paths,
+            deletions,
+            associated_files,
+        })
     }
 }

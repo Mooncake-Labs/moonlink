@@ -191,7 +191,7 @@ mod tests {
         target_lsn: u64,
         expected_ids: &[i32],
     ) {
-        let read_state = read_manager.try_read(Some(target_lsn)).await;
+        let read_state = read_manager.try_read(Some(target_lsn)).await.unwrap();
         let (files, deletions) = decode_read_state_for_testing(&read_state);
         if files.is_empty() {
             unreachable!("No snapshot files returned");

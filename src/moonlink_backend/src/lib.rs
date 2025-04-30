@@ -56,8 +56,10 @@ impl<T: Eq + Hash> MoonlinkBackend<T> {
 
     pub async fn scan_table(&self, table_id: &T, lsn: Option<u64>) -> Result<Arc<ReadState>> {
         let table_readers = self.table_readers.read().await;
-        let reader = table_readers.get(table_id).unwrap();
-        let read_state = reader.try_read(lsn).await;
+        let reader = table_readers
+            .get(table_id)
+            .expect("try to scan a table that does not exist");
+        let read_state = reader.try_read(lsn).await?;
         Ok(read_state)
     }
 }

@@ -20,6 +20,7 @@ use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
+pub(crate) use snapshot::ReadOutput;
 pub(crate) use snapshot::SnapshotTableState;
 use tokio::spawn;
 use tokio::sync::{watch, RwLock};

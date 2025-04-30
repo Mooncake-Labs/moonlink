@@ -11,22 +11,32 @@ const BINCODE_CONFIG: config::Configuration = config::standard();
 #[derive(Debug)]
 pub struct ReadState {
     pub data: Vec<u8>,
+    associated_files: Vec<String>,
 }
 
 impl Drop for ReadState {
     fn drop(&mut self) {
-        println!("Dropping read state");
+        println!("Dropping files: {:?}", self.associated_files);
+        for file in self.associated_files.iter() {
+            std::fs::remove_file(file).unwrap();
+        }
     }
 }
 
 impl ReadState {
-    pub(super) fn new(input: (Vec<String>, Vec<(u32, u32)>)) -> Self {
+    pub(super) fn new(
+        input: (Vec<String>, Vec<(u32, u32)>),
+        associated_files: Vec<String>,
+    ) -> Self {
         let metadata = TableMetadata {
             data_files: input.0,
             position_deletes: input.1,
         };
         let data = bincode::encode_to_vec(metadata, BINCODE_CONFIG).unwrap(); // TODO
-        Self { data }
+        Self {
+            data,
+            associated_files,
+        }
     }
 }
 

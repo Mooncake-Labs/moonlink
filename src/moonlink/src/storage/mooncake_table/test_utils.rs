@@ -5,7 +5,6 @@ use arrow::datatypes::{DataType, Field};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashSet;
 use std::fs::{create_dir_all, File};
-use std::path::Path;
 use tempfile::{tempdir, TempDir};
 
 pub struct TestContext {
@@ -50,7 +49,7 @@ pub fn test_table(context: &TestContext, table_name: &str) -> MooncakeTable {
     MooncakeTable::new(test_schema(), table_name.to_string(), 1, context.path())
 }
 
-pub fn read_ids_from_parquet(file_path: &Path) -> Vec<Option<i32>> {
+pub fn read_ids_from_parquet(file_path: &String) -> Vec<Option<i32>> {
     let file = File::open(file_path).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
@@ -66,7 +65,7 @@ pub fn read_ids_from_parquet(file_path: &Path) -> Vec<Option<i32>> {
 }
 
 pub fn verify_file_contents(
-    file_path: &Path,
+    file_path: &String,
     expected_ids: &[i32],
     expected_row_count: Option<usize>,
 ) {
@@ -123,7 +122,7 @@ pub fn verify_files_and_deletions(
 ) {
     let mut res = vec![];
     for (i, path) in files.iter().enumerate() {
-        let mut ids = read_ids_from_parquet(Path::new(path));
+        let mut ids = read_ids_from_parquet(path);
         for deletion in deletions {
             if deletion.0 == i as u32 {
                 ids[deletion.1 as usize] = None;
