@@ -1,7 +1,7 @@
-use super::column_array_builder::ColumnArrayBuilder;
-use super::delete_vector::BatchDeletionVector;
 use crate::error::Result;
+use crate::row::ColumnArrayBuilder;
 use crate::row::MoonlinkRow;
+use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::storage_utils::RecordLocation;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;

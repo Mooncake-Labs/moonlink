@@ -28,6 +28,7 @@ memmap2 = "0.9.5"
 [dev-dependencies]
 tempfile.workspace = true
 pprof = { version = "0.14", features = ["flamegraph"] }
+rand = "0.9.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(profiling_enabled)'] }

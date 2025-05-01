@@ -1,4 +1,3 @@
-mod column_array_builder;
 mod data_batches;
 pub(crate) mod delete_vector;
 mod disk_slice;

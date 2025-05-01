@@ -1,13 +1,13 @@
 use crate::error::Error;
 use crate::row::RowValue;
-use arrow::array::builder::{BooleanBuilder, PrimitiveBuilder, StringBuilder};
+use arrow::array::builder::{BinaryBuilder, BooleanBuilder, PrimitiveBuilder, StringBuilder};
 use arrow::array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
 use arrow::array::{ArrayRef, FixedSizeBinaryBuilder};
 use arrow::compute::kernels::cast;
 use arrow::datatypes::DataType;
 use std::sync::Arc;
 /// A column array builder that can handle different types
-pub(super) enum ColumnArrayBuilder {
+pub(crate) enum ColumnArrayBuilder {
     Boolean(BooleanBuilder),
     Int32(PrimitiveBuilder<Int32Type>),
     Int64(PrimitiveBuilder<Int64Type>),
@@ -15,11 +15,12 @@ pub(super) enum ColumnArrayBuilder {
     Float64(PrimitiveBuilder<Float64Type>),
     Utf8(StringBuilder),
     FixedSizeBinary(FixedSizeBinaryBuilder),
+    Binary(BinaryBuilder),
 }
 
 impl ColumnArrayBuilder {
     /// Create a new column array builder for a specific data type
-    pub(super) fn new(data_type: DataType, capacity: usize) -> Self {
+    pub(crate) fn new(data_type: DataType, capacity: usize) -> Self {
         match &data_type {
             DataType::Boolean => {
                 ColumnArrayBuilder::Boolean(BooleanBuilder::with_capacity(capacity))
@@ -45,12 +46,14 @@ impl ColumnArrayBuilder {
                     capacity, 16,
                 ))
             }
+            DataType::Binary => {
+                ColumnArrayBuilder::Binary(BinaryBuilder::with_capacity(capacity, capacity * 10))
+            }
             _ => panic!("data type: {:?}", data_type),
         }
     }
-
     /// Append a value to this builder
-    pub(super) fn append_value(&mut self, value: &RowValue) -> Result<(), Error> {
+    pub(crate) fn append_value(&mut self, value: &RowValue) -> Result<(), Error> {
         match self {
             ColumnArrayBuilder::Boolean(builder) => {
                 match value {
@@ -110,10 +113,18 @@ impl ColumnArrayBuilder {
                 };
                 Ok(())
             }
+            ColumnArrayBuilder::Binary(builder) => {
+                match value {
+                    RowValue::ByteArray(v) => builder.append_value(v),
+                    RowValue::Null => builder.append_null(),
+                    _ => unreachable!("ByteArray expected from well-typed input"),
+                };
+                Ok(())
+            }
         }
     }
     /// Finish building and return the array
-    pub(super) fn finish(&mut self, logical_type: &DataType) -> ArrayRef {
+    pub(crate) fn finish(&mut self, logical_type: &DataType) -> ArrayRef {
         let array: ArrayRef = match self {
             ColumnArrayBuilder::Boolean(builder) => Arc::new(builder.finish()),
             ColumnArrayBuilder::Int32(builder) => Arc::new(builder.finish()),
@@ -122,6 +133,7 @@ impl ColumnArrayBuilder {
             ColumnArrayBuilder::Float64(builder) => Arc::new(builder.finish()),
             ColumnArrayBuilder::Utf8(builder) => Arc::new(builder.finish()),
             ColumnArrayBuilder::FixedSizeBinary(builder) => Arc::new(builder.finish()),
+            ColumnArrayBuilder::Binary(builder) => Arc::new(builder.finish()),
         };
         cast(&array, logical_type).unwrap()
     }
@@ -130,12 +142,17 @@ impl ColumnArrayBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::row::MoonlinkRow;
     use arrow::array::{
         Array, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array,
         Int64Array, StringArray,
     };
-    use arrow::datatypes::DataType;
-
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use rand::Rng;
+    use std::fs::File;
+    use std::sync::Arc;
     #[test]
     fn test_column_array_builder() {
         // Test Int32 type
@@ -252,5 +269,132 @@ mod tests {
         assert_eq!(int32_array.value(0), 1);
         assert!(int32_array.is_null(1));
         assert_eq!(int32_array.value(2), 3);
+    }
+
+    fn generate_data(num_rows: usize) -> (Vec<MoonlinkRow>, RecordBatch) {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("age", DataType::Int32, false),
+            Field::new("is_active", DataType::Boolean, false),
+            Field::new("salary", DataType::Float64, false),
+            Field::new("uuid", DataType::FixedSizeBinary(16), false),
+        ]);
+
+        let mut rng = rand::rng();
+        let mut rows = Vec::with_capacity(num_rows);
+
+        // Generate random rows
+        for _ in 0..num_rows {
+            let id = rng.random::<i32>();
+            let name = if rng.random::<bool>() {
+                Some(format!("Name_{}", rng.random::<u32>()))
+            } else {
+                None
+            };
+            let age = rng.random_range(18..100);
+            let is_active = rng.random::<bool>();
+            let salary = rng.random_range(30000.0..150000.0);
+            let mut uuid = [0u8; 16];
+            rng.fill(&mut uuid);
+
+            rows.push(MoonlinkRow::new(vec![
+                RowValue::Int32(id),
+                if let Some(n) = name {
+                    RowValue::ByteArray(n.as_bytes().to_vec())
+                } else {
+                    RowValue::Null
+                },
+                RowValue::Int32(age),
+                RowValue::Bool(is_active),
+                RowValue::Float64(salary),
+                RowValue::FixedLenByteArray(uuid),
+            ]));
+        }
+
+        // Create a RecordBatch from the rows using the original builder logic
+        let mut builders: Vec<Box<ColumnArrayBuilder>> = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                Box::new(ColumnArrayBuilder::new(
+                    field.data_type().clone(),
+                    rows.len(),
+                ))
+            })
+            .collect();
+
+        for row in &rows {
+            for (i, value) in row.values.iter().enumerate() {
+                let _res = builders[i].append_value(value);
+                assert!(_res.is_ok());
+            }
+        }
+
+        let columns: Vec<ArrayRef> = builders
+            .iter_mut()
+            .zip(schema.fields())
+            .map(|(builder, field)| builder.finish(field.data_type()))
+            .collect();
+
+        let batch = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+        (rows, batch)
+    }
+
+    #[test]
+    fn test_moonlink_row_equals_record_batch() {
+        let (rows, batch) = generate_data(5);
+        // Test equality comparison
+        for (i, row) in rows.iter().enumerate() {
+            assert!(row.equals_record_batch_at_offset(&batch, i));
+        }
+
+        // Test with a different row
+        let different_row = MoonlinkRow::new(vec![
+            RowValue::Int32(4),
+            RowValue::ByteArray("Bob".as_bytes().to_vec()),
+            RowValue::Int32(35),
+            RowValue::Bool(true),
+            RowValue::Float64(80000.0),
+            RowValue::FixedLenByteArray([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]),
+        ]);
+        assert!(!different_row.equals_record_batch_at_offset(&batch, 0));
+    }
+    #[test]
+    fn test_moonlink_row_equals_parquet_at_offset() {
+        let (rows, batch) = generate_data(100);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_name = dir
+            .path()
+            .join("test.parquet")
+            .to_string_lossy()
+            .to_string();
+        let file = File::create(&file_name).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_size(10000)
+            .build();
+        let mut writer = ArrowWriter::try_new(&file, batch.schema(), Some(props)).unwrap();
+        // Write some random rows before and after
+        let num_random_rows = 1000000;
+        let (_, random_batch) = generate_data(num_random_rows);
+        let (_, random_batch2) = generate_data(2000000 - num_random_rows);
+        writer.write(&random_batch).unwrap();
+        writer.write(&batch).unwrap();
+        writer.write(&random_batch2).unwrap();
+        // Write some
+        writer.close().unwrap();
+        let guard = pprof::ProfilerGuard::new(100).unwrap(); // sample at 100 Hz
+
+        for (i, row) in rows.iter().enumerate() {
+            assert!(row.equals_parquet_at_offset(&file_name, num_random_rows + i));
+            for j in num_random_rows + 100..num_random_rows + 300 {
+                assert!(!row.equals_parquet_at_offset(&file_name, j));
+            }
+        }
+        if let Ok(report) = guard.report().build() {
+            let file = std::fs::File::create("flamegraph.svg").unwrap();
+            report.flamegraph(file).unwrap();
+        }
     }
 }
