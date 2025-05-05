@@ -2,6 +2,7 @@ use super::data_batches::{BatchEntry, ColumnStoreBuffer};
 use crate::error::Result;
 use crate::row::MoonlinkRow;
 use crate::storage::index::{Index, MemIndex};
+use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -66,7 +67,7 @@ impl MemSlice {
     pub(super) fn append(
         &mut self,
         lookup_key: u64,
-        row: &MoonlinkRow,
+        row: MoonlinkRow,
     ) -> Result<Option<(u64, Arc<RecordBatch>)>> {
         let (seg_idx, row_idx, new_batch) = self.column_store.append_row(row)?;
         self.mem_index.insert(lookup_key, (seg_idx, row_idx).into());
@@ -91,6 +92,10 @@ impl MemSlice {
     pub(super) fn get_commit_check_point(&self) -> RecordLocation {
         self.column_store.get_commit_check_point()
     }
+
+    pub(super) fn get_latest_rows(&self) -> SharedRowBufferSnapshot {
+        self.column_store.get_latest_rows()
+    }
 }
 
 #[cfg(test)]
@@ -114,7 +119,7 @@ mod tests {
         mem_table
             .append(
                 1,
-                &MoonlinkRow::new(vec![
+                MoonlinkRow::new(vec![
                     RowValue::Int32(1),
                     RowValue::ByteArray("John".as_bytes().to_vec()),
                     RowValue::Int32(30),
@@ -125,7 +130,7 @@ mod tests {
         mem_table
             .append(
                 2,
-                &MoonlinkRow::new(vec![
+                MoonlinkRow::new(vec![
                     RowValue::Int32(2),
                     RowValue::ByteArray("Jane".as_bytes().to_vec()),
                     RowValue::Int32(25),
@@ -136,7 +141,7 @@ mod tests {
         mem_table
             .append(
                 3,
-                &MoonlinkRow::new(vec![
+                MoonlinkRow::new(vec![
                     RowValue::Int32(3),
                     RowValue::ByteArray("Bob".as_bytes().to_vec()),
                     RowValue::Int32(40),

@@ -2,6 +2,8 @@ use crate::error::Result;
 use crate::row::ColumnArrayBuilder;
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
+use crate::storage::mooncake_table::shared_array::SharedRowBuffer;
+use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::storage_utils::RecordLocation;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
@@ -54,7 +56,8 @@ pub(super) struct ColumnStoreBuffer {
     /// Collection of record batches including the current one
     in_memory_batches: Vec<BatchEntry>,
     /// Current batch being built
-    current_rows: Vec<ColumnArrayBuilder>,
+    current_batch_builder: Vec<ColumnArrayBuilder>,
+    current_rows: SharedRowBuffer,
     /// Current row count in the current buffer
     current_row_count: usize,
     /// Next batch id, each batch is assigned a unique id
@@ -65,7 +68,7 @@ impl ColumnStoreBuffer {
     /// Initialize a new column store buffer with the given schema and buffer size.
     ///
     pub(super) fn new(schema: Arc<Schema>, max_rows_per_buffer: usize) -> Self {
-        let current_rows = schema
+        let current_batch_builder = schema
             .fields()
             .iter()
             .map(|field| ColumnArrayBuilder::new(field.data_type().clone(), max_rows_per_buffer))
@@ -78,7 +81,8 @@ impl ColumnStoreBuffer {
                 id: 0,
                 batch: InMemoryBatch::new(max_rows_per_buffer),
             }],
-            current_rows,
+            current_batch_builder,
+            current_rows: SharedRowBuffer::new(max_rows_per_buffer),
             current_row_count: 0,
             next_batch_id: 0,
         }
@@ -90,7 +94,7 @@ impl ColumnStoreBuffer {
     #[allow(clippy::type_complexity)]
     pub(super) fn append_row(
         &mut self,
-        row: &MoonlinkRow,
+        row: MoonlinkRow,
     ) -> Result<(u64, usize, Option<(u64, Arc<RecordBatch>)>)> {
         let mut new_batch = None;
         // Check if we need to finalize the current batch
@@ -99,10 +103,11 @@ impl ColumnStoreBuffer {
         }
 
         row.values.iter().enumerate().for_each(|(i, cell)| {
-            let _res = self.current_rows[i].append_value(cell);
+            let _res = self.current_batch_builder[i].append_value(cell);
             assert!(_res.is_ok());
         });
         self.current_row_count += 1;
+        self.current_rows.push(row);
 
         Ok((
             self.in_memory_batches.last().unwrap().id,
@@ -120,7 +125,7 @@ impl ColumnStoreBuffer {
 
         // Convert the current rows into a RecordBatch
         let columns: Vec<ArrayRef> = self
-            .current_rows
+            .current_batch_builder
             .iter_mut()
             .zip(self.schema.fields())
             .map(|(builder, field)| {
@@ -139,6 +144,7 @@ impl ColumnStoreBuffer {
         });
         // Reset the current batch
         self.current_row_count = 0;
+        self.current_rows = SharedRowBuffer::new(self.max_rows_per_buffer);
 
         Ok(Some((self.next_batch_id - 1, batch)))
     }
@@ -182,6 +188,10 @@ impl ColumnStoreBuffer {
             self.in_memory_batches.last().unwrap().id,
             self.current_row_count,
         )
+    }
+
+    pub(super) fn get_latest_rows(&self) -> SharedRowBufferSnapshot {
+        self.current_rows.get_snapshot()
     }
 }
 
@@ -258,11 +268,11 @@ mod tests {
             RowValue::Int64(1618876800000000),
         ]);
 
-        buffer.append_row(&row1)?;
-        buffer.append_row(&row2)?;
+        buffer.append_row(row1)?;
+        buffer.append_row(row2)?;
 
         // This should create a new buffer
-        buffer.append_row(&row3)?;
+        buffer.append_row(row3)?;
         buffer.finalize_current_batch()?;
 
         let batches = buffer.drain();

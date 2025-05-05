@@ -2,8 +2,8 @@ use super::data_batches::{create_batch_from_rows, InMemoryBatch};
 use super::delete_vector::BatchDeletionVector;
 use super::{Snapshot, SnapshotTask, TableMetadata};
 use crate::error::Result;
-use crate::row::MoonlinkRow;
 use crate::storage::index::Index;
+use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::storage_utils::RawDeletionRecord;
 use crate::storage::storage_utils::{ProcessedDeletionRecord, RecordLocation};
 use parquet::arrow::ArrowWriter;
@@ -18,7 +18,7 @@ pub(crate) struct SnapshotTableState {
     batches: BTreeMap<u64, InMemoryBatch>,
 
     /// Latest rows
-    rows: Vec<MoonlinkRow>,
+    rows: Option<SharedRowBufferSnapshot>,
 
     // UNDONE(BATCH_INSERT):
     // Track uncommited disk files/ batches from big batch insert
@@ -45,7 +45,7 @@ impl SnapshotTableState {
         Self {
             current_snapshot: Snapshot::new(metadata),
             batches,
-            rows: Vec::new(),
+            rows: None,
             last_commit: RecordLocation::MemoryBatch(0, 0),
             committed_deletion_log: Vec::new(),
             uncommitted_deletion_log: Vec::new(),
@@ -82,7 +82,6 @@ impl SnapshotTableState {
                         },
                     )
                 }));
-            self.rows.clear();
         }
         if !next_snapshot_task.new_disk_slices.is_empty() {
             let mut new_disk_slices = take(&mut next_snapshot_task.new_disk_slices);
@@ -113,10 +112,7 @@ impl SnapshotTableState {
                 });
             }
         }
-        if !next_snapshot_task.new_rows.is_empty() {
-            let new_rows = take(&mut next_snapshot_task.new_rows);
-            self.rows.extend(new_rows);
-        }
+        self.rows = take(&mut next_snapshot_task.new_rows);
         Self::process_deletion_log(self, &mut next_snapshot_task);
         if next_snapshot_task.new_lsn != 0 {
             self.current_snapshot.snapshot_version = next_snapshot_task.new_lsn;
@@ -303,7 +299,7 @@ impl SnapshotTableState {
                             filtered_batches.push(filtered_batch);
                         }
                     } else {
-                        let rows = &self.rows[..row_id];
+                        let rows = self.rows.as_ref().unwrap().get_buffer(row_id);
                         let deletions = &self
                             .batches
                             .values()

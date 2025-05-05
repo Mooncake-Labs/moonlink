@@ -216,8 +216,8 @@ mod tests {
             RowValue::ByteArray("Bob".as_bytes().to_vec()),
         ]);
 
-        mem_slice.append(1, &row1)?;
-        mem_slice.append(2, &row2)?;
+        mem_slice.append(1, row1)?;
+        mem_slice.append(2, row2)?;
         let (_new_batch, entries, _index) = mem_slice.drain().unwrap();
         let mut old_index = MemIndex::new();
         old_index.insert(1, RecordLocation::MemoryBatch(0, 0));
@@ -290,7 +290,7 @@ mod tests {
         ];
 
         // Insert original keys into the index
-        for row in rows.iter() {
+        for row in rows.into_iter() {
             let key = match row.values[0] {
                 RowValue::Int32(v) => v as u64,
                 _ => panic!("Expected i32"),

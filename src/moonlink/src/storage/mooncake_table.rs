@@ -2,13 +2,14 @@ mod data_batches;
 pub(crate) mod delete_vector;
 mod disk_slice;
 mod mem_slice;
+mod shared_array;
 mod snapshot;
 
 use super::index::{get_lookup_key, MemIndex, MooncakeIndex};
 use super::storage_utils::{RawDeletionRecord, RecordLocation};
 use crate::error::{Error, Result};
 use crate::row::MoonlinkRow;
-
+use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use std::collections::HashMap;
 use std::mem::take;
 use std::path::{Path, PathBuf};
@@ -117,7 +118,7 @@ pub struct SnapshotTask {
     new_disk_slices: Vec<DiskSliceWriter>,
     new_deletions: Vec<RawDeletionRecord>,
     new_record_batches: Vec<(u64, Arc<RecordBatch>)>,
-    new_rows: Vec<MoonlinkRow>,
+    new_rows: Option<SharedRowBufferSnapshot>,
     new_mem_indices: Vec<Arc<MemIndex>>,
     new_lsn: u64,
     new_commit_point: Option<RecordLocation>,
@@ -131,7 +132,7 @@ impl SnapshotTask {
             new_disk_slices: Vec::new(),
             new_deletions: Vec::new(),
             new_record_batches: Vec::new(),
-            new_rows: Vec::new(),
+            new_rows: None,
             new_mem_indices: Vec::new(),
             new_lsn: 0,
             new_commit_point: None,
@@ -225,11 +226,9 @@ impl MooncakeTable {
 
     pub fn append(&mut self, row: MoonlinkRow) -> Result<()> {
         let lookup_key = (self.metadata.get_lookup_key)(&row);
-        if let Some(batch) = self.mem_slice.append(lookup_key, &row)? {
+        if let Some(batch) = self.mem_slice.append(lookup_key, row)? {
             self.next_snapshot_task.new_record_batches.push(batch);
-            self.next_snapshot_task.new_rows = vec![];
         }
-        self.next_snapshot_task.new_rows.push(row);
         Ok(())
     }
 
@@ -271,7 +270,7 @@ impl MooncakeTable {
         let lookup_key = (self.metadata.get_lookup_key)(&row);
         let stream_state = self.get_or_create_stream_state(xact_id);
 
-        stream_state.mem_slice.append(lookup_key, &row)?;
+        stream_state.mem_slice.append(lookup_key, row)?;
 
         Ok(())
     }
@@ -319,7 +318,6 @@ impl MooncakeTable {
 
         if let Some(batch) = new_batch {
             snapshot_task.new_record_batches.push(batch);
-            snapshot_task.new_rows.clear();
         }
 
         let index = Arc::new(index);
@@ -389,6 +387,7 @@ impl MooncakeTable {
         if !self.next_snapshot_task.should_create_snapshot() {
             return None;
         }
+        self.next_snapshot_task.new_rows = Some(self.mem_slice.get_latest_rows());
         let next_snapshot_task = take(&mut self.next_snapshot_task);
         Some(spawn(Self::create_snapshot_async(
             self.snapshot.clone(),
