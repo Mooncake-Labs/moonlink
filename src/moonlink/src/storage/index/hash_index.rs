@@ -79,7 +79,7 @@ mod tests {
 
         let record = RawDeletionRecord {
             lookup_key: 1,
-            _row_identity: None,
+            row_identity: None,
             pos: None,
             lsn: 1,
             xact_id: None,

@@ -39,10 +39,9 @@ impl MemSlice {
 
         for location in locations {
             // Clone the reference to create an owned copy
-            let location = location.clone();
-            let location_tuple: (u64, usize) = location.into();
-            if self.column_store.delete_if_exists(location_tuple) {
-                return Some(location_tuple);
+            let ret = self.column_store.delete_row_by_record(record, &location);
+            if ret.is_some() {
+                return ret;
             }
         }
         None
@@ -53,14 +52,11 @@ impl MemSlice {
         let locations = self.mem_index.find_record(record)?;
 
         for location in locations {
-            let location_tuple: (u64, usize) = location.clone().into();
-            let (batch_id, row_offset) = location_tuple;
-
-            if !self.column_store.is_deleted(location_tuple) {
-                return Some((batch_id, row_offset));
+            let ret = self.column_store.find_valid_row_by_record(record, &location);
+            if ret.is_some() {
+                return ret;
             }
         }
-
         None
     }
 
@@ -153,7 +149,7 @@ mod tests {
                 lookup_key: 2,
                 lsn: 0,
                 pos: None,
-                _row_identity: None,
+                row_identity: None,
                 xact_id: None,
             }),
             Some((0, 1))
@@ -163,7 +159,7 @@ mod tests {
                 lookup_key: 3,
                 lsn: 0,
                 pos: None,
-                _row_identity: None,
+                row_identity: None,
                 xact_id: None
             }),
             Some((0, 2))
@@ -173,7 +169,7 @@ mod tests {
                 lookup_key: 1,
                 lsn: 0,
                 pos: None,
-                _row_identity: None,
+                row_identity: None,
                 xact_id: None,
             }),
             Some((0, 0))

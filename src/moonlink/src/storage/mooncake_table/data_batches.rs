@@ -4,7 +4,7 @@ use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::shared_array::SharedRowBuffer;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
-use crate::storage::storage_utils::RecordLocation;
+use crate::storage::storage_utils::{RecordLocation, RawDeletionRecord};
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
 use std::sync::Arc;
@@ -149,27 +149,46 @@ impl ColumnStoreBuffer {
         Ok(Some((self.next_batch_id - 1, batch)))
     }
 
-    pub(super) fn delete_if_exists(&mut self, (batch_id, row_offset): (u64, usize)) -> bool {
-        let idx = self
-            .in_memory_batches
-            .binary_search_by_key(&batch_id, |x| x.id)
-            .unwrap();
-        self.in_memory_batches[idx]
-            .batch
-            .deletions
-            .delete_row(row_offset)
+    #[inline]
+    pub fn check_identity(&self, record: &RawDeletionRecord, batch: &InMemoryBatch, offset: usize) -> bool {
+        if record.row_identity.is_some() {
+            if let Some(batch) = &batch.data {
+                record.row_identity.as_ref().unwrap().equals_record_batch_at_offset(batch, offset)
+            } else {
+                record.row_identity.as_ref().unwrap() == self.current_rows.get_row(offset)
+            }
+        } else {
+            true
+        }
+    }
+    
+    pub fn find_valid_row_by_record(&self, record: &RawDeletionRecord, record_location: &RecordLocation) -> Option<(u64, usize)> {
+        if let RecordLocation::MemoryBatch(batch_id, row_offset) = record_location {
+            let idx = self
+                .in_memory_batches
+                .binary_search_by_key(batch_id, |x| x.id)
+                .unwrap();
+            if !self.in_memory_batches[idx].batch.deletions.is_deleted(*row_offset) && self.check_identity(record, &self.in_memory_batches[idx].batch, *row_offset) {
+                return Some((*batch_id, *row_offset));
+            }
+        }
+        None
     }
 
-    pub fn is_deleted(&self, (batch_id, row_offset): (u64, usize)) -> bool {
-        let idx = self
-            .in_memory_batches
-            .binary_search_by_key(&batch_id, |x| x.id)
-            .unwrap();
-        self.in_memory_batches[idx]
-            .batch
-            .deletions
-            .is_deleted(row_offset)
+    pub fn delete_row_by_record(&mut self, record: &RawDeletionRecord, record_location: &RecordLocation) -> Option<(u64, usize)> {
+        if let RecordLocation::MemoryBatch(batch_id, row_offset) = record_location {
+            let idx = self
+                .in_memory_batches
+                .binary_search_by_key(batch_id, |x| x.id)
+                .unwrap();
+            if !self.in_memory_batches[idx].batch.deletions.is_deleted(*row_offset) && self.check_identity(record, &self.in_memory_batches[idx].batch, *row_offset) {
+                self.in_memory_batches[idx].batch.deletions.delete_row(*row_offset);
+                return Some((*batch_id, *row_offset));
+            }
+        }
+        None
     }
+
 
     pub(super) fn drain(&mut self) -> Vec<BatchEntry> {
         assert!(self.current_row_count == 0);

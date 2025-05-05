@@ -155,7 +155,7 @@ impl TableHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row::RowValue;
+    use crate::row::{Identity, RowValue};
     use crate::storage::verify_files_and_deletions;
     use crate::union_read::decode_read_state_for_testing;
     use crate::union_read::ReadStateManager;
@@ -188,7 +188,7 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path, Identity::Keys(vec![0]));
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
         let read_state_manager = ReadStateManager::new(&table, replication_rx, table_commit_rx);
@@ -247,7 +247,7 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path, Identity::Keys(vec![0]));
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
         let read_state_manager = ReadStateManager::new(&table, replication_rx, table_commit_rx);
@@ -322,7 +322,7 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path, Identity::Keys(vec![0]));
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
         let read_state_manager = ReadStateManager::new(&table, replication_rx, table_commit_rx);
@@ -380,7 +380,7 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path, Identity::Keys(vec![0]));
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
         let read_state_manager = ReadStateManager::new(&table, replication_rx, table_commit_rx);
@@ -460,7 +460,7 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path, Identity::Keys(vec![0]));
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
         let read_state_manager = ReadStateManager::new(&table, replication_rx, table_commit_rx);
@@ -545,7 +545,7 @@ mod tests {
         let path = temp_dir.path().to_path_buf();
 
         // Create a TableHandler
-        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path);
+        let table = MooncakeTable::new(schema, "test_table".to_string(), 1, path, Identity::Keys(vec![0]));
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
         let read_state_manager = ReadStateManager::new(&table, replication_rx, table_commit_rx);

@@ -109,13 +109,14 @@ async fn test_deletion_after_flush() -> Result<()> {
 #[tokio::test]
 async fn test_snapshot_initialization() -> Result<()> {
     let schema = test_schema();
+    let identity = Identity::Keys(vec![0]);
     let metadata = Arc::new(TableMetadata {
         name: "test_table".to_string(),
         id: 1,
         schema: Arc::new(schema),
         config: TableConfig::new(),
         path: PathBuf::new(),
-        get_lookup_key,
+        identity,
     });
     let snapshot = Snapshot::new(metadata);
     assert_eq!(snapshot.snapshot_version, 0);

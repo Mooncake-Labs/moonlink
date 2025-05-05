@@ -398,6 +398,7 @@ impl IcebergSnapshot for Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::row::Identity;
 
     use crate::storage::iceberg::test_utils;
     use crate::storage::{
@@ -485,7 +486,7 @@ mod tests {
             id: 0, // unused.
             config: TableConfig::new(),
             path: tmp_dir.path().to_path_buf(),
-            get_lookup_key: |_row| 1, // unused.
+            identity: Identity::Keys(vec![0]),
         });
 
         // Write first snapshot to iceberg table (with deletion vector).
@@ -631,7 +632,7 @@ mod tests {
             id: 0, // unused.
             config: TableConfig::new(),
             path: tmp_dir.path().to_path_buf(),
-            get_lookup_key: |_row| 1, // unused.
+            identity: Identity::Keys(vec![0]),
         });
         let mut snapshot = Snapshot::new(metadata.clone());
         snapshot._set_warehouse_info("invalid_warehouse_uri".to_string());

@@ -310,14 +310,14 @@ mod tests {
         // Delete a couple of rows to test that only active rows are mapped
         mem_slice.delete(&RawDeletionRecord {
             lookup_key: 2,
-            _row_identity: None,
+            row_identity: None,
             pos: Some((0, 1)),
             lsn: 1,
             xact_id: None,
         }); // Delete Bob (ID 2)
         mem_slice.delete(&RawDeletionRecord {
             lookup_key: 4,
-            _row_identity: None,
+            row_identity: None,
             pos: Some((0, 3)),
             lsn: 1,
             xact_id: None,

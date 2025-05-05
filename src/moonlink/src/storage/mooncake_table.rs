@@ -8,7 +8,7 @@ mod snapshot;
 use super::index::{get_lookup_key, MemIndex, MooncakeIndex};
 use super::storage_utils::{RawDeletionRecord, RecordLocation};
 use crate::error::{Error, Result};
-use crate::row::MoonlinkRow;
+use crate::row::{Identity, MoonlinkRow};
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use std::collections::HashMap;
 use std::mem::take;
@@ -63,7 +63,7 @@ pub struct TableMetadata {
     /// storage path
     pub(crate) path: PathBuf,
     /// function to get lookup key from row
-    pub(crate) get_lookup_key: fn(&MoonlinkRow) -> u64,
+    pub(crate) identity: Identity,
 }
 
 /// Snapshot contains state of the table at a given time.
@@ -191,7 +191,7 @@ pub struct MooncakeTable {
 impl MooncakeTable {
     /// foreground functions
     ///
-    pub fn new(schema: Schema, name: String, version: u64, base_path: PathBuf) -> Self {
+    pub fn new(schema: Schema, name: String, version: u64, base_path: PathBuf, identity: Identity) -> Self {
         let table_config = TableConfig::new();
         let schema = Arc::new(schema);
         let metadata = Arc::new(TableMetadata {
@@ -200,7 +200,7 @@ impl MooncakeTable {
             schema,
             config: table_config,
             path: base_path,
-            get_lookup_key,
+            identity,
         });
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(0);
 
@@ -225,7 +225,7 @@ impl MooncakeTable {
     }
 
     pub fn append(&mut self, row: MoonlinkRow) -> Result<()> {
-        let lookup_key = (self.metadata.get_lookup_key)(&row);
+        let lookup_key = get_lookup_key(&row, &self.metadata.identity);
         if let Some(batch) = self.mem_slice.append(lookup_key, row)? {
             self.next_snapshot_task.new_record_batches.push(batch);
         }
@@ -233,12 +233,12 @@ impl MooncakeTable {
     }
 
     pub fn delete(&mut self, row: MoonlinkRow, lsn: u64) {
-        let lookup_key = (self.metadata.get_lookup_key)(&row);
+        let lookup_key = get_lookup_key(&row, &self.metadata.identity);
         let mut record = RawDeletionRecord {
             lookup_key,
             lsn,
             pos: None,
-            _row_identity: None,
+            row_identity: self.metadata.identity.extract_identify_columns(row),
             xact_id: None,
         };
         let pos = self.mem_slice.delete(&record);
@@ -267,7 +267,7 @@ impl MooncakeTable {
     }
 
     pub fn append_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) -> Result<()> {
-        let lookup_key = (self.metadata.get_lookup_key)(&row);
+        let lookup_key = get_lookup_key(&row, &self.metadata.identity);
         let stream_state = self.get_or_create_stream_state(xact_id);
 
         stream_state.mem_slice.append(lookup_key, row)?;
@@ -276,12 +276,12 @@ impl MooncakeTable {
     }
 
     pub fn delete_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) {
-        let lookup_key = (self.metadata.get_lookup_key)(&row);
+        let lookup_key = get_lookup_key(&row, &self.metadata.identity);
         let mut record = RawDeletionRecord {
             lookup_key,
             lsn: u64::MAX, // Updated at commit time
             pos: None,
-            _row_identity: None,
+            row_identity: None,
             xact_id: Some(xact_id),
         };
 

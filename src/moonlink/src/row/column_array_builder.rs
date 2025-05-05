@@ -344,6 +344,7 @@ mod tests {
     #[test]
     fn test_moonlink_row_equals_record_batch() {
         let (rows, batch) = generate_data(5);
+
         // Test equality comparison
         for (i, row) in rows.iter().enumerate() {
             assert!(row.equals_record_batch_at_offset(&batch, i));

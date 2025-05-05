@@ -6,7 +6,7 @@ use crate::pg_replicate::{
     },
     table::{TableId, TableSchema},
 };
-use crate::postgres::util::table_schema_to_arrow_schema;
+use crate::postgres::util::postgres_schema_to_moonlink_schema;
 use crate::postgres::util::PostgresTableRow;
 use async_trait::async_trait;
 use moonlink::ReadStateManager;
@@ -75,11 +75,13 @@ impl BatchSink for Sink {
             let table_path =
                 PathBuf::from(&self.base_path).join(table_schema.table_name.to_string());
             create_dir_all(&table_path).unwrap();
+            let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema);
             let table = MooncakeTable::new(
-                table_schema_to_arrow_schema(&table_schema),
+                arrow_schema,
                 table_schema.table_name.to_string(),
                 table_id as u64,
                 table_path,
+                identity,
             );
             let (table_commit_tx, table_commit_rx) = watch::channel(0u64);
             self.last_committed_lsn_per_table

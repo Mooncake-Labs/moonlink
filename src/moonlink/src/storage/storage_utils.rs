@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::row::MoonlinkRow;
+
 // UNDONE(UPDATE_DELETE): a better way to handle file ids
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileId(pub(crate) Arc<PathBuf>);
@@ -16,14 +18,10 @@ pub enum RecordLocation {
     DiskFile(FileId, usize),
 }
 
-// UNDONE(REPLICATION IDENTITY):
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordIdentity {}
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RawDeletionRecord {
     pub(crate) lookup_key: u64,
-    pub(crate) _row_identity: Option<RecordIdentity>,
+    pub(crate) row_identity: Option<MoonlinkRow>,
     pub(crate) pos: Option<(u64, usize)>,
     pub(crate) lsn: u64,
     pub(crate) xact_id: Option<u32>,

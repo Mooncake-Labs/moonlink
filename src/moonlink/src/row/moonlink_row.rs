@@ -3,6 +3,7 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 use std::fs::File;
+use std::mem::take;
 
 #[derive(Debug)]
 pub struct MoonlinkRow {
@@ -17,10 +18,6 @@ impl MoonlinkRow {
     pub fn equals_record_batch_at_offset(&self, batch: &RecordBatch, offset: usize) -> bool {
         if offset >= batch.num_rows() {
             panic!("Offset is out of bounds");
-        }
-
-        if self.values.len() != batch.num_columns() {
-            panic!("MoonlinkRow has a different number of values than the RecordBatch");
         }
 
         for (value, column) in self.values.iter().zip(batch.columns()) {
@@ -155,6 +152,100 @@ impl MoonlinkRow {
 
 impl PartialEq for MoonlinkRow {
     fn eq(&self, other: &Self) -> bool {
-        self.values == other.values
+        let min_len = self.values.len().min(other.values.len());
+        self.values.iter().take(min_len).eq(other.values.iter().take(min_len))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identity {
+    IntPrimaryKey(usize),
+    Keys(Vec<usize>),
+    FullRow,
+}
+
+impl Identity {
+    pub fn may_collide(&self) -> bool {
+        match self {
+            Identity::IntPrimaryKey(_) => false,
+            Identity::Keys(_) => true,
+            Identity::FullRow => true,
+        }
+    }
+
+    pub fn extract_identify_columns(&self, mut row: MoonlinkRow) -> Option<MoonlinkRow> {
+        match self {
+            Identity::IntPrimaryKey(_) => None,
+            Identity::Keys(keys) => {
+                let mut identify_columns = Vec::new();
+                for key in keys {
+                    identify_columns.push(take(&mut row.values[*key]));
+                }
+                Some(MoonlinkRow::new(identify_columns))
+            },
+            Identity::FullRow => Some(row),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::row::RowValue;
+
+    #[test]
+    fn test_equals_by_value_prefix_various_types() {
+        let row1 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Float32(2.0),
+            RowValue::ByteArray(b"abc".to_vec()),
+            RowValue::Null,
+        ]);
+        let row2 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Float32(2.0),
+            RowValue::ByteArray(b"abc".to_vec()),
+        ]);
+        let row3 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Float32(2.0),
+            RowValue::ByteArray(b"abcd".to_vec()), // different value
+        ]);
+        let row4 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Float32(2.0),
+            RowValue::Int32(3), // different type
+        ]);
+        let row5 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Float32(2.0),
+            RowValue::ByteArray(b"abc".to_vec()),
+            RowValue::Null,
+            RowValue::Int32(99),
+        ]);
+        let row_empty = MoonlinkRow::new(vec![]);
+
+        // Prefix match (row2 is prefix of row1)
+        assert!(row1 == row2);
+        assert!(row2 == row1);
+
+        // Full match
+        assert!(row1 == row1);
+
+        // Mismatch in value
+        assert!(row1 != row3);
+        assert!(row3 != row1);
+
+        // Mismatch in type
+        assert!(row1 != row4);
+        assert!(row4 != row1);
+
+        // row1 is prefix of row5
+        assert!(row5 == row1);
+        assert!(row1 == row5);
+
+        // Empty row is prefix of any row
+        assert!(row1 == row_empty);
+        assert!(row_empty == row1);
     }
 }
