@@ -1,6 +1,6 @@
 use super::data_batches::{BatchEntry, ColumnStoreBuffer};
 use crate::error::Result;
-use crate::row::MoonlinkRow;
+use crate::row::{Identity, MoonlinkRow};
 use crate::storage::index::{Index, MemIndex};
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
@@ -34,12 +34,18 @@ impl MemSlice {
         }
     }
 
-    pub(super) fn delete(&mut self, record: &RawDeletionRecord) -> Option<(u64, usize)> {
+    pub(super) fn delete(
+        &mut self,
+        record: &RawDeletionRecord,
+        identity: &Identity,
+    ) -> Option<(u64, usize)> {
         let locations = self.mem_index.find_record(record)?;
 
         for location in locations {
             // Clone the reference to create an owned copy
-            let ret = self.column_store.delete_row_by_record(record, &location);
+            let ret = self
+                .column_store
+                .delete_row_by_record(record, location, identity);
             if ret.is_some() {
                 return ret;
             }
@@ -48,11 +54,17 @@ impl MemSlice {
     }
 
     /// Find the first non-deleted position for a given lookup key
-    pub fn find_non_deleted_position(&self, record: &RawDeletionRecord) -> Option<(u64, usize)> {
+    pub fn find_non_deleted_position(
+        &self,
+        record: &RawDeletionRecord,
+        identity: &Identity,
+    ) -> Option<(u64, usize)> {
         let locations = self.mem_index.find_record(record)?;
 
         for location in locations {
-            let ret = self.column_store.find_valid_row_by_record(record, &location);
+            let ret = self
+                .column_store
+                .find_valid_row_by_record(record, location, identity);
             if ret.is_some() {
                 return ret;
             }
@@ -145,33 +157,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            mem_table.delete(&RawDeletionRecord {
-                lookup_key: 2,
-                lsn: 0,
-                pos: None,
-                row_identity: None,
-                xact_id: None,
-            }),
+            mem_table.delete(
+                &RawDeletionRecord {
+                    lookup_key: 2,
+                    lsn: 0,
+                    pos: None,
+                    row_identity: None,
+                    xact_id: None,
+                },
+                &Identity::SinglePrimitiveKey(0)
+            ),
             Some((0, 1))
         );
         assert_eq!(
-            mem_table.delete(&RawDeletionRecord {
-                lookup_key: 3,
-                lsn: 0,
-                pos: None,
-                row_identity: None,
-                xact_id: None
-            }),
+            mem_table.delete(
+                &RawDeletionRecord {
+                    lookup_key: 3,
+                    lsn: 0,
+                    pos: None,
+                    row_identity: None,
+                    xact_id: None
+                },
+                &Identity::SinglePrimitiveKey(0)
+            ),
             Some((0, 2))
         );
         assert_eq!(
-            mem_table.delete(&RawDeletionRecord {
-                lookup_key: 1,
-                lsn: 0,
-                pos: None,
-                row_identity: None,
-                xact_id: None,
-            }),
+            mem_table.delete(
+                &RawDeletionRecord {
+                    lookup_key: 1,
+                    lsn: 0,
+                    pos: None,
+                    row_identity: None,
+                    xact_id: None,
+                },
+                &Identity::SinglePrimitiveKey(0)
+            ),
             Some((0, 0))
         );
     }

@@ -23,6 +23,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-retry2 = { version = "0.5.7", default-features = false, features = ["jitter"] }
+ahash = "0.8.11"
 url = { workspace = true }
 uuid = { workspace = true }
 

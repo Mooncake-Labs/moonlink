@@ -194,7 +194,7 @@ impl DiskSliceWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row::{MoonlinkRow, RowValue};
+    use crate::row::{Identity, MoonlinkRow, RowValue};
     use crate::storage::mooncake_table::mem_slice::MemSlice;
     use crate::storage::storage_utils::RawDeletionRecord;
     use arrow::datatypes::{DataType, Field};
@@ -308,20 +308,26 @@ mod tests {
         }
 
         // Delete a couple of rows to test that only active rows are mapped
-        mem_slice.delete(&RawDeletionRecord {
-            lookup_key: 2,
-            row_identity: None,
-            pos: Some((0, 1)),
-            lsn: 1,
-            xact_id: None,
-        }); // Delete Bob (ID 2)
-        mem_slice.delete(&RawDeletionRecord {
-            lookup_key: 4,
-            row_identity: None,
-            pos: Some((0, 3)),
-            lsn: 1,
-            xact_id: None,
-        }); // Delete David (ID 4)
+        mem_slice.delete(
+            &RawDeletionRecord {
+                lookup_key: 2,
+                row_identity: None,
+                pos: Some((0, 1)),
+                lsn: 1,
+                xact_id: None,
+            },
+            &Identity::SinglePrimitiveKey(0),
+        ); // Delete Bob (ID 2)
+        mem_slice.delete(
+            &RawDeletionRecord {
+                lookup_key: 4,
+                row_identity: None,
+                pos: Some((0, 3)),
+                lsn: 1,
+                xact_id: None,
+            },
+            &Identity::SinglePrimitiveKey(0),
+        ); // Delete David (ID 4)
 
         let (_new_batch, entries, index) = mem_slice.drain().unwrap();
 

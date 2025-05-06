@@ -142,6 +142,7 @@ impl ColumnArrayBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::row::Identity;
     use crate::row::MoonlinkRow;
     use arrow::array::{
         Array, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array,
@@ -343,11 +344,12 @@ mod tests {
 
     #[test]
     fn test_moonlink_row_equals_record_batch() {
+        let identity = Identity::FullRow;
         let (rows, batch) = generate_data(5);
 
         // Test equality comparison
         for (i, row) in rows.iter().enumerate() {
-            assert!(row.equals_record_batch_at_offset(&batch, i));
+            assert!(row.equals_record_batch_at_offset(&batch, i, &identity));
         }
 
         // Test with a different row
@@ -359,7 +361,7 @@ mod tests {
             RowValue::Float64(80000.0),
             RowValue::FixedLenByteArray([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]),
         ]);
-        assert!(!different_row.equals_record_batch_at_offset(&batch, 0));
+        assert!(!different_row.equals_record_batch_at_offset(&batch, 0, &identity));
     }
     #[test]
     fn test_moonlink_row_equals_parquet_at_offset() {
@@ -393,10 +395,11 @@ mod tests {
         #[cfg(profiling_enabled)]
         let guard = pprof::ProfilerGuard::new(100).unwrap(); // sample at 100 Hz
 
+        let identity = Identity::FullRow;
         for (i, row) in rows.iter().enumerate() {
-            assert!(row.equals_parquet_at_offset(&file_name, num_random_rows + i));
+            assert!(row.equals_parquet_at_offset(&file_name, num_random_rows + i, &identity));
             for j in num_random_rows + 100..num_random_rows + 300 {
-                assert!(!row.equals_parquet_at_offset(&file_name, j));
+                assert!(!row.equals_parquet_at_offset(&file_name, j, &identity));
             }
         }
         #[cfg(profiling_enabled)]

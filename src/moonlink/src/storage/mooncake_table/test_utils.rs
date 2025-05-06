@@ -46,7 +46,13 @@ pub fn test_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
 }
 
 pub fn test_table(context: &TestContext, table_name: &str) -> MooncakeTable {
-    MooncakeTable::new(test_schema(), table_name.to_string(), 1, context.path(), Identity::Keys(vec![0]))
+    MooncakeTable::new(
+        test_schema(),
+        table_name.to_string(),
+        1,
+        context.path(),
+        Identity::Keys(vec![0]),
+    )
 }
 
 pub fn read_ids_from_parquet(file_path: &String) -> Vec<Option<i32>> {

@@ -1,7 +1,6 @@
 pub mod hash_index;
 pub mod persisted_bucket_hash_map;
 
-use crate::row::{Identity, MoonlinkRow};
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use multimap::MultiMap;
 use persisted_bucket_hash_map::GlobalIndex;
@@ -18,23 +17,6 @@ pub struct MooncakeIndex {
     in_memory_index: HashSet<IndexPtr>,
     file_indices: Vec<FileIndex>,
 }
-
-#[inline]
-pub fn get_lookup_key(row: &MoonlinkRow, identity: &Identity) -> u64 {
-    match identity {
-        Identity::Keys(keys) => {
-            let key;
-            if keys.len() == 1 {
-                key = row.values[keys[0]].to_u64();
-            } else {
-                todo!("Hash the composite key");
-            }
-            key
-        }
-        _ => todo!("Handle other types of primary keys"),
-    }
-}
-
 /// Type for primary keys
 pub type PrimaryKey = u64;
 

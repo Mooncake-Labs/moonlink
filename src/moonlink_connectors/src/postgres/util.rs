@@ -4,8 +4,8 @@ use crate::pg_replicate::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use chrono::Timelike;
-use moonlink::row::{Identity, MoonlinkRow};
 use moonlink::row::RowValue;
+use moonlink::row::{Identity, MoonlinkRow};
 use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
 use tokio_postgres::types::Type;
@@ -67,7 +67,19 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
         .collect();
 
     let identity = match &table_schema.lookup_key {
-        LookupKey::Key { name:_, columns } => Identity::Keys(columns.iter().map(|c| table_schema.column_schemas.iter().position(|cs| cs.name == *c).unwrap()).collect()),
+        LookupKey::Key { name: _, columns } => {
+            let columns = columns
+                .iter()
+                .map(|c| {
+                    table_schema
+                        .column_schemas
+                        .iter()
+                        .position(|cs| cs.name == *c)
+                        .unwrap()
+                })
+                .collect();
+            Identity::new_key(columns, &fields)
+        }
         LookupKey::FullRow => Identity::FullRow,
     };
     (Schema::new(fields), identity)
@@ -218,7 +230,7 @@ mod tests {
         ));
         assert!(arrow_schema.field(2).is_nullable());
 
-        assert_eq!(identity, Identity::Keys(vec![0]));
+        assert_eq!(identity, Identity::SinglePrimitiveKey(0));
     }
 
     #[test]
