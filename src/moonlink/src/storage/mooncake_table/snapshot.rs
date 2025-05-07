@@ -133,6 +133,7 @@ impl SnapshotTableState {
             }
         } else {
             let locations = self.current_snapshot.indices.find_record(&deletion);
+            let mut locations_not_deleted = Vec::new();
             for location in locations.unwrap().into_iter() {
                 match &location {
                     RecordLocation::MemoryBatch(batch_id, row_id) => {
@@ -143,12 +144,7 @@ impl SnapshotTableState {
                             .deletions
                             .is_deleted(*row_id)
                         {
-                            return ProcessedDeletionRecord {
-                                _lookup_key: deletion.lookup_key,
-                                pos: location.clone(),
-                                lsn: deletion.lsn,
-                                xact_id: deletion.xact_id,
-                            };
+                            locations_not_deleted.push(location);
                         }
                     }
                     RecordLocation::DiskFile(file_name, row_id) => {
@@ -159,17 +155,68 @@ impl SnapshotTableState {
                             .unwrap()
                             .is_deleted(*row_id)
                         {
-                            return ProcessedDeletionRecord {
-                                _lookup_key: deletion.lookup_key,
-                                pos: location,
-                                lsn: deletion.lsn,
-                                xact_id: deletion.xact_id,
-                            };
+                            locations_not_deleted.push(location);
                         }
                     }
                 }
             }
-            panic!("can't find deletion record");
+            if locations_not_deleted.is_empty() {
+                panic!("can't find deletion record");
+            } else if locations_not_deleted.len() > 1 {
+                assert!(deletion.row_identity.is_some());
+                for location in locations_not_deleted.into_iter() {
+                    match &location {
+                        RecordLocation::MemoryBatch(batch_id, row_id) => {
+                            let batch = self.batches.get_mut(batch_id).unwrap();
+                            if deletion
+                                .row_identity
+                                .as_ref()
+                                .unwrap()
+                                .equals_record_batch_at_offset(
+                                    batch.data.as_ref().unwrap(),
+                                    *row_id,
+                                    &self.current_snapshot.metadata.identity,
+                                )
+                            {
+                                return ProcessedDeletionRecord {
+                                    _lookup_key: deletion.lookup_key,
+                                    pos: location,
+                                    lsn: deletion.lsn,
+                                    xact_id: deletion.xact_id,
+                                };
+                            }
+                        }
+                        RecordLocation::DiskFile(file_name, row_id) => {
+                            let name = file_name.0.to_string_lossy().to_string();
+                            if deletion
+                                .row_identity
+                                .as_ref()
+                                .unwrap()
+                                .equals_parquet_at_offset(
+                                    &name,
+                                    *row_id,
+                                    &self.current_snapshot.metadata.identity,
+                                )
+                            {
+                                return ProcessedDeletionRecord {
+                                    _lookup_key: deletion.lookup_key,
+                                    pos: location,
+                                    lsn: deletion.lsn,
+                                    xact_id: deletion.xact_id,
+                                };
+                            }
+                        }
+                    }
+                }
+                panic!("can't find valid record to delete");
+            } else {
+                ProcessedDeletionRecord {
+                    _lookup_key: deletion.lookup_key,
+                    pos: locations_not_deleted.first().unwrap().clone(),
+                    lsn: deletion.lsn,
+                    xact_id: deletion.xact_id,
+                }
+            }
         }
     }
 

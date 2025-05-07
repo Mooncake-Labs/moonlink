@@ -32,6 +32,8 @@ aws-sdk-s3 = "1.14.0"
 pprof = { version = "0.14", features = ["flamegraph"] }
 rand = "0.9.1"
 tempfile = { workspace = true }
+rstest = "0.25.0"
+rstest_reuse = "0.7.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(profiling_enabled)'] }

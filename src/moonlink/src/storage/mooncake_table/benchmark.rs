@@ -1,4 +1,5 @@
 use super::test_utils::*;
+use crate::storage::mooncake_table::Identity;
 use std::time::Instant;
 
 #[tokio::test]
@@ -14,7 +15,7 @@ async fn perf_write_mooncake_table() {
     const BATCH_SIZE: i32 = 100_000;
 
     let context = TestContext::new("bench_write");
-    let mut table = test_table(&context, "bench_table");
+    let mut table = test_table(&context, "bench_table", Identity::FullRow);
 
     let mut current_id = 1;
     let mut total_appended = 0;

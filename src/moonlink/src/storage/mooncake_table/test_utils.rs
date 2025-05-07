@@ -45,13 +45,13 @@ pub fn test_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
     ])
 }
 
-pub fn test_table(context: &TestContext, table_name: &str) -> MooncakeTable {
+pub fn test_table(context: &TestContext, table_name: &str, identity: Identity) -> MooncakeTable {
     MooncakeTable::new(
         test_schema(),
         table_name.to_string(),
         1,
         context.path(),
-        Identity::Keys(vec![0]),
+        identity,
     )
 }
 
