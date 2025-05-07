@@ -4,6 +4,7 @@ version = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+ahash = "0.8.11"
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
@@ -23,7 +24,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-retry2 = { version = "0.5.7", default-features = false, features = ["jitter"] }
-ahash = "0.8.11"
 url = { workspace = true }
 uuid = { workspace = true }
 
@@ -31,9 +31,9 @@ uuid = { workspace = true }
 aws-sdk-s3 = "1.14.0"
 pprof = { version = "0.14", features = ["flamegraph"] }
 rand = "0.9.1"
-tempfile = { workspace = true }
 rstest = "0.25.0"
 rstest_reuse = "0.7.0"
+tempfile = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(profiling_enabled)'] }
