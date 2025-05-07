@@ -36,8 +36,8 @@ pub enum ReplicationClientError {
     #[error("oid column is not a valid u32")]
     OidColumnNotU32,
 
-    #[error("error writing replica identity: {0}")]
-    ReplicaIdentityWrite(String),
+    #[error("replica identity '{0}' not supported")]
+    ReplicaIdentityNotSupported(String),
 
     #[error("type modifier column is not a valid u32")]
     TypeModifierColumnNotI32,
@@ -442,10 +442,9 @@ impl ReplicationClient {
                         ))?;
 
                 if !(replica_identity == "f") {
-                    self.postgres_client
-                        .simple_query(&format!("ALTER TABLE {} REPLICA IDENTITY FULL;", table))
-                        .await
-                        .map_err(|e| ReplicationClientError::ReplicaIdentityWrite(e.to_string()))?;
+                    return Err(ReplicationClientError::ReplicaIdentityNotSupported(
+                        replica_identity.to_string(),
+                    ));
                 }
 
                 let oid: u32 = row

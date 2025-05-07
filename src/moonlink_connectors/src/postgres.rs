@@ -58,6 +58,10 @@ impl MoonlinkPostgresSource {
             ))
             .await
             .unwrap();
+        self.postgres_client
+            .simple_query(&format!("ALTER TABLE {} REPLICA IDENTITY FULL;", table))
+            .await
+            .unwrap();
         let source = PostgresSource::new(
             &self.uri,
             Some("moonlink_slot".to_string()),
