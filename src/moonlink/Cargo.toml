@@ -30,6 +30,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 aws-sdk-s3 = "1.14"
+criterion = "0.5.1"
 mockall = "0.13"
 pprof = { version = "0.14", features = ["flamegraph"] }
 rand = "0.9.1"
@@ -37,5 +38,26 @@ rstest = "0.25.0"
 rstest_reuse = "0.7.0"
 tempfile = { workspace = true }
 
+[[bench]]
+name = "microbench_write_mooncake_table"
+harness = false
+
+[[bench]]
+name = "microbench_index_stress"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "microbench_row_comparison"
+harness = false
+
+[[bench]]
+name = "bench_write"
+harness = false
+required-features = ["bench"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(profiling_enabled)'] }
+
+[features]
+bench = []

@@ -609,42 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn stress_test() {
-        #[cfg(profiling_enabled)]
-        let guard = pprof::ProfilerGuard::new(100).unwrap(); // sample at 100 Hz
-
-        #[cfg(debug_assertions)]
-        let num_samples = 1000;
-        #[cfg(not(debug_assertions))]
-        let num_samples = 10000000;
-
-        let files = vec![Arc::new(PathBuf::from("test.parquet"))];
-        let vec = (0..10000000).map(|i| (i as u64, 0, i)).collect::<Vec<_>>();
-        let mut builder = GlobalIndexBuilder::new();
-        builder
-            .set_files(files)
-            .set_directory(tempfile::tempdir().unwrap().into_path());
-        let index = builder.build_from_flush(vec);
-        for i in 0..num_samples {
-            if let Some(RecordLocation::DiskFile(FileId(_file_id), row_idx)) =
-                index.search(&(i as u64)).first()
-            {
-                assert_eq!(*row_idx, i);
-            } else {
-                panic!("No record location found for {}", i);
-            }
-        }
-        for i in 10000000..10000000 + num_samples {
-            assert_eq!(index.search(&(i as u64)).len(), 0);
-        }
-
-        #[cfg(profiling_enabled)]
-        if let Ok(report) = guard.report().build() {
-            let file = std::fs::File::create("flamegraph.svg").unwrap();
-            report.flamegraph(file).unwrap();
-        }
-    }
-    #[test]
     fn test_merge() {
         let files = vec![
             Arc::new(PathBuf::from("1.parquet")),

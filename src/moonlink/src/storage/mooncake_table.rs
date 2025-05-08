@@ -133,7 +133,7 @@ impl SnapshotTask {
     }
 
     pub fn should_create_snapshot(&self) -> bool {
-        self.new_lsn > 0 || !self.new_disk_slices.is_empty()
+        self.new_lsn > 0 || !self.new_disk_slices.is_empty() || self.new_deletions.len() > 1000
     }
 }
 
@@ -399,7 +399,7 @@ impl MooncakeTable {
 
     // Create a snapshot of the last committed version, return current snapshot's version.
     //
-    pub(crate) fn create_snapshot(&mut self) -> Option<JoinHandle<u64>> {
+    pub fn create_snapshot(&mut self) -> Option<JoinHandle<u64>> {
         if !self.next_snapshot_task.should_create_snapshot() {
             return None;
         }
@@ -432,6 +432,3 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
-
-#[cfg(test)]
-mod benchmark;
