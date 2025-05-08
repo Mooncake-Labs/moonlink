@@ -1,3 +1,4 @@
+mod cc;
 mod data_batches;
 pub(crate) mod delete_vector;
 mod disk_slice;
