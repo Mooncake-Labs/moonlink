@@ -10,6 +10,7 @@ pub(crate) mod test_utils;
 pub(crate) mod tokio_retry_utils;
 pub(crate) mod utils;
 pub(crate) mod validation;
+pub(crate) mod broken_integration;
 
 #[cfg(feature = "storage-s3")]
 pub(crate) mod s3_test_utils;
