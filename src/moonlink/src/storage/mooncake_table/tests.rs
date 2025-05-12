@@ -7,14 +7,14 @@ use rstest_reuse::{self, *};
 
 #[template]
 #[rstest]
-#[case(Identity::Keys(vec![0]))]
-#[case(Identity::FullRow)]
-#[case(Identity::SinglePrimitiveKey(0))]
-fn shared_cases(#[case] identity: Identity) {}
+#[case(IdentityProp::Keys(vec![0]))]
+#[case(IdentityProp::FullRow)]
+#[case(IdentityProp::SinglePrimitiveKey(0))]
+fn shared_cases(#[case] identity: IdentityProp) {}
 
 #[apply(shared_cases)]
 #[tokio::test]
-async fn test_append_commit_snapshot(#[case] identity: Identity) -> Result<()> {
+async fn test_append_commit_snapshot(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("append_commit");
     let mut table = test_table(&context, "append_table", identity);
     append_rows(&mut table, vec![test_row(1, "A", 20), test_row(2, "B", 21)])?;
@@ -28,7 +28,7 @@ async fn test_append_commit_snapshot(#[case] identity: Identity) -> Result<()> {
 
 #[apply(shared_cases)]
 #[tokio::test]
-async fn test_flush_basic(#[case] identity: Identity) -> Result<()> {
+async fn test_flush_basic(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("flush_basic");
     let mut table = test_table(&context, "flush_table", identity);
     let rows = vec![test_row(1, "Alice", 30), test_row(2, "Bob", 25)];
@@ -41,7 +41,7 @@ async fn test_flush_basic(#[case] identity: Identity) -> Result<()> {
 
 #[apply(shared_cases)]
 #[tokio::test]
-async fn test_delete_and_append(#[case] identity: Identity) -> Result<()> {
+async fn test_delete_and_append(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("delete_append");
     let mut table = test_table(&context, "del_table", identity);
     let initial_rows = vec![
@@ -71,7 +71,7 @@ async fn test_delete_and_append(#[case] identity: Identity) -> Result<()> {
 
 #[apply(shared_cases)]
 #[tokio::test]
-async fn test_deletion_before_flush(#[case] identity: Identity) -> Result<()> {
+async fn test_deletion_before_flush(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("delete_pre_flush");
     let mut table = test_table(&context, "table", identity);
     append_rows(&mut table, batch_rows(1, 4))?;
@@ -91,7 +91,7 @@ async fn test_deletion_before_flush(#[case] identity: Identity) -> Result<()> {
 
 #[apply(shared_cases)]
 #[tokio::test]
-async fn test_deletion_after_flush(#[case] identity: Identity) -> Result<()> {
+async fn test_deletion_after_flush(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("delete_post_flush");
     let mut table = test_table(&context, "table", identity);
     append_commit_flush_snapshot(&mut table, batch_rows(1, 4), 1).await?;
@@ -125,7 +125,7 @@ async fn test_deletion_after_flush(#[case] identity: Identity) -> Result<()> {
 #[tokio::test]
 async fn test_snapshot_initialization() -> Result<()> {
     let schema = test_schema();
-    let identity = Identity::Keys(vec![0]);
+    let identity = IdentityProp::Keys(vec![0]);
     let metadata = Arc::new(TableMetadata {
         name: "test_table".to_string(),
         id: 1,
@@ -146,7 +146,7 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     let mut table = test_table(
         &context,
         "full_row_with_duplication_and_identical",
-        Identity::FullRow,
+        IdentityProp::FullRow,
     );
 
     // Insert duplicate rows (same identity, different values)

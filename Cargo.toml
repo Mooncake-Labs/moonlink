@@ -16,6 +16,10 @@ bitstream-io = "4"
 chrono = { version = "0.4", default-features = false }
 crc32fast = "1"
 futures = { version = "0.3", default-features = false }
+hashbrown = { version = "0.15", features = [
+    "default-hasher",
+    "inline-more",
+] }
 # TODO(hjiang): Restrict dependency to include only fs by default, after upstream the fix for iceberg-rust.
 iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "513376cb04b899edf457918c3852a786a292071c", default-features = false, features = [
   "storage-s3",

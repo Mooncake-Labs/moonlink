@@ -354,7 +354,7 @@ mod tests {
     use super::*;
 
     use crate::row::MoonlinkRow;
-    use crate::row::{Identity, RowValue};
+    use crate::row::{IdentityProp, RowValue};
     use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
     #[cfg(feature = "storage-s3")]
     use crate::storage::iceberg::s3_test_utils;
@@ -588,7 +588,7 @@ mod tests {
             "test_table".to_string(),
             /*version=*/ 1,
             path,
-            Identity::Keys(vec![0]),
+            IdentityProp::Keys(vec![0]),
             Some(iceberg_table_config.clone()),
         );
 

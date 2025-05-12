@@ -9,7 +9,7 @@ use super::iceberg::iceberg_table_manager::IcebergTableManagerConfig;
 use super::index::{MemIndex, MooncakeIndex};
 use super::storage_utils::{RawDeletionRecord, RecordLocation};
 use crate::error::{Error, Result};
-use crate::row::{Identity, MoonlinkRow};
+use crate::row::{IdentityProp, MoonlinkRow};
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use std::collections::HashMap;
 use std::mem::take;
@@ -30,13 +30,13 @@ use tokio::task::JoinHandle;
 pub(crate) struct TableConfig {
     /// mem slice size
     ///
-    _mem_slice_size: usize,
+    mem_slice_size: usize,
     batch_size: usize,
 }
 
 impl TableConfig {
     #[cfg(debug_assertions)]
-    const DEFAULT_MEM_SLICE_SIZE: usize = 2048 * 2;
+    const DEFAULT_MEM_SLICE_SIZE: usize = 4 * 16;
     #[cfg(debug_assertions)]
     const DEFAULT_BATCH_SIZE: usize = 4;
 
@@ -47,7 +47,7 @@ impl TableConfig {
 
     pub fn new() -> Self {
         Self {
-            _mem_slice_size: Self::DEFAULT_MEM_SLICE_SIZE,
+            mem_slice_size: Self::DEFAULT_MEM_SLICE_SIZE,
             batch_size: Self::DEFAULT_BATCH_SIZE,
         }
     }
@@ -66,7 +66,7 @@ pub struct TableMetadata {
     /// storage path
     pub(crate) path: PathBuf,
     /// function to get lookup key from row
-    pub(crate) identity: Identity,
+    pub(crate) identity: IdentityProp,
 }
 
 /// Snapshot contains state of the table at a given time.
@@ -146,9 +146,9 @@ struct TransactionStreamState {
 }
 
 impl TransactionStreamState {
-    fn new(schema: Arc<Schema>, batch_size: usize) -> Self {
+    fn new(schema: Arc<Schema>, batch_size: usize, identity: IdentityProp) -> Self {
         Self {
-            mem_slice: MemSlice::new(schema, batch_size),
+            mem_slice: MemSlice::new(schema, batch_size, identity),
             new_deletions: Vec::new(),
             new_disk_slices: Vec::new(),
         }
@@ -191,7 +191,7 @@ impl MooncakeTable {
         name: String,
         version: u64,
         base_path: PathBuf,
-        identity: Identity,
+        identity: IdentityProp,
         iceberg_table_config: Option<IcebergTableManagerConfig>,
     ) -> Self {
         let table_config = TableConfig::new();
@@ -206,7 +206,11 @@ impl MooncakeTable {
         });
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(0);
         Self {
-            mem_slice: MemSlice::new(metadata.schema.clone(), metadata.config.batch_size),
+            mem_slice: MemSlice::new(
+                metadata.schema.clone(),
+                metadata.config.batch_size,
+                metadata.identity.clone(),
+            ),
             metadata: metadata.clone(),
             snapshot: Arc::new(RwLock::new(SnapshotTableState::new(
                 metadata,
@@ -230,7 +234,8 @@ impl MooncakeTable {
 
     pub fn append(&mut self, row: MoonlinkRow) -> Result<()> {
         let lookup_key = self.metadata.identity.get_lookup_key(&row);
-        if let Some(batch) = self.mem_slice.append(lookup_key, row)? {
+        let identity_for_key = self.metadata.identity.extract_identity_for_key(&row);
+        if let Some(batch) = self.mem_slice.append(lookup_key, row, identity_for_key)? {
             self.next_snapshot_task.new_record_batches.push(batch);
         }
         Ok(())
@@ -255,7 +260,7 @@ impl MooncakeTable {
     }
 
     pub fn should_flush(&self) -> bool {
-        self.mem_slice.get_num_rows() >= self.metadata.config.batch_size
+        self.mem_slice.get_num_rows() >= self.metadata.config.mem_slice_size
     }
 
     fn get_or_create_stream_state<'a>(
@@ -264,7 +269,11 @@ impl MooncakeTable {
         xact_id: u32,
     ) -> &'a mut TransactionStreamState {
         transaction_stream_states.entry(xact_id).or_insert_with(|| {
-            TransactionStreamState::new(metadata.schema.clone(), metadata.config.batch_size)
+            TransactionStreamState::new(
+                metadata.schema.clone(),
+                metadata.config.batch_size,
+                metadata.identity.clone(),
+            )
         })
     }
 
@@ -278,14 +287,17 @@ impl MooncakeTable {
     }
 
     pub fn append_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) -> Result<()> {
-        let lookup_key = self.metadata.identity.get_lookup_key(&row);
         let stream_state = Self::get_or_create_stream_state(
             &mut self.transaction_stream_states,
             &self.metadata,
             xact_id,
         );
 
-        stream_state.mem_slice.append(lookup_key, row)?;
+        let lookup_key = self.metadata.identity.get_lookup_key(&row);
+        let identity_for_key = self.metadata.identity.extract_identity_for_key(&row);
+        stream_state
+            .mem_slice
+            .append(lookup_key, row, identity_for_key)?;
 
         Ok(())
     }

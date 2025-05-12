@@ -1,16 +1,16 @@
 pub mod hash_index;
+pub mod mem_index;
 pub mod persisted_bucket_hash_map;
 
+use crate::row::MoonlinkRow;
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use multimap::MultiMap;
 use persisted_bucket_hash_map::GlobalIndex;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-
-pub trait Index<'a>: Send + Sync {
-    type ReturnType;
-    fn find_record(&'a self, raw_record: &RawDeletionRecord) -> Option<Vec<Self::ReturnType>>;
+pub trait Index: Send + Sync {
+    fn find_record(&self, raw_record: &RawDeletionRecord) -> Vec<RecordLocation>;
 }
 
 pub struct MooncakeIndex {
@@ -20,8 +20,22 @@ pub struct MooncakeIndex {
 /// Type for primary keys
 pub type PrimaryKey = u64;
 
+pub struct SinglePrimitiveKey {
+    hash: PrimaryKey,
+    location: RecordLocation,
+}
+pub struct KeyWithIdentity {
+    hash: PrimaryKey,
+    identity: MoonlinkRow,
+    location: RecordLocation,
+}
 /// Index containing records in memory
-pub type MemIndex = MultiMap<PrimaryKey, RecordLocation>; // key -> (batch_id, row_offset)
+pub enum MemIndex {
+    SinglePrimitive(hashbrown::HashTable<SinglePrimitiveKey>),
+    Key(hashbrown::HashTable<KeyWithIdentity>),
+    FullRow(MultiMap<PrimaryKey, RecordLocation>),
+}
+
 /// Index containing records in files
 pub type FileIndex = GlobalIndex; // key -> (file, row_offset)
 

@@ -1,6 +1,6 @@
 use super::data_batches::{BatchEntry, ColumnStoreBuffer};
 use crate::error::Result;
-use crate::row::{Identity, MoonlinkRow};
+use crate::row::{IdentityProp, MoonlinkRow};
 use crate::storage::index::{Index, MemIndex};
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
@@ -27,10 +27,14 @@ pub(super) struct MemSlice {
 }
 
 impl MemSlice {
-    pub(super) fn new(schema: Arc<Schema>, max_rows_per_buffer: usize) -> Self {
+    pub(super) fn new(
+        schema: Arc<Schema>,
+        max_rows_per_buffer: usize,
+        identity: IdentityProp,
+    ) -> Self {
         Self {
             column_store: ColumnStoreBuffer::new(schema, max_rows_per_buffer),
-            mem_index: MemIndex::new(),
+            mem_index: MemIndex::new(identity),
         }
     }
 
@@ -38,34 +42,42 @@ impl MemSlice {
     pub(super) fn delete(
         &mut self,
         record: &RawDeletionRecord,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> Option<(u64 /*batch_id*/, usize /*row_offset*/)> {
-        let locations = self.mem_index.find_record(record)?;
-
-        for location in locations {
-            // Clone the reference to create an owned copy
-            let ret = self
-                .column_store
-                .delete_row_by_record(record, location, identity);
-            if ret.is_some() {
-                return ret;
+        if !self.mem_index.allow_duplicate() {
+            let location = self.mem_index.fast_delete(record);
+            if let Some(location) = location {
+                self.column_store
+                    .delete_row_by_record(record, &location, identity)
+            } else {
+                None
             }
+        } else {
+            let locations = self.mem_index.find_record(record);
+            for location in locations {
+                let ret = self
+                    .column_store
+                    .delete_row_by_record(record, &location, identity);
+                if ret.is_some() {
+                    return ret;
+                }
+            }
+            None
         }
-        None
     }
 
     /// Find the first non-deleted position for a given lookup key
     pub fn find_non_deleted_position(
         &self,
         record: &RawDeletionRecord,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> Option<(u64, usize)> {
-        let locations = self.mem_index.find_record(record)?;
+        let locations = self.mem_index.find_record(record);
 
         for location in locations {
             let ret = self
                 .column_store
-                .find_valid_row_by_record(record, location, identity);
+                .find_valid_row_by_record(record, &location, identity);
             if ret.is_some() {
                 return ret;
             }
@@ -77,9 +89,11 @@ impl MemSlice {
         &mut self,
         lookup_key: u64,
         row: MoonlinkRow,
+        identity_for_key: Option<MoonlinkRow>,
     ) -> Result<Option<(u64, Arc<RecordBatch>)>> {
         let (seg_idx, row_idx, new_batch) = self.column_store.append_row(row)?;
-        self.mem_index.insert(lookup_key, (seg_idx, row_idx).into());
+        self.mem_index
+            .insert(lookup_key, identity_for_key, (seg_idx, row_idx).into());
         Ok(new_batch)
     }
 
@@ -93,7 +107,7 @@ impl MemSlice {
     ) -> Result<(Option<(u64, Arc<RecordBatch>)>, Vec<BatchEntry>, MemIndex)> {
         let batch = self.column_store.finalize_current_batch()?;
         let entries = self.column_store.drain();
-        let mut index = MemIndex::new();
+        let mut index = MemIndex::new_like(&self.mem_index);
         swap(&mut index, &mut self.mem_index);
         Ok((batch, entries, index))
     }
@@ -118,6 +132,7 @@ mod tests {
 
     #[test]
     fn test_mem_slice() {
+        let identity = IdentityProp::SinglePrimitiveKey(0);
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
                 "PARQUET:field_id".to_string(),
@@ -132,7 +147,7 @@ mod tests {
                 "3".to_string(),
             )])),
         ]);
-        let mut mem_table = MemSlice::new(Arc::new(schema), 4);
+        let mut mem_table = MemSlice::new(Arc::new(schema), 4, identity);
 
         // Create arrays properly
         mem_table
@@ -143,6 +158,7 @@ mod tests {
                     RowValue::ByteArray("John".as_bytes().to_vec()),
                     RowValue::Int32(30),
                 ]),
+                None,
             )
             .unwrap();
 
@@ -154,6 +170,7 @@ mod tests {
                     RowValue::ByteArray("Jane".as_bytes().to_vec()),
                     RowValue::Int32(25),
                 ]),
+                None,
             )
             .unwrap();
 
@@ -165,6 +182,7 @@ mod tests {
                     RowValue::ByteArray("Bob".as_bytes().to_vec()),
                     RowValue::Int32(40),
                 ]),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -175,7 +193,7 @@ mod tests {
                     pos: None,
                     row_identity: None,
                 },
-                &Identity::SinglePrimitiveKey(0)
+                &IdentityProp::SinglePrimitiveKey(0)
             ),
             Some((0, 1))
         );
@@ -187,7 +205,7 @@ mod tests {
                     pos: None,
                     row_identity: None,
                 },
-                &Identity::SinglePrimitiveKey(0)
+                &IdentityProp::SinglePrimitiveKey(0)
             ),
             Some((0, 2))
         );
@@ -199,7 +217,7 @@ mod tests {
                     pos: None,
                     row_identity: None,
                 },
-                &Identity::SinglePrimitiveKey(0)
+                &IdentityProp::SinglePrimitiveKey(0)
             ),
             Some((0, 0))
         );

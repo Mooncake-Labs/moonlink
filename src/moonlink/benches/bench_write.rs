@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use moonlink::row::{Identity, MoonlinkRow, RowValue};
+use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
 use moonlink::MooncakeTable;
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
@@ -40,7 +40,7 @@ fn bench_write(c: &mut Criterion) {
                     "test_table".to_string(),
                     1,
                     temp_dir.path().to_path_buf(),
-                    Identity::SinglePrimitiveKey(0),
+                    IdentityProp::SinglePrimitiveKey(0),
                     None,
                 );
                 for row in batches.iter() {
@@ -62,7 +62,7 @@ fn bench_write(c: &mut Criterion) {
                     "test_table".to_string(),
                     1,
                     temp_dir.path().to_path_buf(),
-                    Identity::SinglePrimitiveKey(0),
+                    IdentityProp::SinglePrimitiveKey(0),
                     None,
                 );
                 for row in batches.iter() {
@@ -87,7 +87,7 @@ fn bench_write(c: &mut Criterion) {
                     "test_table".to_string(),
                     1,
                     temp_dir.path().to_path_buf(),
-                    Identity::SinglePrimitiveKey(0),
+                    IdentityProp::SinglePrimitiveKey(0),
                     None,
                 );
                 for row in batches.iter() {
@@ -99,7 +99,7 @@ fn bench_write(c: &mut Criterion) {
                     );
                 }
                 rt.block_on(async {
-                    let handle = table.flush_transaction_stream(1, 100000);
+                    let handle = table.flush_transaction_stream(1);
                     let _ = handle.await.unwrap();
                 });
                 table
@@ -114,10 +114,10 @@ fn bench_write(c: &mut Criterion) {
                             1,
                         );
                     }
-                    let handle = table.flush_transaction_stream(1, 10000);
+                    let handle = table.flush_transaction_stream(1);
                     let _ = handle.await.unwrap();
-                    let handle = table.create_snapshot();
-                    let _ = handle.unwrap().await.unwrap();
+                    //let handle = table.create_snapshot();
+                    //let _ = handle.unwrap().await.unwrap();
                 });
             },
             BatchSize::PerIteration,

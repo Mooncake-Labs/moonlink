@@ -187,7 +187,6 @@ impl SnapshotTableState {
             .current_snapshot
             .indices
             .find_record(&deletion)
-            .expect("record not found in indices")
             .into_iter()
             .filter(|loc| !self.is_deleted(loc))
             .collect();

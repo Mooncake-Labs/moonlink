@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::row::ColumnArrayBuilder;
-use crate::row::Identity;
+use crate::row::IdentityProp;
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::shared_array::SharedRowBuffer;
@@ -156,7 +156,7 @@ impl ColumnStoreBuffer {
         record: &RawDeletionRecord,
         batch: &InMemoryBatch,
         offset: usize,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> bool {
         if record.row_identity.is_some() {
             if let Some(batch) = &batch.data {
@@ -181,7 +181,7 @@ impl ColumnStoreBuffer {
         &self,
         record: &RawDeletionRecord,
         record_location: &RecordLocation,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> Option<(u64, usize)> {
         if let RecordLocation::MemoryBatch(batch_id, row_offset) = record_location {
             let idx = self
@@ -209,7 +209,7 @@ impl ColumnStoreBuffer {
         &mut self,
         record: &RawDeletionRecord,
         record_location: &RecordLocation,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> Option<(u64, usize)> {
         if let RecordLocation::MemoryBatch(batch_id, row_offset) = record_location {
             let idx = self

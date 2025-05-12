@@ -5,13 +5,13 @@ use crate::pg_replicate::{
 use arrow::datatypes::{DataType, Field, Schema};
 use chrono::Timelike;
 use moonlink::row::RowValue;
-use moonlink::row::{Identity, MoonlinkRow};
+use moonlink::row::{IdentityProp, MoonlinkRow};
 use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
 use tokio_postgres::types::Type;
 
 /// Convert a PostgreSQL TableSchema to an Arrow Schema
-pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema, Identity) {
+pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema, IdentityProp) {
     let fields: Vec<Field> = table_schema
         .column_schemas
         .iter()
@@ -78,9 +78,9 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
                         .unwrap()
                 })
                 .collect();
-            Identity::new_key(columns, &fields)
+            IdentityProp::new_key(columns, &fields)
         }
-        LookupKey::FullRow => Identity::FullRow,
+        LookupKey::FullRow => IdentityProp::FullRow,
     };
     (Schema::new(fields), identity)
 }
@@ -230,7 +230,7 @@ mod tests {
         ));
         assert!(arrow_schema.field(2).is_nullable());
 
-        assert_eq!(identity, Identity::SinglePrimitiveKey(0));
+        assert_eq!(identity, IdentityProp::SinglePrimitiveKey(0));
     }
 
     #[test]

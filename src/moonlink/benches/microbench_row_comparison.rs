@@ -2,7 +2,7 @@ use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use moonlink::row::{Identity, MoonlinkRow, RowValue};
+use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
 use parquet::arrow::ArrowWriter;
 use std::fs::File;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ fn create_test_row() -> MoonlinkRow {
 fn bench_equals_record_batch(c: &mut Criterion) {
     let batch = create_test_batch();
     let row = create_test_row();
-    let identity = Identity::FullRow;
+    let identity = IdentityProp::FullRow;
 
     c.bench_function("equals_record_batch", |b| {
         b.iter(|| {
@@ -97,7 +97,7 @@ fn bench_equals_parquet(c: &mut Criterion) {
     writer.close().unwrap();
 
     let row = create_test_row();
-    let identity = Identity::FullRow;
+    let identity = IdentityProp::FullRow;
 
     c.bench_function("equals_parquet", |b| {
         b.iter(|| {

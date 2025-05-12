@@ -1,4 +1,4 @@
-use crate::row::{Identity, MoonlinkRow, RowValue};
+use crate::row::{IdentityProp, MoonlinkRow, RowValue};
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler}; // Ensure this path is correct
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
@@ -48,7 +48,7 @@ impl TestEnvironment {
             "test_table".to_string(),
             1,
             path,
-            Identity::Keys(vec![0]),
+            IdentityProp::Keys(vec![0]),
             /*iceberg_table_config=*/ None,
         );
 

@@ -22,7 +22,7 @@ impl MoonlinkRow {
         &self,
         batch: &RecordBatch,
         offset: usize,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> bool {
         if offset >= batch.num_rows() {
             panic!("Offset is out of bounds");
@@ -110,7 +110,7 @@ impl MoonlinkRow {
             }
         };
 
-        if let Identity::Keys(keys) = identity {
+        if let IdentityProp::Keys(keys) = identity {
             if keys.len() != batch.columns().len() {
                 return self
                     .values
@@ -132,7 +132,7 @@ impl MoonlinkRow {
         &self,
         file_name: &str,
         offset: usize,
-        identity: &Identity,
+        identity: &IdentityProp,
     ) -> bool {
         let file = File::open(file_name).unwrap();
         let reader_builder = ArrowReaderBuilder::try_new(file).unwrap();
@@ -159,16 +159,16 @@ impl MoonlinkRow {
 }
 
 impl MoonlinkRow {
-    pub fn equals_full_row(&self, other: &Self, identity: &Identity) -> bool {
+    pub fn equals_full_row(&self, other: &Self, identity: &IdentityProp) -> bool {
         match identity {
-            Identity::Keys(keys) => {
+            IdentityProp::Keys(keys) => {
                 assert_eq!(self.values.len(), keys.len());
                 self.values
                     .iter()
                     .eq(keys.iter().map(|k| &other.values[*k]))
             }
-            Identity::FullRow => self.values.iter().eq(other.values.iter()),
-            Identity::SinglePrimitiveKey(_) => {
+            IdentityProp::FullRow => self.values.iter().eq(other.values.iter()),
+            IdentityProp::SinglePrimitiveKey(_) => {
                 panic!("Never required for equality checkx")
             }
         }
@@ -176,51 +176,63 @@ impl MoonlinkRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Identity {
+pub enum IdentityProp {
     SinglePrimitiveKey(usize),
     Keys(Vec<usize>),
     FullRow,
 }
 
-impl Identity {
+impl IdentityProp {
     pub fn new_key(columns: Vec<usize>, fields: &[Field]) -> Self {
         if columns.len() == 1 {
             let width = fields[columns[0]].data_type().primitive_width();
             if width == Some(1) || width == Some(2) || width == Some(4) || width == Some(8) {
-                Identity::SinglePrimitiveKey(columns[0])
+                IdentityProp::SinglePrimitiveKey(columns[0])
             } else {
-                Identity::Keys(columns)
+                IdentityProp::Keys(columns)
             }
         } else {
-            Identity::Keys(columns)
+            IdentityProp::Keys(columns)
         }
     }
 
     pub fn extract_identity_columns(&self, mut row: MoonlinkRow) -> Option<MoonlinkRow> {
         match self {
-            Identity::SinglePrimitiveKey(_) => None,
-            Identity::Keys(keys) => {
+            IdentityProp::SinglePrimitiveKey(_) => None,
+            IdentityProp::Keys(keys) => {
                 let mut identity_columns = Vec::new();
                 for key in keys {
                     identity_columns.push(take(&mut row.values[*key]));
                 }
                 Some(MoonlinkRow::new(identity_columns))
             }
-            Identity::FullRow => Some(row),
+            IdentityProp::FullRow => Some(row),
+        }
+    }
+
+    pub fn extract_identity_for_key(&self, row: &MoonlinkRow) -> Option<MoonlinkRow> {
+        if let IdentityProp::Keys(keys) = self {
+            let mut identity_columns = Vec::new();
+            for key in keys {
+                identity_columns.push(row.values[*key].clone());
+            }
+            Some(MoonlinkRow::new(identity_columns))
+        } else {
+            None
         }
     }
 
     pub fn get_lookup_key(&self, row: &MoonlinkRow) -> u64 {
         match self {
-            Identity::SinglePrimitiveKey(key) => row.values[*key].to_u64_key(),
-            Identity::Keys(keys) => {
+            IdentityProp::SinglePrimitiveKey(key) => row.values[*key].to_u64_key(),
+            IdentityProp::Keys(keys) => {
                 let mut hasher = AHasher::default();
                 for key in keys {
                     row.values[*key].hash(&mut hasher);
                 }
                 hasher.finish()
             }
-            Identity::FullRow => {
+            IdentityProp::FullRow => {
                 let mut hasher = AHasher::default();
                 for value in row.values.iter() {
                     value.hash(&mut hasher);
@@ -256,9 +268,9 @@ mod tests {
         ]);
 
         // Identity using all columns
-        let identity_all = Identity::FullRow;
+        let identity_all = IdentityProp::FullRow;
         // Identity using only the first column
-        let identity_first = Identity::Keys(vec![0]);
+        let identity_first = IdentityProp::Keys(vec![0]);
 
         // All columns: identity_row and full_row
         let id_row1_all = identity_all.extract_identity_columns(row1.clone()).unwrap();
