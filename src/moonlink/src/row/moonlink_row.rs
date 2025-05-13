@@ -106,6 +106,12 @@ impl MoonlinkRow {
                         false
                     }
                 }
+                RowValue::Array(_) => {
+                    panic!("Array not supported");
+                }
+                RowValue::Struct(_) => {
+                    panic!("Struct not supported");
+                }
                 RowValue::Null => column.is_null(offset),
             }
         };

@@ -72,7 +72,7 @@ impl ColumnStoreBuffer {
         let current_batch_builder = schema
             .fields()
             .iter()
-            .map(|field| ColumnArrayBuilder::new(field.data_type().clone(), max_rows_per_buffer))
+            .map(|field| ColumnArrayBuilder::new(field.data_type(), max_rows_per_buffer, false))
             .collect();
 
         Self {
@@ -125,7 +125,7 @@ impl ColumnStoreBuffer {
         }
 
         // Convert the current rows into a RecordBatch
-        let columns: Vec<ArrayRef> = self
+        let columns = self
             .current_batch_builder
             .iter_mut()
             .zip(self.schema.fields())
@@ -271,8 +271,9 @@ pub(super) fn create_batch_from_rows(
         .iter()
         .map(|field| {
             Box::new(ColumnArrayBuilder::new(
-                field.data_type().clone(),
+                field.data_type(),
                 rows.len(),
+                false,
             ))
         })
         .collect();

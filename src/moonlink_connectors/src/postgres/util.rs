@@ -8,67 +8,83 @@ use moonlink::row::RowValue;
 use moonlink::row::{IdentityProp, MoonlinkRow};
 use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
-use tokio_postgres::types::Type;
+use std::sync::Arc;
+use tokio_postgres::types::{Kind, Type};
+
+pub fn postgres_primitive_to_arrow_type(typ: &Type, name: &str, nullable: bool) -> Field {
+    let (data_type, extension_name) = match *typ {
+        Type::BOOL => (DataType::Boolean, None),
+        Type::INT2 => (DataType::Int16, None),
+        Type::INT4 => (DataType::Int32, None),
+        Type::INT8 => (DataType::Int64, None),
+        Type::FLOAT4 => (DataType::Float32, None),
+        Type::FLOAT8 => (DataType::Float64, None),
+        Type::NUMERIC => (DataType::Decimal128(38, 0), None),
+        Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::CHAR | Type::NAME => {
+            (DataType::Utf8, None)
+        }
+        Type::DATE => (DataType::Date32, None),
+        Type::TIMESTAMP => (
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            None,
+        ),
+        Type::TIMESTAMPTZ => (
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into())),
+            None,
+        ),
+        Type::TIME => (
+            DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
+            None,
+        ),
+        Type::TIMETZ => (
+            DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
+            None,
+        ),
+        Type::UUID => (DataType::FixedSizeBinary(16), Some("uuid".to_string())),
+        Type::JSON | Type::JSONB => (DataType::Utf8, Some("json".to_string())),
+        Type::BYTEA => (DataType::Binary, None),
+        _ => (DataType::Utf8, None), // Default to string for unknown types
+    };
+
+    let mut field = Field::new(name, data_type, nullable);
+
+    // Apply extension type if specified
+    if let Some(ext_name) = extension_name {
+        let mut metadata = HashMap::new();
+        metadata.insert("ARROW:extension:name".to_string(), ext_name);
+        field = field.with_metadata(metadata);
+    }
+
+    field
+}
+
+pub fn postgres_type_to_arrow_type(typ: &Type, name: &str, nullable: bool) -> Field {
+    match typ.kind() {
+        Kind::Simple => postgres_primitive_to_arrow_type(typ, name, nullable),
+        Kind::Array(inner) => {
+            let item_type = postgres_type_to_arrow_type(inner, "item", false);
+            Field::new_list(name, Arc::new(item_type), nullable)
+        }
+        Kind::Composite(fields) => {
+            let fields: Vec<Field> = fields
+                .iter()
+                .map(|f| postgres_type_to_arrow_type(f.type_(), f.name(), true))
+                .collect();
+            Field::new_struct(name, fields, nullable)
+        }
+        Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
+        _ => {
+            panic!("Unsupported type: {:?}", typ);
+        }
+    }
+}
 
 /// Convert a PostgreSQL TableSchema to an Arrow Schema
 pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema, IdentityProp) {
-    // Record field id as metadata for each field, necessary for arrow schema to iceberg schema conversion.
-    let mut field_id = 0;
-
     let fields: Vec<Field> = table_schema
         .column_schemas
         .iter()
-        .map(|col| {
-            let (data_type, extension_name) = match col.typ {
-                Type::BOOL => (DataType::Boolean, None),
-                Type::INT2 => (DataType::Int16, None),
-                Type::INT4 => (DataType::Int32, None),
-                Type::INT8 => (DataType::Int64, None),
-                Type::FLOAT4 => (DataType::Float32, None),
-                Type::FLOAT8 => (DataType::Float64, None),
-                Type::NUMERIC => (DataType::Decimal128(38, 0), None),
-                Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::CHAR | Type::NAME => {
-                    (DataType::Utf8, None)
-                }
-                Type::DATE => (DataType::Date32, None),
-                Type::TIMESTAMP => (
-                    DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
-                    None,
-                ),
-                Type::TIMESTAMPTZ => (
-                    DataType::Timestamp(
-                        arrow::datatypes::TimeUnit::Microsecond,
-                        Some("UTC".into()),
-                    ),
-                    None,
-                ),
-                Type::TIME => (
-                    DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
-                    None,
-                ),
-                Type::TIMETZ => (
-                    DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
-                    None,
-                ),
-                Type::UUID => (DataType::FixedSizeBinary(16), Some("uuid".to_string())),
-                Type::JSON | Type::JSONB => (DataType::Utf8, Some("json".to_string())),
-                Type::BYTEA => (DataType::Binary, None),
-                _ => (DataType::Utf8, None), // Default to string for unknown types
-            };
-
-            let mut field = Field::new(&col.name, data_type, col.nullable);
-
-            // Apply extension type if specified
-            let mut metadata = HashMap::new();
-            if let Some(ext_name) = extension_name {
-                metadata.insert("ARROW:extension:name".to_string(), ext_name);
-            }
-            field_id += 1;
-            metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
-            field = field.with_metadata(metadata);
-
-            field
-        })
+        .map(|col| postgres_type_to_arrow_type(&col.typ, &col.name, col.nullable))
         .collect();
 
     let identity = match &table_schema.lookup_key {

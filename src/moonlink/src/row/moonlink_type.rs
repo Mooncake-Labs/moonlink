@@ -11,6 +11,8 @@ pub enum RowValue {
     Bool(bool),
     ByteArray(Vec<u8>),
     FixedLenByteArray([u8; 16]), // uuid & certain numeric
+    Array(Vec<RowValue>),
+    Struct(Vec<RowValue>),
     #[default]
     Null,
 }
@@ -43,6 +45,8 @@ impl Hash for RowValue {
             RowValue::Bool(value) => value.hash(state),
             RowValue::ByteArray(bytes) => bytes.hash(state),
             RowValue::FixedLenByteArray(bytes) => bytes.hash(state),
+            RowValue::Array(values) => values.hash(state),
+            RowValue::Struct(values) => values.hash(state),
             RowValue::Null => {} // Null: only the discriminant is hashed
         }
     }
