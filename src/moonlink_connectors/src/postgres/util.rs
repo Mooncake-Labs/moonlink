@@ -1,5 +1,5 @@
 use crate::pg_replicate::{
-    conversions::{numeric::PgNumeric, table_row::TableRow, Cell},
+    conversions::{numeric::PgNumeric, table_row::TableRow, ArrayCell, Cell},
     table::{LookupKey, TableSchema},
 };
 use arrow::datatypes::{DataType, Field, Schema};
@@ -114,6 +114,119 @@ pub(crate) struct PostgresTableRow(pub TableRow);
 
 const ARROW_EPOCH: chrono::NaiveDate = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
 
+fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
+    match cell {
+        ArrayCell::Null => vec![],
+        ArrayCell::Bool(values) => values
+            .into_iter()
+            .map(|v| v.map(RowValue::Bool).unwrap_or(RowValue::Null))
+            .collect(),
+        ArrayCell::String(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|s| RowValue::ByteArray(s.as_bytes().to_vec()))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::I16(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|i| RowValue::Int32(i as i32))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::I32(values) => values
+            .into_iter()
+            .map(|v| v.map(RowValue::Int32).unwrap_or(RowValue::Null))
+            .collect(),
+        ArrayCell::U32(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|i| RowValue::Int32(i as i32))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::I64(values) => values
+            .into_iter()
+            .map(|v| v.map(RowValue::Int64).unwrap_or(RowValue::Null))
+            .collect(),
+        ArrayCell::F32(values) => values
+            .into_iter()
+            .map(|v| v.map(RowValue::Float32).unwrap_or(RowValue::Null))
+            .collect(),
+        ArrayCell::F64(values) => values
+            .into_iter()
+            .map(|v| v.map(RowValue::Float64).unwrap_or(RowValue::Null))
+            .collect(),
+        ArrayCell::Numeric(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|n| match n {
+                    PgNumeric::Value(bigdecimal) => {
+                        RowValue::Decimal(bigdecimal.to_i128().unwrap())
+                    }
+                    _ => RowValue::Null,
+                })
+                .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::Date(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|d| RowValue::Int32(d.signed_duration_since(ARROW_EPOCH).num_days() as i32))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::Time(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|t| {
+                    RowValue::Int64(
+                        t.num_seconds_from_midnight() as i64 * 1_000_000
+                            + t.nanosecond() as i64 / 1_000,
+                    )
+                })
+                .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::TimeStamp(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|t| RowValue::Int64(t.and_utc().timestamp_micros()))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::TimeStampTz(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|t| RowValue::Int64(t.timestamp_micros()))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::Uuid(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|u| RowValue::FixedLenByteArray(*u.as_bytes()))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::Json(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|j| RowValue::ByteArray(j.to_string().as_bytes().to_vec()))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+        ArrayCell::Bytes(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|b| RowValue::ByteArray(b.to_vec()))
+                    .unwrap_or(RowValue::Null)
+            })
+            .collect(),
+    }
+}
+
 impl From<PostgresTableRow> for MoonlinkRow {
     fn from(row: PostgresTableRow) -> Self {
         let mut values = Vec::new();
@@ -166,8 +279,8 @@ impl From<PostgresTableRow> for MoonlinkRow {
                 Cell::Bytes(value) => {
                     values.push(RowValue::ByteArray(value));
                 }
-                Cell::Array(_value) => {
-                    todo!("Moonlink: Array")
+                Cell::Array(value) => {
+                    values.push(RowValue::Array(convert_array_cell(value)));
                 }
                 Cell::Numeric(value) => {
                     match value {
@@ -321,5 +434,106 @@ mod tests {
             )
         );
         assert_eq!(moonlink_row.values[10], RowValue::Null);
+    }
+
+    #[test]
+    fn test_postgres_array_to_moonlink_row() {
+        let postgres_table_row = PostgresTableRow(TableRow {
+            values: vec![
+                // Array of integers
+                Cell::Array(ArrayCell::I32(vec![Some(1), Some(2), Some(3)])),
+                // Array of strings
+                Cell::Array(ArrayCell::String(vec![
+                    Some("hello".to_string()),
+                    Some("world".to_string()),
+                ])),
+                // Array with null values
+                Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)])),
+                // Empty array
+                Cell::Array(ArrayCell::I32(vec![])),
+                // Array of booleans
+                Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false)])),
+                // Array of timestamps
+                Cell::Array(ArrayCell::TimeStamp(vec![
+                    Some(
+                        NaiveDateTime::parse_from_str("2024-01-01 12:00:00", "%Y-%m-%d %H:%M:%S")
+                            .unwrap(),
+                    ),
+                    Some(
+                        NaiveDateTime::parse_from_str("2024-01-02 12:00:00", "%Y-%m-%d %H:%M:%S")
+                            .unwrap(),
+                    ),
+                ])),
+            ],
+        });
+
+        let moonlink_row: MoonlinkRow = postgres_table_row.into();
+        assert_eq!(moonlink_row.values.len(), 6);
+
+        // Test array of integers
+        let int_array = match &moonlink_row.values[0] {
+            RowValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        assert_eq!(int_array.len(), 3);
+        assert_eq!(int_array[0], RowValue::Int32(1));
+        assert_eq!(int_array[1], RowValue::Int32(2));
+        assert_eq!(int_array[2], RowValue::Int32(3));
+
+        // Test array of strings
+        let str_array = match &moonlink_row.values[1] {
+            RowValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        assert_eq!(str_array.len(), 2);
+        assert_eq!(
+            str_array[0],
+            RowValue::ByteArray("hello".as_bytes().to_vec())
+        );
+        assert_eq!(
+            str_array[1],
+            RowValue::ByteArray("world".as_bytes().to_vec())
+        );
+
+        // Test array with null values
+        let null_array = match &moonlink_row.values[2] {
+            RowValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        assert_eq!(null_array.len(), 3);
+        assert_eq!(null_array[0], RowValue::Int32(1));
+        assert_eq!(null_array[1], RowValue::Null);
+        assert_eq!(null_array[2], RowValue::Int32(3));
+
+        // Test empty array
+        let empty_array = match &moonlink_row.values[3] {
+            RowValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        assert_eq!(empty_array.len(), 0);
+
+        // Test array of booleans
+        let bool_array = match &moonlink_row.values[4] {
+            RowValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        assert_eq!(bool_array.len(), 2);
+        assert_eq!(bool_array[0], RowValue::Bool(true));
+        assert_eq!(bool_array[1], RowValue::Bool(false));
+
+        // Test array of timestamps
+        let timestamp_array = match &moonlink_row.values[5] {
+            RowValue::Array(arr) => arr,
+            _ => panic!("Expected array"),
+        };
+        assert_eq!(timestamp_array.len(), 2);
+        assert_eq!(
+            timestamp_array[0],
+            RowValue::Int64(1704110400000000) // 2024-01-01 12:00:00 in microseconds
+        );
+        assert_eq!(
+            timestamp_array[1],
+            RowValue::Int64(1704196800000000) // 2024-01-02 12:00:00 in microseconds
+        );
     }
 }
