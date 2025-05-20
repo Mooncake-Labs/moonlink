@@ -10,11 +10,12 @@ use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
 use crate::storage::index::Index;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::mooncake_table::MoonlinkRow;
-use crate::storage::storage_utils::{ProcessedDeletionRecord, RawDeletionRecord, RecordLocation};
+use crate::storage::storage_utils::{
+    DataFileRef, ProcessedDeletionRecord, RawDeletionRecord, RecordLocation,
+};
 use parquet::arrow::AsyncArrowWriter;
 use std::collections::{BTreeMap, HashMap};
 use std::mem::take;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) struct SnapshotTableState {
@@ -97,7 +98,7 @@ impl SnapshotTableState {
     fn aggregate_committed_deletion_logs(
         &self,
         flush_lsn: u64,
-    ) -> HashMap<PathBuf, BatchDeletionVector> {
+    ) -> Vec<(DataFileRef, BatchDeletionVector)> {
         let mut aggregated_deletion_logs = HashMap::new();
         for cur_deletion_log in self.committed_deletion_log.iter() {
             assert!(
@@ -110,15 +111,26 @@ impl SnapshotTableState {
                 continue;
             }
             if let RecordLocation::DiskFile(file_id, row_idx) = &cur_deletion_log.pos {
-                let filepath = (*file_id.0).clone();
                 let deletion_vector =
-                    aggregated_deletion_logs.entry(filepath).or_insert_with(|| {
+                    aggregated_deletion_logs.entry(*file_id).or_insert_with(|| {
                         BatchDeletionVector::new(self.mooncake_table_config.batch_size())
                     });
                 assert!(deletion_vector.delete_row(*row_idx));
             }
         }
-        aggregated_deletion_logs
+        let mut ret = vec![];
+        for (file_id, deletion_vector) in aggregated_deletion_logs.into_iter() {
+            ret.push((
+                self.current_snapshot
+                    .disk_files
+                    .get_key_value(&file_id)
+                    .unwrap()
+                    .0
+                    .clone(),
+                deletion_vector,
+            ));
+        }
+        ret
     }
 
     /// Prune committed deletion logs for the given persisted records.
@@ -155,7 +167,7 @@ impl SnapshotTableState {
     /// Update current mooncake snapshot with persisted deletion vector.
     fn update_current_snapshot_with_iceberg_snapshot(
         &mut self,
-        puffin_blob_ref: HashMap<PathBuf, PuffinBlobRef>,
+        puffin_blob_ref: HashMap<DataFileRef, PuffinBlobRef>,
     ) {
         for (local_disk_file, puffin_blob_ref) in puffin_blob_ref.into_iter() {
             let entry = self
@@ -364,7 +376,6 @@ impl SnapshotTableState {
         pos: RecordLocation,
     ) -> ProcessedDeletionRecord {
         ProcessedDeletionRecord {
-            _lookup_key: deletion.lookup_key,
             pos,
             lsn: deletion.lsn,
         }
@@ -380,10 +391,10 @@ impl SnapshotTableState {
                 .deletions
                 .is_deleted(*row_id),
 
-            RecordLocation::DiskFile(file_name, row_id) => self
+            RecordLocation::DiskFile(file_id, row_id) => self
                 .current_snapshot
                 .disk_files
-                .get_mut(file_name.0.as_ref())
+                .get_mut(file_id)
                 .expect("missing disk file")
                 .batch_deletion_vector
                 .is_deleted(*row_id),
@@ -401,11 +412,15 @@ impl SnapshotTableState {
                     &self.current_snapshot.metadata.identity,
                 )
             }
-            RecordLocation::DiskFile(file_name, row_id) => {
-                let name = file_name.0.to_string_lossy();
+            RecordLocation::DiskFile(file_id, row_id) => {
+                let (file, _) = self
+                    .current_snapshot
+                    .disk_files
+                    .get_key_value(file_id)
+                    .expect("missing disk file");
                 identity
                     .equals_parquet_at_offset(
-                        &name,
+                        file.file_name(),
                         *row_id,
                         &self.current_snapshot.metadata.identity,
                     )
@@ -433,7 +448,7 @@ impl SnapshotTableState {
                 let res = self
                     .current_snapshot
                     .disk_files
-                    .get_mut(file_name.0.as_ref())
+                    .get_mut(file_name)
                     .unwrap()
                     .batch_deletion_vector
                     .delete_row(*row_id);
@@ -506,9 +521,9 @@ impl SnapshotTableState {
         // Get committed but un-persisted deletion vector.
         let mut ret = Vec::new();
         for deletion in self.committed_deletion_log.iter() {
-            if let RecordLocation::DiskFile(file_name, row_id) = &deletion.pos {
+            if let RecordLocation::DiskFile(file_id, row_id) = &deletion.pos {
                 for (id, (file, _)) in self.current_snapshot.disk_files.iter().enumerate() {
-                    if *file == *file_name.0 {
+                    if file.file_id() == *file_id {
                         ret.push((id as u32, *row_id as u32));
                         break;
                     }
@@ -527,7 +542,7 @@ impl SnapshotTableState {
             self.current_snapshot
                 .disk_files
                 .keys()
-                .map(|path| path.to_string_lossy().to_string()),
+                .map(|path| path.file_name().clone()),
         );
 
         // For committed but not persisted records, we create a temporary file for them, which gets deleted after query completion.

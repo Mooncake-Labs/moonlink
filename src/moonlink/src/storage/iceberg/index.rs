@@ -1,10 +1,11 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::collections::HashMap;
 
 use crate::storage::iceberg::puffin_utils;
 use crate::storage::index::file_index_id::get_next_file_index_id;
 use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeIndexBlock;
 /// This module defines the file index struct used for iceberg, which corresponds to in-memory mooncake table file index structs, and supports the serde between mooncake table format and iceberg format.
 use crate::storage::index::FileIndex as MooncakeFileIndex;
+use crate::storage::storage_utils::create_data_file;
 
 use iceberg::io::FileIO;
 use iceberg::puffin::Blob;
@@ -57,7 +58,7 @@ impl FileIndex {
             data_files: mooncake_index
                 .files
                 .iter()
-                .map(|path| path.to_str().unwrap().to_string())
+                .map(|path| path.file_name().clone())
                 .collect(),
             index_block_files: mooncake_index
                 .index_blocks
@@ -99,7 +100,7 @@ impl FileIndex {
             files: self
                 .data_files
                 .iter()
-                .map(|path| Arc::new(PathBuf::from(path)))
+                .map(|path| create_data_file(0, path.to_string()))
                 .collect(),
             num_rows: self.num_rows,
             hash_bits: self.hash_bits,
@@ -204,6 +205,7 @@ mod tests {
 
     use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeIndexBlock;
     use crate::storage::index::FileIndex as MooncakeFileIndex;
+    use crate::storage::storage_utils::create_data_file;
 
     #[tokio::test]
     async fn test_hash_index_v1_serde() {
@@ -224,7 +226,10 @@ mod tests {
             seg_id_bits: 6,
             row_id_bits: 3,
             bucket_bits: 5,
-            files: vec![Arc::new(PathBuf::from(temp_data_file.path()))],
+            files: vec![create_data_file(
+                0,
+                temp_data_file.path().to_str().unwrap().to_string(),
+            )],
             index_blocks: vec![
                 MooncakeIndexBlock::new(
                     /*bucket_start_idx=*/ 0,

@@ -10,11 +10,11 @@ use crate::storage::iceberg::utils;
 use crate::storage::iceberg::validation as IcebergValidation;
 use crate::storage::index::{FileIndex as MooncakeFileIndex, MooncakeIndex};
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
+use crate::storage::mooncake_table::DiskFileDeletionVector;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
-use crate::storage::mooncake_table::{
-    DiskFileDeletionVector, Snapshot as MooncakeSnapshot, TableMetadata as MooncakeTableMetadata,
-};
-
+use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
+use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::storage_utils::{create_data_file, DataFileRef};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,7 +79,7 @@ pub trait IcebergOperation {
     async fn sync_snapshot(
         &mut self,
         snapshot_payload: IcebergSnapshotPayload,
-    ) -> IcebergResult<HashMap<PathBuf, PuffinBlobRef>>;
+    ) -> IcebergResult<HashMap<DataFileRef, PuffinBlobRef>>;
 
     /// Load latest snapshot from iceberg table. Used for recovery and initialization.
     /// Notice this function is supposed to call **only once**.
@@ -117,7 +117,7 @@ pub struct IcebergTableManager {
     pub(crate) iceberg_table: Option<IcebergTable>,
 
     /// Maps from already persisted data file filepath to its deletion vector, and iceberg `DataFile`.
-    pub(crate) persisted_data_files: HashMap<PathBuf, DataFileEntry>,
+    pub(crate) persisted_data_files: HashMap<String, DataFileEntry>,
 
     /// A set of file index id which has been managed by the iceberg table.
     pub(crate) persisted_file_index_ids: HashSet<u32>,
@@ -225,7 +225,7 @@ impl IcebergTableManager {
         };
         let old_entry = self
             .persisted_data_files
-            .insert(file_path, new_data_file_entry);
+            .insert(file_path.to_string_lossy().to_string(), new_data_file_entry);
         assert!(old_entry.is_none());
         Ok(())
     }
@@ -242,12 +242,12 @@ impl IcebergTableManager {
         }
 
         let data_file = entry.data_file();
-        let referenced_path_buf: PathBuf = data_file.referenced_data_file().unwrap().into();
-        let mut data_file_entry = self.persisted_data_files.get_mut(&referenced_path_buf);
+        let referencec_file_name = data_file.referenced_data_file().unwrap();
+        let mut data_file_entry = self.persisted_data_files.get_mut(&referencec_file_name);
         assert!(
             data_file_entry.is_some(),
             "At recovery, the data file path for {:?} doesn't exist",
-            referenced_path_buf
+            &referencec_file_name
         );
 
         IcebergValidation::validate_puffin_manifest_entry(entry)?;
@@ -280,18 +280,23 @@ impl IcebergTableManager {
             } else {
                 0
             };
-
+        let mut file_name_to_id = HashMap::new();
         // Fill in disk files.
         mooncake_snapshot.disk_files = HashMap::with_capacity(self.persisted_data_files.len());
-        for (data_filepath, data_file_entry) in self.persisted_data_files.iter() {
+        for (file_id, (data_filepath, data_file_entry)) in
+            self.persisted_data_files.iter().enumerate()
+        {
             mooncake_snapshot.disk_files.insert(
-                data_filepath.clone(),
+                create_data_file(file_id as u64, data_filepath.to_string()),
                 DiskFileDeletionVector {
                     puffin_deletion_blob: data_file_entry.persisted_deletion_vector.clone(),
                     batch_deletion_vector: data_file_entry.deletion_vector.clone(),
                 },
             );
+            file_name_to_id.insert(data_filepath.to_string(), file_id);
         }
+        // UNDONE:
+        // 1. Update file id in persisted_file_indices.
 
         // Fill in indices.
         mooncake_snapshot.indices = MooncakeIndex {
@@ -356,17 +361,17 @@ impl IcebergTableManager {
     /// Return new iceberg data files for append transaction.
     async fn sync_data_files(
         &mut self,
-        new_data_files: Vec<PathBuf>,
+        new_data_files: Vec<DataFileRef>,
     ) -> IcebergResult<Vec<DataFile>> {
         let mut new_iceberg_data_files = Vec::with_capacity(new_data_files.len());
         for local_data_file in new_data_files.into_iter() {
             let iceberg_data_file = utils::write_record_batch_to_iceberg(
                 self.iceberg_table.as_ref().unwrap(),
-                &local_data_file,
+                local_data_file.file_name(),
             )
             .await?;
             let old_entry = self.persisted_data_files.insert(
-                local_data_file.clone(),
+                local_data_file.file_name().to_string(),
                 DataFileEntry {
                     data_file: iceberg_data_file.clone(),
                     deletion_vector: BatchDeletionVector::new(
@@ -384,13 +389,13 @@ impl IcebergTableManager {
     /// Dump committed deletion logs into iceberg table, only the changed part will be persisted.
     async fn sync_deletion_vector(
         &mut self,
-        new_deletion_logs: HashMap<PathBuf, BatchDeletionVector>,
-    ) -> IcebergResult<HashMap<PathBuf, PuffinBlobRef>> {
+        new_deletion_logs: Vec<(DataFileRef, BatchDeletionVector)>,
+    ) -> IcebergResult<HashMap<DataFileRef, PuffinBlobRef>> {
         let mut puffin_deletion_blobs = HashMap::new();
-        for (local_data_filepath, new_deletion_vector) in new_deletion_logs.into_iter() {
+        for (local_data_file, new_deletion_vector) in new_deletion_logs.into_iter() {
             let mut entry = self
                 .persisted_data_files
-                .get(&local_data_filepath)
+                .get(local_data_file.file_name())
                 .unwrap()
                 .clone();
             entry.deletion_vector.merge_with(&new_deletion_vector);
@@ -401,8 +406,8 @@ impl IcebergTableManager {
                 .write_deletion_vector(iceberg_data_file.to_string(), entry.deletion_vector.clone())
                 .await?;
             self.persisted_data_files
-                .insert(local_data_filepath.clone(), entry);
-            puffin_deletion_blobs.insert(local_data_filepath, puffin_blob);
+                .insert(local_data_file.file_name().to_string(), entry);
+            puffin_deletion_blobs.insert(local_data_file, puffin_blob);
         }
         Ok(puffin_deletion_blobs)
     }
@@ -470,7 +475,7 @@ impl IcebergOperation for IcebergTableManager {
     async fn sync_snapshot(
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
-    ) -> IcebergResult<HashMap<PathBuf, PuffinBlobRef>> {
+    ) -> IcebergResult<HashMap<DataFileRef, PuffinBlobRef>> {
         // Initialize iceberg table on access.
         self.initialize_iceberg_table().await?;
 

@@ -1,5 +1,5 @@
 use crate::storage::index::file_index_id::get_next_file_index_id;
-use crate::storage::storage_utils::{FileId, RecordLocation};
+use crate::storage::storage_utils::{DataFileRef, RecordLocation};
 use futures::executor::block_on;
 use memmap2::Mmap;
 use std::collections::BinaryHeap;
@@ -44,7 +44,7 @@ pub struct GlobalIndex {
     /// A unique id to identify each global index.
     pub(crate) global_index_id: u32,
 
-    pub(crate) files: Vec<Arc<PathBuf>>,
+    pub(crate) files: Vec<DataFileRef>,
     pub(crate) num_rows: u32,
     pub(crate) hash_bits: u32,
     pub(crate) hash_upper_bits: u32,
@@ -146,7 +146,7 @@ impl IndexBlock {
                 let (hash, seg_idx, row_idx) = self.read_entry(&mut entry_reader, metadata).await;
                 if hash == target_lower_hash {
                     results.push(RecordLocation::DiskFile(
-                        FileId(metadata.files[seg_idx].clone()),
+                        metadata.files[seg_idx].file_id(),
                         row_idx,
                     ));
                 }
@@ -284,7 +284,7 @@ impl IndexBlockBuilder {
 
 pub struct GlobalIndexBuilder {
     num_rows: u32,
-    files: Vec<Arc<PathBuf>>,
+    files: Vec<DataFileRef>,
     directory: PathBuf,
 }
 
@@ -302,7 +302,7 @@ impl GlobalIndexBuilder {
         self
     }
 
-    pub fn set_files(&mut self, files: Vec<Arc<PathBuf>>) -> &mut Self {
+    pub fn set_files(&mut self, files: Vec<DataFileRef>) -> &mut Self {
         self.files = files;
         self
     }
@@ -635,11 +635,11 @@ mod tests {
 
     use super::*;
 
-    use crate::storage::storage_utils::FileId;
+    use crate::storage::storage_utils::{create_data_file, FileId};
 
     #[tokio::test]
     async fn test_new() {
-        let data_file = Arc::new(PathBuf::from("test.parquet"));
+        let data_file = create_data_file(0, "a.parquet".to_string());
         let files = vec![data_file.clone()];
         let hash_entries = vec![
             (1, 0, 0),
@@ -662,10 +662,9 @@ mod tests {
             .set_directory(tempfile::tempdir().unwrap().keep());
         let index = builder.build_from_flush(hash_entries.clone()).await;
 
-        let data_file_ids = [FileId(data_file.clone())];
+        let data_file_ids = [data_file.file_id()];
         for (hash, seg_idx, row_idx) in hash_entries.iter() {
-            let expected_record_loc =
-                RecordLocation::DiskFile(data_file_ids[*seg_idx].clone(), *row_idx);
+            let expected_record_loc = RecordLocation::DiskFile(data_file_ids[*seg_idx], *row_idx);
             assert_eq!(index.search(hash).await, vec![expected_record_loc]);
         }
 
@@ -685,9 +684,9 @@ mod tests {
     #[tokio::test]
     async fn test_merge() {
         let files = vec![
-            Arc::new(PathBuf::from("1.parquet")),
-            Arc::new(PathBuf::from("2.parquet")),
-            Arc::new(PathBuf::from("3.parquet")),
+            create_data_file(1, "1.parquet".to_string()),
+            create_data_file(2, "2.parquet".to_string()),
+            create_data_file(3, "3.parquet".to_string()),
         ];
         let vec = (0..100).map(|i| (i as u64, i % 3, i)).collect::<Vec<_>>();
         let mut builder = GlobalIndexBuilder::new();
@@ -696,8 +695,8 @@ mod tests {
             .set_directory(tempfile::tempdir().unwrap().keep());
         let index1 = builder.build_from_flush(vec).await;
         let files = vec![
-            Arc::new(PathBuf::from("4.parquet")),
-            Arc::new(PathBuf::from("5.parquet")),
+            create_data_file(4, "4.parquet".to_string()),
+            create_data_file(5, "5.parquet".to_string()),
         ];
         let vec = (100..200).map(|i| (i as u64, i % 2, i)).collect::<Vec<_>>();
         let mut builder = GlobalIndexBuilder::new();
@@ -715,7 +714,7 @@ mod tests {
             let RecordLocation::DiskFile(FileId(file_id), _) = record_location else {
                 panic!("No record location found for {}", i);
             };
-            assert_eq!(file_id.to_string_lossy(), format!("{}.parquet", i % 3 + 1));
+            assert_eq!(*file_id, i % 3 + 1);
         }
     }
 }

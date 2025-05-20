@@ -419,7 +419,7 @@ async fn test_iceberg_snapshot_creation() {
         .unwrap();
     assert_eq!(snapshot.disk_files.len(), 1);
     let (cur_data_file, cur_deletion_vector) = snapshot.disk_files.into_iter().next().unwrap();
-    assert!(tokio::fs::metadata(cur_data_file).await.is_ok());
+    assert!(tokio::fs::metadata(cur_data_file.file_name()).await.is_ok());
     assert!(cur_deletion_vector
         .batch_deletion_vector
         .collect_deleted_rows()

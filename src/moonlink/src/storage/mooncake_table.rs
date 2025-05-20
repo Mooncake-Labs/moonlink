@@ -8,7 +8,7 @@ mod table_snapshot;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{MemIndex, MooncakeIndex};
-use super::storage_utils::{RawDeletionRecord, RecordLocation};
+use super::storage_utils::{DataFileRef, RawDeletionRecord, RecordLocation};
 use crate::error::{Error, Result};
 use crate::row::{IdentityProp, MoonlinkRow};
 use crate::storage::iceberg::iceberg_table_manager::{
@@ -130,7 +130,7 @@ pub struct Snapshot {
     pub(crate) metadata: Arc<TableMetadata>,
     /// datafile and their deletion vector.
     /// TODO(hjiang): For the initial release and before we figure out a cache design, disk files are always local ones.
-    pub(crate) disk_files: HashMap<PathBuf, DiskFileDeletionVector>,
+    pub(crate) disk_files: HashMap<DataFileRef, DiskFileDeletionVector>,
     /// Current snapshot version, which is the mooncake table commit point.
     pub(crate) snapshot_version: u64,
     /// LSN which last data file flush operation happens.
@@ -195,7 +195,7 @@ pub struct SnapshotTask {
     /// Flush LSN for iceberg snapshot.
     iceberg_flush_lsn: Option<u64>,
     /// Puffin blobs which have been persisted into iceberg snapshot.
-    iceberg_persisted_puffin_blob: HashMap<PathBuf, PuffinBlobRef>,
+    iceberg_persisted_puffin_blob: HashMap<DataFileRef, PuffinBlobRef>,
 }
 
 impl SnapshotTask {
@@ -223,15 +223,14 @@ impl SnapshotTask {
     }
 
     /// Get newly created data files.
-    pub(crate) fn get_new_data_files(&self) -> Vec<PathBuf> {
+    pub(crate) fn get_new_data_files(&self) -> Vec<DataFileRef> {
         let mut new_files = vec![];
         for cur_disk_slice in self.new_disk_slices.iter() {
             new_files.extend(
                 cur_disk_slice
                     .output_files()
                     .iter()
-                    .map(|(p, _)| p.clone())
-                    .collect::<Vec<_>>(),
+                    .map(|(file, _)| file.clone()),
             );
         }
         new_files
@@ -283,6 +282,10 @@ pub struct MooncakeTable {
     /// Stream state per transaction, keyed by xact-id.
     transaction_stream_states: HashMap<u32, TransactionStreamState>,
 
+    /// Auto increment id for generating unique file ids.
+    /// Note, these ids is only used locally, and not persisted.
+    next_file_id: u32,
+
     /// Iceberg table manager, used to sync snapshot to the corresponding iceberg table.
     ///
     /// TODO(hjiang): Figure out a way to store dynamic trait for mock-based unit test.
@@ -327,6 +330,7 @@ impl MooncakeTable {
             transaction_stream_states: HashMap::new(),
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
+            next_file_id: 0,
             iceberg_table_manager,
         }
     }
@@ -467,6 +471,7 @@ impl MooncakeTable {
         snapshot_task: &mut SnapshotTask,
         metadata: &Arc<TableMetadata>,
         lsn: u64,
+        next_file_id: u32,
     ) -> Result<DiskSliceWriter> {
         // Finalize the current batch (if needed)
         let (new_batch, batches, index) = mem_slice.drain().unwrap();
@@ -487,6 +492,7 @@ impl MooncakeTable {
                 path_clone,
                 batches,
                 Some(lsn),
+                next_file_id,
                 index,
             );
             block_on(disk_slice.write())?;
@@ -503,6 +509,7 @@ impl MooncakeTable {
     async fn stream_flush(
         mem_slice: &mut MemSlice,
         metadata: &Arc<TableMetadata>,
+        next_file_id: u32,
     ) -> Result<DiskSliceWriter> {
         // Finalize the current batch (if needed)
         let (_, batches, index) = mem_slice.drain().unwrap();
@@ -513,6 +520,7 @@ impl MooncakeTable {
             metadata.path.clone(),
             batches,
             None,
+            next_file_id,
             index,
         );
         // TODO(nbiscaro): Find longer term solution that allows aysnc write
@@ -522,8 +530,11 @@ impl MooncakeTable {
 
     pub async fn flush_transaction_stream(&mut self, xact_id: u32) -> Result<()> {
         if let Some(stream_state) = self.transaction_stream_states.get_mut(&xact_id) {
+            let next_file_id = self.next_file_id;
+            self.next_file_id += 1;
             let disk_slice =
-                Self::stream_flush(&mut stream_state.mem_slice, &self.metadata).await?;
+                Self::stream_flush(&mut stream_state.mem_slice, &self.metadata, next_file_id)
+                    .await?;
 
             stream_state.new_disk_slices.push(disk_slice);
 
@@ -550,8 +561,11 @@ impl MooncakeTable {
                 .new_deletions
                 .append(&mut stream_state.new_deletions);
 
+            let next_file_id = self.next_file_id;
+            self.next_file_id += 1;
             // Flush any remaining rows in the xact mem slice
-            let disk_slice = Self::stream_flush(xact_mem_slice, &self.metadata).await?;
+            let disk_slice =
+                Self::stream_flush(xact_mem_slice, &self.metadata, next_file_id).await?;
             stream_state.new_disk_slices.push(disk_slice);
 
             // Update the LSN of all disk slices from pre-commit flushes
@@ -579,12 +593,15 @@ impl MooncakeTable {
             return Ok(());
         }
 
+        let next_file_id = self.next_file_id;
+        self.next_file_id += 1;
         // Flush data files into iceberb table.
         let disk_slice = Self::inner_flush_data_files(
             &mut self.mem_slice,
             &mut self.next_snapshot_task,
             &self.metadata,
             lsn,
+            next_file_id,
         )
         .await?;
         self.next_snapshot_task.new_disk_slices.push(disk_slice);

@@ -6,7 +6,7 @@ use crate::storage::iceberg::table_property;
 
 use futures::TryStreamExt;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use url::Url;
 use uuid::Uuid;
 
@@ -206,7 +206,7 @@ pub(crate) async fn get_iceberg_table<C: MoonlinkCatalog + ?Sized>(
 // One way to resolve is to use DataFileWrite on local write, and remember the `DataFile` returned.
 pub(crate) async fn write_record_batch_to_iceberg(
     table: &IcebergTable,
-    parquet_filepath: &PathBuf,
+    parquet_filepath: &String,
 ) -> IcebergResult<DataFile> {
     let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
     let file_name_generator = DefaultFileNameGenerator::new(
