@@ -1,5 +1,5 @@
 use crate::storage::index::file_index_id::get_next_file_index_id;
-use crate::storage::storage_utils::{DataFileRef, RecordLocation};
+use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
 use futures::executor::block_on;
 use memmap2::Mmap;
 use std::collections::BinaryHeap;
@@ -44,7 +44,7 @@ pub struct GlobalIndex {
     /// A unique id to identify each global index.
     pub(crate) global_index_id: u32,
 
-    pub(crate) files: Vec<DataFileRef>,
+    pub(crate) files: Vec<MooncakeDataFileRef>,
     pub(crate) num_rows: u32,
     pub(crate) hash_bits: u32,
     pub(crate) hash_upper_bits: u32,
@@ -284,7 +284,7 @@ impl IndexBlockBuilder {
 
 pub struct GlobalIndexBuilder {
     num_rows: u32,
-    files: Vec<DataFileRef>,
+    files: Vec<MooncakeDataFileRef>,
     directory: PathBuf,
 }
 
@@ -302,7 +302,7 @@ impl GlobalIndexBuilder {
         self
     }
 
-    pub fn set_files(&mut self, files: Vec<DataFileRef>) -> &mut Self {
+    pub fn set_files(&mut self, files: Vec<MooncakeDataFileRef>) -> &mut Self {
         self.files = files;
         self
     }

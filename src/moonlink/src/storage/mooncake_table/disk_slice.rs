@@ -3,8 +3,8 @@ use crate::error::{Error, Result};
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
 use crate::storage::index::{FileIndex, MemIndex};
 use crate::storage::storage_utils::{
-    create_data_file, get_random_file_name_in_dir, DataFileRef, ProcessedDeletionRecord,
-    RecordLocation,
+    create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
+    MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation,
 };
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -37,7 +37,7 @@ pub(crate) struct DiskSliceWriter {
     new_index: Option<FileIndex>,
 
     /// Records already flushed data files.
-    files: Vec<(DataFileRef, usize /* row count */)>,
+    files: Vec<(MooncakeDataFileRef, usize /* row count */)>,
 }
 
 impl DiskSliceWriter {
@@ -106,7 +106,7 @@ impl DiskSliceWriter {
         &self.batches
     }
     /// Get the list of files in the DiskSlice
-    pub(super) fn output_files(&self) -> &[(DataFileRef, usize)] {
+    pub(super) fn output_files(&self) -> &[(MooncakeDataFileRef, usize)] {
         self.files.as_slice()
     }
 
@@ -130,12 +130,14 @@ impl DiskSliceWriter {
             if writer.is_none() {
                 // Generate a unique file name
                 // Create the file
-                assert!(out_file_idx < 100);
-                let file_id = self.table_auto_incr_id as u64 * 100 + out_file_idx as u64;
+                let file_id = get_unique_file_id_for_flush(
+                    self.table_auto_incr_id as u64,
+                    out_file_idx as u64,
+                );
                 let file_path = get_random_file_name_in_dir(dir_path);
                 data_file = Some(create_data_file(file_id, file_path));
                 let file =
-                    tokio::fs::File::create(dir_path.join(data_file.as_ref().unwrap().file_name()))
+                    tokio::fs::File::create(dir_path.join(data_file.as_ref().unwrap().file_path()))
                         .await
                         .map_err(Error::Io)?;
                 out_file_idx = files.len();
@@ -266,7 +268,7 @@ mod tests {
 
         // Read the files and verify the data
         for (file, _rows) in disk_slice.output_files() {
-            let file_path = temp_dir.path().join(file.file_name());
+            let file_path = temp_dir.path().join(file.file_path());
             let file = tokio::fs::File::open(file_path).await?;
             let builder = ParquetRecordBatchStreamBuilder::new(file).await?;
             let actual_schema = builder.schema();

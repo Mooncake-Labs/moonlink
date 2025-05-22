@@ -5,34 +5,42 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct DataFile {
+pub struct MooncakeDataFile {
     file_id: FileId,
-    file_name: String,
+    file_path: String,
 }
 
-impl DataFile {
+impl MooncakeDataFile {
     pub fn file_id(&self) -> FileId {
         self.file_id
     }
 
-    pub fn file_name(&self) -> &String {
-        &self.file_name
+    pub fn file_path(&self) -> &String {
+        &self.file_path
     }
 }
 
-impl PartialEq for DataFile {
+impl PartialEq for MooncakeDataFile {
     fn eq(&self, other: &Self) -> bool {
         self.file_id == other.file_id
     }
 }
-impl Eq for DataFile {}
-impl Hash for DataFile {
+impl Eq for MooncakeDataFile {}
+impl Hash for MooncakeDataFile {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.file_id.0.hash(state);
     }
 }
 
-pub type DataFileRef = Arc<DataFile>;
+pub type MooncakeDataFileRef = Arc<MooncakeDataFile>;
+
+const LOCAL_FILE_ID_BASE: u64 = 10000000000000000;
+const NUM_FILES_PER_FLUSH: u64 = 100;
+
+pub fn get_unique_file_id_for_flush(table_auto_incr_id: u64, file_idx: u64) -> u64 {
+    assert!(file_idx < NUM_FILES_PER_FLUSH);
+    LOCAL_FILE_ID_BASE + table_auto_incr_id * NUM_FILES_PER_FLUSH + file_idx
+}
 
 pub fn get_random_file_name_in_dir(dir_path: &Path) -> String {
     dir_path
@@ -41,10 +49,10 @@ pub fn get_random_file_name_in_dir(dir_path: &Path) -> String {
         .to_string()
 }
 
-pub fn create_data_file(file_id: u64, file_path: String) -> DataFileRef {
-    Arc::new(DataFile {
+pub fn create_data_file(file_id: u64, file_path: String) -> MooncakeDataFileRef {
+    Arc::new(MooncakeDataFile {
         file_id: FileId(file_id),
-        file_name: file_path,
+        file_path,
     })
 }
 
@@ -92,12 +100,12 @@ impl From<(u64, usize)> for RecordLocation {
     }
 }
 
-impl From<(DataFile, usize)> for RecordLocation {
-    fn from(value: (DataFile, usize)) -> Self {
+impl From<(MooncakeDataFile, usize)> for RecordLocation {
+    fn from(value: (MooncakeDataFile, usize)) -> Self {
         RecordLocation::DiskFile(value.0.file_id, value.1)
     }
 }
-impl Borrow<FileId> for DataFileRef {
+impl Borrow<FileId> for MooncakeDataFileRef {
     fn borrow(&self) -> &FileId {
         &self.file_id
     }
@@ -109,11 +117,11 @@ mod tests {
     use std::collections::HashSet;
     #[test]
     fn test_data_file_id() {
-        let mut set: HashSet<Arc<DataFile>> = HashSet::new();
+        let mut set: HashSet<Arc<MooncakeDataFile>> = HashSet::new();
 
-        let df = Arc::new(DataFile {
+        let df = Arc::new(MooncakeDataFile {
             file_id: FileId(42),
-            file_name: "hello.txt".into(),
+            file_path: "hello.txt".into(),
         });
         set.insert(df.clone());
 
@@ -121,7 +129,7 @@ mod tests {
 
         // No dummy object needed 🎯
         if let Some(found) = set.get(&lookup_id) {
-            println!("Found: {:?}", found.file_name);
+            println!("Found: {:?}", found.file_path);
         }
     }
 }

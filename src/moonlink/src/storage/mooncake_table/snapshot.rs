@@ -11,7 +11,7 @@ use crate::storage::index::Index;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::mooncake_table::MoonlinkRow;
 use crate::storage::storage_utils::{
-    DataFileRef, ProcessedDeletionRecord, RawDeletionRecord, RecordLocation,
+    MooncakeDataFileRef, ProcessedDeletionRecord, RawDeletionRecord, RecordLocation,
 };
 use parquet::arrow::AsyncArrowWriter;
 use std::collections::{BTreeMap, HashMap};
@@ -98,7 +98,7 @@ impl SnapshotTableState {
     fn aggregate_committed_deletion_logs(
         &self,
         flush_lsn: u64,
-    ) -> Vec<(DataFileRef, BatchDeletionVector)> {
+    ) -> Vec<(MooncakeDataFileRef, BatchDeletionVector)> {
         let mut aggregated_deletion_logs = HashMap::new();
         for cur_deletion_log in self.committed_deletion_log.iter() {
             assert!(
@@ -167,7 +167,7 @@ impl SnapshotTableState {
     /// Update current mooncake snapshot with persisted deletion vector.
     fn update_current_snapshot_with_iceberg_snapshot(
         &mut self,
-        puffin_blob_ref: HashMap<DataFileRef, PuffinBlobRef>,
+        puffin_blob_ref: HashMap<MooncakeDataFileRef, PuffinBlobRef>,
     ) {
         for (local_disk_file, puffin_blob_ref) in puffin_blob_ref.into_iter() {
             let entry = self
@@ -420,7 +420,7 @@ impl SnapshotTableState {
                     .expect("missing disk file");
                 identity
                     .equals_parquet_at_offset(
-                        file.file_name(),
+                        file.file_path(),
                         *row_id,
                         &self.current_snapshot.metadata.identity,
                     )
@@ -542,7 +542,7 @@ impl SnapshotTableState {
             self.current_snapshot
                 .disk_files
                 .keys()
-                .map(|path| path.file_name().clone()),
+                .map(|path| path.file_path().clone()),
         );
 
         // For committed but not persisted records, we create a temporary file for them, which gets deleted after query completion.

@@ -8,7 +8,7 @@ mod table_snapshot;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{MemIndex, MooncakeIndex};
-use super::storage_utils::{DataFileRef, RawDeletionRecord, RecordLocation};
+use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
 use crate::error::{Error, Result};
 use crate::row::{IdentityProp, MoonlinkRow};
 use crate::storage::iceberg::iceberg_table_manager::{
@@ -130,7 +130,7 @@ pub struct Snapshot {
     pub(crate) metadata: Arc<TableMetadata>,
     /// datafile and their deletion vector.
     /// TODO(hjiang): For the initial release and before we figure out a cache design, disk files are always local ones.
-    pub(crate) disk_files: HashMap<DataFileRef, DiskFileDeletionVector>,
+    pub(crate) disk_files: HashMap<MooncakeDataFileRef, DiskFileDeletionVector>,
     /// Current snapshot version, which is the mooncake table commit point.
     pub(crate) snapshot_version: u64,
     /// LSN which last data file flush operation happens.
@@ -195,7 +195,7 @@ pub struct SnapshotTask {
     /// Flush LSN for iceberg snapshot.
     iceberg_flush_lsn: Option<u64>,
     /// Puffin blobs which have been persisted into iceberg snapshot.
-    iceberg_persisted_puffin_blob: HashMap<DataFileRef, PuffinBlobRef>,
+    iceberg_persisted_puffin_blob: HashMap<MooncakeDataFileRef, PuffinBlobRef>,
 }
 
 impl SnapshotTask {
@@ -223,7 +223,7 @@ impl SnapshotTask {
     }
 
     /// Get newly created data files.
-    pub(crate) fn get_new_data_files(&self) -> Vec<DataFileRef> {
+    pub(crate) fn get_new_data_files(&self) -> Vec<MooncakeDataFileRef> {
         let mut new_files = vec![];
         for cur_disk_slice in self.new_disk_slices.iter() {
             new_files.extend(

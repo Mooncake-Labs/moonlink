@@ -17,7 +17,7 @@ use crate::storage::mooncake_table::{
     TableMetadata as MooncakeTableMetadata,
 };
 use crate::storage::storage_utils::create_data_file;
-use crate::storage::storage_utils::DataFileRef;
+use crate::storage::storage_utils::MooncakeDataFileRef;
 use crate::storage::storage_utils::RawDeletionRecord;
 use crate::storage::storage_utils::RecordLocation;
 use crate::storage::MooncakeTable;
@@ -40,8 +40,8 @@ use tempfile::TempDir;
 
 /// Create test batch deletion vector.
 fn test_committed_deletion_log_1(
-    data_filepath: DataFileRef,
-) -> Vec<(DataFileRef, BatchDeletionVector)> {
+    data_filepath: MooncakeDataFileRef,
+) -> Vec<(MooncakeDataFileRef, BatchDeletionVector)> {
     let mut deletion_vector = BatchDeletionVector::new(MooncakeTableConfig::DEFAULT_BATCH_SIZE);
     deletion_vector.delete_row(0);
 
@@ -49,8 +49,8 @@ fn test_committed_deletion_log_1(
 }
 /// Test deletion vector 2 includes deletion vector 1, used to mimic new data file rows deletion situation.
 fn test_committed_deletion_log_2(
-    data_filepath: DataFileRef,
-) -> Vec<(DataFileRef, BatchDeletionVector)> {
+    data_filepath: MooncakeDataFileRef,
+) -> Vec<(MooncakeDataFileRef, BatchDeletionVector)> {
     let mut deletion_vector = BatchDeletionVector::new(MooncakeTableConfig::DEFAULT_BATCH_SIZE);
     deletion_vector.delete_row(1);
     deletion_vector.delete_row(2);
@@ -153,7 +153,7 @@ fn get_file_indices_filepath_and_data_filepaths(
             cur_file_index
                 .files
                 .iter()
-                .map(|cur_file| cur_file.file_name().clone())
+                .map(|cur_file| cur_file.file_path().clone())
                 .collect::<Vec<_>>(),
         );
         index_files.extend(
@@ -524,7 +524,7 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         .unwrap()
         .file_io();
     let (loaded_path, deletion_vector) = snapshot.disk_files.iter().next().unwrap();
-    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_name().as_str()).await?;
+    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_path().as_str()).await?;
     let expected_arrow_batch = RecordBatch::try_new(
         schema.clone(),
         // row2 and row3
@@ -596,7 +596,7 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         .unwrap()
         .file_io();
     let (loaded_path, deletion_vector) = snapshot.disk_files.iter().next().unwrap();
-    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_name().as_str()).await?;
+    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_path().as_str()).await?;
     assert_eq!(
         loaded_arrow_batch, expected_arrow_batch,
         "Expected arrow data is {:?}, actual data is {:?}",
@@ -656,7 +656,7 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         .unwrap()
         .file_io();
     let (loaded_path, deletion_vector) = snapshot.disk_files.iter().next().unwrap();
-    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_name().as_str()).await?;
+    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_path().as_str()).await?;
     assert_eq!(
         loaded_arrow_batch, expected_arrow_batch,
         "Expected arrow data is {:?}, actual data is {:?}",
@@ -729,7 +729,7 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
     // The old data file and deletion vector is unchanged.
     let old_data_entry = iceberg_table_manager
         .persisted_data_files
-        .remove(loaded_path.file_name());
+        .remove(loaded_path.file_path());
     assert!(
         old_data_entry.is_some(),
         "Add new data file shouldn't change existing persisted items"
@@ -742,13 +742,13 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
     let (file_in_new_snapshot, _) = snapshot
         .disk_files
         .iter()
-        .find(|(path, _)| path.file_name() == loaded_path.file_name())
+        .find(|(path, _)| path.file_path() == loaded_path.file_path())
         .unwrap();
     snapshot.disk_files.remove(&file_in_new_snapshot.file_id());
 
     // Check new data file is correctly managed by iceberg table with no deletion vector.
     let (loaded_path, deletion_vector) = snapshot.disk_files.iter().next().unwrap();
-    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_name().as_str()).await?;
+    let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.file_path().as_str()).await?;
 
     let expected_arrow_batch = RecordBatch::try_new(
         schema.clone(),
@@ -947,7 +947,7 @@ async fn check_prev_data_files(
         .as_ref()
         .unwrap()
         .file_io();
-    let loaded_arrow_batch = load_arrow_batch(file_io, data_file.file_name().as_str())
+    let loaded_arrow_batch = load_arrow_batch(file_io, data_file.file_path().as_str())
         .await
         .unwrap();
     let expected_arrow_batch = RecordBatch::try_new(
@@ -993,7 +993,7 @@ async fn check_new_data_files(
         .as_ref()
         .unwrap()
         .file_io();
-    let loaded_arrow_batch = load_arrow_batch(file_io, data_file.file_name().as_str())
+    let loaded_arrow_batch = load_arrow_batch(file_io, data_file.file_path().as_str())
         .await
         .unwrap();
     let expected_arrow_batch = RecordBatch::try_new(
@@ -1042,7 +1042,7 @@ async fn check_prev_and_new_data_files(
     let mut loaded_record_batches: Vec<RecordBatch> = Vec::with_capacity(2);
     let mut batch_deletion_vectors: Vec<&BatchDeletionVector> = Vec::with_capacity(2);
     for (cur_data_file, cur_deletion_vector) in snapshot.disk_files.iter() {
-        let cur_arrow_batch = load_arrow_batch(file_io, cur_data_file.file_name().as_str())
+        let cur_arrow_batch = load_arrow_batch(file_io, cur_data_file.file_path().as_str())
             .await
             .unwrap();
         loaded_record_batches.push(cur_arrow_batch);

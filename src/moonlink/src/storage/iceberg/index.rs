@@ -58,7 +58,7 @@ impl FileIndex {
             data_files: mooncake_index
                 .files
                 .iter()
-                .map(|path| path.file_name().clone())
+                .map(|path| path.file_path().clone())
                 .collect(),
             index_block_files: mooncake_index
                 .index_blocks
