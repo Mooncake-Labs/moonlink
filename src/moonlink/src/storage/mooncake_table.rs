@@ -5,6 +5,7 @@ mod mem_slice;
 mod shared_array;
 mod snapshot;
 mod table_snapshot;
+mod transaction_stream;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{MemIndex, MooncakeIndex};
@@ -18,10 +19,12 @@ use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 pub(crate) use crate::storage::mooncake_table::table_snapshot::{
     IcebergSnapshotPayload, IcebergSnapshotResult,
 };
+use crate::storage::storage_utils::FileId;
 use std::collections::HashMap;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
@@ -179,6 +182,7 @@ pub struct SnapshotTask {
     /// Current task
     ///
     new_disk_slices: Vec<DiskSliceWriter>,
+    disk_file_lsn_map: HashMap<FileId, u64>,
     new_deletions: Vec<RawDeletionRecord>,
     /// Pair of <batch id, record batch>.
     new_record_batches: Vec<(u64, Arc<RecordBatch>)>,
@@ -189,6 +193,9 @@ pub struct SnapshotTask {
     /// Assigned at a flush operation.
     new_flush_lsn: Option<u64>,
     new_commit_point: Option<RecordLocation>,
+
+    /// streaming xact
+    new_streaming_xact: Vec<TransactionStreamOutput>,
 
     /// ---- States have been recorded by mooncake snapshot, and persisted into iceberg table ----
     /// These persisted items will be reflected to mooncake snapshot in the next invocation of periodic mooncake snapshot operation.
@@ -206,6 +213,7 @@ impl SnapshotTask {
         Self {
             mooncake_table_config,
             new_disk_slices: Vec::new(),
+            disk_file_lsn_map: HashMap::new(),
             new_deletions: Vec::new(),
             new_record_batches: Vec::new(),
             new_rows: None,
@@ -213,6 +221,7 @@ impl SnapshotTask {
             new_commit_lsn: 0,
             new_flush_lsn: None,
             new_commit_point: None,
+            new_streaming_xact: Vec::new(),
             iceberg_flush_lsn: None,
             iceberg_persisted_data_files: Vec::new(),
             iceberg_persisted_puffin_blob: HashMap::new(),
@@ -238,24 +247,6 @@ impl SnapshotTask {
             );
         }
         new_files
-    }
-}
-
-/// Used to track the state of a streamed transaction
-/// Holds the memslice and pending deletes
-struct TransactionStreamState {
-    mem_slice: MemSlice,
-    new_deletions: Vec<RawDeletionRecord>,
-    new_disk_slices: Vec<DiskSliceWriter>,
-}
-
-impl TransactionStreamState {
-    fn new(schema: Arc<Schema>, batch_size: usize, identity: IdentityProp) -> Self {
-        Self {
-            mem_slice: MemSlice::new(schema, batch_size, identity),
-            new_deletions: Vec::new(),
-            new_disk_slices: Vec::new(),
-        }
     }
 }
 
@@ -429,93 +420,6 @@ impl MooncakeTable {
         self.mem_slice.get_num_rows() >= self.metadata.config.mem_slice_size
     }
 
-    fn get_or_create_stream_state<'a>(
-        transaction_stream_states: &'a mut HashMap<u32, TransactionStreamState>,
-        metadata: &Arc<TableMetadata>,
-        xact_id: u32,
-    ) -> &'a mut TransactionStreamState {
-        transaction_stream_states.entry(xact_id).or_insert_with(|| {
-            TransactionStreamState::new(
-                metadata.schema.clone(),
-                metadata.config.batch_size,
-                metadata.identity.clone(),
-            )
-        })
-    }
-
-    pub fn should_transaction_flush(&self, xact_id: u32) -> bool {
-        self.transaction_stream_states
-            .get(&xact_id)
-            .unwrap()
-            .mem_slice
-            .get_num_rows()
-            >= self.metadata.config.batch_size
-    }
-
-    pub fn append_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) -> Result<()> {
-        let stream_state = Self::get_or_create_stream_state(
-            &mut self.transaction_stream_states,
-            &self.metadata,
-            xact_id,
-        );
-
-        let lookup_key = self.metadata.identity.get_lookup_key(&row);
-        let identity_for_key = self.metadata.identity.extract_identity_for_key(&row);
-        stream_state
-            .mem_slice
-            .append(lookup_key, row, identity_for_key)?;
-
-        Ok(())
-    }
-
-    pub async fn delete_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) {
-        let lookup_key = self.metadata.identity.get_lookup_key(&row);
-        let mut record = RawDeletionRecord {
-            lookup_key,
-            lsn: u64::MAX, // Updated at commit time
-            pos: None,
-            row_identity: self.metadata.identity.extract_identity_columns(row),
-        };
-
-        let stream_state = Self::get_or_create_stream_state(
-            &mut self.transaction_stream_states,
-            &self.metadata,
-            xact_id,
-        );
-        if let Some(pos) = stream_state
-            .mem_slice
-            .delete(&record, &self.metadata.identity)
-            .await
-        {
-            record.pos = Some(pos);
-        } else {
-            // Edge‑case: txn deletes a row that's still in the main mem_slice
-            // TODO(nbiscaro): This is a bit of a hack. We can likely resolve this in a cleaner way during snapshot.
-            // [https://github.com/Mooncake-Labs/moonlink/issues/126]
-            record.pos = self
-                .mem_slice
-                .find_non_deleted_position(&record, &self.metadata.identity)
-                .await;
-            // NOTE: There is still a remaining edge case that is not yet supported:
-            // In the event that we have two identical, rows A and B, with no primary key (using full row as
-            // identifier). We may have a situation where we delete A during some streaming
-            // transaction, and then delete A in a non-streaming transaction. In this case, we will
-            // delete A twice instead of deleting A then B. A potential solution is to have the
-            // main mem slice delete from the top of the matches rows and the streamin transaction
-            // to delete from the bottom, but this needs a closer look.
-        }
-        self.transaction_stream_states
-            .get_mut(&xact_id)
-            .unwrap()
-            .new_deletions
-            .push(record);
-    }
-
-    pub fn abort_in_stream_batch(&mut self, xact_id: u32) {
-        // Record abortion in snapshot task so we can remove any uncomitted deletions
-        self.transaction_stream_states.remove(&xact_id);
-    }
-
     /// Flush `mem_slice` into parquet files and return the resulting `DiskSliceWriter`.
     ///
     /// When `snapshot_task` is provided, new batches and indices are recorded so
@@ -555,70 +459,6 @@ impl MooncakeTable {
 
         disk_slice.write().await?;
         Ok(disk_slice)
-    }
-
-    pub async fn flush_transaction_stream(&mut self, xact_id: u32) -> Result<()> {
-        if let Some(stream_state) = self.transaction_stream_states.get_mut(&xact_id) {
-            let next_file_id = self.next_file_id;
-            self.next_file_id += 1;
-            let disk_slice = Self::flush_mem_slice(
-                &mut stream_state.mem_slice,
-                &self.metadata,
-                next_file_id,
-                None,
-                None,
-            )
-            .await?;
-
-            stream_state.new_disk_slices.push(disk_slice);
-
-            return Ok(());
-        }
-        Ok(())
-    }
-
-    pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        self.next_snapshot_task.new_flush_lsn = Some(lsn);
-
-        if let Some(mut stream_state) = self.transaction_stream_states.remove(&xact_id) {
-            let xact_mem_slice = &mut stream_state.mem_slice;
-
-            let snapshot_task = &mut self.next_snapshot_task;
-            snapshot_task.new_commit_lsn = lsn;
-
-            // We update our delete records with the last lsn of the transaction
-            // Note that in the stream case we dont have this until commit time
-            for deletion in stream_state.new_deletions.iter_mut() {
-                deletion.lsn = lsn;
-            }
-
-            // add transaction deletions to snapshot task
-            snapshot_task
-                .new_deletions
-                .append(&mut stream_state.new_deletions);
-
-            let next_file_id = self.next_file_id;
-            self.next_file_id += 1;
-            // Flush any remaining rows in the xact mem slice
-            let disk_slice =
-                Self::flush_mem_slice(xact_mem_slice, &self.metadata, next_file_id, None, None)
-                    .await?;
-            stream_state.new_disk_slices.push(disk_slice);
-
-            // Update the LSN of all disk slices from pre-commit flushes
-            for disk_slice in stream_state.new_disk_slices.iter_mut() {
-                disk_slice.set_lsn(Some(lsn));
-            }
-
-            // Add the disk slices to the snapshot task
-            snapshot_task
-                .new_disk_slices
-                .append(&mut stream_state.new_disk_slices);
-
-            Ok(())
-        } else {
-            Err(Error::TransactionNotFound(xact_id))
-        }
     }
 
     // UNDONE(BATCH_INSERT):

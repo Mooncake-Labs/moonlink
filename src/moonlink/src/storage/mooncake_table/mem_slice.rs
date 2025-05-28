@@ -90,6 +90,10 @@ impl MemSlice {
         None
     }
 
+    pub fn try_delete_at_pos(&mut self, pos: (u64, usize)) -> bool {
+        self.column_store.try_delete_at_pos(pos)
+    }
+
     /// Append the given row into column store buffer and mem index.
     /// Return the finalized record batch if the current one's full.
     pub(super) fn append(

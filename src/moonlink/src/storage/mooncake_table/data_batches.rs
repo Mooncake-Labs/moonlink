@@ -259,6 +259,22 @@ impl ColumnStoreBuffer {
     pub(super) fn get_latest_rows(&self) -> SharedRowBufferSnapshot {
         self.current_rows.get_snapshot()
     }
+
+    pub(super) fn try_delete_at_pos(&mut self, pos: (u64, usize)) -> bool {
+        let idx = self
+            .in_memory_batches
+            .binary_search_by_key(&pos.0, |x| x.id);
+        if idx.is_ok() {
+            let res = self.in_memory_batches[idx.unwrap()]
+                .batch
+                .deletions
+                .delete_row(pos.1);
+            assert!(res);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub(super) fn create_batch_from_rows(

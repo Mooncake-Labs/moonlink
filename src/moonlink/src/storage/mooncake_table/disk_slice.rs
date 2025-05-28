@@ -98,10 +98,6 @@ impl DiskSliceWriter {
         self.writer_lsn
     }
 
-    pub(super) fn set_lsn(&mut self, lsn: Option<u64>) {
-        self.writer_lsn = lsn;
-    }
-
     pub(super) fn input_batches(&self) -> &Vec<BatchEntry> {
         &self.batches
     }

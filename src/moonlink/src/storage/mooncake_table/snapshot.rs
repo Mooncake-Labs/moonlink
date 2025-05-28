@@ -10,6 +10,7 @@ use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
 use crate::storage::index::Index;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::mooncake_table::MoonlinkRow;
+use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::{
     MooncakeDataFile, MooncakeDataFileRef, ProcessedDeletionRecord, RawDeletionRecord,
     RecordLocation,
@@ -24,7 +25,7 @@ pub(crate) struct SnapshotTableState {
     mooncake_table_config: TableConfig,
 
     /// Current snapshot
-    current_snapshot: Snapshot,
+    pub(super) current_snapshot: Snapshot,
 
     /// In memory RecordBatches, maps from batch id to in-memory batch.
     batches: BTreeMap<u64, InMemoryBatch>,
@@ -41,9 +42,9 @@ pub(crate) struct SnapshotTableState {
     // 3. Committed but not yet persisted deletion logs
     //
     // Type-3, committed but not yet persisted deletion logs.
-    committed_deletion_log: Vec<ProcessedDeletionRecord>,
+    pub(super) committed_deletion_log: Vec<ProcessedDeletionRecord>,
     // Type-1: uncommitted deletion logs.
-    uncommitted_deletion_log: Vec<Option<ProcessedDeletionRecord>>,
+    pub(super) uncommitted_deletion_log: Vec<Option<ProcessedDeletionRecord>>,
 
     /// Last commit point
     last_commit: RecordLocation,
@@ -250,6 +251,7 @@ impl SnapshotTableState {
         // To reduce iceberg write frequency, only create new iceberg snapshot when there're new data files.
         let new_data_files = task.get_new_data_files();
 
+        self.apply_transaction_stream(&mut task);
         self.merge_mem_indices(&mut task);
         self.finalize_batches(&mut task);
         self.integrate_disk_slices(&mut task);
@@ -353,9 +355,12 @@ impl SnapshotTableState {
                         },
                     )
                 }));
-
-            // remap deletions written *after* this slice’s LSN
             let write_lsn = slice.lsn();
+            let lsn = write_lsn.expect("commited datafile should have a valid LSN");
+            for (f, _) in slice.output_files().iter() {
+                task.disk_file_lsn_map.insert(f.file_id(), lsn);
+            }
+            // remap deletions written *after* this slice’s LSN
             let cut = self.committed_deletion_log.partition_point(|d| {
                 d.lsn
                     <= write_lsn.expect(
@@ -391,6 +396,7 @@ impl SnapshotTableState {
     async fn process_delete_record(
         &mut self,
         deletion: RawDeletionRecord,
+        file_id_to_lsn: &HashMap<FileId, u64>,
     ) -> ProcessedDeletionRecord {
         // Fast-path: The row we are deleting was in the mem slice so we already have the position
         if let Some(pos) = deletion.pos {
@@ -404,7 +410,9 @@ impl SnapshotTableState {
             .find_record(&deletion)
             .await
             .into_iter()
-            .filter(|loc| !self.is_deleted(loc))
+            .filter(|loc| {
+                !self.is_deleted(loc) && self.is_visible(loc, file_id_to_lsn, deletion.lsn)
+            })
             .collect();
 
         match candidates.len() {
@@ -458,6 +466,20 @@ impl SnapshotTableState {
                 .expect("missing disk file")
                 .batch_deletion_vector
                 .is_deleted(*row_id),
+        }
+    }
+
+    fn is_visible(
+        &self,
+        loc: &RecordLocation,
+        file_id_to_lsn: &HashMap<FileId, u64>,
+        lsn: u64,
+    ) -> bool {
+        match loc {
+            RecordLocation::MemoryBatch(_, _) => true,
+            RecordLocation::DiskFile(file_id, _) => {
+                file_id_to_lsn.get(file_id).is_none() || file_id_to_lsn.get(file_id).unwrap() < &lsn
+            }
         }
     }
 
@@ -543,7 +565,9 @@ impl SnapshotTableState {
     /// them or defer until their LSN becomes visible.
     async fn apply_new_deletions(&mut self, task: &mut SnapshotTask) {
         for raw in take(&mut task.new_deletions) {
-            let processed = self.process_delete_record(raw).await;
+            let processed = self
+                .process_delete_record(raw, &task.disk_file_lsn_map)
+                .await;
             if processed.lsn <= task.new_commit_lsn {
                 self.commit_deletion(processed);
             } else {

@@ -274,6 +274,47 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_duplicate_deletion() -> Result<()> {
+    // Create iceberg snapshot whenever `create_snapshot` is called.
+    let context = TestContext::new("duplicate_deletion");
+    let mut table = test_table(&context, "duplicate_deletion", IdentityProp::Keys(vec![0])).await;
+
+    let old_row = test_row(1, "John", 30);
+    table.append(old_row.clone()).unwrap();
+    table.commit(/*lsn=*/ 100);
+    table.flush(/*lsn=*/ 100).await.unwrap();
+    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+
+    // Update operation.
+    let new_row = old_row.clone();
+    table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 200).await;
+    table.append(new_row.clone()).unwrap();
+    table.commit(/*lsn=*/ 200);
+    table.flush(/*lsn=*/ 200).await.unwrap();
+    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+
+    {
+        let table_snapshot = table.snapshot.read().await;
+        let ReadOutput {
+            data_file_paths,
+            puffin_file_paths,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = table_snapshot.request_read().await?;
+        verify_files_and_deletions(
+            &data_file_paths,
+            &puffin_file_paths,
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+    }
+    Ok(())
+}
+
 /// ---- Mock unit test ----
 #[tokio::test]
 async fn test_snapshot_load_failure() {
