@@ -96,7 +96,7 @@ fn postgres_type_to_arrow_type(
         Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id),
         Kind::Array(inner) => {
             let item_type = postgres_type_to_arrow_type(
-                inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ false,
+                inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ true,
                 field_id,
             );
             let field = Field::new_list(name, Arc::new(item_type), nullable);

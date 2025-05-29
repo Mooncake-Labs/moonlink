@@ -83,10 +83,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::Bool(v) = v[i] else {
-                                unreachable!("Bool expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::Bool(v) => builder.append_value(*v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("Bool expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -100,10 +101,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::Int32(v) = v[i] else {
-                                unreachable!("Int32 expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::Int32(v) => builder.append_value(*v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("Int32 expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -117,10 +119,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::Int64(v) = v[i] else {
-                                unreachable!("Int64 expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::Int64(v) => builder.append_value(*v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("Int64 expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -134,10 +137,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::Float32(v) = v[i] else {
-                                unreachable!("Float32 expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::Float32(v) => builder.append_value(*v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("Float32 expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -151,10 +155,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::Float64(v) = v[i] else {
-                                unreachable!("Float64 expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::Float64(v) => builder.append_value(*v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("Float64 expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -168,10 +173,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::Decimal(v) = v[i] else {
-                                unreachable!("Decimal128 expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::Decimal(v) => builder.append_value(*v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("Decimal128 expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -187,10 +193,12 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::ByteArray(v) = &v[i] else {
-                                unreachable!("ByteArray expected from well-typed input");
-                            };
-                            builder.append_value(unsafe { std::str::from_utf8_unchecked(v) });
+                            match &v[i] {
+                                RowValue::ByteArray(v) => builder
+                                    .append_value(unsafe { std::str::from_utf8_unchecked(v) }),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("ByteArray expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -204,10 +212,13 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::FixedLenByteArray(v) = v[i] else {
-                                unreachable!("FixedLenByteArray expected from well-typed input");
-                            };
-                            builder.append_value(v)?;
+                            match &v[i] {
+                                RowValue::FixedLenByteArray(v) => builder.append_value(v)?,
+                                RowValue::Null => builder.append_null(),
+                                _ => {
+                                    unreachable!("FixedLenByteArray expected from well-typed input")
+                                }
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
@@ -221,10 +232,11 @@ impl ColumnArrayBuilder {
                     RowValue::Array(v) => {
                         offset_builder.as_mut().unwrap().push(builder.len() as i32);
                         for i in 0..v.len() {
-                            let RowValue::ByteArray(v) = &v[i] else {
-                                unreachable!("ByteArray expected from well-typed input");
-                            };
-                            builder.append_value(v);
+                            match &v[i] {
+                                RowValue::ByteArray(v) => builder.append_value(v),
+                                RowValue::Null => builder.append_null(),
+                                _ => unreachable!("ByteArray expected from well-typed input"),
+                            }
                         }
                     }
                     RowValue::Null => builder.append_null(),
