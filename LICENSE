@@ -1,59 +1,65 @@
-# Business Source License 1.1
+Business Source License 1.1
 
-© 2025 Mooncake Labs Inc. All Rights Reserved.
+Parameters:
+  Licensor: Mooncake Labs Inc.
+  Licensed Work: All source code, documentation, and related files located in this repository, "Moonlink".
+  Additional Use Grant: You may use, modify, and deploy the Licensed Work within your organization, including embedding it in your applications. However, you may not offer the Licensed Work or any derivative as a managed service (such as a database, data warehouse, stream processing, or data lake service) to third parties without a separate commercial license from Mooncake Labs Inc.
+  Change Date: Four (4) years from the release date of the respective version of the Licensed Work. For Moonlink version 0.1.0, released on 2025-06-03, the Change Date is 2029-06-03. Please see https://github.com/Mooncake-Labs/moonlink/releases for exact dates of other versions.
+  Change License: Apache License 2.0
 
-"Business Source License" is a trademark of MariaDB plc.
+--------------------------------------------------------------------------------
 
-## Licensor and Licensed Work
+TERMS
 
-* **LICENSOR**: Mooncake Labs Inc.
-* **LICENSED WORK**: All source code, documentation, and related files located in this repository, "Moonlink".
+The Licensor grants you the right to copy, modify, create derivative works,
+redistribute, and make non-production use of the Licensed Work. Production
+use is allowed as described in the Additional Use Grant.
 
-## Additional Use Grant
+This License applies separately for each version of the Licensed Work. You must
+include a copy of this License with each copy of the Licensed Work. You must
+also include this License in any derivative works you create.
 
-* You may use, modify, and deploy the Licensed Work within your organization, including embedding it in your applications. However, you may not offer the Licensed Work or any derivative as a managed service (such as a database, data warehouse, stream processing, or data lake service) to third parties without a separate commercial license from Mooncake Labs Inc.
+The Licensed Work is provided “AS IS” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE LICENSED WORK OR THE USE OR OTHER DEALINGS IN
+THE LICENSED WORK.
 
-## Change Date and License
+The Licensor commits to making the Licensed Work available under the Change
+License on the Change Date. The Change License will apply to the version of
+the Licensed Work released on or before the Change Date and to all previous
+versions of the Licensed Work.
 
-* **CHANGE DATE**: Four (4) years from the release date. The latest release of Moonlink 0.1.0 is **2025-06-03**. See the [releases](https://github.com/Mooncake-Labs/moonlink/releases) page for exact dates.
-* **CHANGE LICENSE**: Apache License 2.0
+GENERAL CONDITIONS
 
----
+If your use of the Licensed Work does not comply with the license terms, you must either purchase a commercial license from Mooncake Labs Inc. or cease using the Licensed Work.
 
-## PG_MOONCAKE Linking & Distribution Exception
-
-This exception applies exclusively to the open-source project **pg_mooncake** (<https://github.com/mooncakelabs/pg_mooncake>) which embeds Moonlink.
-
-* **Linking & Redistribution**: You may statically or dynamically link Moonlink object code with pg_mooncake and distribute the combined executable under the MIT License applicable to pg_mooncake.
-* **Modifications to pg_mooncake**: Modifications to pg_mooncake itself (excluding any modifications to Moonlink code) remain governed exclusively by the MIT License. Modifications made directly to Moonlink code remain governed exclusively by this Business Source License 1.1.
-* **Termination**: Failure to comply with these terms automatically terminates this exception.
-
----
-
-## Full Business Source License Text
-
-The Licensor grants you the right to copy, modify, create derivative works, redistribute, and make non-production use of the Licensed Work, subject to the Additional Use Grant above.
-
-On the Change Date (defined above) or four years after the initial public release of the Licensed Work, whichever is earlier, the Licensed Work will be made available under the Change License.
-
-If your use of the Licensed Work does not comply with the terms of this License, you must purchase a commercial license from Mooncake Labs Inc. or cease using the Licensed Work.
-
-All copies of the original, modified, or derivative Licensed Work are subject to this License. The License applies separately to each version of the Licensed Work.
+All copies of the original, modified, or derivative Licensed Work are subject to this License.
 
 You must prominently display this License on each copy of the Licensed Work. Any violation automatically terminates your rights under this License.
 
 This License does not grant any rights to the trademarks or logos of Mooncake Labs Inc.
 
-### Disclaimer
+COVENANTS OF LICENSOR
 
-TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+Licensor covenants to specify a Change License compatible with GPL Version 2.0 or later. Licensor may specify additional compatible licenses.
 
-### Covenants of Licensor
+NOTICE
 
-The Licensor covenants to specify a Change License that is compatible with GNU General Public License Version 2.0 or later. The Licensor may specify additional compatible licenses.
+The Business Source License is not an open-source license. However, it guarantees eventual availability under an open-source license as specified above.
 
-### Notice
+PG_MOONCAKE LINKING & DISTRIBUTION EXCEPTION
 
-The Business Source License is not an open-source license. However, it guarantees the eventual availability of the Licensed Work under an open-source license as specified above.
+Scope: This exception applies exclusively to the open-source project "pg_mooncake" (https://github.com/mooncakelabs/pg_mooncake) which embeds Moonlink.
 
-For more information, see <https://mariadb.com/bsl11/>.
+1. Linking and Redistribution: You may statically or dynamically link Moonlink object code with pg_mooncake and distribute the combined executable under the MIT License applicable to pg_mooncake.
+
+2. Modifications to pg_mooncake: Modifications to pg_mooncake itself (excluding any modifications specifically to Moonlink code) remain governed exclusively by the MIT License. Modifications made directly to Moonlink code remain governed exclusively by this Business Source License 1.1.
+
+3. Termination: Failure to comply with these terms automatically terminates this exception.
+
+Copyright (c) 2025 Mooncake Labs Inc. All Rights Reserved.
+"Business Source License" is a trademark of MariaDB plc.
+For more details visit: https://mariadb.com/bsl11/
