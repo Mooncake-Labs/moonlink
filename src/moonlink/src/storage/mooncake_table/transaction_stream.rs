@@ -42,6 +42,10 @@ impl TransactionStreamState {
     }
 }
 
+// DevNote:
+// This is a trick to track xact of uncommitted deletions
+// we set first 32 bits to 1, so it will be 'uncommitted' as the value is larger than any possible lsn.
+// And we use the last 32 bits to store the xact_id, so we can find deletion for a given xact_id.
 fn get_lsn_for_pending_xact(xact_id: u32) -> u64 {
     0xFFFF_FFFF_0000_0000 | xact_id as u64
 }
@@ -191,11 +195,8 @@ impl MooncakeTable {
     }
 
     pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        self.next_snapshot_task.new_flush_lsn = Some(lsn);
-
+        self.flush_transaction_stream(xact_id).await?;
         if let Some(mut stream_state) = self.transaction_stream_states.remove(&xact_id) {
-            let xact_mem_slice = &mut stream_state.mem_slice;
-
             let snapshot_task = &mut self.next_snapshot_task;
             snapshot_task.new_commit_lsn = lsn;
 
@@ -212,23 +213,6 @@ impl MooncakeTable {
             for deletion in stream_state.local_deletions.iter_mut() {
                 deletion.lsn = lsn;
             }
-            // add transaction deletions to snapshot task
-            snapshot_task
-                .new_deletions
-                .append(&mut stream_state.pending_deletions_in_main_mem_slice);
-
-            let next_file_id = self.next_file_id;
-            self.next_file_id += 1;
-            // Flush any remaining rows in the xact mem slice
-            let disk_slice = Self::flush_mem_slice(
-                xact_mem_slice,
-                &self.metadata,
-                next_file_id,
-                Some(lsn),
-                None,
-            )
-            .await?;
-            snapshot_task.new_disk_slices.push(disk_slice);
 
             let commit = TransactionStreamCommit {
                 xact_id,
@@ -241,6 +225,7 @@ impl MooncakeTable {
             snapshot_task
                 .new_streaming_xact
                 .push(TransactionStreamOutput::Commit(commit));
+            snapshot_task.new_flush_lsn = Some(lsn);
             Ok(())
         } else {
             Err(Error::TransactionNotFound(xact_id))
