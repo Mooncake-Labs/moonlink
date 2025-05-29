@@ -4,9 +4,10 @@ use crate::storage::storage_utils::ProcessedDeletionRecord;
 /// Used to track the state of a streamed transaction
 /// Holds appending rows in memslice and files.
 /// Deletes are more complex,
-/// 1. Deletes on appending rows is tracked in `local_deletions`
-/// 2. Deletes on flushed files are directly pushed to snapshot_task.new_deletions
-/// 3. Deletes on "in-memory" rows are tracked in `pending_deletions_in_main_mem_slice`
+/// 1. row belong to stream state memslice, directly delete it.
+/// 2. row belong to stream state flushed file, add to `local_deletions`
+/// 3. row belong to main table's flushed files, directly pushed to snapshot_task.new_deletions and let snapshot handle it.
+/// 4. row belong to main table's memslice, add to `pending_deletions_in_main_mem_slice`, and handle at commit time`
 ///
 pub(super) struct TransactionStreamState {
     mem_slice: MemSlice,
