@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(arrow_schema.field(20).data_type(), &DataType::Binary);
 
         assert_eq!(arrow_schema.field(21).name(), "bool_array_field");
-        let mut expected_field = Field::new("item", DataType::Boolean, /*nullable=*/ false);
+        let mut expected_field = Field::new("item", DataType::Boolean, /*nullable=*/ true);
         let mut field_metadata = HashMap::new();
         field_metadata.insert("PARQUET:field_id".to_string(), "22".to_string());
         expected_field.set_metadata(field_metadata);
