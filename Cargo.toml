@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2021"
 
 [workspace.dependencies]
-arrow = { version = "55", default-features = false }
+arrow = { version = "55", default-features = false, features = ["canonical_extension_types"] }
 arrow-array = "55"
 arrow-schema = "55"
 async-trait = "0.1"
@@ -26,7 +26,7 @@ num-traits = "0.2"
 opendal = { version = "0.53", default-features = false, features = [
   "services-s3",
 ] }
-parquet = { version = "55", default-features = false, features = ["arrow", "async"] }
+parquet = { version = "55", default-features = false, features = ["arrow", "async", "arrow_canonical_extension_types"] }
 postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git" }
 roaring = "0.10"
 serde = { version = "1.0", default-features = false, features = ["derive"] }

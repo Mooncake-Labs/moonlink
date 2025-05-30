@@ -3,6 +3,7 @@ use crate::pg_replicate::{
     table::{LookupKey, TableSchema},
 };
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow_schema::extension::{ExtensionType, Json as ArrowJson, Uuid as ArrowUuid};
 use arrow_schema::{DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE};
 use chrono::Timelike;
 use moonlink::row::RowValue;
@@ -24,6 +25,11 @@ fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
     let raw_scale = (typmod & 0x7fff);
     let scale = ((raw_scale ^ 1024) - 1024) as i8;
     Some((precision, scale))
+}
+
+enum ArrowExtensionType {
+    Uuid,
+    Json,
 }
 
 fn postgres_primitive_to_arrow_type(
@@ -65,22 +71,32 @@ fn postgres_primitive_to_arrow_type(
             DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
             None,
         ),
-        Type::UUID => (DataType::FixedSizeBinary(16), Some("uuid".to_string())),
-        Type::JSON | Type::JSONB => (DataType::Utf8, Some("json".to_string())),
+        Type::UUID => (
+            DataType::FixedSizeBinary(16),
+            Some(ArrowExtensionType::Uuid),
+        ),
+        Type::JSON | Type::JSONB => (DataType::Utf8, Some(ArrowExtensionType::Json)),
         Type::BYTEA => (DataType::Binary, None),
         _ => (DataType::Utf8, None), // Default to string for unknown types
     };
 
     let mut field = Field::new(name, data_type, nullable);
-
-    // Apply extension type if specified
     let mut metadata = HashMap::new();
-    if let Some(ext_name) = extension_name {
-        metadata.insert("ARROW:extension:name".to_string(), ext_name);
-    }
     *field_id += 1;
     metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
     field = field.with_metadata(metadata);
+
+    // Apply extension type if specified
+    if let Some(ext_name) = extension_name {
+        match ext_name {
+            ArrowExtensionType::Uuid => {
+                field = field.with_extension_type(ArrowUuid::default());
+            }
+            ArrowExtensionType::Json => {
+                field = field.with_extension_type(ArrowJson::default());
+            }
+        }
+    }
 
     field
 }
@@ -689,11 +705,12 @@ mod tests {
                         .with_timezone(&Utc),
                 ),
                 Cell::Null,
+                Cell::Uuid(uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap()),
             ],
         });
 
         let moonlink_row: MoonlinkRow = postgres_table_row.into();
-        assert_eq!(moonlink_row.values.len(), 11);
+        assert_eq!(moonlink_row.values.len(), 12);
         assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
         assert_eq!(moonlink_row.values[1], RowValue::Int64(2));
         assert_eq!(
@@ -734,6 +751,11 @@ mod tests {
             )
         );
         assert_eq!(moonlink_row.values[10], RowValue::Null);
+        println!("{:?}", moonlink_row.values[11]);
+        let RowValue::FixedLenByteArray(bytes) = moonlink_row.values[11] else {
+            panic!("Expected fixed length byte array");
+        };
+        println!("{:?}", uuid::Uuid::from_bytes(bytes));
     }
 
     #[test]
