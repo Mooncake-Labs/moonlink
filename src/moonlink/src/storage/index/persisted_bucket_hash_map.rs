@@ -199,6 +199,21 @@ impl GlobalIndex {
             .sum()
     }
 
+    pub async fn search_values(&self, values: &[u64]) -> Vec<(u64, RecordLocation)> {
+        let mut results = Vec::new();
+        let mut hashes = values.iter().map(|value| splitmix64(*value)).collect::<Vec<_>>();
+        hashes.sort();
+        let lower_hashes = hashes.iter().map(|hash| hash & ((1 << self.hash_lower_bits) - 1)).collect::<Vec<_>>();
+        let upper_hashes = hashes.iter().map(|hash| hash >> self.hash_lower_bits).collect::<Vec<_>>();
+        let mut start_idx = 0;
+        let mut end_idx = 0;
+        for block in self.index_blocks.iter() {
+
+            
+        }
+        results
+    }
+    
     pub async fn create_iterator<'a>(
         &'a self,
         file_id_remap: &'a Vec<u32>,

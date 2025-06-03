@@ -1066,8 +1066,49 @@ impl SnapshotTableState {
         }
     }
 
+    async fn match_deletions_with_identical_key_and_lsn(
+        &self,
+        deletions: Vec<RawDeletionRecord>,
+        index_lookup_result: Vec<RecordLocation>,
+        file_id_to_lsn: &HashMap<FileId, u64>,
+    ) -> Vec<ProcessedDeletionRecord> {
+        let mut candidates: Vec<RecordLocation> = index_lookup_result
+            .into_iter()
+            .filter(|loc| {
+                !self.is_deleted(loc) && Self::is_visible(loc, file_id_to_lsn, deletions.get(0).unwrap().lsn)
+            })
+            .collect();
+        if candidates.len() == deletions.len() {
+            return candidates.into_iter().zip(deletions.into_iter()).map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc)).collect();
+        }
+        else if candidates.len() < deletions.len() {
+            panic!("can't find deletion record {:?}", deletions);
+        }
+        else {
+            let mut processed_deletions = Vec::new();
+            // multiple candidates → disambiguate via full row identity comparison.
+            for deletion in deletions.into_iter() {
+                let identity = deletion
+                .row_identity
+                .as_ref()
+                .expect("row_identity required when multiple matches");
+                let mut target_position: Option<RecordLocation> = None;
+                for (idx, loc) in candidates.iter().enumerate() {
+                    let matches = self.matches_identity(&loc, identity).await;
+                    if matches {
+                        target_position = Some(candidates.swap_remove(idx));
+                        break;
+                    }
+                }
+                processed_deletions.push(Self::build_processed_deletion(deletion, target_position.unwrap()));
+            }
+            processed_deletions
+        }
+
+    }
+
     async fn process_delete_record(
-        &mut self,
+        &self,
         deletion: RawDeletionRecord,
         file_id_to_lsn: &HashMap<FileId, u64>,
     ) -> ProcessedDeletionRecord {
@@ -1084,7 +1125,7 @@ impl SnapshotTableState {
             .await
             .into_iter()
             .filter(|loc| {
-                !self.is_deleted(loc) && self.is_visible(loc, file_id_to_lsn, deletion.lsn)
+                !self.is_deleted(loc) && Self::is_visible(loc, file_id_to_lsn, deletion.lsn)
             })
             .collect();
 
@@ -1123,11 +1164,11 @@ impl SnapshotTableState {
     }
 
     /// Returns `true` if the location has already been marked deleted.
-    fn is_deleted(&mut self, loc: &RecordLocation) -> bool {
+    fn is_deleted(&self, loc: &RecordLocation) -> bool {
         match loc {
             RecordLocation::MemoryBatch(batch_id, row_id) => self
                 .batches
-                .get_mut(batch_id)
+                .get(batch_id)
                 .expect("missing batch")
                 .deletions
                 .is_deleted(*row_id),
@@ -1135,7 +1176,7 @@ impl SnapshotTableState {
             RecordLocation::DiskFile(file_id, row_id) => self
                 .current_snapshot
                 .disk_files
-                .get_mut(file_id)
+                .get(file_id)
                 .expect("missing disk file")
                 .batch_deletion_vector
                 .is_deleted(*row_id),
@@ -1143,7 +1184,6 @@ impl SnapshotTableState {
     }
 
     fn is_visible(
-        &self,
         loc: &RecordLocation,
         file_id_to_lsn: &HashMap<FileId, u64>,
         lsn: u64,
@@ -1237,7 +1277,9 @@ impl SnapshotTableState {
     /// Convert raw deletions discovered by the snapshot task and either commit
     /// them or defer until their LSN becomes visible.
     async fn apply_new_deletions(&mut self, task: &mut SnapshotTask) {
-        for raw in take(&mut task.new_deletions) {
+        let mut new_deletions = take(&mut task.new_deletions);
+        new_deletions.sort_by_key(|deletion| deletion.lookup_key);
+        for raw in new_deletions {
             let processed = self
                 .process_delete_record(raw, &task.disk_file_lsn_map)
                 .await;
