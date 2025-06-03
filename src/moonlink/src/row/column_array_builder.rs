@@ -369,7 +369,12 @@ impl ColumnArrayBuilder {
             );
             Arc::new(list_array)
         } else {
-            cast(&array, logical_type).unwrap()
+            cast(&array, logical_type).unwrap_or_else(|_| {
+                panic!(
+                    "Fail to cast to correct type in ColumnArrayBuilder::finish for {:?}",
+                    logical_type
+                )
+            })
         }
     }
 }

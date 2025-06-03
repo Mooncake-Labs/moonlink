@@ -36,7 +36,7 @@ fn postgres_primitive_to_arrow_type(
     typ: &Type,
     modifier: i32,
     name: &str,
-    nullable: bool,
+    mut nullable: bool,
     field_id: &mut i32,
 ) -> Field {
     let (data_type, extension_name) = match *typ {
@@ -47,6 +47,9 @@ fn postgres_primitive_to_arrow_type(
         Type::FLOAT4 => (DataType::Float32, None),
         Type::FLOAT8 => (DataType::Float64, None),
         Type::NUMERIC => {
+            // Numeric type can contain invalid values, we will cast them to NULL
+            // so make it nullable.
+            nullable = true;
             let (precision, scale) = numeric_precision_scale(modifier)
                 .unwrap_or((DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE));
             (DataType::Decimal128(precision, scale), None)

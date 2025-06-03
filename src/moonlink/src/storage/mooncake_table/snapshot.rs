@@ -16,6 +16,8 @@ use crate::storage::storage_utils::{
     RecordLocation,
 };
 use parquet::arrow::AsyncArrowWriter;
+use parquet::basic::{Compression, Encoding};
+use parquet::file::properties::WriterProperties;
 use std::collections::{BTreeMap, HashMap};
 use std::mem::take;
 use std::sync::Arc;
@@ -716,8 +718,12 @@ impl SnapshotTableState {
             if !filtered_batches.is_empty() {
                 // Build a parquet file from current record batches
                 let temp_file = tokio::fs::File::create(&file_path).await?;
-                let mut parquet_writer =
-                    AsyncArrowWriter::try_new(temp_file, schema, /*props=*/ None)?;
+                let props = WriterProperties::builder()
+                    .set_compression(Compression::UNCOMPRESSED)
+                    .set_dictionary_enabled(false)
+                    .set_encoding(Encoding::PLAIN)
+                    .build();
+                let mut parquet_writer = AsyncArrowWriter::try_new(temp_file, schema, Some(props))?;
                 for batch in filtered_batches.iter() {
                     parquet_writer.write(batch).await?;
                 }
