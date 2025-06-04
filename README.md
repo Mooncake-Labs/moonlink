@@ -78,34 +78,28 @@ A demo of `moonlink-backend` running as a server, replicating Postgres tables to
 
 ### Short term
 **Iceberg Integration**
-- Integration & productionize more Iceberg Catalogs
-
-- Iceberg DataFile Optimization & Compaction
+- [ ] Integration & productionize more Iceberg Catalogs
+- [ ] Iceberg DataFile Optimization & Compaction
 
 **Performance Optimization**
-- Read/Write Cache
-
-- Index Optimization
+- [ ] Read/Write Cache
+- [ ] Index Optimization
   
 **Data Types**
-- Composite types in connector
+- [ ] Composite types in connector
 
 ### Mid term
 **Iceberg Integration**
-- Partitioning & Clustering
-  
-- Schema Evolution
-
-- Iceberg V3 types: Geospatial & Variant
+- [ ] Partitioning & Clustering
+- [ ] Schema Evolution
+- [ ] Iceberg V3 types: Geospatial & Variant
 
 **Functionality**
-
-- Expose Index_Read interface for fast lookup queries.
-  
-- Implement Other index types: Inverted-index, Full-text search, Vector.
+- [ ] Expose Index_Read interface for fast lookup queries.
+- [ ] Implement Other index types: Inverted-index, Full-text search, Vector.
 
 **Deployability**
-- Deploy Moonlink as standalone service
+- [ ] Deploy Moonlink as standalone service
 
  
 🥮
