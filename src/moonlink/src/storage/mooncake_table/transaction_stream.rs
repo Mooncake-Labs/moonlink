@@ -31,6 +31,17 @@ pub struct TransactionStreamCommit {
     pending_deletions: Vec<RawDeletionRecord>,
 }
 
+impl TransactionStreamCommit {
+    /// Get flushed data files for the current streaming commit.
+    pub(crate) fn get_flushed_data_files(&self) -> Vec<MooncakeDataFileRef> {
+        self.flushed_files.keys().cloned().collect::<Vec<_>>()
+    }
+    /// Get flushed file indices for the current streaming commit.
+    pub(crate) fn get_file_indices(&self) -> Vec<FileIndex> {
+        self.flushed_file_index.file_indices.clone()
+    }
+}
+
 impl TransactionStreamState {
     fn new(schema: Arc<Schema>, batch_size: usize, identity: IdentityProp) -> Self {
         Self {
@@ -72,7 +83,7 @@ impl MooncakeTable {
             .unwrap()
             .mem_slice
             .get_num_rows()
-            >= self.metadata.config.batch_size
+            >= self.metadata.config.mem_slice_size
     }
 
     pub fn append_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) -> Result<()> {
@@ -99,7 +110,6 @@ impl MooncakeTable {
             pos: None,
             row_identity: self.metadata.identity.extract_identity_columns(row),
         };
-
         let stream_state = Self::get_or_create_stream_state(
             &mut self.transaction_stream_states,
             &self.metadata,
@@ -146,6 +156,7 @@ impl MooncakeTable {
                 }
             }
         }
+
         // Delete from main table
         record.pos = self
             .mem_slice

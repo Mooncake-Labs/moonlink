@@ -1,20 +1,23 @@
-use crate::row::IdentityProp as RowIdentity;
 use crate::row::MoonlinkRow;
 use crate::row::RowValue;
-use crate::storage::iceberg::deletion_vector::DeletionVector;
+use crate::storage::iceberg::iceberg_table_manager::IcebergTableConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
-use crate::storage::iceberg::iceberg_table_manager::*;
-use crate::storage::iceberg::puffin_utils;
+use crate::storage::iceberg::iceberg_table_manager::TableManager;
 #[cfg(feature = "storage-s3")]
 use crate::storage::iceberg::s3_test_utils;
+use crate::storage::iceberg::test_utils::{
+    check_deletion_vector_consistency_for_snapshot, create_table_and_iceberg_manager,
+    create_test_arrow_schema, create_test_table_metadata, load_arrow_batch,
+    validate_recovered_snapshot,
+};
+use crate::storage::index::persisted_bucket_hash_map::GlobalIndex;
 use crate::storage::index::Index;
 use crate::storage::index::MooncakeIndex;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot;
 use crate::storage::mooncake_table::{
-    DiskFileDeletionVector, TableConfig as MooncakeTableConfig,
-    TableMetadata as MooncakeTableMetadata,
+    TableConfig as MooncakeTableConfig, TableMetadata as MooncakeTableMetadata,
 };
 use crate::storage::storage_utils::create_data_file;
 use crate::storage::storage_utils::FileId;
@@ -24,95 +27,87 @@ use crate::storage::storage_utils::RecordLocation;
 use crate::storage::MooncakeTable;
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
-use arrow::datatypes::{DataType, Field};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
-use iceberg::io::FileIO;
 use iceberg::io::FileIOBuilder;
-use iceberg::io::FileRead;
 use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::AsyncArrowWriter;
 use tempfile::tempdir;
-use tempfile::TempDir;
 
 /// Create test batch deletion vector.
 fn test_committed_deletion_log_1(
     data_filepath: MooncakeDataFileRef,
-) -> Vec<(MooncakeDataFileRef, BatchDeletionVector)> {
+) -> HashMap<MooncakeDataFileRef, BatchDeletionVector> {
     let mut deletion_vector = BatchDeletionVector::new(MooncakeTableConfig::DEFAULT_BATCH_SIZE);
     deletion_vector.delete_row(0);
 
-    vec![(data_filepath.clone(), deletion_vector)]
+    HashMap::<MooncakeDataFileRef, BatchDeletionVector>::from([(
+        data_filepath.clone(),
+        deletion_vector,
+    )])
 }
-/// Test deletion vector 2 includes deletion vector 1, used to mimic new data file rows deletion situation.
 fn test_committed_deletion_log_2(
     data_filepath: MooncakeDataFileRef,
-) -> Vec<(MooncakeDataFileRef, BatchDeletionVector)> {
+) -> HashMap<MooncakeDataFileRef, BatchDeletionVector> {
     let mut deletion_vector = BatchDeletionVector::new(MooncakeTableConfig::DEFAULT_BATCH_SIZE);
     deletion_vector.delete_row(1);
     deletion_vector.delete_row(2);
 
-    vec![(data_filepath.clone(), deletion_vector)]
+    HashMap::<MooncakeDataFileRef, BatchDeletionVector>::from([(
+        data_filepath.clone(),
+        deletion_vector,
+    )])
 }
 
-/// Test util function to create arrow schema.
-fn create_test_arrow_schema() -> Arc<ArrowSchema> {
-    Arc::new(ArrowSchema::new(vec![
-        Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-            "PARQUET:field_id".to_string(),
-            "1".to_string(),
-        )])),
-        Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
-            "PARQUET:field_id".to_string(),
-            "2".to_string(),
-        )])),
-        Field::new("age", DataType::Int32, false).with_metadata(HashMap::from([(
-            "PARQUET:field_id".to_string(),
-            "3".to_string(),
-        )])),
-    ]))
+/// Test util function to create file indices.
+fn test_global_index(data_files: Vec<MooncakeDataFileRef>) -> GlobalIndex {
+    GlobalIndex {
+        files: data_files,
+        num_rows: 0,
+        hash_bits: 0,
+        hash_upper_bits: 0,
+        hash_lower_bits: 0,
+        seg_id_bits: 0,
+        row_id_bits: 0,
+        bucket_bits: 0,
+        index_blocks: vec![],
+    }
 }
 
-/// Test util function to create mooncake table metadata.
-fn create_test_table_metadata(local_table_directory: String) -> Arc<MooncakeTableMetadata> {
-    Arc::new(MooncakeTableMetadata {
-        name: "test_table".to_string(),
-        id: 0,
-        schema: create_test_arrow_schema(),
-        config: MooncakeTableConfig::new(),
-        path: PathBuf::from(local_table_directory),
-        identity: RowIdentity::FullRow,
-    })
+/// Test util functions to create moonlink rows.
+fn test_row_1() -> MoonlinkRow {
+    MoonlinkRow::new(vec![
+        RowValue::Int32(1),
+        RowValue::ByteArray("John".as_bytes().to_vec()),
+        RowValue::Int32(10),
+    ])
+}
+fn test_row_2() -> MoonlinkRow {
+    MoonlinkRow::new(vec![
+        RowValue::Int32(2),
+        RowValue::ByteArray("Bob".as_bytes().to_vec()),
+        RowValue::Int32(20),
+    ])
+}
+fn test_row_3() -> MoonlinkRow {
+    MoonlinkRow::new(vec![
+        RowValue::Int32(3),
+        RowValue::ByteArray("Cat".as_bytes().to_vec()),
+        RowValue::Int32(30),
+    ])
 }
 
-/// Test util function to create arrow record batch.
-fn test_batch_1(arrow_schema: Arc<ArrowSchema>) -> RecordBatch {
-    RecordBatch::try_new(
-        arrow_schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])), // id column
-            Arc::new(StringArray::from(vec!["a", "b", "c"])), // name column
-            Arc::new(Int32Array::from(vec![10, 20, 30])), // age column
-        ],
-    )
-    .unwrap()
-}
-fn test_batch_2(arrow_schema: Arc<ArrowSchema>) -> RecordBatch {
-    RecordBatch::try_new(
-        arrow_schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![4, 5, 6])), // id column
-            Arc::new(StringArray::from(vec!["d", "e", "f"])), // name column
-            Arc::new(Int32Array::from(vec![40, 50, 60])), // age column
-        ],
-    )
-    .unwrap()
+/// Test util function to create iceberg table config.
+fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTableConfig {
+    IcebergTableConfig {
+        warehouse_uri,
+        namespace: vec!["namespace".to_string()],
+        table_name: "test_table".to_string(),
+    }
 }
 
 /// Test util function to write arrow record batch into local file.
@@ -126,18 +121,6 @@ async fn write_arrow_record_batch_to_local<P: AsRef<std::path::Path>>(
     writer.write(batch).await?;
     writer.close().await?;
     Ok(())
-}
-
-/// Test util function to load all arrow batch from the given parquet file.
-async fn load_arrow_batch(file_io: &FileIO, filepath: &str) -> IcebergResult<RecordBatch> {
-    let input_file = file_io.new_input(filepath)?;
-    let input_file_metadata = input_file.metadata().await?;
-    let reader = input_file.reader().await?;
-    let bytes = reader.read(0..input_file_metadata.size).await?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)?;
-    let mut reader = builder.build()?;
-    let batch = reader.next().transpose()?.expect("Should have one batch");
-    Ok(batch)
 }
 
 /// Test util to get file indices filepaths and their corresponding data filepaths.
@@ -171,45 +154,16 @@ fn get_file_indices_filepath_and_data_filepaths(
     (data_files, index_files)
 }
 
-/// Test util function to check consistency for snapshot batch deletion vector and deletion puffin blob.
-async fn check_deletion_vector_consistency(disk_dv_entry: &DiskFileDeletionVector) {
-    if disk_dv_entry.puffin_deletion_blob.is_none() {
-        assert!(disk_dv_entry
-            .batch_deletion_vector
-            .collect_deleted_rows()
-            .is_empty());
-        return;
-    }
-
-    let local_fileio = FileIOBuilder::new_fs_io().build().unwrap();
-    let blob = puffin_utils::load_blob_from_puffin_file(
-        local_fileio,
-        &disk_dv_entry
-            .puffin_deletion_blob
-            .as_ref()
-            .unwrap()
-            .puffin_filepath,
-    )
-    .await
-    .unwrap();
-    let iceberg_deletion_vector = DeletionVector::deserialize(blob).unwrap();
-    let batch_deletion_vector = iceberg_deletion_vector
-        .take_as_batch_delete_vector(MooncakeTableConfig::default().batch_size());
-    assert_eq!(batch_deletion_vector, disk_dv_entry.batch_deletion_vector);
-}
-
-/// Test util function to check deletion vector consistency for the given snapshot.
-async fn check_deletion_vector_consistency_for_snapshot(snapshot: &Snapshot) {
-    for disk_deletion_vector in snapshot.disk_files.values() {
-        check_deletion_vector_consistency(disk_deletion_vector).await;
-    }
-}
-
 /// Test snapshot store and load for different types of catalogs based on the given warehouse.
 async fn test_store_and_load_snapshot_impl(
-    iceberg_table_manager: &mut IcebergTableManager,
+    mooncake_table_metadata: Arc<MooncakeTableMetadata>,
+    iceberg_table_config: IcebergTableConfig,
 ) -> IcebergResult<()> {
     // At the beginning of the test, there's nothing in table.
+    let mut iceberg_table_manager = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+    )?;
     assert!(iceberg_table_manager.persisted_data_files.is_empty());
 
     // Create arrow schema and table.
@@ -218,16 +172,27 @@ async fn test_store_and_load_snapshot_impl(
 
     // Write first snapshot to iceberg table (with deletion vector).
     let data_filename_1 = "data-1.parquet";
-    let batch = test_batch_1(arrow_schema.clone());
+    let batch_1 = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])), // id column
+            Arc::new(StringArray::from(vec!["a", "b", "c"])), // name column
+            Arc::new(Int32Array::from(vec![10, 20, 30])), // age column
+        ],
+    )
+    .unwrap();
     let parquet_path = tmp_dir.path().join(data_filename_1);
-    let data_file = create_data_file(0, parquet_path.to_str().unwrap().to_string());
-    write_arrow_record_batch_to_local(parquet_path.as_path(), arrow_schema.clone(), &batch).await?;
+    let data_file_1 = create_data_file(0, parquet_path.to_str().unwrap().to_string());
+    write_arrow_record_batch_to_local(parquet_path.as_path(), arrow_schema.clone(), &batch_1)
+        .await?;
+    let file_indice_1 = test_global_index(vec![data_file_1.clone()]);
 
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         flush_lsn: 0,
-        data_files: vec![data_file.clone()],
-        new_deletion_vector: test_committed_deletion_log_1(data_file.clone()),
-        file_indices: vec![],
+        data_files: vec![data_file_1.clone()],
+        new_deletion_vector: test_committed_deletion_log_1(data_file_1.clone()),
+        file_indices_to_import: vec![file_indice_1.clone()],
+        file_indices_to_remove: vec![],
     };
     iceberg_table_manager
         .sync_snapshot(iceberg_snapshot_payload)
@@ -235,16 +200,27 @@ async fn test_store_and_load_snapshot_impl(
 
     // Write second snapshot to iceberg table, with updated deletion vector and new data file.
     let data_filename_2 = "data-2.parquet";
-    let batch = test_batch_2(arrow_schema.clone());
+    let batch_2 = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![4, 5, 6])), // id column
+            Arc::new(StringArray::from(vec!["d", "e", "f"])), // name column
+            Arc::new(Int32Array::from(vec![40, 50, 60])), // age column
+        ],
+    )
+    .unwrap();
     let parquet_path = tmp_dir.path().join(data_filename_2);
-    let data_file = create_data_file(1, parquet_path.to_str().unwrap().to_string());
-    write_arrow_record_batch_to_local(parquet_path.as_path(), arrow_schema.clone(), &batch).await?;
+    let data_file_2 = create_data_file(1, parquet_path.to_str().unwrap().to_string());
+    write_arrow_record_batch_to_local(parquet_path.as_path(), arrow_schema.clone(), &batch_2)
+        .await?;
+    let file_indice_2 = test_global_index(vec![data_file_2.clone()]);
 
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         flush_lsn: 1,
-        data_files: vec![data_file.clone()],
-        new_deletion_vector: test_committed_deletion_log_2(data_file.clone()),
-        file_indices: vec![],
+        data_files: vec![data_file_2.clone()],
+        new_deletion_vector: test_committed_deletion_log_2(data_file_2.clone()),
+        file_indices_to_import: vec![file_indice_2.clone()],
+        file_indices_to_remove: vec![],
     };
     iceberg_table_manager
         .sync_snapshot(iceberg_snapshot_payload)
@@ -257,6 +233,7 @@ async fn test_store_and_load_snapshot_impl(
         "Persisted items for table manager is {:?}",
         iceberg_table_manager.persisted_data_files
     );
+    assert_eq!(iceberg_table_manager.persisted_file_indices.len(), 2);
 
     // Check the loaded data file is of the expected format and content.
     let file_io = iceberg_table_manager
@@ -267,64 +244,67 @@ async fn test_store_and_load_snapshot_impl(
     for (loaded_path, data_entry) in iceberg_table_manager.persisted_data_files.iter() {
         let loaded_arrow_batch = load_arrow_batch(file_io, loaded_path.as_str()).await?;
         let deleted_rows = data_entry.deletion_vector.collect_deleted_rows();
-        assert_eq!(
-            *loaded_arrow_batch.schema_ref(),
-            arrow_schema,
-            "Expect arrow schema {:?}, actual arrow schema {:?}",
-            arrow_schema,
-            loaded_arrow_batch.schema_ref()
-        );
+        assert_eq!(*loaded_arrow_batch.schema_ref(), arrow_schema);
 
         // Check second data file and its deletion vector.
         if loaded_path.ends_with(data_filename_2) {
-            assert_eq!(
-                loaded_arrow_batch,
-                test_batch_2(arrow_schema.clone()),
-                "Expect arrow record batch {:?}, actual arrow record batch {:?}",
-                loaded_arrow_batch,
-                test_batch_2(arrow_schema.clone())
-            );
-            assert_eq!(
-                deleted_rows,
-                vec![1, 2],
-                "Loaded deletion vector is not the same as the one gets stored."
-            );
+            assert_eq!(loaded_arrow_batch, batch_2,);
+            assert_eq!(deleted_rows, vec![1, 2],);
             continue;
         }
 
         // Check first data file and its deletion vector.
         assert!(loaded_path.ends_with(data_filename_1));
-        assert_eq!(
-            loaded_arrow_batch,
-            test_batch_1(arrow_schema.clone()),
-            "Expect arrow record batch {:?}, actual arrow record batch {:?}",
-            loaded_arrow_batch,
-            test_batch_1(arrow_schema.clone())
-        );
-        assert_eq!(
-            deleted_rows,
-            vec![0],
-            "Loaded deletion vector is not the same as the one gets stored."
-        );
+        assert_eq!(loaded_arrow_batch, batch_1,);
+        assert_eq!(deleted_rows, vec![0],);
     }
+
+    // Write third snapshot to iceberg table, with file indices to add and remove.
+    let iceberg_snapshot_payload = IcebergSnapshotPayload {
+        flush_lsn: 2,
+        data_files: vec![],
+        new_deletion_vector: HashMap::new(),
+        file_indices_to_import: vec![test_global_index(vec![
+            data_file_1.clone(),
+            data_file_2.clone(),
+        ])],
+        file_indices_to_remove: vec![file_indice_1.clone(), file_indice_2.clone()],
+    };
+    iceberg_table_manager
+        .sync_snapshot(iceberg_snapshot_payload)
+        .await?;
+    assert_eq!(iceberg_table_manager.persisted_file_indices.len(), 1);
+
+    // Create a new iceberg table manager and check persisted content.
+    let mut iceberg_table_manager = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+    )?;
+    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
+    assert!(snapshot.indices.in_memory_index.is_empty());
+    assert_eq!(snapshot.indices.file_indices.len(), 1);
+    validate_recovered_snapshot(&snapshot, &iceberg_table_config.warehouse_uri).await;
 
     Ok(())
 }
 
+/// Basic iceberg snapshot sync and load test via iceberg table manager.
 #[tokio::test]
 async fn test_sync_snapshots() -> IcebergResult<()> {
     // Create arrow schema and table.
     let tmp_dir = tempdir()?;
     let mooncake_table_metadata =
         create_test_table_metadata(tmp_dir.path().to_str().unwrap().to_string());
-    let config = IcebergTableConfig {
+    let iceberg_table_config = IcebergTableConfig {
         warehouse_uri: tmp_dir.path().to_str().unwrap().to_string(),
         namespace: vec!["namespace".to_string()],
         table_name: "test_table".to_string(),
-        drop_table_if_exists: false,
     };
-    let mut iceberg_table_manager = IcebergTableManager::new(mooncake_table_metadata, config)?;
-    test_store_and_load_snapshot_impl(&mut iceberg_table_manager).await?;
+    test_store_and_load_snapshot_impl(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -338,12 +318,11 @@ async fn test_drop_table() {
         warehouse_uri: tmp_dir.path().to_str().unwrap().to_string(),
         namespace: vec!["namespace".to_string()],
         table_name: "test_table".to_string(),
-        drop_table_if_exists: false,
     };
     let mut iceberg_table_manager =
         IcebergTableManager::new(mooncake_table_metadata.clone(), config.clone()).unwrap();
     iceberg_table_manager
-        .initialize_iceberg_table()
+        .initialize_iceberg_table_for_once()
         .await
         .unwrap();
 
@@ -360,25 +339,64 @@ async fn test_drop_table() {
     assert!(!directory_exists);
 }
 
+/// Testing scenario: attempt an iceberg snapshot load with no preceding store.
+#[tokio::test]
+async fn test_empty_snapshot_load() -> IcebergResult<()> {
+    let tmp_dir = tempdir()?;
+    let mooncake_table_metadata =
+        create_test_table_metadata(tmp_dir.path().to_str().unwrap().to_string());
+    let config = create_iceberg_table_config(tmp_dir.path().to_str().unwrap().to_string());
+
+    // Recover from iceberg snapshot, and check mooncake table snapshot version.
+    let mut iceberg_table_manager =
+        IcebergTableManager::new(mooncake_table_metadata.clone(), config.clone())?;
+    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
+    assert!(snapshot.disk_files.is_empty());
+    assert!(snapshot.indices.in_memory_index.is_empty());
+    assert!(snapshot.indices.file_indices.is_empty());
+    assert!(snapshot.data_file_flush_lsn.is_none());
+    Ok(())
+}
+
+/// Testing scenario: iceberg snapshot should be loaded only once at recovery, otherwise it panics.
+#[tokio::test]
+async fn test_snapshot_load_for_multiple_times() -> IcebergResult<()> {
+    let tmp_dir = tempdir()?;
+    let mooncake_table_metadata =
+        create_test_table_metadata(tmp_dir.path().to_str().unwrap().to_string());
+    let config = create_iceberg_table_config(tmp_dir.path().to_str().unwrap().to_string());
+    let mut iceberg_table_manager =
+        IcebergTableManager::new(mooncake_table_metadata.clone(), config.clone())?;
+
+    iceberg_table_manager.load_snapshot_from_table().await?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            iceberg_table_manager
+                .load_snapshot_from_table()
+                .await
+                .unwrap();
+        });
+    }));
+    assert!(result.is_err());
+
+    Ok(())
+}
+
 /// Testing scenario: attempt an iceberg snapshot when no data file, deletion vector or index files generated.
 #[tokio::test]
 async fn test_empty_content_snapshot_creation() -> IcebergResult<()> {
     let tmp_dir = tempdir()?;
     let mooncake_table_metadata =
         create_test_table_metadata(tmp_dir.path().to_str().unwrap().to_string());
-    let config = IcebergTableConfig {
-        warehouse_uri: tmp_dir.path().to_str().unwrap().to_string(),
-        namespace: vec!["namespace".to_string()],
-        table_name: "test_table".to_string(),
-        drop_table_if_exists: false,
-    };
+    let config = create_iceberg_table_config(tmp_dir.path().to_str().unwrap().to_string());
     let mut iceberg_table_manager =
         IcebergTableManager::new(mooncake_table_metadata.clone(), config.clone())?;
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         flush_lsn: 0,
         data_files: vec![],
-        new_deletion_vector: vec![],
-        file_indices: vec![],
+        new_deletion_vector: HashMap::new(),
+        file_indices_to_import: vec![],
+        file_indices_to_remove: vec![],
     };
     iceberg_table_manager
         .sync_snapshot(iceberg_snapshot_payload)
@@ -395,7 +413,127 @@ async fn test_empty_content_snapshot_creation() -> IcebergResult<()> {
     Ok(())
 }
 
-/// Testing senario: mooncake snapshot and iceberg snapshot doesn't correspond to each other 1-1.
+/// Testing scenario: when mooncake snapshot is created periodically, there're no committed deletion logs later than flush LSN.
+/// In the test case we shouldn't create iceberg snapshot.
+#[tokio::test]
+async fn test_create_snapshot_when_no_committed_deletion_log_to_flush() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let warehouse_uri = path.clone().to_str().unwrap().to_string();
+    let mooncake_table_metadata =
+        create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
+    let identity_property = mooncake_table_metadata.identity.clone();
+
+    let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
+    let schema = create_test_arrow_schema();
+    let mut table = MooncakeTable::new(
+        schema.as_ref().clone(),
+        "test_table".to_string(),
+        /*version=*/ 1,
+        path,
+        identity_property,
+        iceberg_table_config.clone(),
+        MooncakeTableConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let row = test_row_1();
+    table.append(row.clone()).unwrap();
+    table.commit(/*lsn=*/ 10);
+    table.flush(/*lsn=*/ 10).await.unwrap();
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
+
+    // Second time snapshot check, committed deletion logs haven't reached flush LSN.
+    table.delete(row.clone(), /*lsn=*/ 20).await;
+    table.commit(/*lsn=*/ 30);
+    let handle = table.create_snapshot().unwrap();
+    let (_, iceberg_snapshot_payload) = handle.await.unwrap();
+    assert!(iceberg_snapshot_payload.is_none());
+}
+
+/// Test scenario: small batch size and large parquet file, which means:
+/// 1. all rows live within their own record batch, and potentially their own batch deletion vector.
+/// 2. when flushed to on-disk parquet files, they're grouped into one file but different arrow batch records.
+/// Fixed issue: https://github.com/Mooncake-Labs/moonlink/issues/343
+#[tokio::test]
+async fn test_small_batch_size_and_large_parquet_size() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let warehouse_uri = path.clone().to_str().unwrap().to_string();
+    let mooncake_table_metadata =
+        create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
+    let identity_property = mooncake_table_metadata.identity.clone();
+
+    let iceberg_table_config = create_iceberg_table_config(warehouse_uri.clone());
+    let schema = create_test_arrow_schema();
+    let mooncake_table_config = MooncakeTableConfig {
+        batch_size: 1,
+        disk_slice_parquet_file_size: 1000,
+        // Trigger iceberg snapshot as long as there're any commit deletion log.
+        iceberg_snapshot_new_committed_deletion_log: 1,
+        ..Default::default()
+    };
+    let mut table = MooncakeTable::new(
+        schema.as_ref().clone(),
+        "test_table".to_string(),
+        /*version=*/ 1,
+        path,
+        identity_property,
+        iceberg_table_config.clone(),
+        mooncake_table_config,
+    )
+    .await
+    .unwrap();
+
+    // Append first row.
+    let row_1 = test_row_1();
+    table.append(row_1.clone()).unwrap();
+
+    // Append second row.
+    let row_2 = test_row_2();
+    table.append(row_2.clone()).unwrap();
+
+    // Commit, flush and create snapshots.
+    table.commit(/*lsn=*/ 1);
+    table.flush(/*lsn=*/ 1).await.unwrap();
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
+
+    // Delete the second record.
+    table.delete(/*row=*/ row_2.clone(), /*lsn=*/ 2).await;
+    table.commit(/*lsn=*/ 3);
+    table.flush(/*lsn=*/ 3).await.unwrap();
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
+
+    let mut iceberg_table_manager = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+    )
+    .unwrap();
+    let snapshot = iceberg_table_manager
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.disk_files.len(), 1);
+    let deletion_vector = snapshot.disk_files.iter().next().unwrap().1.clone();
+    assert_eq!(
+        deletion_vector.batch_deletion_vector.collect_deleted_rows(),
+        vec![1]
+    );
+    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
+    validate_recovered_snapshot(&snapshot, &warehouse_uri).await;
+}
+
+/// Testing scenario: mooncake snapshot and iceberg snapshot doesn't correspond to each other 1-1.
 /// In the test case we perform one iceberg snapshot after three mooncake snapshots.
 #[tokio::test]
 async fn test_async_iceberg_snapshot() {
@@ -432,11 +570,7 @@ async fn test_async_iceberg_snapshot() {
     let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
 
     // Operation group 1: Append new rows and create mooncake snapshot.
-    let row_1 = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(10),
-    ]);
+    let row_1 = test_row_1();
     table.append(row_1.clone()).unwrap();
     table.commit(/*lsn=*/ 10);
     table.flush(/*lsn=*/ 10).await.unwrap();
@@ -444,11 +578,7 @@ async fn test_async_iceberg_snapshot() {
     let (_, iceberg_snapshot_payload) = mooncake_snapshot_handle.await.unwrap();
 
     // Operation group 2: Append new rows and create mooncake snapshot.
-    let row_2 = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Bob".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
+    let row_2 = test_row_2();
     table.append(row_2.clone()).unwrap();
     table.delete(row_1.clone(), /*lsn=*/ 20).await;
     table.commit(/*lsn=*/ 30);
@@ -458,7 +588,7 @@ async fn test_async_iceberg_snapshot() {
 
     // Create iceberg snapshot for the first mooncake snapshot.
     let iceberg_snapshot_handle = table.persist_iceberg_snapshot(iceberg_snapshot_payload.unwrap());
-    let iceberg_snapshot_res = iceberg_snapshot_handle.await.unwrap();
+    let iceberg_snapshot_res = iceberg_snapshot_handle.await.unwrap().unwrap();
     table.set_iceberg_snapshot_res(iceberg_snapshot_res);
 
     // Load and check iceberg snapshot.
@@ -484,11 +614,7 @@ async fn test_async_iceberg_snapshot() {
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
 
     // Operation group 3: Append new rows and create mooncake snapshot.
-    let row_3 = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
+    let row_3 = test_row_3();
     table.append(row_3.clone()).unwrap();
     table.commit(/*lsn=*/ 40);
     table.flush(/*lsn=*/ 40).await.unwrap();
@@ -497,7 +623,7 @@ async fn test_async_iceberg_snapshot() {
 
     // Create iceberg snapshot for the mooncake snapshot.
     let iceberg_snapshot_handle = table.persist_iceberg_snapshot(iceberg_snapshot_payload.unwrap());
-    let iceberg_snapshot_res = iceberg_snapshot_handle.await.unwrap();
+    let iceberg_snapshot_res = iceberg_snapshot_handle.await.unwrap().unwrap();
     table.set_iceberg_snapshot_res(iceberg_snapshot_res);
 
     // Load and check iceberg snapshot.
@@ -608,48 +734,6 @@ async fn check_row_index_on_disk(snapshot: &Snapshot, row: &MoonlinkRow) {
     }
 }
 
-/// Test util functions to check recovered snapshot only contains remote filepaths and they do exist.
-async fn validate_recovered_snapshot(snapshot: &Snapshot, warehouse_uri: &str) {
-    let warehouse_directory = tokio::fs::canonicalize(&warehouse_uri).await.unwrap();
-    let mut data_filepaths: HashSet<String> = HashSet::new();
-
-    // Check data files and their puffin blobs.
-    for (cur_disk_file, cur_deletion_vector) in snapshot.disk_files.iter() {
-        let cur_disk_pathbuf = PathBuf::from(cur_disk_file.file_path());
-        assert!(cur_disk_pathbuf.starts_with(&warehouse_directory));
-        assert!(tokio::fs::try_exists(cur_disk_pathbuf).await.unwrap());
-        assert!(data_filepaths.insert(cur_disk_file.file_path().clone()));
-
-        if cur_deletion_vector.puffin_deletion_blob.is_none() {
-            continue;
-        }
-        let puffin_filepath = &cur_deletion_vector
-            .puffin_deletion_blob
-            .as_ref()
-            .unwrap()
-            .puffin_filepath;
-        let puffin_pathbuf = PathBuf::from(puffin_filepath);
-        assert!(puffin_pathbuf.starts_with(&warehouse_directory));
-        assert!(tokio::fs::try_exists(puffin_filepath).await.unwrap());
-    }
-
-    // Check file indices.
-    let mut index_referenced_data_filepaths: HashSet<String> = HashSet::new();
-    for cur_file_index in snapshot.indices.file_indices.iter() {
-        for cur_index_block in cur_file_index.index_blocks.iter() {
-            let index_pathbuf = PathBuf::from(&cur_index_block.file_path);
-            assert!(index_pathbuf.starts_with(&warehouse_directory));
-            assert!(tokio::fs::try_exists(&index_pathbuf).await.unwrap());
-        }
-
-        for cur_data_filepath in cur_file_index.files.iter() {
-            index_referenced_data_filepaths.insert(cur_data_filepath.file_path().clone());
-        }
-    }
-
-    assert_eq!(index_referenced_data_filepaths, data_filepaths);
-}
-
 async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergResult<()> {
     // For the ease of testing, we use different directories for mooncake table and iceberg warehouse uri.
     let temp_dir = tempfile::tempdir().unwrap();
@@ -659,16 +743,13 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
     let identity_property = mooncake_table_metadata.identity.clone();
 
-    let iceberg_table_config = IcebergTableConfig {
-        warehouse_uri: warehouse_uri.clone(),
-        namespace: vec!["namespace".to_string()],
-        table_name: "test_table".to_string(),
-        drop_table_if_exists: false,
-    };
+    let iceberg_table_config = create_iceberg_table_config(warehouse_uri.clone());
     let schema = create_test_arrow_schema();
     // Create iceberg snapshot whenever `create_snapshot` is called.
-    let mut mooncake_table_config = MooncakeTableConfig::new();
-    mooncake_table_config.iceberg_snapshot_new_data_file_count = 0;
+    let mooncake_table_config = MooncakeTableConfig {
+        iceberg_snapshot_new_data_file_count: 0,
+        ..Default::default()
+    };
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
         "test_table".to_string(),
@@ -737,7 +818,10 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         )
     })?;
     table.commit(/*flush_lsn=*/ 200);
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
 
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
@@ -808,7 +892,10 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         )
     })?;
     table.commit(/*flush_lsn=*/ 300);
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
 
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
@@ -870,7 +957,10 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         )
     })?;
     table.commit(/*flush_lsn=*/ 400);
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
 
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
@@ -949,7 +1039,10 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) -> IcebergR
         )
     })?;
     table.commit(/*flush_lsn=*/ 500);
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await
+        .unwrap();
 
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
@@ -1047,16 +1140,13 @@ async fn test_drop_table_at_creation() -> IcebergResult<()> {
 
     let mooncake_table_metadata =
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
-    let iceberg_table_config = IcebergTableConfig {
-        warehouse_uri: path.clone(),
-        namespace: vec!["namespace".to_string()],
-        table_name: "test_table".to_string(),
-        drop_table_if_exists: false,
-    };
+    let iceberg_table_config = create_iceberg_table_config(path.clone());
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
-    let mut mooncake_table_config = MooncakeTableConfig::new();
-    mooncake_table_config.iceberg_snapshot_new_data_file_count = 0;
+    let mooncake_table_config = MooncakeTableConfig {
+        iceberg_snapshot_new_data_file_count: 0,
+        ..Default::default()
+    };
     let mut table = MooncakeTable::new(
         create_test_arrow_schema().as_ref().clone(),
         "test_table".to_string(),
@@ -1068,11 +1158,7 @@ async fn test_drop_table_at_creation() -> IcebergResult<()> {
     )
     .await
     .unwrap();
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
+    let row = test_row_1();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
     table.flush(/*lsn=*/ 200).await.unwrap();
@@ -1086,2126 +1172,6 @@ async fn test_drop_table_at_creation() -> IcebergResult<()> {
     assert!(snapshot.disk_files.is_empty());
     assert!(snapshot.indices.file_indices.is_empty());
     assert!(snapshot.data_file_flush_lsn.is_none());
-
-    Ok(())
-}
-
-// --------- state-based unit tests ---------
-// Possible states for data records:
-// (1) Uncommitted in-memory record batches
-// (2) Committed in-memory record batches
-// (3) Committed data files
-// (4) Uncommitted and committed in-memory record batches
-// (5) Committed in-memory record batches and committed data files
-// (6) Uncommitted/committed record batches, and committed data files
-// (7) No record batches
-//
-// Possible states for deletion vectors:
-// (1) No deletion record
-// (2) Only uncommitted deletion record
-// (3) Only committed deletion record
-// (4) Uncommitted and committed deletion record
-// (5) Committed and flushed deletion record
-// (6) Uncommitted deletion record and committed/flushed deletion record
-//
-// For states, refer to https://docs.google.com/document/d/1hZ0H66_eefjFezFQf1Pdr-A63eJ94OH9TsInNS-6xao/edit?usp=sharing
-//
-// A few testing assumptions / preparations:
-// - There will be at most two types of data files, one written before test case perform any append/delete operations, another after new rows appended.
-// - To differentiate these two types of data files, the first type of record batch contains two rows, the second type of record batch contains only one row.
-
-// Util function to create mooncake table and iceberg table manager.
-async fn create_table_and_iceberg_manager(
-    temp_dir: &TempDir,
-) -> (MooncakeTable, IcebergTableManager) {
-    let path = temp_dir.path().to_path_buf();
-    let warehouse_uri = path.clone().to_str().unwrap().to_string();
-    let mooncake_table_metadata =
-        create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
-    let identity_property = mooncake_table_metadata.identity.clone();
-
-    let iceberg_table_config = IcebergTableConfig {
-        warehouse_uri,
-        namespace: vec!["namespace".to_string()],
-        table_name: "test_table".to_string(),
-        drop_table_if_exists: false,
-    };
-    let schema = create_test_arrow_schema();
-
-    // Create iceberg snapshot whenever `create_snapshot` is called.
-    let mut mooncake_table_config = MooncakeTableConfig::new();
-    mooncake_table_config.iceberg_snapshot_new_data_file_count = 0;
-    let table = MooncakeTable::new(
-        schema.as_ref().clone(),
-        "test_table".to_string(),
-        /*version=*/ 1,
-        path,
-        identity_property,
-        iceberg_table_config.clone(),
-        mooncake_table_config,
-    )
-    .await
-    .unwrap();
-
-    let iceberg_table_manager = IcebergTableManager::new(
-        mooncake_table_metadata.clone(),
-        iceberg_table_config.clone(),
-    )
-    .unwrap();
-
-    (table, iceberg_table_manager)
-}
-
-// Test util function to prepare for committed and persisted data file,
-// here we write two rows and assume they'll be included in one arrow record batch and one data file.
-async fn prepare_committed_and_flushed_data_files(
-    table: &mut MooncakeTable,
-    lsn: u64,
-) -> (MoonlinkRow, MoonlinkRow) {
-    // Append first row.
-    let row_1 = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row_1.clone()).unwrap();
-
-    // Append second row.
-    let row_2 = MoonlinkRow::new(vec![
-        RowValue::Int32(4),
-        RowValue::ByteArray("David".as_bytes().to_vec()),
-        RowValue::Int32(40),
-    ]);
-    table.append(row_2.clone()).unwrap();
-
-    table.commit(lsn);
-    table.flush(lsn).await.unwrap();
-
-    (row_2, row_1)
-}
-
-// Test util function to check whether the data file in iceberg snapshot is the same as initially-prepared one from `prepare_committed_and_flushed_data_files`.
-//
-// # Arguments
-//
-// * deleted: whether the record in the data file has been deleted.
-async fn check_prev_data_files(
-    snapshot: &Snapshot,
-    iceberg_table_manager: &IcebergTableManager,
-    deleted: bool,
-) {
-    assert_eq!(snapshot.disk_files.len(), 1);
-    let (data_file, deletion_vector) = snapshot.disk_files.iter().next().unwrap();
-    let file_io = iceberg_table_manager
-        .iceberg_table
-        .as_ref()
-        .unwrap()
-        .file_io();
-    let loaded_arrow_batch = load_arrow_batch(file_io, data_file.file_path().as_str())
-        .await
-        .unwrap();
-    let expected_arrow_batch = RecordBatch::try_new(
-        iceberg_table_manager.mooncake_table_metadata.schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![1, 4])),
-            Arc::new(StringArray::from(vec!["John", "David"])),
-            Arc::new(Int32Array::from(vec![30, 40])),
-        ],
-    )
-    .unwrap();
-    assert_eq!(loaded_arrow_batch, expected_arrow_batch);
-
-    // In the test suite, we only delete the second prepared row.
-    assert!(!deletion_vector
-        .batch_deletion_vector
-        .is_deleted(/*row_idx=*/ 0));
-    if deleted {
-        assert!(deletion_vector
-            .batch_deletion_vector
-            .is_deleted(/*row_idx=*/ 1));
-    } else {
-        assert!(!deletion_vector
-            .batch_deletion_vector
-            .is_deleted(/*row_idx=*/ 1));
-    }
-}
-
-// Test util function to check whether the data file in iceberg snapshot is the same as the newly appended row.
-//
-// # Arguments
-//
-// * deleted: whether the record in the data file has been deleted.
-async fn check_new_data_files(
-    snapshot: &Snapshot,
-    iceberg_table_manager: &IcebergTableManager,
-    deleted: bool,
-) {
-    assert_eq!(snapshot.disk_files.len(), 1);
-    let (data_file, deletion_vector) = snapshot.disk_files.iter().next().unwrap();
-    let file_io = iceberg_table_manager
-        .iceberg_table
-        .as_ref()
-        .unwrap()
-        .file_io();
-    let loaded_arrow_batch = load_arrow_batch(file_io, data_file.file_path().as_str())
-        .await
-        .unwrap();
-    let expected_arrow_batch = RecordBatch::try_new(
-        iceberg_table_manager.mooncake_table_metadata.schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![1])),
-            Arc::new(StringArray::from(vec!["John"])),
-            Arc::new(Int32Array::from(vec![30])),
-        ],
-    )
-    .unwrap();
-    assert_eq!(loaded_arrow_batch, expected_arrow_batch);
-
-    // In the test suite, we only delete the second prepared row.
-    assert!(!deletion_vector
-        .batch_deletion_vector
-        .is_deleted(/*row_idx=*/ 0));
-    if deleted {
-        assert!(deletion_vector
-            .batch_deletion_vector
-            .is_deleted(/*row_idx=*/ 1));
-    } else {
-        assert!(!deletion_vector
-            .batch_deletion_vector
-            .is_deleted(/*row_idx=*/ 1));
-    }
-}
-
-// Test util function to check whether the data files in iceberg snapshot is the same as initially-prepared one from `prepare_committed_and_flushed_data_files`, and the newly added row.
-//
-// # Arguments
-//
-// * deleted: whether the record in the data file has been deleted.
-async fn check_prev_and_new_data_files(
-    snapshot: &Snapshot,
-    iceberg_table_manager: &IcebergTableManager,
-    deleted: Vec<bool>,
-) {
-    assert_eq!(snapshot.disk_files.len(), 2);
-    let file_io = iceberg_table_manager
-        .iceberg_table
-        .as_ref()
-        .unwrap()
-        .file_io();
-
-    let mut loaded_record_batches: Vec<RecordBatch> = Vec::with_capacity(2);
-    let mut batch_deletion_vectors: Vec<&BatchDeletionVector> = Vec::with_capacity(2);
-    for (cur_data_file, cur_deletion_vector) in snapshot.disk_files.iter() {
-        let cur_arrow_batch = load_arrow_batch(file_io, cur_data_file.file_path().as_str())
-            .await
-            .unwrap();
-        loaded_record_batches.push(cur_arrow_batch);
-        batch_deletion_vectors.push(&cur_deletion_vector.batch_deletion_vector);
-    }
-    // In the test suite, the first record has two rows, and the second record has one row.
-    if loaded_record_batches[0].num_rows() == 1 {
-        loaded_record_batches.swap(0, 1);
-        batch_deletion_vectors.swap(0, 1);
-    }
-
-    // Check data files.
-    let expected_arrow_batch_1 = RecordBatch::try_new(
-        iceberg_table_manager.mooncake_table_metadata.schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![1, 4])),
-            Arc::new(StringArray::from(vec!["John", "David"])),
-            Arc::new(Int32Array::from(vec![30, 40])),
-        ],
-    )
-    .unwrap();
-    let expected_arrow_batch_2 = RecordBatch::try_new(
-        iceberg_table_manager.mooncake_table_metadata.schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![2])),
-            Arc::new(StringArray::from(vec!["Tim"])),
-            Arc::new(Int32Array::from(vec![20])),
-        ],
-    )
-    .unwrap();
-    assert_eq!(loaded_record_batches[0], expected_arrow_batch_1);
-    assert_eq!(loaded_record_batches[1], expected_arrow_batch_2);
-
-    // Check deletion vector.
-    assert!(!batch_deletion_vectors[0].is_deleted(/*row_idx=*/ 0));
-    if deleted[0] {
-        assert!(batch_deletion_vectors[0].is_deleted(/*row_idx=*/ 1));
-    } else {
-        assert!(!batch_deletion_vectors[0].is_deleted(/*row_idx=*/ 1));
-    }
-
-    if deleted[1] {
-        assert!(batch_deletion_vectors[1].is_deleted(/*row_idx=*/ 0));
-    } else {
-        assert!(!batch_deletion_vectors[1].is_deleted(/*row_idx=*/ 0));
-    }
-}
-
-// Testing combination: (1) + (1) => no snapshot
-#[tokio::test]
-async fn test_state_1_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    assert!(table.create_snapshot().is_none());
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (1) + (2) => no snapshot
-#[tokio::test]
-async fn test_state_1_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    // Prepate deletion log pre-requisite.
-    table.delete(row.clone(), /*lsn=*/ 1).await;
-
-    // Request to create snapshot.
-    assert!(table.create_snapshot().is_none());
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (1) + (3) => no snapshot, depends on snapshot threshold
-#[tokio::test]
-async fn test_state_1_3() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite.
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (1) + (4) => no snapshot, depends on snapshot threshold
-#[tokio::test]
-async fn test_state_1_4() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 400).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (1) + (5) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_1_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (1) + (6) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_1_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 400).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (2) + (1) => no snapshot
-#[tokio::test]
-async fn test_state_2_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 100);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (2) + (2) => no snapshot
-#[tokio::test]
-async fn test_state_2_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 100);
-    // Prepate deletion log pre-requisite.
-    table.delete(row.clone(), /*lsn=*/ 200).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (2) + (3) => no snapshot, depends on snapshot threshold
-#[tokio::test]
-async fn test_state_2_3() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite.
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (2) + (4) => no snapshot, depends on snapshot threshold
-#[tokio::test]
-async fn test_state_2_4() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 500).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (2) + (5) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_2_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (2) + (6) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_2_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 500).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (1) => snapshot with data file created
-#[tokio::test]
-async fn test_state_3_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 100);
-    table.flush(/*lsn=*/ 200).await.unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_new_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (2) => snapshot with data files created
-#[tokio::test]
-async fn test_state_3_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 100);
-    table.flush(/*lsn=*/ 200).await.unwrap();
-    // Prepate deletion log pre-requisite.
-    table.delete(row.clone(), /*lsn=*/ 300).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_new_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (3) + committed deletion before flush => snapshot with data files and deletion vector
-#[tokio::test]
-async fn test_state_3_3_deletion_before_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 500).await.unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (3) + committed deletion after flush => snapshot with data files
-#[tokio::test]
-async fn test_state_3_3_deletion_after_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 200);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 400).await;
-    table.commit(/*lsn=*/ 500);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![false, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (4) + committed deletion record before flush => snapshot with data files with deletion vector
-#[tokio::test]
-async fn test_state_3_4_committed_deletion_before_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 500).await.unwrap();
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (4) + committed deletion record after flush => snapshot with data files
-#[tokio::test]
-async fn test_state_3_4_committed_deletion_after_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 200);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 400).await;
-    table.commit(/*lsn=*/ 500);
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![false, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (5) => snapshot with data files with deletion vector
-#[tokio::test]
-async fn test_state_3_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 400).await.unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (3) + (6) => snapshot with data files with deletion vector
-#[tokio::test]
-async fn test_state_3_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 400).await.unwrap();
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 500).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (4) + (1) => no snapshot
-#[tokio::test]
-async fn test_state_4_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite (committed record batch).
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 100);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (4) + (2) => no snapshot
-#[tokio::test]
-async fn test_state_4_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite (committed record batch).
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 100);
-    // Prepate deletion log pre-requisite.
-    table.delete(row.clone(), /*lsn=*/ 200).await;
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (4) + (3) => no snapshot, depends on snapshot threshold
-#[tokio::test]
-async fn test_state_4_3() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed record batch).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (4) + (4) => no snapshot, depends on snapshot threshold
-#[tokio::test]
-async fn test_state_4_4() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 500).await;
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (4) + (5) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_4_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare committed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("David".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (4) + (6) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_4_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed and flushed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare committed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("David".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    // Prepare uncommitted deletion record.
-    table.delete(row.clone(), /*lsn=*/ 500).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (1) => snapshot with data file created
-#[tokio::test]
-async fn test_state_5_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 100);
-    table.flush(/*lsn=*/ 200).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 300);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_new_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (2) => snapshot with data files created
-#[tokio::test]
-async fn test_state_5_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 100);
-    table.flush(/*lsn=*/ 200).await.unwrap();
-    // Prepate deletion log pre-requisite.
-    table.delete(row.clone(), /*lsn=*/ 300).await;
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 400);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_new_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (3) + committed deletion before flush => snapshot with data files and deletion vector
-#[tokio::test]
-async fn test_state_5_3_deletion_before_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 500).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 600);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (3) + committed deletion after flush => snapshot with data files
-#[tokio::test]
-async fn test_state_5_3_deletion_after_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 200);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 400).await;
-    table.commit(/*lsn=*/ 500);
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 600);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![false, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (4) + committed deletion record before flush => snapshot with data files with deletion vector
-#[tokio::test]
-async fn test_state_5_4_committed_deletion_before_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 500).await.unwrap();
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 700);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (4) + committed deletion record after flush => snapshot with data files
-#[tokio::test]
-async fn test_state_5_4_committed_deletion_after_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 200);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 400).await;
-    table.commit(/*lsn=*/ 500);
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 700);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![false, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (5) => snapshot with data files and deletion vector
-#[tokio::test]
-async fn test_state_5_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed and flushed deletion record.
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 400).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 500);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (5) + (6) => snapshot with data files and deletion vector
-#[tokio::test]
-async fn test_state_5_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed and flushed deletion record.
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 400).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 500);
-    // Prepare uncommitted deletion record.
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (1) => snapshot with data file created
-#[tokio::test]
-async fn test_state_6_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 100);
-    table.flush(/*lsn=*/ 200).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 300);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_new_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (2) => snapshot with data files created
-#[tokio::test]
-async fn test_state_6_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare data file pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(1),
-        RowValue::ByteArray("John".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 100);
-    table.flush(/*lsn=*/ 200).await.unwrap();
-    // Prepate deletion log pre-requisite.
-    table.delete(row.clone(), /*lsn=*/ 300).await;
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 400);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_new_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (3) + committed deletion before flush => snapshot with data files and deletion vector
-#[tokio::test]
-async fn test_state_6_3_deletion_before_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 500).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 600);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (3) + committed deletion after flush => snapshot with data files
-#[tokio::test]
-async fn test_state_6_3_deletion_after_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 200);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 400).await;
-    table.commit(/*lsn=*/ 500);
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 600);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![false, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (4) + committed deletion record before flush => snapshot with data files with deletion vector
-#[tokio::test]
-async fn test_state_6_4_committed_deletion_before_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 500).await.unwrap();
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 700);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (4) + committed deletion record after flush => snapshot with data files
-#[tokio::test]
-async fn test_state_6_4_committed_deletion_after_flush() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 200);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare deletion pre-requisite (committed deletion record).
-    table.delete(old_row.clone(), /*lsn=*/ 400).await;
-    table.commit(/*lsn=*/ 500);
-    // Prepare deletion pre-requisite (uncommitted deletion record).
-    table.delete(row.clone(), /*lsn=*/ 600).await;
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 700);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![false, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (5) => snapshot with data files
-#[tokio::test]
-async fn test_state_6_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed and flushed deletion records.
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 400).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 500);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row).unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (6) + (6) => snapshot with data files
-#[tokio::test]
-async fn test_state_6_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed and flushed deletion records.
-    table.delete(old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepate data files pre-requisite.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(2),
-        RowValue::ByteArray("Tim".as_bytes().to_vec()),
-        RowValue::Int32(20),
-    ]);
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 400);
-    table.flush(/*lsn=*/ 400).await.unwrap();
-    // Prepare committed but unflushed record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(3),
-        RowValue::ByteArray("Cat".as_bytes().to_vec()),
-        RowValue::Int32(30),
-    ]);
-    table.append(row).unwrap();
-    table.commit(/*lsn=*/ 500);
-    // Prepare uncommitted record batch.
-    let row = MoonlinkRow::new(vec![
-        RowValue::Int32(5),
-        RowValue::ByteArray("Ethan".as_bytes().to_vec()),
-        RowValue::Int32(50),
-    ]);
-    table.append(row.clone()).unwrap();
-    // Prepare uncommitted deletion record.
-    table.delete(/*row=*/ row.clone(), /*lsn=*/ 600).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_and_new_data_files(
-        &snapshot,
-        &iceberg_table_manager,
-        /*deleted=*/ vec![true, false],
-    )
-    .await;
-    assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (7) + (1) => no snapshot
-#[tokio::test]
-async fn test_state_7_1() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    assert!(snapshot.disk_files.is_empty());
-    assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (7) + (2) => no snapshot
-#[tokio::test]
-async fn test_state_7_2() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare uncommitted deletion record.
-    table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 200).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (7) + (3) => no snapshot
-#[tokio::test]
-async fn test_state_7_3() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed deletion record.
-    table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (7) + (4) => no snapshot
-#[tokio::test]
-async fn test_state_7_4() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row_1, old_row_2) =
-        prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed deletion record.
-    table.delete(/*row=*/ old_row_1.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    // Prepare uncommitted deletion record.
-    table.delete(old_row_2, /*lsn=*/ 400).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ false).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (7) + (5) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_7_5() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed and flushed deletion record.
-    table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
-
-    Ok(())
-}
-
-// Testing combination: (7) + (6) => snapshot with deletion vector
-#[tokio::test]
-async fn test_state_7_6() -> IcebergResult<()> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
-    // Prepare environment setup.
-    let (old_row_1, old_row_2) =
-        prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
-    // Prepare committed and flushed deletion record.
-    table.delete(/*row=*/ old_row_1.clone(), /*lsn=*/ 200).await;
-    table.commit(/*lsn=*/ 300);
-    table.flush(/*lsn=*/ 300).await.unwrap();
-    // Prepare uncommitted deletion record.
-    table.delete(old_row_2.clone(), /*lsn=*/ 400).await;
-
-    // Request to create snapshot.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
-
-    // Check iceberg snapshot status.
-    let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
-    check_prev_data_files(&snapshot, &iceberg_table_manager, /*deleted=*/ true).await;
-    assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
-    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
 
     Ok(())
 }

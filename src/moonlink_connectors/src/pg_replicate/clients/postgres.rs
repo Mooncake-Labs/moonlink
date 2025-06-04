@@ -10,6 +10,7 @@ use tokio_postgres::{
 };
 use tracing::{info, warn};
 
+use crate::pg_replicate::conversions::text::TextFormatConverter;
 use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableId, TableName, TableSchema};
 
 pub struct SlotInfo {
@@ -131,6 +132,7 @@ impl ReplicationClient {
     pub async fn get_column_schemas(
         &self,
         table_id: TableId,
+        table_name: &TableName,
         publication: Option<&str>,
     ) -> Result<Vec<ColumnSchema>, ReplicationClientError> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
@@ -204,13 +206,22 @@ impl ReplicationClient {
                     .parse()
                     .map_err(|_| ReplicationClientError::OidColumnNotU32)?;
 
-                //TODO: For now we assume all types are simple, fix it later
-                let typ = Type::from_oid(type_oid).unwrap_or(Type::new(
-                    format!("unnamed(oid: {type_oid})"),
-                    type_oid,
-                    Kind::Simple,
-                    "pg_catalog".to_string(),
-                ));
+                // Fail fast on any type that we are not able to parse in try_from_str.
+                let typ = Type::from_oid(type_oid).ok_or_else(|| {
+                    ReplicationClientError::UnsupportedType(
+                        name.clone(),
+                        type_oid,
+                        table_name.to_string(),
+                    )
+                })?;
+
+                if !TextFormatConverter::is_supported_type(&typ) {
+                    return Err(ReplicationClientError::UnsupportedType(
+                        name.clone(),
+                        type_oid,
+                        table_name.to_string(),
+                    ));
+                }
 
                 let modifier = row
                     .try_get("atttypmod")?
@@ -398,7 +409,9 @@ impl ReplicationClient {
             .await?
             .ok_or(ReplicationClientError::MissingTable(table_name.clone()))?;
 
-        let column_schemas = self.get_column_schemas(table_id, publication).await?;
+        let column_schemas = self
+            .get_column_schemas(table_id, &table_name, publication)
+            .await?;
         let lookup_key = self.get_lookup_key(table_id, &column_schemas).await?;
 
         let table_schema = TableSchema {

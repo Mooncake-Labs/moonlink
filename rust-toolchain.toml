@@ -1,0 +1,4 @@
+# rust-toolchain.toml
+[toolchain]
+channel = "1.86.0"
+components = ["clippy", "rustfmt"]

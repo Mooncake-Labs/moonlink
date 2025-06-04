@@ -1,10 +1,10 @@
-use crate::storage::index::file_index_id::get_next_file_index_id;
 use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
 use futures::executor::block_on;
 use memmap2::Mmap;
 use std::collections::BinaryHeap;
 use std::fmt;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::io::SeekFrom;
 use std::path::PathBuf;
@@ -40,9 +40,6 @@ fn splitmix64(mut x: u64) -> u64 {
 /// [lower_bit_hash, seg_idx, row_idx]
 #[derive(Clone)]
 pub struct GlobalIndex {
-    /// A unique id to identify each global index.
-    pub(crate) global_index_id: u32,
-
     pub(crate) files: Vec<MooncakeDataFileRef>,
     pub(crate) num_rows: u32,
     pub(crate) hash_bits: u32,
@@ -53,6 +50,21 @@ pub struct GlobalIndex {
     pub(crate) bucket_bits: u32,
 
     pub(crate) index_blocks: Vec<IndexBlock>,
+}
+
+// For GlobalIndex, there won't be two indices pointing to same sets of data files, so we use data files for hash and equal.
+impl PartialEq for GlobalIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.files == other.files
+    }
+}
+
+impl Eq for GlobalIndex {}
+
+impl Hash for GlobalIndex {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.files.hash(state);
+    }
 }
 
 #[derive(Clone)]
@@ -273,6 +285,12 @@ pub struct GlobalIndexBuilder {
     directory: PathBuf,
 }
 
+impl Default for GlobalIndexBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalIndexBuilder {
     pub fn new() -> Self {
         Self {
@@ -301,7 +319,6 @@ impl GlobalIndexBuilder {
         let lower_bits = 64 - upper_bits;
         let seg_id_bits = 32 - (self.files.len() as u32).trailing_zeros();
         let global_index = GlobalIndex {
-            global_index_id: get_next_file_index_id(),
             files: std::mem::take(&mut self.files),
             num_rows,
             hash_bits: HASH_BITS,
@@ -646,6 +663,9 @@ mod tests {
             .set_files(files)
             .set_directory(tempfile::tempdir().unwrap().keep());
         let index = builder.build_from_flush(hash_entries.clone()).await;
+
+        // Search for a non-existent key doesn't panic.
+        assert!(index.search(/*hash=*/ &0).await.is_empty());
 
         let data_file_ids = [data_file.file_id()];
         for (hash, seg_idx, row_idx) in hash_entries.iter() {

@@ -8,7 +8,7 @@ mod table_snapshot;
 mod transaction_stream;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
-use super::index::{MemIndex, MooncakeIndex};
+use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
 use crate::error::{Error, Result};
 use crate::row::{IdentityProp, MoonlinkRow};
@@ -22,7 +22,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
 use crate::storage::storage_utils::FileId;
 use std::collections::HashMap;
 use std::mem::take;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
@@ -43,6 +43,10 @@ pub struct TableConfig {
     pub snapshot_deletion_record_count: usize,
     /// Max number of rows in MemSlice.
     pub batch_size: usize,
+    /// Filesystem directory to store temporary files, used for union read.
+    pub temp_files_directory: String,
+    /// Disk slice parquet file flush threshold.
+    pub disk_slice_parquet_file_size: usize,
     /// Number of new data files to trigger an iceberg snapshot.
     pub iceberg_snapshot_new_data_file_count: usize,
     /// Number of unpersisted committed delete logs to trigger an iceberg snapshot.
@@ -51,7 +55,7 @@ pub struct TableConfig {
 
 impl Default for TableConfig {
     fn default() -> Self {
-        Self::new()
+        Self::new(Self::DEFAULT_TEMP_FILE_DIRECTORY.to_string())
     }
 }
 
@@ -66,6 +70,8 @@ impl TableConfig {
     pub(crate) const DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT: usize = 1;
     #[cfg(debug_assertions)]
     pub(crate) const DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG: usize = 1000;
+    #[cfg(debug_assertions)]
+    pub(crate) const DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE: usize = 1024 * 1024 * 2; // 2MiB
 
     #[cfg(not(debug_assertions))]
     pub(crate) const DEFAULT_MEM_SLICE_SIZE: usize = TableConfig::DEFAULT_BATCH_SIZE * 32;
@@ -77,12 +83,19 @@ impl TableConfig {
     pub(crate) const DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT: usize = 1;
     #[cfg(not(debug_assertions))]
     pub(crate) const DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG: usize = 1000;
+    #[cfg(not(debug_assertions))]
+    pub(crate) const DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE: usize = 1024 * 1024 * 128; // 128MiB
 
-    pub fn new() -> Self {
+    /// Default local directory to hold temporary files for union read.
+    pub(crate) const DEFAULT_TEMP_FILE_DIRECTORY: &str = "/tmp/moonlink_temp_file";
+
+    pub fn new(temp_files_directory: String) -> Self {
         Self {
             mem_slice_size: Self::DEFAULT_MEM_SLICE_SIZE,
             snapshot_deletion_record_count: Self::DEFAULT_SNAPSHOT_DELETION_RECORD_COUNT,
             batch_size: Self::DEFAULT_BATCH_SIZE,
+            disk_slice_parquet_file_size: Self::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
+            temp_files_directory,
             iceberg_snapshot_new_data_file_count: Self::DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT,
             iceberg_snapshot_new_committed_deletion_log:
                 Self::DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG,
@@ -163,13 +176,12 @@ impl Snapshot {
     }
 
     pub fn get_name_for_inmemory_file(&self) -> PathBuf {
-        Path::join(
-            &self.metadata.path,
-            format!(
-                "inmemory_{}_{}_{}.parquet",
-                self.metadata.name, self.metadata.id, self.snapshot_version
-            ),
-        )
+        let mut directory = PathBuf::from(&self.metadata.config.temp_files_directory);
+        directory.push(format!(
+            "inmemory_{}_{}_{}.parquet",
+            self.metadata.name, self.metadata.id, self.snapshot_version
+        ));
+        directory
     }
 }
 
@@ -206,6 +218,8 @@ pub struct SnapshotTask {
     iceberg_persisted_data_files: Vec<MooncakeDataFileRef>,
     /// Puffin blobs which have been persisted into iceberg snapshot.
     iceberg_persisted_puffin_blob: HashMap<MooncakeDataFileRef, PuffinBlobRef>,
+    /// Persisted new file indices.
+    iceberg_persisted_file_indices: Vec<FileIndex>,
 }
 
 impl SnapshotTask {
@@ -225,6 +239,7 @@ impl SnapshotTask {
             iceberg_flush_lsn: None,
             iceberg_persisted_data_files: Vec::new(),
             iceberg_persisted_puffin_blob: HashMap::new(),
+            iceberg_persisted_file_indices: Vec::new(),
         }
     }
 
@@ -235,9 +250,11 @@ impl SnapshotTask {
                 >= self.mooncake_table_config.snapshot_deletion_record_count()
     }
 
-    /// Get newly created data files.
+    /// Get newly created data files, including both batch write ones and stream write ones.
     pub(crate) fn get_new_data_files(&self) -> Vec<MooncakeDataFileRef> {
         let mut new_files = vec![];
+
+        // Batch write data files.
         for cur_disk_slice in self.new_disk_slices.iter() {
             new_files.extend(
                 cur_disk_slice
@@ -246,7 +263,37 @@ impl SnapshotTask {
                     .map(|(file, _)| file.clone()),
             );
         }
+
+        // Stream write data files.
+        for cur_stream_xact in self.new_streaming_xact.iter() {
+            if let TransactionStreamOutput::Commit(cur_stream_commit) = cur_stream_xact {
+                new_files.extend(cur_stream_commit.get_flushed_data_files());
+            }
+        }
+
         new_files
+    }
+
+    /// Get newly created file indices, including both batch write ones and stream write ones.
+    pub(crate) fn get_new_file_indices(&self) -> Vec<FileIndex> {
+        let mut new_file_indices = vec![];
+
+        // Batch write file indices.
+        for cur_disk_slice in self.new_disk_slices.iter() {
+            let file_indice = cur_disk_slice.get_file_indice();
+            if let Some(file_indice) = file_indice {
+                new_file_indices.push(file_indice);
+            }
+        }
+
+        // Stream write file indices.
+        for cur_stream_xact in self.new_streaming_xact.iter() {
+            if let TransactionStreamOutput::Commit(cur_stream_commit) = cur_stream_xact {
+                new_file_indices.extend(cur_stream_commit.get_file_indices());
+            }
+        }
+
+        new_file_indices
     }
 }
 
@@ -370,6 +417,13 @@ impl MooncakeTable {
             .is_empty());
         self.next_snapshot_task.iceberg_persisted_puffin_blob =
             iceberg_snapshot_res.puffin_blob_ref;
+
+        assert!(self
+            .next_snapshot_task
+            .iceberg_persisted_file_indices
+            .is_empty());
+        self.next_snapshot_task.iceberg_persisted_file_indices =
+            iceberg_snapshot_res.imported_file_indices;
     }
 
     /// Get iceberg snapshot flush LSN.
@@ -445,16 +499,17 @@ impl MooncakeTable {
             task.new_mem_indices.push(index.clone());
         }
 
-        let metadata_clone = metadata.clone();
-        let path_clone = metadata.path.clone();
+        let path = metadata.path.clone();
+        let parquet_flush_threshold_size = metadata.config.disk_slice_parquet_file_size;
 
         let mut disk_slice = DiskSliceWriter::new(
-            metadata_clone.schema.clone(),
-            path_clone,
+            metadata.schema.clone(),
+            path,
             batches,
             lsn,
             next_file_id,
             index,
+            parquet_flush_threshold_size,
         );
 
         disk_slice.write().await?;
@@ -524,29 +579,30 @@ impl MooncakeTable {
     }
 
     /// Persist an iceberg snapshot.
-    ///
-    /// TODO(hjiang): Better error handling at TableHandler eventloop.
     async fn persist_iceberg_snapshot_impl(
         mut iceberg_table_manager: Box<dyn TableManager>,
         snapshot_payload: IcebergSnapshotPayload,
-    ) -> IcebergSnapshotResult {
+    ) -> Result<IcebergSnapshotResult> {
         let flush_lsn = snapshot_payload.flush_lsn;
         let new_data_files = snapshot_payload.data_files.clone();
+        let imported_file_indices = snapshot_payload.file_indices_to_import.clone();
+        let removed_file_indices = snapshot_payload.file_indices_to_remove.clone();
         let puffin_blob_ref = iceberg_table_manager
             .sync_snapshot(snapshot_payload)
-            .await
-            .unwrap();
-        IcebergSnapshotResult {
+            .await?;
+        Ok(IcebergSnapshotResult {
             table_manager: iceberg_table_manager,
             flush_lsn,
             new_data_files,
+            imported_file_indices,
+            removed_file_indices,
             puffin_blob_ref,
-        }
+        })
     }
     pub(crate) fn persist_iceberg_snapshot(
         &mut self,
         snapshot_payload: IcebergSnapshotPayload,
-    ) -> JoinHandle<IcebergSnapshotResult> {
+    ) -> JoinHandle<Result<IcebergSnapshotResult>> {
         let iceberg_table_manager = self.iceberg_table_manager.take().unwrap();
         tokio::task::spawn(Self::persist_iceberg_snapshot_impl(
             iceberg_table_manager,
@@ -583,7 +639,7 @@ impl MooncakeTable {
     //
     // Test util function, which updates mooncake table snapshot and create iceberg snapshot in a serial fashion.
     #[cfg(test)]
-    pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_test(&mut self) {
+    pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_test(&mut self) -> Result<()> {
         if let Some(mooncake_join_handle) = self.create_snapshot() {
             // Wait for the snapshot async task to complete.
             match mooncake_join_handle.await {
@@ -596,7 +652,7 @@ impl MooncakeTable {
                         let iceberg_join_handle = self.persist_iceberg_snapshot(payload);
                         match iceberg_join_handle.await {
                             Ok(iceberg_snapshot_res) => {
-                                self.set_iceberg_snapshot_res(iceberg_snapshot_res);
+                                self.set_iceberg_snapshot_res(iceberg_snapshot_res?);
                             }
                             Err(e) => {
                                 panic!("Iceberg snapshot task gets cancelled: {:?}", e);
@@ -609,6 +665,7 @@ impl MooncakeTable {
                 }
             }
         }
+        Ok(())
     }
 }
 

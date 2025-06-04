@@ -51,9 +51,9 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
         warehouse_uri: base_path.to_str().unwrap().to_string(),
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),
-        drop_table_if_exists: false,
     };
     let rt = Runtime::new().unwrap();
+    let table_config = TableConfig::new(temp_dir.path().to_str().unwrap().to_string());
     let mut table = rt
         .block_on(MooncakeTable::new(
             schema,
@@ -62,7 +62,7 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
             base_path,
             IdentityProp::SinglePrimitiveKey(0),
             iceberg_table_config,
-            TableConfig::new(),
+            table_config,
         ))
         .unwrap();
 

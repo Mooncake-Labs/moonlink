@@ -7,7 +7,9 @@ use bincode::error::EncodeError;
 pub(super) struct TableMetadata {
     pub(super) data_files: Vec<String>,
     pub(super) puffin_files: Vec<String>,
+    /// Sorted deletion vector based on data file index.
     pub(super) deletion_vectors: Vec<PuffinDeletionBlobAtRead>,
+    /// Sorted positional deletes on first element (data file id).
     pub(super) position_deletes: Vec<(u32, u32)>,
 }
 
@@ -34,18 +36,28 @@ impl Encode for TableMetadata {
         }
         write_usize(writer, offset)?;
 
+        // Used to check deletion vector ordering.
+        let mut prev_data_file_index = 0;
         // Write deletion vector puffin blob information.
         write_usize(writer, self.deletion_vectors.len())?;
         for deletion_vector in &self.deletion_vectors {
+            assert!(deletion_vector.data_file_index >= prev_data_file_index);
+            prev_data_file_index = deletion_vector.data_file_index;
+
             write_u32(writer, deletion_vector.data_file_index)?;
             write_u32(writer, deletion_vector.puffin_file_index)?;
             write_u32(writer, deletion_vector.start_offset)?;
             write_u32(writer, deletion_vector.blob_size)?;
         }
 
+        // Used to check positional deletes ordering.
+        let mut prev_position_delete_data_file_index = 0;
         // Write positional deletion records.
         write_usize(writer, self.position_deletes.len())?;
         for position_delete in &self.position_deletes {
+            assert!(position_delete.0 >= prev_position_delete_data_file_index);
+            prev_position_delete_data_file_index = position_delete.0;
+
             write_u32(writer, position_delete.0)?;
             write_u32(writer, position_delete.1)?;
         }

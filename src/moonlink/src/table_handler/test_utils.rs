@@ -7,6 +7,7 @@ use crate::storage::{load_blob_from_puffin_file, DeletionVector};
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{IcebergEventSyncSender, TableEvent, TableHandler}; // Ensure this path is correct
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
+use crate::Result;
 use crate::{
     IcebergEventSyncReceiver, IcebergTableEventManager, IcebergTableManager,
     TableConfig as MooncakeTableConfig,
@@ -55,7 +56,6 @@ pub fn get_iceberg_manager_config(table_name: String, warehouse_uri: String) -> 
         warehouse_uri,
         namespace: vec!["default".to_string()],
         table_name,
-        drop_table_if_exists: false,
     }
 }
 
@@ -66,28 +66,63 @@ pub struct TestEnvironment {
     read_state_manager: Arc<ReadStateManager>,
     replication_tx: watch::Sender<u64>,
     last_commit_tx: watch::Sender<u64>,
-    iceberg_snapshot_manager: IcebergTableEventManager,
+    pub(crate) iceberg_table_event_manager: IcebergTableEventManager,
     pub(crate) temp_dir: TempDir,
 }
 
 impl TestEnvironment {
     /// Creates a default test environment with default settings.
     pub async fn default() -> Self {
-        Self::new(MooncakeTableConfig::default()).await
+        let temp_dir = tempdir().unwrap();
+        let mooncake_table_config =
+            MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+        Self::new(temp_dir, mooncake_table_config).await
+    }
+
+    /// Create a new test environment with the given mooncake table.
+    pub(crate) async fn new_with_mooncake_table(
+        temp_dir: TempDir,
+        mooncake_table: MooncakeTable,
+    ) -> Self {
+        let (replication_tx, replication_rx) = watch::channel(0u64);
+        let (last_commit_tx, last_commit_rx) = watch::channel(0u64);
+        let read_state_manager = Arc::new(ReadStateManager::new(
+            &mooncake_table,
+            replication_rx,
+            last_commit_rx,
+        ));
+
+        let (iceberg_drop_table_completion_tx, iceberg_drop_table_completion_rx) = mpsc::channel(1);
+        let iceberg_event_sync_sender = IcebergEventSyncSender {
+            iceberg_drop_table_completion_tx,
+        };
+        let iceberg_event_sync_receiver = IcebergEventSyncReceiver {
+            iceberg_drop_table_completion_rx,
+        };
+        let handler = TableHandler::new(mooncake_table, iceberg_event_sync_sender);
+        let iceberg_table_event_manager =
+            IcebergTableEventManager::new(handler.get_event_sender(), iceberg_event_sync_receiver);
+        let event_sender = handler.get_event_sender();
+
+        Self {
+            handler,
+            event_sender,
+            read_state_manager,
+            replication_tx,
+            last_commit_tx,
+            iceberg_table_event_manager,
+            temp_dir,
+        }
     }
 
     /// Creates a new test environment with default settings.
-    pub async fn new(mooncake_table_config: MooncakeTableConfig) -> Self {
-        let schema = default_schema();
-        let temp_dir = tempdir().unwrap();
+    pub async fn new(temp_dir: TempDir, mooncake_table_config: MooncakeTableConfig) -> Self {
         let path = temp_dir.path().to_path_buf();
-
-        // TODO(hjiang): Hard-code iceberg table namespace and table name.
         let table_name = "table_name";
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
         let mooncake_table = MooncakeTable::new(
-            schema,
+            default_schema(),
             table_name.to_string(),
             1,
             path,
@@ -98,38 +133,7 @@ impl TestEnvironment {
         .await
         .unwrap();
 
-        let (replication_tx, replication_rx) = watch::channel(0u64);
-        let (last_commit_tx, last_commit_rx) = watch::channel(0u64);
-        let read_state_manager = Arc::new(ReadStateManager::new(
-            &mooncake_table,
-            replication_rx,
-            last_commit_rx,
-        ));
-
-        let (iceberg_snapshot_completion_tx, iceberg_snapshot_completion_rx) = mpsc::channel(1);
-        let (iceberg_drop_table_completion_tx, iceberg_drop_table_completion_rx) = mpsc::channel(1);
-        let iceberg_event_sync_sender = IcebergEventSyncSender {
-            iceberg_drop_table_completion_tx,
-            iceberg_snapshot_completion_tx,
-        };
-        let iceberg_event_sync_receiver = IcebergEventSyncReceiver {
-            iceberg_drop_table_completion_rx,
-            iceberg_snapshot_completion_rx,
-        };
-        let handler = TableHandler::new(mooncake_table, iceberg_event_sync_sender);
-        let iceberg_snapshot_manager =
-            IcebergTableEventManager::new(handler.get_event_sender(), iceberg_event_sync_receiver);
-        let event_sender = handler.get_event_sender();
-
-        Self {
-            handler,
-            event_sender,
-            read_state_manager,
-            replication_tx,
-            last_commit_tx,
-            iceberg_snapshot_manager,
-            temp_dir,
-        }
+        Self::new_with_mooncake_table(temp_dir, mooncake_table).await
     }
 
     /// Create iceberg table manager.
@@ -160,25 +164,11 @@ impl TestEnvironment {
             .expect("Failed to send event");
     }
 
-    // --- Util functions for iceberg snapshot creation ---
-
-    /// Initiate an iceberg snapshot event at best effort.
-    pub async fn initiate_snapshot(&mut self, lsn: u64) {
-        self.iceberg_snapshot_manager.initiate_snapshot(lsn).await
-    }
-
-    /// Wait iceberg snapshot creation completion.
-    pub async fn sync_snapshot_completion(&mut self) {
-        self.iceberg_snapshot_manager
-            .sync_snapshot_completion()
-            .await
-    }
-
     // --- Util functions for iceberg drop table ---
 
     /// Request to drop iceberg table and block wait its completion.
-    pub async fn drop_iceberg_table(&mut self) {
-        self.iceberg_snapshot_manager.drop_table().await
+    pub async fn drop_iceberg_table(&mut self) -> Result<()> {
+        self.iceberg_table_event_manager.drop_table().await
     }
 
     // --- Operation Helpers ---
@@ -195,12 +185,16 @@ impl TestEnvironment {
     }
 
     pub async fn commit(&self, lsn: u64) {
-        self.send_event(TableEvent::Commit { lsn }).await;
+        self.send_event(TableEvent::Commit { lsn, xact_id: None })
+            .await;
     }
 
     pub async fn stream_commit(&self, lsn: u64, xact_id: u32) {
-        self.send_event(TableEvent::StreamCommit { lsn, xact_id })
-            .await;
+        self.send_event(TableEvent::Commit {
+            lsn,
+            xact_id: Some(xact_id),
+        })
+        .await;
     }
 
     pub async fn stream_abort(&self, xact_id: u32) {

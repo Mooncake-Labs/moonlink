@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same branch / PR
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+defaults:
+  run:
+    shell: bash
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
+jobs:
+  # ────────────────────────────── 1 · FORMAT + CLIPPY ─────────────────────────
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+        with:
+          components: rustfmt,clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - name: rustfmt check
+        run: cargo fmt --check
+
+      - name: clippy lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ───────────────────────── 2 · TEST & COVERAGE ────────────────────────────
+  coverage:
+    name: Unit Tests + Coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+        with:
+          components: llvm-tools-preview
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-llvm-cov }
+
+      - name: Run tests and generate lcov.info
+        run: |
+          cargo llvm-cov --locked --lib \
+                         --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          files: lcov.info
+          verbose: true
+          fail_ci_if_error: true

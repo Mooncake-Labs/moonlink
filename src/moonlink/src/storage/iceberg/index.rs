@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
 use crate::storage::iceberg::puffin_utils;
-use crate::storage::index::file_index_id::get_next_file_index_id;
 use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeIndexBlock;
 /// This module defines the file index struct used for iceberg, which corresponds to in-memory mooncake table file index structs, and supports the serde between mooncake table format and iceberg format.
 use crate::storage::index::FileIndex as MooncakeFileIndex;
-use crate::storage::storage_utils::{create_data_file, MooncakeDataFileRef};
+use crate::storage::storage_utils::create_data_file;
 
 use iceberg::io::FileIO;
 use iceberg::puffin::Blob;
@@ -54,13 +53,13 @@ impl FileIndex {
     pub(crate) fn new(
         mooncake_index: &MooncakeFileIndex,
         local_index_file_to_remote: &mut HashMap<String, String>,
-        local_data_file_to_remote: &mut HashMap<MooncakeDataFileRef, String>,
+        local_data_file_to_remote: &mut HashMap<String, String>,
     ) -> Self {
         Self {
             data_files: mooncake_index
                 .files
                 .iter()
-                .map(|path| local_data_file_to_remote.remove(&path.file_id()).unwrap())
+                .map(|path| local_data_file_to_remote.remove(path.file_path()).unwrap())
                 .collect(),
             index_block_files: mooncake_index
                 .index_blocks
@@ -96,13 +95,17 @@ impl FileIndex {
             )
         });
         let index_blocks = futures::future::join_all(index_block_futures).await;
+        let mut next_file_id = 0;
 
         MooncakeFileIndex {
-            global_index_id: get_next_file_index_id(),
             files: self
                 .data_files
                 .iter()
-                .map(|path| create_data_file(0, path.to_string()))
+                .map(|path| {
+                    let cur_file_id = next_file_id;
+                    next_file_id += 1;
+                    create_data_file(cur_file_id, path.to_string())
+                })
                 .collect(),
             num_rows: self.num_rows,
             hash_bits: self.hash_bits,
@@ -127,7 +130,7 @@ impl FileIndexBlob {
     pub fn new(
         file_indices: Vec<&MooncakeFileIndex>,
         mut local_index_file_to_remote: HashMap<String, String>, // TODO(hjiang): Check whether we could use mooncake file ref.
-        mut local_data_file_to_remote: HashMap<MooncakeDataFileRef, String>,
+        mut local_data_file_to_remote: HashMap<String, String>,
     ) -> Self {
         Self {
             file_indices: file_indices
@@ -231,7 +234,6 @@ mod tests {
         let local_data_file = create_data_file(/*file_id=*/ 0, local_data_filepath.clone());
 
         let original_mooncake_file_index = MooncakeFileIndex {
-            global_index_id: 0,
             num_rows: 10,
             hash_bits: 10,
             hash_upper_bits: 4,
@@ -256,8 +258,8 @@ mod tests {
             local_index_filepath.clone(),
             remote_index_filepath.clone(),
         )]);
-        let local_data_file_to_remote = HashMap::<MooncakeDataFileRef, String>::from([(
-            local_data_file,
+        let local_data_file_to_remote = HashMap::<String, String>::from([(
+            local_data_filepath.clone(),
             remote_data_filepath.clone(),
         )]);
         let file_index_blob = FileIndexBlob::new(

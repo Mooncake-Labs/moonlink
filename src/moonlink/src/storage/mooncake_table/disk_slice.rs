@@ -29,6 +29,9 @@ pub(crate) struct DiskSliceWriter {
 
     table_auto_incr_id: u32,
 
+    /// Parquet file flush threshold size.
+    parquet_flush_threshold_size: usize,
+
     // a mapping of old record locations to new record locations
     // this is used to remap deletions on the disk slice
     batch_id_to_idx: HashMap<u64, usize>,
@@ -41,12 +44,6 @@ pub(crate) struct DiskSliceWriter {
 }
 
 impl DiskSliceWriter {
-    #[cfg(debug_assertions)]
-    const PARQUET_FILE_SIZE: usize = 1024 * 1024 * 2; // 2MB
-
-    #[cfg(not(debug_assertions))]
-    const PARQUET_FILE_SIZE: usize = 1024 * 1024 * 128; // 128MB
-
     pub(super) fn new(
         schema: Arc<Schema>,
         dir_path: PathBuf,
@@ -54,6 +51,7 @@ impl DiskSliceWriter {
         writer_lsn: Option<u64>,
         table_auto_incr_id: u32,
         old_index: Arc<MemIndex>,
+        parquet_flush_threshold_size: usize,
     ) -> Self {
         Self {
             schema,
@@ -66,6 +64,7 @@ impl DiskSliceWriter {
             row_offset_mapping: vec![],
             old_index,
             new_index: None,
+            parquet_flush_threshold_size,
         }
     }
 
@@ -104,6 +103,11 @@ impl DiskSliceWriter {
     /// Get the list of files in the DiskSlice
     pub(super) fn output_files(&self) -> &[(MooncakeDataFileRef, usize)] {
         self.files.as_slice()
+    }
+
+    /// Get the list of files in the DiskSlice
+    pub(crate) fn get_file_indice(&self) -> Option<FileIndex> {
+        self.new_index.clone()
     }
 
     pub(super) fn old_index(&self) -> &Arc<MemIndex> {
@@ -146,7 +150,7 @@ impl DiskSliceWriter {
             }
             // Write the batch
             writer.as_mut().unwrap().write(batch).await?;
-            if writer.as_ref().unwrap().memory_size() > Self::PARQUET_FILE_SIZE {
+            if writer.as_ref().unwrap().memory_size() > self.parquet_flush_threshold_size {
                 // Finalize the writer
                 writer.unwrap().close().await?;
                 writer = None;
@@ -203,6 +207,7 @@ mod tests {
     use super::*;
     use crate::row::{IdentityProp, MoonlinkRow, RowValue};
     use crate::storage::mooncake_table::mem_slice::MemSlice;
+    use crate::storage::mooncake_table::TableConfig as MooncakeTableConfig;
     use crate::storage::storage_utils::RawDeletionRecord;
     use arrow::datatypes::{DataType, Field};
     use arrow_array::{Int32Array, StringArray};
@@ -256,6 +261,7 @@ mod tests {
             Some(1),
             /*table_auto_incr_id=*/ 0,
             Arc::new(old_index),
+            MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
         );
         disk_slice.write().await?;
 
@@ -368,6 +374,7 @@ mod tests {
             Some(1),
             0,
             Arc::new(index),
+            MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
         );
 
         // Write the disk slice

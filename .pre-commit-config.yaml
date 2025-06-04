@@ -2,25 +2,31 @@ repos:
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:
-    - id: fmt
+      - id: fmt
   - repo: local
     hooks:
-    - id: cargo-sort
-      name: cargo-sort
-      language: system
-      files: '\.toml$'
-      entry: cargo sort --workspace
-      pass_filenames: false
-    # Split clippy command into two parts, because `--fix` suppress the "warning to error" conversion.
-    - id: clipper-fixlint
-      name: clipper-fixlint
-      language: system
-      files: '\.rs$'
-      entry: cargo clippy --all-targets --fix --allow-dirty --allow-staged
-      pass_filenames: false
-    - id: clipper-check
-      name: clipper-check
-      language: system
-      files: '\.rs$'
-      entry: cargo clippy --all-targets -- -D warnings
-      pass_filenames: false
+      - id: cargo-sort
+        name: cargo-sort
+        language: system
+        files: '\.toml$'
+        entry: cargo sort --workspace
+        pass_filenames: false
+      # Split clippy command into two parts, because `--fix` suppress the "warning to error" conversion.
+      - id: clipper-fixlint
+        name: clipper-fixlint
+        language: system
+        files: '\.rs$'
+        entry: cargo clippy --all-targets --all-features --fix --allow-dirty --allow-staged
+        pass_filenames: false
+      - id: clipper-check
+        name: clipper-check
+        language: system
+        files: '\.rs$'
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        pass_filenames: false
+      - id: check-dependency-license
+        name: check-dependency-license
+        language: system
+        files: '\.toml$'
+        entry: cargo deny check
+        pass_filenames: false

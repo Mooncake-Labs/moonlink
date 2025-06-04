@@ -52,6 +52,7 @@ fn bench_write(c: &mut Criterion) {
                 let iceberg_table_config = IcebergTableConfig::builder()
                     .warehouse_uri(temp_warehouse_uri)
                     .build();
+                let table_config = TableConfig::new(temp_dir.path().to_str().unwrap().to_string());
                 let mut table = MooncakeTable::new(
                     schema.clone(),
                     "test_table".to_string(),
@@ -59,7 +60,7 @@ fn bench_write(c: &mut Criterion) {
                     temp_dir.path().to_path_buf(),
                     IdentityProp::SinglePrimitiveKey(0),
                     iceberg_table_config,
-                    TableConfig::new(),
+                    table_config,
                 )
                 .await
                 .unwrap();
@@ -83,6 +84,7 @@ fn bench_write(c: &mut Criterion) {
                 let iceberg_table_config = IcebergTableConfig::builder()
                     .warehouse_uri(temp_warehouse_uri)
                     .build();
+                let table_config = TableConfig::new(temp_dir.path().to_str().unwrap().to_string());
                 let mut table = MooncakeTable::new(
                     schema.clone(),
                     "test_table".to_string(),
@@ -90,7 +92,7 @@ fn bench_write(c: &mut Criterion) {
                     temp_dir.path().to_path_buf(),
                     IdentityProp::SinglePrimitiveKey(0),
                     iceberg_table_config,
-                    TableConfig::new(),
+                    table_config,
                 )
                 .await
                 .unwrap();
@@ -117,6 +119,7 @@ fn bench_write(c: &mut Criterion) {
                 let iceberg_table_config = IcebergTableConfig::builder()
                     .warehouse_uri(temp_warehouse_uri)
                     .build();
+                let table_config = TableConfig::new(temp_dir.path().to_str().unwrap().to_string());
                 let mut table = rt
                     .block_on(MooncakeTable::new(
                         schema.clone(),
@@ -125,7 +128,7 @@ fn bench_write(c: &mut Criterion) {
                         temp_dir.path().to_path_buf(),
                         IdentityProp::SinglePrimitiveKey(0),
                         iceberg_table_config,
-                        TableConfig::new(),
+                        table_config,
                     ))
                     .unwrap();
                 rt.block_on(async {
@@ -138,22 +141,24 @@ fn bench_write(c: &mut Criterion) {
                         );
                     }
                     let handle = table.flush_transaction_stream(1);
-                    let _ = handle.await.unwrap();
+                    handle.await.unwrap();
                 });
                 table
             },
             |mut table| {
                 rt.block_on(async {
                     for i in 0..1000000 {
-                        let _ = table.delete_in_stream_batch(
-                            MoonlinkRow {
-                                values: vec![RowValue::Int32(i)],
-                            },
-                            1,
-                        );
+                        table
+                            .delete_in_stream_batch(
+                                MoonlinkRow {
+                                    values: vec![RowValue::Int32(i)],
+                                },
+                                1,
+                            )
+                            .await;
                     }
                     let handle = table.flush_transaction_stream(1);
-                    let _ = handle.await.unwrap();
+                    handle.await.unwrap();
                     //let handle = table.create_snapshot();
                     //let _ = handle.unwrap().await.unwrap();
                 });

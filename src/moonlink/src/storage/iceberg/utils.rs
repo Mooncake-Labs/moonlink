@@ -155,24 +155,18 @@ async fn create_iceberg_table<C: MoonlinkCatalog + ?Sized>(
 /// - If the table doesn't exist, create a new one
 /// - If the table already exists, and [drop_if_exists] true (overwrite use case), delete the table and re-create
 /// - If already exists and not requested to drop (recovery use case), do nothing and return the table directly
-pub(crate) async fn get_iceberg_table<C: MoonlinkCatalog + ?Sized>(
+pub(crate) async fn get_or_create_iceberg_table<C: MoonlinkCatalog + ?Sized>(
     catalog: &C,
     warehouse_uri: &str,
     namespace: &Vec<String>,
     table_name: &str,
     arrow_schema: &ArrowSchema,
-    drop_if_exists: bool,
 ) -> IcebergResult<IcebergTable> {
     let namespace_ident = NamespaceIdent::from_strs(namespace).unwrap();
     let table_ident = TableIdent::new(namespace_ident.clone(), table_name.to_string());
     let should_create = match catalog.load_table(&table_ident).await {
         Ok(existing_table) => {
-            if drop_if_exists {
-                catalog.drop_table(&table_ident).await?;
-                true
-            } else {
-                return Ok(existing_table);
-            }
+            return Ok(existing_table);
         }
         Err(_) => true,
     };
@@ -189,6 +183,24 @@ pub(crate) async fn get_iceberg_table<C: MoonlinkCatalog + ?Sized>(
     } else {
         unreachable!()
     }
+}
+
+/// Get iceberg table if exists.
+pub(crate) async fn get_table_if_exists<C: MoonlinkCatalog + ?Sized>(
+    catalog: &C,
+    namespace: &Vec<String>,
+    table_name: &str,
+) -> IcebergResult<Option<IcebergTable>> {
+    let namespace_ident = NamespaceIdent::from_strs(namespace).unwrap();
+    let table_ident = TableIdent::new(namespace_ident.clone(), table_name.to_string());
+
+    let table_exists = catalog.table_exists(&table_ident).await?;
+    if !table_exists {
+        return Ok(None);
+    }
+
+    let table = catalog.load_table(&table_ident).await?;
+    Ok(Some(table))
 }
 
 /// Copy source filepath to destination filepath.
