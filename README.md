@@ -4,9 +4,9 @@
 Real-Time Postgres to Iceberg Mirroring 
 
 [![License](https://img.shields.io/badge/License-BSL-blue)](https://github.com/Mooncake-Labs/moonlink/blob/main/LICENSE)
-[![Slack](https://img.shields.io/badge/Mooncake%20Devs-purple?logo=slack)](https://join.slack.com/t/mooncakelabs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA)
+[![Slack](https://img.shields.io/badge/Mooncake%20Devs-purple?logo=slack)](https://join.slack.com/t/mooncake-devs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA)
 [![Twitter](https://img.shields.io/twitter/url?url=https%3A%2F%2Fx.com%2Fmooncakelabs&label=%40mooncakelabs)](https://x.com/mooncakelabs)
-[![Docs](https://img.shields.io/badge/docs-pg?style=flat&logo=readthedocs&logoColor=white)](https://pgmooncake.com/docs)
+[![Docs](https://img.shields.io/badge/docs-pg?style=flat&logo=readthedocs&logoColor=white)](https://docs.mooncake.dev)
 
 </div>
 
