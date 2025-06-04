@@ -1,7 +1,7 @@
 {
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
-    "workspaceFolder": "/workspaces/pg_moonlink",
+    "workspaceFolder": "/workspaces/moonlink",
     "features": {
         "ghcr.io/robbert229/devcontainer-features/postgresql-client": {
             "version": "17"

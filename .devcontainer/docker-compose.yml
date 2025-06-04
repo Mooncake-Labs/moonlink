@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     volumes:
-      - ..:/workspaces/pg_moonlink:cached
+      - ..:/workspaces/moonlink:cached
     networks:
       - shared_network
     depends_on:

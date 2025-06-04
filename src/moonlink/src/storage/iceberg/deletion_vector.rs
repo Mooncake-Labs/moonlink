@@ -33,8 +33,11 @@ impl DeletionVector {
     }
 
     /// Marks a row as deleted.
+    /// Pre-requisite: row indices must be in ascending order.
     pub fn mark_rows_deleted(&mut self, rows: Vec<u64>) {
-        self.bitmap.extend(rows);
+        let row_count = rows.len();
+        let appended_num = self.bitmap.append(rows).unwrap();
+        assert_eq!(appended_num as usize, row_count);
     }
 
     /// Deserializes a byte vector into a DeletionVector.

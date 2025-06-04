@@ -18,10 +18,18 @@ pub struct ReadState {
 
 impl Drop for ReadState {
     fn drop(&mut self) {
-        println!("Dropping files: {:?}", self.associated_files);
-        for file in self.associated_files.iter() {
-            std::fs::remove_file(file).unwrap();
+        if self.associated_files.is_empty() {
+            return;
         }
+        let associated_files = std::mem::take(&mut self.associated_files);
+        // Perform best-effort deletion by spawning detached task.
+        tokio::spawn(async move {
+            for file in associated_files.into_iter() {
+                if let Err(e) = tokio::fs::remove_file(&file).await {
+                    println!("Failed to delete file {} because {:?}", file, e);
+                }
+            }
+        });
     }
 }
 
@@ -29,10 +37,19 @@ impl ReadState {
     pub(super) fn new(
         data_files: Vec<String>,
         puffin_files: Vec<String>,
-        deletion_vectors_at_read: Vec<PuffinDeletionBlobAtRead>,
-        position_deletes: Vec<(u32 /*file_index*/, u32 /*row_index*/)>,
+        mut deletion_vectors_at_read: Vec<PuffinDeletionBlobAtRead>,
+        mut position_deletes: Vec<(u32 /*file_index*/, u32 /*row_index*/)>,
         associated_files: Vec<String>,
     ) -> Self {
+        deletion_vectors_at_read.sort_by(|dv_1, dv_2| {
+            dv_1.data_file_index
+                .cmp(&dv_2.data_file_index)
+                .then_with(|| dv_1.puffin_file_index.cmp(&dv_2.puffin_file_index))
+                .then_with(|| dv_1.start_offset.cmp(&dv_2.start_offset))
+                .then_with(|| dv_1.blob_size.cmp(&dv_2.blob_size))
+        });
+        position_deletes.sort();
+
         let metadata = TableMetadata {
             data_files,
             puffin_files,

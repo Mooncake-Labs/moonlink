@@ -2,6 +2,8 @@ use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::IcebergSnapshotResult;
 use crate::storage::MooncakeTable;
+use crate::{Error, Result};
+use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
@@ -20,10 +22,8 @@ pub enum TableEvent {
         lsn: u64,
         xact_id: Option<u32>,
     },
-    /// Commit all pending operations with a given LSN
-    Commit { lsn: u64 },
-    /// Commit all pending operations with given LSN and xact_id
-    StreamCommit { lsn: u64, xact_id: u32 },
+    /// Commit all pending operations with a given LSN and xact_id
+    Commit { lsn: u64, xact_id: Option<u32> },
     /// Abort current stream with given xact_id
     StreamAbort { xact_id: u32 },
     /// Flush the table to disk
@@ -33,7 +33,7 @@ pub enum TableEvent {
     /// Shutdown the handler
     _Shutdown,
     /// Force a mooncake and iceberg snapshot.
-    ForceSnapshot { lsn: u64 },
+    ForceSnapshot { lsn: u64, tx: Sender<Result<()>> },
     /// Drop table.
     DropIcebergTable,
 }
@@ -49,11 +49,8 @@ pub struct TableHandler {
 
 /// Contains a few senders, which notifies after certain iceberg events completion.
 pub struct IcebergEventSyncSender {
-    /// Notifies when iceberg snapshot completes.
-    pub iceberg_snapshot_completion_tx: mpsc::Sender<()>,
-
     /// Notifies when iceberg drop table completes.
-    pub iceberg_drop_table_completion_tx: mpsc::Sender<()>,
+    pub iceberg_drop_table_completion_tx: mpsc::Sender<Result<()>>,
 }
 
 impl TableHandler {
@@ -85,21 +82,58 @@ impl TableHandler {
         mut event_receiver: Receiver<TableEvent>,
         mut table: MooncakeTable,
     ) {
+        type IcebergSnapshotHandle = Option<JoinHandle<Result<IcebergSnapshotResult>>>;
+        type MooncakeSnapshotHandle = Option<JoinHandle<(u64, Option<IcebergSnapshotPayload>)>>;
+
         let mut periodic_snapshot_interval = time::interval(Duration::from_millis(500));
 
         // Join handle for mooncake snapshot.
-        let mut mooncake_snapshot_handle: Option<
-            JoinHandle<(u64, Option<IcebergSnapshotPayload>)>,
-        > = None;
+        let mut mooncake_snapshot_handle: MooncakeSnapshotHandle = None;
 
         // Join handle for iceberg snapshot.
-        let mut iceberg_snapshot_handle: Option<JoinHandle<IcebergSnapshotResult>> = None;
+        let mut iceberg_snapshot_handle: IcebergSnapshotHandle = None;
 
         // Requested minimum LSN for a force snapshot request.
-        let mut force_snapshot_lsn: Option<u64> = None;
+        let mut force_snapshot_lsns: BTreeMap<u64, Vec<Sender<Result<()>>>> = BTreeMap::new();
 
         // Record LSN if the last handled table event is committed, which indicates mooncake table stays at a consistent view, so table could be flushed safely.
         let mut table_consistent_view_lsn: Option<u64> = None;
+
+        // Whether current table receives any update events.
+        let mut table_updated = false;
+
+        // Whether iceberg snapshot result has been consumed by the latest mooncake snapshot, when creating a mooncake snapshot.
+        //
+        // There're three possible states for an iceberg snapshot:
+        // - handle is none, result consumed = true: no active iceberg snapshot
+        // - handle is some, result consumed = true: iceberg snapshot is ongoing
+        // - handle is none, result consumed = false: iceberg snapshot completes, but wait for mooncake snapshot to consume the result
+        //
+        // Invariant of impossible state: handle is none, result consumed = false
+        let mut iceberg_snapshot_result_consumed = true;
+
+        // Invoked before mooncake snapshot creation, this function checks and resets iceberg snapshot state.
+        let check_and_reset_iceberg_snapshot_state =
+            |iceberg_consumed: &mut bool, iceberg_handle: &mut IcebergSnapshotHandle| {
+                // Validate iceberg snapshot state before mooncake snapshot creation.
+                //
+                // Assertion on impossible state.
+                assert!(iceberg_handle.is_none() || *iceberg_consumed);
+
+                // If there's pending iceberg snapshot result unconsumed, the following mooncake snapshot will properly handle it.
+                if !*iceberg_consumed {
+                    *iceberg_consumed = true;
+                    *iceberg_handle = None;
+                }
+            };
+
+        // Used to decide whether we could create an iceberg snapshot.
+        // The completion of an iceberg snapshot is **NOT** marked as the finish of snapshot thread, but the handling of its results.
+        // We can only create a new iceberg snapshot when (1) there's no ongoing iceberg snapshot; and (2) previous snapshot results have been acknowledged.
+        let can_initiate_iceberg_snapshot =
+            |iceberg_consumed: bool, iceberg_handle: &IcebergSnapshotHandle| {
+                iceberg_consumed && iceberg_handle.is_none()
+            };
 
         // Process events until the receiver is closed or a Shutdown event is received
         loop {
@@ -107,10 +141,14 @@ impl TableHandler {
                 // Process events from the queue
                 Some(event) = event_receiver.recv() => {
                     table_consistent_view_lsn = match event {
-                        TableEvent::Commit { lsn } => Some(lsn),
+                        TableEvent::Commit { lsn, .. } => Some(lsn),
                         // `ForceSnapshot` event doesn't affect whether mooncake is at a committed state.
                         TableEvent::ForceSnapshot { .. } => table_consistent_view_lsn,
                         _ => None,
+                    };
+                    table_updated = match event {
+                        TableEvent::ForceSnapshot { .. } => table_updated,
+                        _ => true,
                     };
 
                     match event {
@@ -138,28 +176,34 @@ impl TableHandler {
                                 None => table.delete(row, lsn).await,
                             };
                         }
-                        TableEvent::Commit { lsn } => {
-                            table.commit(lsn);
-
+                        TableEvent::Commit { lsn, xact_id } => {
                             // Force create snapshot if
                             // 1. force snapshot is requested
                             // and 2. LSN which meets force snapshot requirement has appeared, before that we still allow buffering
                             // and 3. there's no snapshot creation operation ongoing
-                            let need_force_snapshot = force_snapshot_lsn.is_some() && lsn >= force_snapshot_lsn.unwrap() && mooncake_snapshot_handle.is_none();
+                            let force_snapshot = !force_snapshot_lsns.is_empty()
+                                && lsn >= *force_snapshot_lsns.iter().next().as_ref().unwrap().0
+                                && mooncake_snapshot_handle.is_none();
 
-                            if table.should_flush() || need_force_snapshot {
-                                if let Err(e) = table.flush(lsn).await {
-                                    println!("Flush failed in Commit: {}", e);
+                            match xact_id {
+                                Some(xact_id) => {
+                                    if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
+                                        println!("Stream commit flush failed: {}", e);
+                                    }
+                                }
+                                None => {
+                                    table.commit(lsn);
+                                    if table.should_flush() || force_snapshot {
+                                        if let Err(e) = table.flush(lsn).await {
+                                            println!("Flush failed in Commit: {}", e);
+                                        }
+                                    }
                                 }
                             }
-                            if need_force_snapshot {
+
+                            if force_snapshot {
+                                check_and_reset_iceberg_snapshot_state(&mut iceberg_snapshot_result_consumed, &mut iceberg_snapshot_handle);
                                 mooncake_snapshot_handle = table.force_create_snapshot();
-                            }
-                        }
-                        TableEvent::StreamCommit { lsn, xact_id } => {
-                            // TODO(hiang): Support force snapshot creation.
-                            if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
-                                println!("Stream commit flush failed: {}", e);
                             }
                         }
                         TableEvent::StreamAbort { xact_id } => {
@@ -179,27 +223,28 @@ impl TableHandler {
                             println!("Shutting down table handler");
                             break;
                         }
-                        TableEvent::ForceSnapshot { lsn } => {
-                            // TODO(hjiang): Currently we only support one ongoing force snapshot operation.
-                            assert!(force_snapshot_lsn.is_none());
+                        TableEvent::ForceSnapshot { lsn, tx } => {
+                            // A workaround to avoid create snapshot call gets stuck, when there's no write operations to the table.
+                            if !table_updated {
+                                tx.send(Ok(())).await.unwrap();
+                                continue;
+                            }
 
                             // Fast-path: if iceberg snapshot requirement is already satisfied, notify directly.
                             let last_iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
                             if last_iceberg_snapshot_lsn.is_some() && lsn <= last_iceberg_snapshot_lsn.unwrap() {
-                                iceberg_event_sync_sender.iceberg_snapshot_completion_tx.send(()).await.unwrap();
+                                tx.send(Ok(())).await.unwrap();
                             }
                             // Iceberg snapshot LSN requirement is not met, record the required LSN, so later commit will pick up.
                             else {
-                                force_snapshot_lsn = Some(lsn);
+                                force_snapshot_lsns.entry(lsn).or_default().push(tx);
                             }
                         }
                         // Branch to drop the iceberg table, only used when the whole table requested to drop.
                         // So we block wait for asynchronous request completion.
                         TableEvent::DropIcebergTable => {
-                            if let Err(e) = table.drop_iceberg_table().await {
-                                println!("Drop iceberg table failed: {}", e);
-                            }
-                            iceberg_event_sync_sender.iceberg_drop_table_completion_tx.send(()).await.unwrap();
+                            let res = table.drop_iceberg_table().await;
+                            iceberg_event_sync_sender.iceberg_drop_table_completion_tx.send(res).await.unwrap();
                         }
                     }
                 }
@@ -226,7 +271,7 @@ impl TableHandler {
                     //
                     // TODO(hjiang): same as mooncake snapshot, there should be at most one iceberg snapshot ongoing; for simplicity, we skip iceberg snapshot if there's already one.
                     // An optimization is skip generating iceberg snapshot payload at mooncake snapshot if we know it's already taking place, but the risk is missing iceberg snapshot.
-                    if iceberg_snapshot_handle.is_none() {
+                    if can_initiate_iceberg_snapshot(iceberg_snapshot_result_consumed, &iceberg_snapshot_handle) {
                         if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
                             iceberg_snapshot_handle = Some(table.persist_iceberg_snapshot(iceberg_snapshot_payload));
                         }
@@ -250,13 +295,35 @@ impl TableHandler {
                         futures::future::pending::<Option<_>>().await
                     }
                 } => {
-                    let iceberg_flush_lsn = iceberg_snapshot_res.flush_lsn;
-                    table.set_iceberg_snapshot_res(iceberg_snapshot_res);
-                    if force_snapshot_lsn.is_some() && force_snapshot_lsn.unwrap() <= iceberg_flush_lsn {
-                        iceberg_event_sync_sender.iceberg_snapshot_completion_tx.send(()).await.unwrap();
-                        force_snapshot_lsn = None;
-                    }
+                    // Once we poll the completed join handle, it should be reset and never get re-polled.
                     iceberg_snapshot_handle = None;
+
+                    match iceberg_snapshot_res {
+                        Ok(snapshot_res) => {
+                            let iceberg_flush_lsn = snapshot_res.flush_lsn;
+                            table.set_iceberg_snapshot_res(snapshot_res);
+                            iceberg_snapshot_result_consumed = false;
+
+                            // Notify all waiters with LSN satisfied.
+                            let new_map = force_snapshot_lsns.split_off(&(iceberg_flush_lsn + 1));
+                            for (requested_lsn, tx) in force_snapshot_lsns.iter() {
+                                assert!(*requested_lsn <= iceberg_flush_lsn);
+                                for cur_tx in tx {
+                                    cur_tx.send(Ok(())).await.unwrap();
+                                }
+                            }
+                            force_snapshot_lsns = new_map;
+                        }
+                        Err(e) => {
+                            for (_, tx) in force_snapshot_lsns.iter() {
+                                for cur_tx in tx {
+                                    let err = Error::IcebergMessage(format!("Iceberg failure: {}", e));
+                                    cur_tx.send(Err(err)).await.unwrap();
+                                }
+                            }
+                            force_snapshot_lsns.clear();
+                        }
+                    }
                 }
                 // Periodic snapshot based on time
                 _ = periodic_snapshot_interval.tick() => {
@@ -266,10 +333,11 @@ impl TableHandler {
                     }
 
                     // Check whether a flush and force snapshot is needed.
-                    if let Some(requested_lsn) = force_snapshot_lsn {
+                    if !force_snapshot_lsns.is_empty() {
                         if let Some(commit_lsn) = table_consistent_view_lsn {
-                            if requested_lsn <= commit_lsn {
+                            if *force_snapshot_lsns.iter().next().as_ref().unwrap().0 <= commit_lsn {
                                 table.flush(/*lsn=*/ commit_lsn).await.unwrap();
+                                check_and_reset_iceberg_snapshot_state(&mut iceberg_snapshot_result_consumed, &mut iceberg_snapshot_handle);
                                 mooncake_snapshot_handle = table.force_create_snapshot();
                                 continue;
                             }
@@ -277,6 +345,7 @@ impl TableHandler {
                     }
 
                     // Fallback to normal periodic snapshot.
+                    check_and_reset_iceberg_snapshot_state(&mut iceberg_snapshot_result_consumed, &mut iceberg_snapshot_handle);
                     mooncake_snapshot_handle = table.create_snapshot();
                 }
                 // If all senders have been dropped, exit the loop

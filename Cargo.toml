@@ -5,9 +5,10 @@ resolver = "2"
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
+license = "LicenseRef-BSL-1.1"
 
 [workspace.dependencies]
-arrow = { version = "55", default-features = false }
+arrow = { version = "55", default-features = false, features = ["canonical_extension_types"] }
 arrow-array = "55"
 arrow-schema = "55"
 async-trait = "0.1"
@@ -16,7 +17,7 @@ chrono = { version = "0.4", default-features = false }
 crc32fast = "1"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15.3"
-iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "e488f45b8e137e1e0ecc0e07fed864fd73985d21", default-features = false, features = [
+iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "40b055a779365b121ad070b900389d27f8122741", default-features = false, features = [
   "storage-fs",
 ] }
 itertools = { version = "0.14" }
@@ -26,8 +27,9 @@ num-traits = "0.2"
 opendal = { version = "0.53", default-features = false, features = [
   "services-s3",
 ] }
-parquet = { version = "55", default-features = false, features = ["arrow", "async"] }
+parquet = { version = "55", default-features = false, features = ["arrow", "async", "arrow_canonical_extension_types"] }
 postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git" }
+rand = "0.9"
 roaring = "0.10"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = "1"

@@ -12,9 +12,13 @@ pub struct TableName {
 impl TableName {
     pub fn parse_schema_name(table_name: &str) -> (String, String) {
         let tokens: Vec<&str> = table_name.split('.').collect();
+        assert_eq!(tokens.len(), 2);
         let schema = tokens[0].to_string();
         let name = tokens[1].to_string();
         (schema, name)
+    }
+    pub fn get_schema_name(&self) -> String {
+        format!("{}.{}", self.schema, self.name)
     }
     pub fn as_quoted_identifier(&self) -> String {
         let quoted_schema = quote_identifier(&self.schema);

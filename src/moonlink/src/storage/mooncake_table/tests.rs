@@ -2,7 +2,6 @@ use super::test_utils::*;
 use super::*;
 use crate::storage::iceberg::iceberg_table_manager::MockTableManager;
 use crate::storage::mooncake_table::snapshot::ReadOutput;
-use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableConfig as MooncakeTableConfig;
 use iceberg::{Error as IcebergError, ErrorKind};
 use rstest::*;
@@ -159,7 +158,9 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
     table.append(row3.clone())?;
     table.commit(/*lsn=*/ 100);
     table.flush(/*lsn=*/ 100).await?;
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await?;
     {
         let table_snapshot = table.snapshot.read().await;
         let ReadOutput {
@@ -187,7 +188,9 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
     table.flush(/*lsn=*/ 300).await?;
 
     // Check update result.
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await?;
     {
         let table_snapshot = table.snapshot.read().await;
         let ReadOutput {
@@ -218,7 +221,7 @@ async fn test_snapshot_initialization() -> Result<()> {
         name: "test_table".to_string(),
         id: 1,
         schema: Arc::new(schema),
-        config: TableConfig::new(),
+        config: TableConfig::default(), // No temp files generated.
         path: PathBuf::new(),
         identity,
     });
@@ -353,7 +356,9 @@ async fn test_duplicate_deletion() -> Result<()> {
     table.append(old_row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
     table.flush(/*lsn=*/ 100).await.unwrap();
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await?;
 
     // Update operation.
     let new_row = old_row.clone();
@@ -361,7 +366,9 @@ async fn test_duplicate_deletion() -> Result<()> {
     table.append(new_row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
     table.flush(/*lsn=*/ 200).await.unwrap();
-    table.create_mooncake_and_iceberg_snapshot_for_test().await;
+    table
+        .create_mooncake_and_iceberg_snapshot_for_test()
+        .await?;
 
     {
         let table_snapshot = table.snapshot.read().await;
@@ -386,53 +393,18 @@ async fn test_duplicate_deletion() -> Result<()> {
 
 /// ---- Mock unit test ----
 #[tokio::test]
-async fn test_snapshot_load_failure() {
-    let mut mock_manager = MockTableManager::new();
-    mock_manager
-        .expect_load_snapshot_from_table()
-        .times(1)
-        .returning(|| {
-            Box::pin(async move {
-                Err(IcebergError::new(
-                    ErrorKind::Unexpected,
-                    "Intended error for unit test",
-                ))
-            })
-        });
-
-    let metadata = Arc::new(TableMetadata {
-        name: "test_table".to_string(),
-        id: 1,
-        schema: Arc::new(test_schema()),
-        config: TableConfig::new(),
-        path: PathBuf::new(),
-        identity: IdentityProp::Keys(vec![0]),
-    });
-    let snapshot_table_state = SnapshotTableState::new(metadata, &mut mock_manager).await;
-    assert!(snapshot_table_state.is_err());
-}
-
-#[tokio::test]
 async fn test_snapshot_store_failure() {
     let temp_dir = TempDir::new().unwrap();
     let table_metadata = Arc::new(TableMetadata {
         name: "test_table".to_string(),
         id: 1,
         schema: Arc::new(test_schema()),
-        config: TableConfig::new(),
+        config: TableConfig::default(), // No temp files generated.
         path: PathBuf::from(temp_dir.path()),
         identity: IdentityProp::Keys(vec![0]),
     });
-    let table_metadata_copy = table_metadata.clone();
 
     let mut mock_table_manager = MockTableManager::new();
-    mock_table_manager
-        .expect_load_snapshot_from_table()
-        .times(1)
-        .returning(move || {
-            let table_metadata_copy = table_metadata_copy.clone();
-            Box::pin(async move { Ok(MooncakeSnapshot::new(table_metadata_copy)) })
-        });
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
@@ -448,7 +420,7 @@ async fn test_snapshot_store_failure() {
     let mut table = MooncakeTable::new_with_table_manager(
         table_metadata,
         Box::new(mock_table_manager),
-        MooncakeTableConfig::default(),
+        MooncakeTableConfig::default(), // No temp files generated.
     )
     .await
     .unwrap();
@@ -460,5 +432,5 @@ async fn test_snapshot_store_failure() {
     let mooncake_snapshot_handle = table.create_snapshot().unwrap();
     let (_, iceberg_snapshot_payload) = mooncake_snapshot_handle.await.unwrap();
     let iceberg_snapshot_handle = table.persist_iceberg_snapshot(iceberg_snapshot_payload.unwrap());
-    assert!(iceberg_snapshot_handle.await.is_err());
+    assert!(iceberg_snapshot_handle.await.unwrap().is_err());
 }

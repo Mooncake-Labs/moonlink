@@ -8,20 +8,22 @@
 // deletion vector table spec: https://github.com/apache/iceberg/pull/11240
 //
 // puffin blob spec: https://iceberg.apache.org/puffin-spec/?h=deletion#deletion-vector-v1-blob-type
+//
+// TODO(hjiang): Add documentation on how we store puffin blobs inside of puffinf file, what's the relationship between puffin file and manifest file, etc.
 
 use crate::storage::iceberg::deletion_vector::{
     DELETION_VECTOR_CADINALITY, DELETION_VECTOR_REFERENCED_DATA_FILE,
 };
 use crate::storage::iceberg::index::{MOONCAKE_HASH_INDEX_V1, MOONCAKE_HASH_INDEX_V1_CARDINALITY};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use iceberg::io::FileIO;
 use iceberg::puffin::{CompressionCodec, PuffinWriter, DELETION_VECTOR_V1};
 use iceberg::spec::{
     DataContentType, DataFile, DataFileFormat, Datum, FormatVersion, ManifestContentType,
-    ManifestListWriter, ManifestWriter, ManifestWriterBuilder, Struct, TableMetadata,
+    ManifestListWriter, ManifestWriter, ManifestWriterBuilder, Snapshot, Struct, TableMetadata,
 };
 use iceberg::Result as IcebergResult;
 
@@ -209,9 +211,9 @@ pub(crate) async fn get_puffin_metadata_and_close(
 fn get_data_file_for_file_index(
     puffin_filepath: &str,
     blob_metadata: &PuffinBlobMetadataProxy,
-) -> DataFileProxy {
+) -> DataFile {
     assert_eq!(blob_metadata.r#type, MOONCAKE_HASH_INDEX_V1);
-    DataFileProxy {
+    let data_file_proxy = DataFileProxy {
         content: DataContentType::Data,
         file_path: puffin_filepath.to_string(),
         file_format: DataFileFormat::Puffin,
@@ -238,14 +240,15 @@ fn get_data_file_for_file_index(
         referenced_data_file: None,
         content_offset: None,
         content_size_in_bytes: None,
-    }
+    };
+    unsafe { std::mem::transmute::<DataFileProxy, DataFile>(data_file_proxy) }
 }
 
 /// Util function to get `DataFileProxy` for deletion vector puffin blob.
 fn get_data_file_for_deletion_vector(
     puffin_filepath: &str,
     blob_metadata: &PuffinBlobMetadataProxy,
-) -> (String /*referenced_data_filepath*/, DataFileProxy) {
+) -> (String /*referenced_data_filepath*/, DataFile) {
     assert_eq!(blob_metadata.r#type, DELETION_VECTOR_V1);
     let referenced_data_filepath = blob_metadata
         .properties
@@ -253,7 +256,7 @@ fn get_data_file_for_deletion_vector(
         .unwrap()
         .clone();
 
-    let data_file = DataFileProxy {
+    let data_file_proxy = DataFileProxy {
         content: DataContentType::PositionDeletes,
         file_path: puffin_filepath.to_string(),
         file_format: DataFileFormat::Puffin,
@@ -281,31 +284,21 @@ fn get_data_file_for_deletion_vector(
         content_offset: Some(blob_metadata.offset as i64),
         content_size_in_bytes: Some(blob_metadata.length as i64),
     };
+    let data_file = unsafe { std::mem::transmute::<DataFileProxy, DataFile>(data_file_proxy) };
     (referenced_data_filepath, data_file)
 }
 
-/// Get all manifest files, keep data files unchanged, and merge existing deletion vectors with puffion deletion vector blob and rewrite it.
-/// For more details, please refer to https://docs.google.com/document/d/1fIvrRfEHWBephsX0Br2G-Ils_30JIkmGkcdbFbovQjI/edit?usp=sharing
-///
-/// Note: this function should be called before catalog transaction commit.
-///
-/// TODO(hjiang): There're too many sequential IO operations to rewrite deletion vectors, need to optimize.
-pub(crate) async fn append_puffin_metadata_and_rewrite(
+/// Util function to create manifest list writer and delete current one.
+async fn create_new_manifest_list_writer(
     table_metadata: &TableMetadata,
+    cur_snapshot: &Snapshot,
     file_io: &FileIO,
-    puffin_filepath: &str,
-    blob_metadata: Vec<PuffinBlobMetadataProxy>,
-) -> IcebergResult<()> {
-    let latest_seq_no = table_metadata.last_sequence_number();
-    let cur_snapshot = table_metadata.current_snapshot().unwrap();
-    let manifest_list = cur_snapshot
-        .load_manifest_list(file_io, table_metadata)
-        .await?;
-
-    // Delete existing manifest list file and rewrite.
+) -> IcebergResult<ManifestListWriter> {
     file_io.delete(cur_snapshot.manifest_list()).await?;
     let manifest_list_outfile = file_io.new_output(cur_snapshot.manifest_list())?;
-    let mut manifest_list_writer = if table_metadata.format_version() == FormatVersion::V1 {
+
+    let latest_seq_no = table_metadata.last_sequence_number();
+    let manifest_list_writer = if table_metadata.format_version() == FormatVersion::V1 {
         ManifestListWriter::v1(
             manifest_list_outfile,
             cur_snapshot.snapshot_id(),
@@ -319,6 +312,52 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
             latest_seq_no,
         )
     };
+    Ok(manifest_list_writer)
+}
+
+/// Util function to create manifest write.
+fn create_manifest_writer_builder(
+    table_metadata: &TableMetadata,
+    file_io: &FileIO,
+) -> IcebergResult<ManifestWriterBuilder> {
+    let manifest_writer_builder = ManifestWriterBuilder::new(
+        file_io.new_output(format!(
+            "{}/metadata/{}-m0.avro",
+            table_metadata.location(),
+            Uuid::new_v4()
+        ))?,
+        table_metadata.current_snapshot_id(),
+        /*key_metadata=*/ vec![],
+        table_metadata.current_schema().clone(),
+        table_metadata.default_partition_spec().as_ref().clone(),
+    );
+    Ok(manifest_writer_builder)
+}
+
+/// Get all manifest files, keep data files unchanged, and merge existing deletion vectors with puffion deletion vector blob and rewrite it.
+/// For more details, please refer to https://docs.google.com/document/d/1fIvrRfEHWBephsX0Br2G-Ils_30JIkmGkcdbFbovQjI/edit?usp=sharing
+///
+/// Note: this function should be called before catalog transaction commit.
+///
+/// TODO(hjiang): There're too many sequential IO operations to rewrite deletion vectors, need to optimize.
+pub(crate) async fn append_puffin_metadata_and_rewrite(
+    table_metadata: &TableMetadata,
+    file_io: &FileIO,
+    puffin_blobs_to_add: &HashMap<String, Vec<PuffinBlobMetadataProxy>>,
+    puffin_blobs_to_remove: &HashSet<String>,
+) -> IcebergResult<()> {
+    if puffin_blobs_to_add.is_empty() {
+        return Ok(());
+    }
+
+    let cur_snapshot = table_metadata.current_snapshot().unwrap();
+    let manifest_list = cur_snapshot
+        .load_manifest_list(file_io, table_metadata)
+        .await?;
+
+    // Delete existing manifest list file and rewrite.
+    let mut manifest_list_writer =
+        create_new_manifest_list_writer(table_metadata, cur_snapshot, file_io).await?;
 
     // Rewrite the deletion vector manifest files.
     // TODO(hjiang): Double confirm for deletion vector manifest filename.
@@ -329,18 +368,8 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
             if writer.is_some() {
                 return Ok(());
             }
-            let new_writer = ManifestWriterBuilder::new(
-                file_io.new_output(format!(
-                    "{}/metadata/{}-m0.avro",
-                    table_metadata.location(),
-                    Uuid::new_v4()
-                ))?,
-                table_metadata.current_snapshot_id(),
-                /*key_metadata=*/ vec![],
-                table_metadata.current_schema().clone(),
-                table_metadata.default_partition_spec().as_ref().clone(),
-            )
-            .build_v2_deletes();
+            let new_writer_builder = create_manifest_writer_builder(table_metadata, file_io)?;
+            let new_writer = new_writer_builder.build_v2_deletes();
             *writer = Some(new_writer);
             Ok(())
         };
@@ -351,18 +380,8 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
             if writer.is_some() {
                 return Ok(());
             }
-            let new_writer = ManifestWriterBuilder::new(
-                file_io.new_output(format!(
-                    "{}/metadata/{}-m0.avro",
-                    table_metadata.location(),
-                    Uuid::new_v4()
-                ))?,
-                table_metadata.current_snapshot_id(),
-                /*key_metadata=*/ vec![],
-                table_metadata.current_schema().clone(),
-                table_metadata.default_partition_spec().as_ref().clone(),
-            )
-            .build_v2_data();
+            let new_writer_builder = create_manifest_writer_builder(table_metadata, file_io)?;
+            let new_writer = new_writer_builder.build_v2_data();
             *writer = Some(new_writer);
             Ok(())
         };
@@ -370,21 +389,43 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
     // Map from referenced data file to deletion vector manifest entry.
     let mut existing_deletion_vector_entries = HashMap::new();
 
-    // Iterate through all manifest files, keep data manifest files (including data files and hash index files) and merge all deletion vectors.
+    // Iterate through all manifest files, keep data manifest files, process hash index files, and merge all deletion vectors.
     for cur_manifest_file in manifest_list.entries() {
-        if cur_manifest_file.content == ManifestContentType::Data {
+        let manifest = cur_manifest_file.load_manifest(file_io).await?;
+        let (manifest_entries, manifest_metadata) = manifest.into_parts();
+
+        // Keep data files unchanged.
+        // Assumption: we store all data file manifest entries in one manifest file.
+        assert!(!manifest_entries.is_empty());
+        if *manifest_metadata.content() == ManifestContentType::Data
+            && manifest_entries.first().unwrap().file_format() == DataFileFormat::Parquet
+        {
             manifest_list_writer.add_manifests([cur_manifest_file.clone()].into_iter())?;
             continue;
         }
 
-        let manifest = cur_manifest_file.load_manifest(file_io).await?;
-        let (manifest_entries, _) = manifest.into_parts();
+        // Process deletion vector puffin files.
         for cur_manifest_entry in manifest_entries.into_iter() {
-            assert_eq!(
-                cur_manifest_entry.file_format(),
-                DataFileFormat::Puffin,
-                "Expect manifest entry to be either parquet or puffin."
-            );
+            assert_eq!(cur_manifest_entry.file_format(), DataFileFormat::Puffin,);
+
+            // Process file indices: skip those requested to remove, and keep those un-mentioned.
+            if *manifest_metadata.content() == ManifestContentType::Data {
+                // Skip file indices which are requested to remove.
+                if puffin_blobs_to_remove.contains(cur_manifest_entry.data_file().file_path()) {
+                    continue;
+                }
+
+                // Keep file indices which are not requested to remove.
+                init_file_index_manifest_writer(&mut file_index_manifest_writer)?;
+                file_index_manifest_writer.as_mut().unwrap().add_file(
+                    cur_manifest_entry.data_file().clone(),
+                    cur_manifest_entry.sequence_number().unwrap(),
+                )?;
+                continue;
+            }
+
+            // Process deletion vectors.
+            assert_eq!(*manifest_metadata.content(), ManifestContentType::Deletes);
             let old_entry = existing_deletion_vector_entries.insert(
                 cur_manifest_entry
                     .data_file()
@@ -401,30 +442,29 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
     }
 
     // Append puffin blobs into existing manifest entries.
-    for cur_blob_metadata in blob_metadata.iter() {
-        // Handle mooncake hash index v1.
-        if cur_blob_metadata.r#type == MOONCAKE_HASH_INDEX_V1 {
-            let new_data_file = get_data_file_for_file_index(puffin_filepath, cur_blob_metadata);
-            let data_file =
-                unsafe { std::mem::transmute::<DataFileProxy, DataFile>(new_data_file) };
-            init_file_index_manifest_writer(&mut file_index_manifest_writer)?;
-            file_index_manifest_writer
+    for (puffin_filepath, blob_metadata) in puffin_blobs_to_add.iter() {
+        for cur_blob_metadata in blob_metadata.iter() {
+            // Handle mooncake hash index v1.
+            if cur_blob_metadata.r#type == MOONCAKE_HASH_INDEX_V1 {
+                let data_file = get_data_file_for_file_index(puffin_filepath, cur_blob_metadata);
+                init_file_index_manifest_writer(&mut file_index_manifest_writer)?;
+                file_index_manifest_writer
+                    .as_mut()
+                    .unwrap()
+                    .add_file(data_file, cur_blob_metadata.sequence_number)?;
+                continue;
+            }
+
+            // Handle deletion vectors.
+            let (referenced_data_filepath, data_file) =
+                get_data_file_for_deletion_vector(puffin_filepath, cur_blob_metadata);
+            existing_deletion_vector_entries.remove(&referenced_data_filepath);
+            init_deletion_vector_manifest_writer_for_once(&mut deletion_vector_manifest_writer)?;
+            deletion_vector_manifest_writer
                 .as_mut()
                 .unwrap()
                 .add_file(data_file, cur_blob_metadata.sequence_number)?;
-            continue;
         }
-
-        // Handle deletion vectors.
-        let (referenced_data_filepath, new_data_file) =
-            get_data_file_for_deletion_vector(puffin_filepath, cur_blob_metadata);
-        existing_deletion_vector_entries.remove(&referenced_data_filepath);
-        let data_file = unsafe { std::mem::transmute::<DataFileProxy, DataFile>(new_data_file) };
-        init_deletion_vector_manifest_writer_for_once(&mut deletion_vector_manifest_writer)?;
-        deletion_vector_manifest_writer
-            .as_mut()
-            .unwrap()
-            .add_file(data_file, cur_blob_metadata.sequence_number)?;
     }
 
     // Add old deletion vector entries which doesn't get overwritten.

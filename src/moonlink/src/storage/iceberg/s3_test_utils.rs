@@ -1,9 +1,7 @@
-#![cfg(feature = "storage-s3")]
-
 /// This module provides a few test util functions.
 use crate::storage::iceberg::file_catalog::{CatalogConfig, FileCatalog};
 
-use randomizer::Randomizer;
+use rand::Rng;
 
 /// Minio related constants.
 ///
@@ -42,10 +40,15 @@ pub(crate) fn create_minio_s3_catalog(bucket: &str, warehouse_uri: &str) -> File
 pub(crate) fn get_test_minio_bucket_and_warehouse(
 ) -> (String /*bucket_name*/, String /*warehouse_url*/) {
     // minio bucket name only allows lowercase case letters, digits and hyphen.
-    let random_string = Randomizer::ALPHANUMERIC(TEST_BUCKET_NAME_LEN)
-        .string()
-        .unwrap()
-        .to_lowercase();
+    const TEST_BUCKET_NAME_LEN: usize = 12;
+    const ALLOWED_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-";
+    let mut rng = rand::rng();
+    let random_string: String = (0..TEST_BUCKET_NAME_LEN)
+        .map(|_| {
+            let idx = rng.random_range(0..ALLOWED_CHARS.len());
+            ALLOWED_CHARS[idx] as char
+        })
+        .collect();
     (
         format!("{}{}", MINIO_TEST_BUCKET_PREFIX, random_string),
         format!("{}{}", MINIO_TEST_WAREHOUSE_URI_PREFIX, random_string),

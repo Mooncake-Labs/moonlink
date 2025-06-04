@@ -22,6 +22,11 @@ impl BatchDeletionVector {
         }
     }
 
+    /// Get max rows of deletion vector.
+    pub fn get_max_rows(&self) -> usize {
+        self.max_rows
+    }
+
     /// Initialize deletion vector.
     fn initialize_vector_for_once(&mut self) {
         if self.deletion_vector.is_some() {
@@ -90,6 +95,7 @@ impl BatchDeletionVector {
             .collect()
     }
 
+    /// Return deleted row index in ascending order.
     pub(crate) fn collect_deleted_rows(&self) -> Vec<u64> {
         let Some(bitmap) = &self.deletion_vector else {
             return Vec::new();

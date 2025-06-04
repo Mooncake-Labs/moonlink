@@ -314,6 +314,7 @@ mod tests {
     use super::*;
     use crate::row::RowValue;
     use arrow::datatypes::{DataType, Field};
+    use arrow_array::{Int32Array, StringArray, TimestampMicrosecondArray};
     use std::collections::HashMap;
 
     // TODO(hjiang): Add unit test for ColumnStoreBuffer with deletion, and check record batch content.
@@ -343,7 +344,7 @@ mod tests {
             )])),
         ]);
 
-        let mut buffer = ColumnStoreBuffer::new(Arc::new(schema), 2);
+        let mut buffer = ColumnStoreBuffer::new(Arc::new(schema.clone()), 2);
 
         let row1 = MoonlinkRow::new(vec![
             RowValue::Int32(1),
@@ -375,7 +376,83 @@ mod tests {
 
         let batches = buffer.drain();
         assert_eq!(batches.len(), 2);
-        println!("batches: {:?}", batches);
+
+        // Check batch entry 1.
+        let first_batch = &batches[0];
+        assert_eq!(first_batch.id, 0);
+        assert!(first_batch
+            .batch
+            .deletions
+            .collect_deleted_rows()
+            .is_empty());
+        let expected_record_batch = Arc::new(
+            RecordBatch::try_new(
+                Arc::new(schema.clone()),
+                vec![
+                    Arc::new(Int32Array::from(vec![1, 2])),
+                    Arc::new(StringArray::from(vec![
+                        "John".to_string(),
+                        "Jane".to_string(),
+                    ])),
+                    Arc::new(Int32Array::from(vec![30, 25])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![
+                        1618876800000000,
+                        1618876800000000,
+                    ])),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            *first_batch.batch.data.as_ref().unwrap(),
+            expected_record_batch
+        );
+
+        // Get filtered record batch.
+        let filtered_batch = first_batch
+            .batch
+            .get_filtered_batch_with_limit(/*row_limit=*/ 1)
+            .unwrap()
+            .unwrap();
+        let expected_record_batch = Arc::new(
+            RecordBatch::try_new(
+                Arc::new(schema.clone()),
+                vec![
+                    Arc::new(Int32Array::from(vec![1])),
+                    Arc::new(StringArray::from(vec!["John".to_string()])),
+                    Arc::new(Int32Array::from(vec![30])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![1618876800000000])),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(Arc::new(filtered_batch), expected_record_batch);
+
+        // Check batch entry 2.
+        let second_batch = &batches[1];
+        assert_eq!(second_batch.id, 1);
+        assert!(second_batch
+            .batch
+            .deletions
+            .collect_deleted_rows()
+            .is_empty());
+        let expected_record_batch = Arc::new(
+            RecordBatch::try_new(
+                Arc::new(schema.clone()),
+                vec![
+                    Arc::new(Int32Array::from(vec![3])),
+                    Arc::new(StringArray::from(vec!["Bob"])),
+                    Arc::new(Int32Array::from(vec![40])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![1618876800000000])),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            *second_batch.batch.data.as_ref().unwrap(),
+            expected_record_batch
+        );
+
         Ok(())
     }
 }

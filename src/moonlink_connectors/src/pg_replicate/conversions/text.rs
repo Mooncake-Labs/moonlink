@@ -59,6 +59,54 @@ pub enum ArrayParseError {
 }
 
 impl TextFormatConverter {
+    pub fn is_supported_type(typ: &Type) -> bool {
+        matches!(
+            *typ,
+            Type::BOOL
+                | Type::BOOL_ARRAY
+                | Type::CHAR
+                | Type::BPCHAR
+                | Type::VARCHAR
+                | Type::NAME
+                | Type::TEXT
+                | Type::CHAR_ARRAY
+                | Type::BPCHAR_ARRAY
+                | Type::VARCHAR_ARRAY
+                | Type::NAME_ARRAY
+                | Type::TEXT_ARRAY
+                | Type::INT2
+                | Type::INT2_ARRAY
+                | Type::INT4
+                | Type::INT4_ARRAY
+                | Type::INT8
+                | Type::INT8_ARRAY
+                | Type::FLOAT4
+                | Type::FLOAT4_ARRAY
+                | Type::FLOAT8
+                | Type::FLOAT8_ARRAY
+                | Type::NUMERIC
+                | Type::NUMERIC_ARRAY
+                | Type::BYTEA
+                | Type::BYTEA_ARRAY
+                | Type::DATE
+                | Type::DATE_ARRAY
+                | Type::TIME
+                | Type::TIME_ARRAY
+                | Type::TIMESTAMP
+                | Type::TIMESTAMP_ARRAY
+                | Type::TIMESTAMPTZ
+                | Type::TIMESTAMPTZ_ARRAY
+                | Type::UUID
+                | Type::UUID_ARRAY
+                | Type::JSON
+                | Type::JSON_ARRAY
+                | Type::JSONB
+                | Type::JSONB_ARRAY
+                | Type::OID
+                | Type::OID_ARRAY
+        )
+    }
+
     pub fn default_value(typ: &Type) -> Cell {
         match *typ {
             Type::BOOL => Cell::Bool(bool::default()),
@@ -277,6 +325,7 @@ impl TextFormatConverter {
         let mut val_str = String::with_capacity(10);
         let mut in_quotes = false;
         let mut in_escape = false;
+        let mut val_quoted = false;
         let mut chars = str.chars();
         let mut done = str.is_empty();
 
@@ -288,7 +337,12 @@ impl TextFormatConverter {
                             val_str.push(c);
                             in_escape = false;
                         }
-                        '"' => in_quotes = !in_quotes,
+                        '"' => {
+                            if !in_quotes {
+                                val_quoted = true;
+                            }
+                            in_quotes = !in_quotes;
+                        }
                         '\\' => in_escape = true,
                         ',' if !in_quotes => {
                             break;
@@ -303,15 +357,44 @@ impl TextFormatConverter {
                     }
                 }
             }
-            let val = if val_str.to_lowercase() == "null" {
+            let val = if !val_quoted && val_str.to_lowercase() == "null" {
                 None
             } else {
                 parse(&val_str)?
             };
             res.push(val);
             val_str.clear();
+            val_quoted = false;
         }
 
         Ok(Cell::Array(m(res)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_text_array_quoted_null_as_string() {
+        let cell =
+            TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, "{\"a\",\"null\"}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![Some("a".to_string()), Some("null".to_string())]);
+            }
+            _ => panic!("unexpected cell"),
+        }
+    }
+
+    #[test]
+    fn parse_text_array_unquoted_null_is_none() {
+        let cell = TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, "{a,NULL}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![Some("a".to_string()), None]);
+            }
+            _ => panic!("unexpected cell"),
+        }
     }
 }

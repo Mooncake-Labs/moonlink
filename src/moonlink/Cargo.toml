@@ -2,6 +2,7 @@
 name = "moonlink"
 version = { workspace = true }
 edition = { workspace = true }
+license = { workspace = true }
 
 [features]
 default = ["storage-fs"]
@@ -31,7 +32,7 @@ num-bigint = { workspace = true }
 num-traits = { workspace = true }
 opendal = { workspace = true }
 parquet = { workspace = true }
-randomizer = "0.1"
+rand = { workspace = true }
 roaring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

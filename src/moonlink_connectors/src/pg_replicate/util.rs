@@ -3,6 +3,7 @@ use crate::pg_replicate::{
     table::{LookupKey, TableSchema},
 };
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow_schema::extension::{ExtensionType, Json as ArrowJson, Uuid as ArrowUuid};
 use arrow_schema::{DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE};
 use chrono::Timelike;
 use moonlink::row::RowValue;
@@ -26,11 +27,16 @@ fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
     Some((precision, scale))
 }
 
+enum ArrowExtensionType {
+    Uuid,
+    Json,
+}
+
 fn postgres_primitive_to_arrow_type(
     typ: &Type,
     modifier: i32,
     name: &str,
-    nullable: bool,
+    mut nullable: bool,
     field_id: &mut i32,
 ) -> Field {
     let (data_type, extension_name) = match *typ {
@@ -41,6 +47,9 @@ fn postgres_primitive_to_arrow_type(
         Type::FLOAT4 => (DataType::Float32, None),
         Type::FLOAT8 => (DataType::Float64, None),
         Type::NUMERIC => {
+            // Numeric type can contain invalid values, we will cast them to NULL
+            // so make it nullable.
+            nullable = true;
             let (precision, scale) = numeric_precision_scale(modifier)
                 .unwrap_or((DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE));
             (DataType::Decimal128(precision, scale), None)
@@ -65,22 +74,34 @@ fn postgres_primitive_to_arrow_type(
             DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
             None,
         ),
-        Type::UUID => (DataType::FixedSizeBinary(16), Some("uuid".to_string())),
-        Type::JSON | Type::JSONB => (DataType::Utf8, Some("json".to_string())),
+        Type::UUID => (
+            DataType::FixedSizeBinary(16),
+            Some(ArrowExtensionType::Uuid),
+        ),
+        Type::JSON | Type::JSONB => (DataType::Utf8, Some(ArrowExtensionType::Json)),
         Type::BYTEA => (DataType::Binary, None),
+        // The type alias for postgres OID is uint32, but iceberg-rust doesn't support unsigned type, so use int64 instead.
+        Type::OID => (DataType::Int64, None),
         _ => (DataType::Utf8, None), // Default to string for unknown types
     };
 
     let mut field = Field::new(name, data_type, nullable);
+    let mut metadata = HashMap::new();
+    metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+    *field_id += 1;
+    field = field.with_metadata(metadata);
 
     // Apply extension type if specified
-    let mut metadata = HashMap::new();
     if let Some(ext_name) = extension_name {
-        metadata.insert("ARROW:extension:name".to_string(), ext_name);
+        match ext_name {
+            ArrowExtensionType::Uuid => {
+                field = field.with_extension_type(ArrowUuid::default());
+            }
+            ArrowExtensionType::Json => {
+                field = field.with_extension_type(ArrowJson::default());
+            }
+        }
     }
-    *field_id += 1;
-    metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
-    field = field.with_metadata(metadata);
 
     field
 }
@@ -96,13 +117,13 @@ fn postgres_type_to_arrow_type(
         Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id),
         Kind::Array(inner) => {
             let item_type = postgres_type_to_arrow_type(
-                inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ false,
+                inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ true,
                 field_id,
             );
             let field = Field::new_list(name, Arc::new(item_type), nullable);
             let mut metadata = HashMap::new();
-            *field_id += 1;
             metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
             field.with_metadata(metadata)
         }
         Kind::Composite(fields) => {
@@ -516,6 +537,12 @@ mod tests {
                     modifier: 0,
                     nullable: true,
                 },
+                ColumnSchema {
+                    name: "oid_field".to_string(),
+                    typ: Type::OID,
+                    modifier: 0,
+                    nullable: true,
+                },
                 // Array type.
                 ColumnSchema {
                     name: "bool_array_field".to_string(),
@@ -532,7 +559,7 @@ mod tests {
         };
 
         let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema);
-        assert_eq!(arrow_schema.fields().len(), 22);
+        assert_eq!(arrow_schema.fields().len(), 23);
 
         assert_eq!(arrow_schema.field(0).name(), "bool_field");
         assert_eq!(arrow_schema.field(0).data_type(), &DataType::Boolean);
@@ -619,13 +646,16 @@ mod tests {
         assert_eq!(arrow_schema.field(20).name(), "bytea_field");
         assert_eq!(arrow_schema.field(20).data_type(), &DataType::Binary);
 
-        assert_eq!(arrow_schema.field(21).name(), "bool_array_field");
-        let mut expected_field = Field::new("item", DataType::Boolean, /*nullable=*/ false);
+        assert_eq!(arrow_schema.field(21).name(), "oid_field");
+        assert_eq!(arrow_schema.field(21).data_type(), &DataType::Int64);
+
+        assert_eq!(arrow_schema.field(22).name(), "bool_array_field");
+        let mut expected_field = Field::new("item", DataType::Boolean, /*nullable=*/ true);
         let mut field_metadata = HashMap::new();
         field_metadata.insert("PARQUET:field_id".to_string(), "22".to_string());
         expected_field.set_metadata(field_metadata);
         assert_eq!(
-            arrow_schema.field(21).data_type(),
+            arrow_schema.field(22).data_type(),
             &DataType::List(expected_field.into()),
         );
 
@@ -635,27 +665,28 @@ mod tests {
         // Convert Arrow schema to Iceberg schema and check field id/name mapping.
         let iceberg_arrow = IcebergArrow::arrow_schema_to_schema(&arrow_schema).unwrap();
         for (field_id, expected_name) in [
-            (1, "bool_field"),
-            (2, "int2_field"),
-            (3, "int4_field"),
-            (4, "int8_field"),
-            (5, "float4_field"),
-            (6, "float8_field"),
-            (7, "numeric_field"),
-            (8, "varchar_field"),
-            (9, "text_field"),
-            (10, "bpchar_field"),
-            (11, "char_field"),
-            (12, "name_field"),
-            (13, "date_field"),
-            (14, "timestamp_field"),
-            (15, "timestamptz_field"),
-            (16, "time_field"),
-            (17, "timetz_field"),
-            (18, "uuid_field"),
-            (19, "json_field"),
-            (20, "jsonb_field"),
-            (21, "bytea_field"),
+            (0, "bool_field"),
+            (1, "int2_field"),
+            (2, "int4_field"),
+            (3, "int8_field"),
+            (4, "float4_field"),
+            (5, "float8_field"),
+            (6, "numeric_field"),
+            (7, "varchar_field"),
+            (8, "text_field"),
+            (9, "bpchar_field"),
+            (10, "char_field"),
+            (11, "name_field"),
+            (12, "date_field"),
+            (13, "timestamp_field"),
+            (14, "timestamptz_field"),
+            (15, "time_field"),
+            (16, "timetz_field"),
+            (17, "uuid_field"),
+            (18, "json_field"),
+            (19, "jsonb_field"),
+            (20, "bytea_field"),
+            (21, "oid_field"),
             (22, "bool_array_field.element"),
             (23, "bool_array_field"),
         ] {
@@ -689,11 +720,12 @@ mod tests {
                         .with_timezone(&Utc),
                 ),
                 Cell::Null,
+                Cell::Uuid(uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap()),
             ],
         });
 
         let moonlink_row: MoonlinkRow = postgres_table_row.into();
-        assert_eq!(moonlink_row.values.len(), 11);
+        assert_eq!(moonlink_row.values.len(), 12);
         assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
         assert_eq!(moonlink_row.values[1], RowValue::Int64(2));
         assert_eq!(
@@ -734,6 +766,14 @@ mod tests {
             )
         );
         assert_eq!(moonlink_row.values[10], RowValue::Null);
+        if let RowValue::FixedLenByteArray(bytes) = moonlink_row.values[11] {
+            assert_eq!(
+                uuid::Uuid::from_bytes(bytes).to_string(),
+                "123e4567-e89b-12d3-a456-426614174000"
+            );
+        } else {
+            panic!("Expected fixed length byte array");
+        };
     }
 
     #[test]

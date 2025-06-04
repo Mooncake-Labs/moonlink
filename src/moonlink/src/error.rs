@@ -32,6 +32,9 @@ pub enum Error {
 
     #[error("Iceberg error: {source}")]
     IcebergError { source: IcebergError },
+
+    #[error("Iceberg error: {0}")]
+    IcebergMessage(String),
 }
 
 pub type Result<T> = result::Result<T, Error>;
