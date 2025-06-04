@@ -2,6 +2,7 @@ use crate::storage::mooncake_table::PuffinDeletionBlobAtRead;
 
 use bincode::enc::{write::Writer, Encode, Encoder};
 use bincode::error::EncodeError;
+use more_asserts as ma;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TableMetadata {
@@ -41,7 +42,7 @@ impl Encode for TableMetadata {
         // Write deletion vector puffin blob information.
         write_usize(writer, self.deletion_vectors.len())?;
         for deletion_vector in &self.deletion_vectors {
-            assert!(deletion_vector.data_file_index >= prev_data_file_index);
+            ma::assert_ge!(deletion_vector.data_file_index, prev_data_file_index);
             prev_data_file_index = deletion_vector.data_file_index;
 
             write_u32(writer, deletion_vector.data_file_index)?;
@@ -55,7 +56,7 @@ impl Encode for TableMetadata {
         // Write positional deletion records.
         write_usize(writer, self.position_deletes.len())?;
         for position_delete in &self.position_deletes {
-            assert!(position_delete.0 >= prev_position_delete_data_file_index);
+            ma::assert_ge!(position_delete.0, prev_position_delete_data_file_index);
             prev_position_delete_data_file_index = position_delete.0;
 
             write_u32(writer, position_delete.0)?;

@@ -1,6 +1,7 @@
 use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
 use futures::executor::block_on;
 use memmap2::Mmap;
+use more_asserts as ma;
 use std::collections::BinaryHeap;
 use std::fmt;
 use std::fmt::Debug;
@@ -138,7 +139,8 @@ impl IndexBlock {
         bucket_idx: u32,
         metadata: &GlobalIndex,
     ) -> Vec<RecordLocation> {
-        assert!(bucket_idx >= self.bucket_start_idx && bucket_idx < self.bucket_end_idx);
+        ma::assert_ge!(bucket_idx, self.bucket_start_idx);
+        ma::assert_lt!(bucket_idx, self.bucket_end_idx);
         let cursor = Cursor::new(self.data.as_ref().as_ref().unwrap().as_ref());
         let mut reader = AsyncBitReader::endian(cursor, AsyncBigEndian);
         let mut entry_reader = reader.clone();
@@ -479,8 +481,13 @@ impl<'a> IndexBlockIterator<'a> {
                 .read_entry(&mut self.entry_reader, self.metadata)
                 .await;
             self.current_entry += 1;
-            if *self.file_id_remap.get(seg_idx).unwrap() != _INVALID_FILE_ID {
-                return Some((lower_hash + self.current_upper_hash, seg_idx, row_idx));
+            let seg_idx = self.file_id_remap.get(seg_idx).unwrap();
+            if *seg_idx != _INVALID_FILE_ID {
+                return Some((
+                    lower_hash + self.current_upper_hash,
+                    *seg_idx as usize,
+                    row_idx,
+                ));
             }
         }
     }
@@ -713,13 +720,21 @@ mod tests {
         builder.set_directory(tempfile::tempdir().unwrap().keep());
         let merged = builder._build_from_merge(vec![index1, index2]).await;
 
-        for i in 0u64..100u64 {
-            let ret = merged.search(&i).await;
+        for idx in 0u64..200u64 {
+            let ret = merged.search(&idx).await;
             let record_location = ret.first().unwrap();
             let RecordLocation::DiskFile(FileId(file_id), _) = record_location else {
-                panic!("No record location found for {}", i);
+                panic!("No record location found for {}", idx);
             };
-            assert_eq!(*file_id, i % 3 + 1);
+
+            // Check for the first file indice.
+            if idx < 100 {
+                assert_eq!(*file_id, idx % 3 + 1);
+            }
+            // Check for the second file indice.
+            else {
+                assert_eq!(*file_id, (idx - 100) % 2 + 4);
+            }
         }
     }
 }

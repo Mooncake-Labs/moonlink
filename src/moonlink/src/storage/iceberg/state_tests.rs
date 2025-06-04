@@ -38,6 +38,7 @@ use crate::storage::iceberg::test_utils::{
 };
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::Snapshot;
+use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::MooncakeTable;
 
 // Test util function to prepare for committed and persisted data file,
@@ -233,7 +234,8 @@ async fn check_prev_and_new_data_files(
 #[tokio::test]
 async fn test_state_1_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, _) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -244,7 +246,7 @@ async fn test_state_1_1() -> IcebergResult<()> {
     table.append(row).unwrap();
 
     // Request to create snapshot.
-    assert!(table.create_snapshot().is_none());
+    assert!(!table.create_snapshot(SnapshotOption::default()));
 
     // Check iceberg snapshot status.
     let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
@@ -260,7 +262,8 @@ async fn test_state_1_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_1_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, _) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -273,7 +276,7 @@ async fn test_state_1_2() -> IcebergResult<()> {
     table.delete(row.clone(), /*lsn=*/ 1).await;
 
     // Request to create snapshot.
-    assert!(table.create_snapshot().is_none());
+    assert!(!table.create_snapshot(SnapshotOption::default()));
 
     // Check iceberg snapshot status.
     let snapshot = iceberg_table_manager.load_snapshot_from_table().await?;
@@ -289,7 +292,8 @@ async fn test_state_1_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_1_3() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -306,7 +310,7 @@ async fn test_state_1_3() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -324,7 +328,8 @@ async fn test_state_1_3() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_1_4() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -343,7 +348,7 @@ async fn test_state_1_4() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -361,7 +366,8 @@ async fn test_state_1_4() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_1_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -379,7 +385,7 @@ async fn test_state_1_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -397,7 +403,8 @@ async fn test_state_1_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_1_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -417,7 +424,7 @@ async fn test_state_1_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -435,7 +442,8 @@ async fn test_state_1_6() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_2_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -448,7 +456,7 @@ async fn test_state_2_1() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -466,7 +474,8 @@ async fn test_state_2_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_2_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -481,7 +490,7 @@ async fn test_state_2_2() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -499,7 +508,8 @@ async fn test_state_2_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_2_3() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -517,7 +527,7 @@ async fn test_state_2_3() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -535,7 +545,8 @@ async fn test_state_2_3() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_2_4() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -555,7 +566,7 @@ async fn test_state_2_4() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -573,7 +584,8 @@ async fn test_state_2_4() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_2_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -592,7 +604,7 @@ async fn test_state_2_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -610,7 +622,8 @@ async fn test_state_2_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_2_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -631,7 +644,7 @@ async fn test_state_2_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -649,7 +662,8 @@ async fn test_state_2_6() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -663,7 +677,7 @@ async fn test_state_3_1() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -681,7 +695,8 @@ async fn test_state_3_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -697,7 +712,7 @@ async fn test_state_3_2() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -715,7 +730,8 @@ async fn test_state_3_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_3_deletion_before_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -734,7 +750,7 @@ async fn test_state_3_3_deletion_before_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -757,7 +773,8 @@ async fn test_state_3_3_deletion_before_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_3_deletion_after_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -776,7 +793,7 @@ async fn test_state_3_3_deletion_after_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -799,7 +816,8 @@ async fn test_state_3_3_deletion_after_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_4_committed_deletion_before_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -820,7 +838,7 @@ async fn test_state_3_4_committed_deletion_before_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -843,7 +861,8 @@ async fn test_state_3_4_committed_deletion_before_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_4_committed_deletion_after_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -864,7 +883,7 @@ async fn test_state_3_4_committed_deletion_after_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -887,7 +906,8 @@ async fn test_state_3_4_committed_deletion_after_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -907,7 +927,7 @@ async fn test_state_3_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -930,7 +950,8 @@ async fn test_state_3_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_3_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -952,7 +973,7 @@ async fn test_state_3_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -975,7 +996,8 @@ async fn test_state_3_6() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_4_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite (committed record batch).
     let row = MoonlinkRow::new(vec![
@@ -995,7 +1017,7 @@ async fn test_state_4_1() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1013,7 +1035,8 @@ async fn test_state_4_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_4_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite (committed record batch).
     let row = MoonlinkRow::new(vec![
@@ -1035,7 +1058,7 @@ async fn test_state_4_2() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1053,7 +1076,8 @@ async fn test_state_4_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_4_3() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1078,7 +1102,7 @@ async fn test_state_4_3() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1096,7 +1120,8 @@ async fn test_state_4_3() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_4_4() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1123,7 +1148,7 @@ async fn test_state_4_4() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1141,7 +1166,8 @@ async fn test_state_4_4() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_4_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1167,7 +1193,7 @@ async fn test_state_4_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1185,7 +1211,8 @@ async fn test_state_4_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_4_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1213,7 +1240,7 @@ async fn test_state_4_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1231,7 +1258,8 @@ async fn test_state_4_6() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -1253,7 +1281,7 @@ async fn test_state_5_1() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1271,7 +1299,8 @@ async fn test_state_5_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -1295,7 +1324,7 @@ async fn test_state_5_2() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1313,7 +1342,8 @@ async fn test_state_5_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_3_deletion_before_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1340,7 +1370,7 @@ async fn test_state_5_3_deletion_before_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1363,7 +1393,8 @@ async fn test_state_5_3_deletion_before_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_3_deletion_after_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1390,7 +1421,7 @@ async fn test_state_5_3_deletion_after_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1413,7 +1444,8 @@ async fn test_state_5_3_deletion_after_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_4_committed_deletion_before_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1442,7 +1474,7 @@ async fn test_state_5_4_committed_deletion_before_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1465,7 +1497,8 @@ async fn test_state_5_4_committed_deletion_before_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_4_committed_deletion_after_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1494,7 +1527,7 @@ async fn test_state_5_4_committed_deletion_after_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1517,7 +1550,8 @@ async fn test_state_5_4_committed_deletion_after_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1545,7 +1579,7 @@ async fn test_state_5_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1568,7 +1602,8 @@ async fn test_state_5_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_5_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1598,7 +1633,7 @@ async fn test_state_5_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1621,7 +1656,8 @@ async fn test_state_5_6() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -1650,7 +1686,7 @@ async fn test_state_6_1() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1668,7 +1704,8 @@ async fn test_state_6_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare data file pre-requisite.
     let row = MoonlinkRow::new(vec![
@@ -1699,7 +1736,7 @@ async fn test_state_6_2() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1717,7 +1754,8 @@ async fn test_state_6_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_3_deletion_before_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1751,7 +1789,7 @@ async fn test_state_6_3_deletion_before_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1774,7 +1812,8 @@ async fn test_state_6_3_deletion_before_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_3_deletion_after_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1808,7 +1847,7 @@ async fn test_state_6_3_deletion_after_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1831,8 +1870,8 @@ async fn test_state_6_3_deletion_after_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_4_committed_deletion_before_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
     // Prepare deletion pre-requisite (committed deletion record).
@@ -1867,7 +1906,7 @@ async fn test_state_6_4_committed_deletion_before_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1890,7 +1929,8 @@ async fn test_state_6_4_committed_deletion_before_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_4_committed_deletion_after_flush() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1926,7 +1966,7 @@ async fn test_state_6_4_committed_deletion_after_flush() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -1949,7 +1989,8 @@ async fn test_state_6_4_committed_deletion_after_flush() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -1984,7 +2025,7 @@ async fn test_state_6_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2007,7 +2048,8 @@ async fn test_state_6_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_6_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -2044,7 +2086,7 @@ async fn test_state_6_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2067,11 +2109,12 @@ async fn test_state_6_6() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_7_1() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2089,7 +2132,8 @@ async fn test_state_7_1() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_7_2() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -2098,7 +2142,7 @@ async fn test_state_7_2() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2116,7 +2160,8 @@ async fn test_state_7_2() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_7_3() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -2126,7 +2171,7 @@ async fn test_state_7_3() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2144,7 +2189,8 @@ async fn test_state_7_3() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_7_4() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row_1, old_row_2) =
@@ -2157,7 +2203,7 @@ async fn test_state_7_4() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2175,7 +2221,8 @@ async fn test_state_7_4() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_7_5() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
 
     // Prepare environment setup.
     let (old_row, _) = prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -2186,7 +2233,7 @@ async fn test_state_7_5() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 
@@ -2204,8 +2251,8 @@ async fn test_state_7_5() -> IcebergResult<()> {
 #[tokio::test]
 async fn test_state_7_6() -> IcebergResult<()> {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut table, mut iceberg_table_manager) = create_table_and_iceberg_manager(&temp_dir).await;
-
+    let (mut table, mut iceberg_table_manager, mut notify_rx) =
+        create_table_and_iceberg_manager(&temp_dir).await;
     // Prepare environment setup.
     let (old_row_1, old_row_2) =
         prepare_committed_and_flushed_data_files(&mut table, /*lsn=*/ 100).await;
@@ -2218,7 +2265,7 @@ async fn test_state_7_6() -> IcebergResult<()> {
 
     // Request to create snapshot.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut notify_rx)
         .await
         .unwrap();
 

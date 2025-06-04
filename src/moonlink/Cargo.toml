@@ -27,6 +27,7 @@ hashbrown = { workspace = true }
 iceberg = { workspace = true }
 itertools = { workspace = true }
 memmap2 = "0.9"
+more-asserts = { workspace = true }
 multimap = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }

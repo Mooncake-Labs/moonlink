@@ -125,3 +125,85 @@ impl TableRowConverter {
         Ok(TableRow { values })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pg_replicate::table::ColumnSchema;
+
+    #[test]
+    fn parse_basic_row() {
+        let schemas = vec![
+            ColumnSchema {
+                name: "id".into(),
+                typ: Type::INT4,
+                modifier: 0,
+                nullable: false,
+            },
+            ColumnSchema {
+                name: "text".into(),
+                typ: Type::TEXT,
+                modifier: 0,
+                nullable: false,
+            },
+        ];
+        let row = b"42\thello\n";
+        let parsed = TableRowConverter::try_from(row, &schemas).unwrap();
+        assert_eq!(parsed.values.len(), 2);
+        assert!(matches!(parsed.values[0], Cell::I32(42)));
+        assert!(matches!(parsed.values[1], Cell::String(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn parse_escaped_and_null_values() {
+        let schemas = vec![
+            ColumnSchema {
+                name: "a".into(),
+                typ: Type::TEXT,
+                modifier: 0,
+                nullable: true,
+            },
+            ColumnSchema {
+                name: "b".into(),
+                typ: Type::TEXT,
+                modifier: 0,
+                nullable: true,
+            },
+        ];
+        // first column NULL, second column contains literal "\\N"
+        let row = b"\\N\t\\\\\\N\n";
+        let parsed = TableRowConverter::try_from(row, &schemas).unwrap();
+        assert!(matches!(parsed.values[0], Cell::Null));
+        assert!(matches!(parsed.values[1], Cell::String(ref s) if s.starts_with('\\')));
+    }
+
+    #[test]
+    fn unterminated_row_error() {
+        let schemas = vec![ColumnSchema {
+            name: "a".into(),
+            typ: Type::INT4,
+            modifier: 0,
+            nullable: false,
+        }];
+        let err = TableRowConverter::try_from(b"1\t2", &schemas);
+        assert!(matches!(
+            err.unwrap_err(),
+            TableRowConversionError::UnterminatedRow
+        ));
+    }
+
+    #[test]
+    fn num_cols_mismatch_error() {
+        let schemas = vec![ColumnSchema {
+            name: "a".into(),
+            typ: Type::INT4,
+            modifier: 0,
+            nullable: false,
+        }];
+        let err = TableRowConverter::try_from(b"1\t2\n", &schemas);
+        assert!(matches!(
+            err.unwrap_err(),
+            TableRowConversionError::NumColsMismatch
+        ));
+    }
+}

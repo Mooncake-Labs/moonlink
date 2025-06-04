@@ -2,6 +2,8 @@ use std::{cell::UnsafeCell, sync::Arc};
 
 use crate::row::MoonlinkRow;
 
+use more_asserts::assert_le;
+
 /// Used to share rows between write and read threads
 ///
 /// It is guaranteed only one thread is writing to the buffer
@@ -54,7 +56,7 @@ impl SharedRowBuffer {
 
 impl SharedRowBufferSnapshot {
     pub fn get_buffer(&self, size: usize) -> &[MoonlinkRow] {
-        assert!(size <= self.length);
+        assert_le!(size, self.length);
         unsafe { &(*self.buffer.get())[..size] }
     }
 }

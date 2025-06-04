@@ -4,12 +4,18 @@ use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::iceberg::puffin_utils;
+use crate::storage::mooncake_table::IcebergSnapshotPayload;
+use crate::storage::mooncake_table::IcebergSnapshotResult;
 use crate::storage::mooncake_table::Snapshot;
+use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::mooncake_table::{
     DiskFileDeletionVector, TableConfig as MooncakeTableConfig,
     TableMetadata as MooncakeTableMetadata,
 };
 use crate::storage::MooncakeTable;
+use crate::table_notify::TableNotify;
+use crate::Result;
+
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::datatypes::{DataType, Field};
 use arrow_array::RecordBatch;
@@ -22,6 +28,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 
 /// Test util function to check consistency for snapshot batch deletion vector and deletion puffin blob.
 async fn check_deletion_vector_consistency(disk_dv_entry: &DiskFileDeletionVector) {
@@ -152,7 +160,7 @@ pub(crate) async fn load_arrow_batch(
 /// Iceberg snapshot will be created whenever `create_snapshot` is called.
 pub(crate) async fn create_table_and_iceberg_manager(
     temp_dir: &TempDir,
-) -> (MooncakeTable, IcebergTableManager) {
+) -> (MooncakeTable, IcebergTableManager, Receiver<TableNotify>) {
     let path = temp_dir.path().to_path_buf();
     let warehouse_uri = path.clone().to_str().unwrap().to_string();
     let mooncake_table_metadata =
@@ -171,7 +179,7 @@ pub(crate) async fn create_table_and_iceberg_manager(
         iceberg_snapshot_new_data_file_count: 0,
         ..Default::default()
     };
-    let table = MooncakeTable::new(
+    let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
         "test_table".to_string(),
         /*version=*/ 1,
@@ -189,5 +197,51 @@ pub(crate) async fn create_table_and_iceberg_manager(
     )
     .unwrap();
 
-    (table, iceberg_table_manager)
+    let (notify_tx, notify_rx) = mpsc::channel(100);
+    table.register_table_notify(notify_tx);
+
+    (table, iceberg_table_manager, notify_rx)
+}
+
+/// Test util function to block wait a mooncake snapshot and get its result.
+pub(crate) async fn get_mooncake_snapshot_result(
+    notify_rx: &mut Receiver<TableNotify>,
+) -> (u64, Option<IcebergSnapshotPayload>) {
+    let notification = notify_rx.recv().await.unwrap();
+    match notification {
+        TableNotify::MooncakeTableSnapshot {
+            lsn,
+            iceberg_snapshot_payload,
+        } => (lsn, iceberg_snapshot_payload),
+        TableNotify::IcebergSnapshot { .. } => {
+            panic!("Expects to receive mooncake snapshot completion notification, but receives iceberg snapshot one.");
+        }
+    }
+}
+
+/// Test util function to perform a mooncake snapshot, block wait its completion and get its result.
+pub(crate) async fn create_mooncake_snapshot(
+    table: &mut MooncakeTable,
+    notify_rx: &mut Receiver<TableNotify>,
+) -> (u64, Option<IcebergSnapshotPayload>) {
+    assert!(table.create_snapshot(SnapshotOption::default()));
+    get_mooncake_snapshot_result(notify_rx).await
+}
+
+/// Test util function to perform an iceberg snapshot, block wait its completion and gets its result.
+pub(crate) async fn create_iceberg_snapshot(
+    table: &mut MooncakeTable,
+    iceberg_snapshot_payload: Option<IcebergSnapshotPayload>,
+    notify_rx: &mut Receiver<TableNotify>,
+) -> Result<IcebergSnapshotResult> {
+    table.persist_iceberg_snapshot(iceberg_snapshot_payload.unwrap());
+    let notification = notify_rx.recv().await.unwrap();
+    match notification {
+        TableNotify::MooncakeTableSnapshot { .. } => {
+            panic!("Expects to receive iceberg snapshot completion notification, but receives mooncake one.")
+        }
+        TableNotify::IcebergSnapshot {
+            iceberg_snapshot_result,
+        } => iceberg_snapshot_result,
+    }
 }

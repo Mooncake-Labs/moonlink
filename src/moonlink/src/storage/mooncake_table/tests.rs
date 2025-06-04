@@ -7,6 +7,7 @@ use iceberg::{Error as IcebergError, ErrorKind};
 use rstest::*;
 use rstest_reuse::{self, *};
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 
 #[template]
 #[rstest]
@@ -20,9 +21,12 @@ fn shared_cases(#[case] identity: IdentityProp) {}
 async fn test_append_commit_snapshot(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("append_commit");
     let mut table = test_table(&context, "append_table", identity).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
+
     append_rows(&mut table, vec![test_row(1, "A", 20), test_row(2, "B", 21)])?;
     table.commit(1);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
     let snapshot = table.snapshot.read().await;
     let ReadOutput {
         data_file_paths, ..
@@ -36,8 +40,11 @@ async fn test_append_commit_snapshot(#[case] identity: IdentityProp) -> Result<(
 async fn test_flush_basic(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("flush_basic");
     let mut table = test_table(&context, "flush_table", identity).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
+
     let rows = vec![test_row(1, "Alice", 30), test_row(2, "Bob", 25)];
-    append_commit_flush_snapshot(&mut table, rows, 1).await?;
+    append_commit_flush_snapshot(&mut table, &mut event_completion_rx, rows, 1).await?;
     let snapshot = table.snapshot.read().await;
     let ReadOutput {
         data_file_paths, ..
@@ -51,20 +58,23 @@ async fn test_flush_basic(#[case] identity: IdentityProp) -> Result<()> {
 async fn test_delete_and_append(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("delete_append");
     let mut table = test_table(&context, "del_table", identity).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
+
     let initial_rows = vec![
         test_row(1, "Row 1", 31),
         test_row(2, "Row 2", 32),
         test_row(3, "Row 3", 33),
     ];
-    append_commit_flush_snapshot(&mut table, initial_rows, 1).await?;
+    append_commit_flush_snapshot(&mut table, &mut event_completion_rx, initial_rows, 1).await?;
 
     table.delete(test_row(2, "Row 2", 32), 2).await;
     table.commit(2);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     append_rows(&mut table, vec![test_row(4, "Row 4", 34)])?;
     table.commit(3);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     let snapshot = table.snapshot.read().await;
     let ReadOutput {
@@ -90,14 +100,17 @@ async fn test_delete_and_append(#[case] identity: IdentityProp) -> Result<()> {
 async fn test_deletion_before_flush(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("delete_pre_flush");
     let mut table = test_table(&context, "table", identity).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
+
     append_rows(&mut table, batch_rows(1, 4))?;
     table.commit(1);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     table.delete(test_row(2, "Row 2", 32), 2).await;
     table.delete(test_row(4, "Row 4", 34), 2).await;
     table.commit(2);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     let snapshot = table.snapshot.read().await;
     let ReadOutput {
@@ -112,12 +125,14 @@ async fn test_deletion_before_flush(#[case] identity: IdentityProp) -> Result<()
 async fn test_deletion_after_flush(#[case] identity: IdentityProp) -> Result<()> {
     let context = TestContext::new("delete_post_flush");
     let mut table = test_table(&context, "table", identity).await;
-    append_commit_flush_snapshot(&mut table, batch_rows(1, 4), 1).await?;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
+    append_commit_flush_snapshot(&mut table, &mut event_completion_rx, batch_rows(1, 4), 1).await?;
 
     table.delete(test_row(2, "Row 2", 32), 2).await;
     table.delete(test_row(4, "Row 4", 34), 2).await;
     table.commit(2);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     let snapshot = table.snapshot.read().await;
     let ReadOutput {
@@ -151,6 +166,8 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
 
     let context = TestContext::new("update_rows");
     let mut table = test_table(&context, "update_table", identity).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
 
     // Perform and check initial append operation.
     table.append(row1.clone())?;
@@ -159,7 +176,7 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
     table.commit(/*lsn=*/ 100);
     table.flush(/*lsn=*/ 100).await?;
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut event_completion_rx)
         .await?;
     {
         let table_snapshot = table.snapshot.read().await;
@@ -189,7 +206,7 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
 
     // Check update result.
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut event_completion_rx)
         .await?;
     {
         let table_snapshot = table.snapshot.read().await;
@@ -240,6 +257,8 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
         IdentityProp::FullRow,
     )
     .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
 
     // Insert duplicate rows (same identity, different values)
     let row1 = test_row(1, "A", 20);
@@ -263,12 +282,12 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
         ],
     )?;
     table.commit(1);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     // Delete one duplicate before flush (row1)
     table.delete(row1.clone(), 2).await;
     table.commit(2);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     // Verify that row1 is deleted, but row2 (same id) remains
     {
@@ -292,12 +311,12 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
 
     // Flush the table
     table.flush(3).await?;
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     // Delete one duplicate during flush (row3)
     table.delete(row3.clone(), 4).await;
     table.commit(4);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     // Verify that row3 is deleted, but row4 (same id) remains
     {
@@ -322,7 +341,7 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     // Delete one duplicate after flush (row5)
     table.delete(row5.clone(), 5).await;
     table.commit(5);
-    snapshot(&mut table).await;
+    snapshot(&mut table, &mut event_completion_rx).await;
 
     {
         let table_snapshot = table.snapshot.read().await;
@@ -351,13 +370,15 @@ async fn test_duplicate_deletion() -> Result<()> {
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let context = TestContext::new("duplicate_deletion");
     let mut table = test_table(&context, "duplicate_deletion", IdentityProp::Keys(vec![0])).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
 
     let old_row = test_row(1, "John", 30);
     table.append(old_row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
     table.flush(/*lsn=*/ 100).await.unwrap();
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut event_completion_rx)
         .await?;
 
     // Update operation.
@@ -367,7 +388,7 @@ async fn test_duplicate_deletion() -> Result<()> {
     table.commit(/*lsn=*/ 200);
     table.flush(/*lsn=*/ 200).await.unwrap();
     table
-        .create_mooncake_and_iceberg_snapshot_for_test()
+        .create_mooncake_and_iceberg_snapshot_for_test(&mut event_completion_rx)
         .await?;
 
     {
@@ -424,13 +445,20 @@ async fn test_snapshot_store_failure() {
     )
     .await
     .unwrap();
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx);
 
     let row = test_row(1, "A", 20);
     table.append(row).unwrap();
     table.commit(/*lsn=*/ 100);
     table.flush(/*lsn=*/ 100).await.unwrap();
-    let mooncake_snapshot_handle = table.create_snapshot().unwrap();
-    let (_, iceberg_snapshot_payload) = mooncake_snapshot_handle.await.unwrap();
-    let iceberg_snapshot_handle = table.persist_iceberg_snapshot(iceberg_snapshot_payload.unwrap());
-    assert!(iceberg_snapshot_handle.await.unwrap().is_err());
+
+    let (_, iceberg_snapshot_payload) = snapshot(&mut table, &mut event_completion_rx).await;
+    let iceberg_snapshot_result = create_iceberg_snapshot(
+        &mut table,
+        iceberg_snapshot_payload,
+        &mut event_completion_rx,
+    )
+    .await;
+    assert!(iceberg_snapshot_result.is_err());
 }
