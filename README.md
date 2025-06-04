@@ -75,7 +75,6 @@ Today, Moonlink can be used as a library. We have two sample examples of Moonlin
 A demo of `moonlink-backend` running as a server, replicating Postgres tables to Iceberg.
 
 ## Roadmap
-
 ### Short term
 **Iceberg Integration**
 - [ ] Integration & productionize more Iceberg Catalogs
@@ -100,7 +99,6 @@ A demo of `moonlink-backend` running as a server, replicating Postgres tables to
 
 **Deployability**
 - [ ] Deploy Moonlink as standalone service
-
  
 🥮
 
