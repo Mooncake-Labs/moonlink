@@ -67,7 +67,7 @@ pub(crate) async fn check_deletion_vector_consistency_for_snapshot(snapshot: &Sn
 
 /// Test util functions to check recovered snapshot only contains remote filepaths and they do exist.
 pub(crate) async fn validate_recovered_snapshot(snapshot: &Snapshot, warehouse_uri: &str) {
-    let warehouse_directory = tokio::fs::canonicalize(&warehouse_uri).await.unwrap();
+    let warehouse_directory = std::path::PathBuf::from(warehouse_uri);
     let mut data_filepaths: HashSet<String> = HashSet::new();
 
     // Check data files and their puffin blobs.
