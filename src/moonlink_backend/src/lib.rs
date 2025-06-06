@@ -1,8 +1,7 @@
-pub use moonlink::ReadState;
 mod error;
 
-pub use error::Error;
-use error::Result;
+pub use error::{Error, Result};
+pub use moonlink::ReadState;
 use moonlink::Result as MoonlinkResult;
 use moonlink_connectors::ReplicationManager;
 use std::hash::Hash;

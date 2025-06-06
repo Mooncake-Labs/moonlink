@@ -44,7 +44,7 @@ tokio-bitstream-io = { workspace = true }
 tokio-retry2 = { version = "0.5", default-features = false, features = [
     "jitter",
 ] }
-typed-builder = "0.18"
+typed-builder = "0.20"
 url = { workspace = true }
 uuid = { workspace = true }
 
