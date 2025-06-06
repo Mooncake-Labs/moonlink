@@ -245,6 +245,9 @@ pub enum CdcStreamError {
 
     #[error("cdc event conversion error: {0}")]
     CdcEventConversion(#[from] CdcEventConversionError),
+
+    #[error("replication stream closed unexpectedly")]
+    UnexpectedEnd,
 }
 
 pin_project! {

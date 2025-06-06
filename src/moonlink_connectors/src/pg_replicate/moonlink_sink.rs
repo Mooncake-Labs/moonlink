@@ -6,11 +6,23 @@ use crate::pg_replicate::{
 };
 use moonlink::TableEvent;
 use std::collections::{HashMap, HashSet};
-use std::convert::Infallible;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tokio_postgres::types::PgLsn;
+
+#[derive(Debug, Error)]
+pub enum SinkError {
+    #[error("failed to send table event: {0}")]
+    Send(#[from] tokio::sync::mpsc::error::SendError<TableEvent>),
+
+    #[error("failed to send commit LSN: {0}")]
+    CommitLsnSend(#[from] tokio::sync::watch::error::SendError<u64>),
+
+    #[error("missing old table row for update event")]
+    MissingOldTableRow,
+}
 
 #[derive(Default)]
 struct TransactionState {
@@ -56,7 +68,7 @@ impl Sink {
         self.commit_lsn_txs.remove(&table_id).unwrap();
     }
 
-    pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<PgLsn, Infallible> {
+    pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<PgLsn, SinkError> {
         match event {
             CdcEvent::Begin(begin_body) => {
                 self.transaction_state.final_lsn = begin_body.final_lsn();
@@ -66,7 +78,7 @@ impl Sink {
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id).cloned();
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
-                        let _ = commit_lsn_tx.send(commit_body.end_lsn());
+                        commit_lsn_tx.send(commit_body.end_lsn())?;
                     }
                     if let Some(event_sender) = event_sender {
                         event_sender
@@ -74,8 +86,7 @@ impl Sink {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
                             })
-                            .await
-                            .unwrap();
+                            .await?;
                     }
                 }
                 self.transaction_state.touched_tables.clear();
@@ -86,7 +97,7 @@ impl Sink {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
-                            let _ = commit_lsn_tx.send(stream_commit_body.end_lsn());
+                            commit_lsn_tx.send(stream_commit_body.end_lsn())?;
                         }
                         if let Some(event_sender) = event_sender {
                             event_sender
@@ -94,8 +105,7 @@ impl Sink {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
                                 })
-                                .await
-                                .unwrap();
+                                .await?;
                         }
                     }
                     self.streaming_transactions_state.remove(&xact_id);
@@ -109,8 +119,7 @@ impl Sink {
                             row: PostgresTableRow(table_row).into(),
                             xact_id,
                         })
-                        .await
-                        .unwrap();
+                        .await?;
                     if let Some(xid) = xact_id {
                         self.streaming_transactions_state
                             .entry(xid)
@@ -124,15 +133,9 @@ impl Sink {
             }
             CdcEvent::Update((table_id, old_table_row, new_table_row, xact_id)) => {
                 let final_lsn = if let Some(xid) = xact_id {
-                    self.streaming_transactions_state
-                        .entry(xid)
-                        .or_default()
-                        .touched_tables
-                        .insert(table_id);
-                    self.streaming_transactions_state
-                        .get(&xid)
-                        .unwrap()
-                        .final_lsn
+                    let entry = self.streaming_transactions_state.entry(xid).or_default();
+                    entry.touched_tables.insert(table_id);
+                    entry.final_lsn
                 } else {
                     self.transaction_state.touched_tables.insert(table_id);
                     self.transaction_state.final_lsn
@@ -140,34 +143,27 @@ impl Sink {
 
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
+                    let old_row = old_table_row.ok_or(SinkError::MissingOldTableRow)?;
                     event_sender
                         .send(TableEvent::Delete {
-                            row: PostgresTableRow(old_table_row.unwrap()).into(),
+                            row: PostgresTableRow(old_row).into(),
                             lsn: final_lsn,
                             xact_id,
                         })
-                        .await
-                        .unwrap();
+                        .await?;
                     event_sender
                         .send(TableEvent::Append {
                             row: PostgresTableRow(new_table_row).into(),
                             xact_id,
                         })
-                        .await
-                        .unwrap();
+                        .await?;
                 }
             }
             CdcEvent::Delete((table_id, table_row, xact_id)) => {
                 let final_lsn = if let Some(xid) = xact_id {
-                    self.streaming_transactions_state
-                        .entry(xid)
-                        .or_default()
-                        .touched_tables
-                        .insert(table_id);
-                    self.streaming_transactions_state
-                        .get(&xid)
-                        .unwrap()
-                        .final_lsn
+                    let entry = self.streaming_transactions_state.entry(xid).or_default();
+                    entry.touched_tables.insert(table_id);
+                    entry.final_lsn
                 } else {
                     self.transaction_state.touched_tables.insert(table_id);
                     self.transaction_state.final_lsn
@@ -181,8 +177,7 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                         })
-                        .await
-                        .unwrap();
+                        .await?;
                 }
             }
             CdcEvent::Relation(relation_body) => println!("Relation {relation_body:?}"),
@@ -200,8 +195,7 @@ impl Sink {
                         if let Some(event_sender) = event_sender {
                             event_sender
                                 .send(TableEvent::StreamAbort { xact_id })
-                                .await
-                                .unwrap();
+                                .await?;
                         }
                     }
                 }

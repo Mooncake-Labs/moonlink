@@ -18,10 +18,11 @@ use futures::StreamExt;
 use moonlink::TableEvent;
 use std::collections::HashMap;
 use std::path::Path;
+use std::process;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_postgres::{connect, Client, Config, NoTls};
-use tracing::warn;
+use tracing::{error, warn};
 
 pub enum Command {
     AddTable {
@@ -40,7 +41,7 @@ pub struct ReplicationConnection {
     table_base_path: String,
     table_temp_files_directory: String,
     postgres_client: Client,
-    handle: Option<JoinHandle<Result<()>>>,
+    handle: Option<JoinHandle<()>>,
     table_readers: HashMap<TableId, ReadStateManager>,
     iceberg_table_event_managers: HashMap<TableId, IcebergTableEventManager>,
     cmd_tx: mpsc::Sender<Command>,
@@ -163,7 +164,7 @@ impl ReplicationConnection {
         &mut self,
         sink: Sink,
         cmd_rx: mpsc::Receiver<Command>,
-    ) -> JoinHandle<Result<()>> {
+    ) -> JoinHandle<()> {
         self.source
             .commit_transaction()
             .await
@@ -179,7 +180,18 @@ impl ReplicationConnection {
             .await
             .expect("failed to get cdc stream");
 
-        tokio::spawn(async move { run_event_loop(stream, sink, cmd_rx).await })
+        tokio::spawn(async move {
+            match run_event_loop(stream, sink, cmd_rx).await {
+                Ok(()) => {
+                    error!("replication loop ended cleanly (unexpected) – shutting down");
+                    process::exit(1);
+                }
+                Err(e) => {
+                    error!("replication loop error: {e:?}");
+                    process::exit(1);
+                }
+            }
+        })
     }
 
     async fn add_table_to_replication(&mut self, schema: &TableSchema) -> Result<()> {
@@ -292,27 +304,31 @@ async fn run_event_loop(
     loop {
         tokio::select! {
              _ = status_interval.tick() => {
-                let _ = stream.as_mut().send_status_update(last_lsn).await;
+                stream.as_mut().send_status_update(last_lsn).await?;
             },
-            Some(cmd) = cmd_rx.recv() => match cmd {
-                Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
-                    sink.add_table(table_id, event_sender, commit_lsn_tx);
-                    stream.as_mut().add_table_schema(schema);
-                }
-                Command::DropTable { table_id } => {
-                    sink.drop_table(table_id);
+             cmd = cmd_rx.recv() => {
+                let cmd = cmd.ok_or(CdcStreamError::UnexpectedEnd)?;
+                match cmd {
+                    Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
+                        sink.add_table(table_id, event_sender, commit_lsn_tx);
+                        stream.as_mut().add_table_schema(schema);
+                    }
+                    Command::DropTable { table_id } => {
+                        sink.drop_table(table_id);
+                    }
                 }
             },
             event = StreamExt::next(&mut stream) => {
-                let Some(event) = event else { break; };
+                let Some(event) = event else {
+                    return Err(CdcStreamError::UnexpectedEnd.into());
+                 };
                 if let Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) = &event {
+                    warn!("missing schema for event: {:?}", event);
                     continue;
                 }
                 let event = event?;
-                last_lsn = sink.process_cdc_event(event).await.unwrap();
+                last_lsn = sink.process_cdc_event(event).await?;
             }
         }
     }
-
-    Ok(())
 }
