@@ -31,7 +31,9 @@ impl ReplicationState {
         let lsn_u64: u64 = lsn.into();
         if lsn_u64 > self.current.load(Ordering::Relaxed) {
             self.current.store(lsn_u64, Ordering::Release);
-            let _ = self.tx.send(lsn_u64);
+            self.tx
+                .send(lsn_u64)
+                .expect("failed to send replication lsn update");
         }
     }
 

@@ -1,9 +1,6 @@
-use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::CdcStream;
-use crate::pg_replicate::postgres_source::{
-    CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
-};
+use crate::pg_replicate::postgres_source::{PostgresSource, PostgresSourceError, TableNamesFrom};
 use crate::pg_replicate::table_init::build_table_components;
 use crate::Result;
 use moonlink::{IcebergTableEventManager, ReadStateManager};
@@ -300,7 +297,11 @@ async fn run_event_loop(
     loop {
         tokio::select! {
             _ = status_interval.tick() => {
-                let _ = stream.as_mut().send_status_update(last_lsn).await;
+                stream
+                    .as_mut()
+                    .send_status_update(last_lsn)
+                    .await
+                    .expect("failed to send status update");
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
                 Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
@@ -313,15 +314,12 @@ async fn run_event_loop(
                 }
             },
             event = StreamExt::next(&mut stream) => {
-                let Some(event) = event else { break; };
-                if let Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) = &event {
-                    continue;
-                }
-                let event = event?;
+                let Some(event) = event else {
+                    panic!("replication stream ended unexpectedly");
+                };
+                let event = event.expect("Failed to process cdc event");
                 last_lsn = sink.process_cdc_event(event).await.unwrap();
             }
         }
     }
-
-    Ok(())
 }

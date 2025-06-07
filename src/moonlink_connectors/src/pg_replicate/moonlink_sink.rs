@@ -66,7 +66,9 @@ impl Sink {
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id).cloned();
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
-                        let _ = commit_lsn_tx.send(commit_body.end_lsn());
+                        commit_lsn_tx
+                            .send(commit_body.end_lsn())
+                            .expect("failed to send commit lsn");
                     }
                     if let Some(event_sender) = event_sender {
                         event_sender
@@ -86,7 +88,9 @@ impl Sink {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
-                            let _ = commit_lsn_tx.send(stream_commit_body.end_lsn());
+                            commit_lsn_tx
+                                .send(stream_commit_body.end_lsn())
+                                .expect("failed to send commit lsn");
                         }
                         if let Some(event_sender) = event_sender {
                             event_sender
