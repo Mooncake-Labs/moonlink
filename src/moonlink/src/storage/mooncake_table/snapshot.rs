@@ -9,7 +9,7 @@ use crate::storage::compaction::table_compaction::{
 };
 use crate::storage::iceberg::iceberg_table_manager::TableManager;
 use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
-use crate::storage::index::{FileIndex, Index};
+use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::mooncake_table::table_snapshot::{
     FileIndiceMergePayload, IcebergSnapshotDataCompactionPayload,
@@ -1068,21 +1068,24 @@ impl SnapshotTableState {
 
     async fn match_deletions_with_identical_key_and_lsn(
         &self,
-        deletions: Vec<RawDeletionRecord>,
+        deletions: &[RawDeletionRecord],
         index_lookup_result: Vec<RecordLocation>,
         file_id_to_lsn: &HashMap<FileId, u64>,
     ) -> Vec<ProcessedDeletionRecord> {
-        let mut candidates: Vec<RecordLocation> = index_lookup_result
+        let mut candidates : Vec<RecordLocation> = index_lookup_result
             .into_iter()
             .filter(|loc| {
                 !self.is_deleted(loc) && Self::is_visible(loc, file_id_to_lsn, deletions.get(0).unwrap().lsn)
             })
             .collect();
+        // This optimization is important when working with table without primary key.
+        // Postgres never distinguish row with same value, so they will almost always be processed together.
+        // thus we can avoid full row identity comparison if we also process them together.
         if candidates.len() == deletions.len() {
-            return candidates.into_iter().zip(deletions.into_iter()).map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc)).collect();
+            return candidates.into_iter().zip(deletions.into_iter()).map(|(loc, deletion)| Self::build_processed_deletion(&deletion, loc)).collect();
         }
         else if candidates.len() < deletions.len() {
-            panic!("can't find deletion record {:?}", deletions);
+            panic!("find less than expected candidates to deletions {:?}", deletions);
         }
         else {
             let mut processed_deletions = Vec::new();
@@ -1100,61 +1103,16 @@ impl SnapshotTableState {
                         break;
                     }
                 }
-                processed_deletions.push(Self::build_processed_deletion(deletion, target_position.unwrap()));
+                processed_deletions.push(Self::build_processed_deletion(&deletion, target_position.unwrap()));
             }
             processed_deletions
         }
 
     }
 
-    async fn process_delete_record(
-        &self,
-        deletion: RawDeletionRecord,
-        file_id_to_lsn: &HashMap<FileId, u64>,
-    ) -> ProcessedDeletionRecord {
-        // Fast-path: The row we are deleting was in the mem slice so we already have the position
-        if let Some(pos) = deletion.pos {
-            return Self::build_processed_deletion(deletion, pos.into());
-        }
-
-        // Locate all candidate positions for this record that have **not** yet been deleted.
-        let mut candidates: Vec<RecordLocation> = self
-            .current_snapshot
-            .indices
-            .find_record(&deletion)
-            .await
-            .into_iter()
-            .filter(|loc| {
-                !self.is_deleted(loc) && Self::is_visible(loc, file_id_to_lsn, deletion.lsn)
-            })
-            .collect();
-
-        match candidates.len() {
-            0 => panic!("can't find deletion record {:?}", deletion),
-            1 => Self::build_processed_deletion(deletion, candidates.pop().unwrap()),
-            _ => {
-                // Multiple candidates → disambiguate via full row identity comparison.
-                let identity = deletion
-                    .row_identity
-                    .as_ref()
-                    .expect("row_identity required when multiple matches");
-
-                let mut target_position: Option<RecordLocation> = None;
-                for loc in candidates.into_iter() {
-                    let matches = self.matches_identity(&loc, identity).await;
-                    if matches {
-                        target_position = Some(loc);
-                        break;
-                    }
-                }
-                Self::build_processed_deletion(deletion, target_position.unwrap())
-            }
-        }
-    }
-
     #[inline]
     fn build_processed_deletion(
-        deletion: RawDeletionRecord,
+        deletion: &RawDeletionRecord,
         pos: RecordLocation,
     ) -> ProcessedDeletionRecord {
         ProcessedDeletionRecord {
@@ -1274,20 +1232,55 @@ impl SnapshotTableState {
         self.uncommitted_deletion_log = still_uncommitted;
     }
 
+    fn add_processed_deletion(&mut self, deletions: Vec<ProcessedDeletionRecord>, new_commit_lsn: u64) {
+        for deletion in deletions.into_iter() {
+            if deletion.lsn <= new_commit_lsn {
+                self.commit_deletion(deletion);
+            } else {
+                self.uncommitted_deletion_log.push(Some(deletion));
+            }
+        }
+    }
+
     /// Convert raw deletions discovered by the snapshot task and either commit
     /// them or defer until their LSN becomes visible.
     async fn apply_new_deletions(&mut self, task: &mut SnapshotTask) {
         let mut new_deletions = take(&mut task.new_deletions);
-        new_deletions.sort_by_key(|deletion| deletion.lookup_key);
-        for raw in new_deletions {
-            let processed = self
-                .process_delete_record(raw, &task.disk_file_lsn_map)
-                .await;
-            if processed.lsn <= task.new_commit_lsn {
-                self.commit_deletion(processed);
+        let mut already_processed = Vec::new();
+        new_deletions.retain(|deletion| 
+            if let Some(pos) = deletion.pos {
+                already_processed.push(Self::build_processed_deletion(deletion, pos.into()));
+                false
             } else {
-                self.uncommitted_deletion_log.push(Some(processed));
+                true
             }
+        );
+        self.add_processed_deletion(already_processed, task.new_commit_lsn);
+        new_deletions.sort_by_key(|deletion| deletion.lookup_key);
+        if new_deletions.len() == 0 {
+            return;
+        }
+        let mut index_lookup_result = self.current_snapshot.indices.find_records(&new_deletions).await;
+        index_lookup_result.sort_by_key(|(key, _)| *key);
+        let mut i = 0;
+        let mut j = 0;
+        while i < new_deletions.len() {
+            let start_i = i; 
+            while i < new_deletions.len() && new_deletions[i].lookup_key == new_deletions[start_i].lookup_key && new_deletions[i].lsn == new_deletions[start_i].lsn {
+                i += 1;
+            }
+            let deletions = &new_deletions[start_i..i];
+            let mut lookup_result = Vec::new();
+            while index_lookup_result[j].0 != new_deletions[start_i].lookup_key {
+                j += 1;
+            }
+            let mut j_end = j;
+            while j_end < index_lookup_result.len() && index_lookup_result[j_end].0 == new_deletions[start_i].lookup_key {
+                lookup_result.push(index_lookup_result[j_end].1.clone());
+                j_end += 1;
+            }
+            let processed_deletions = self.match_deletions_with_identical_key_and_lsn(deletions, lookup_result, &task.disk_file_lsn_map).await;
+            self.add_processed_deletion(processed_deletions, task.new_commit_lsn);
         }
     }
 

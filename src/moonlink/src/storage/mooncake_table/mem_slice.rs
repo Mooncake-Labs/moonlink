@@ -1,7 +1,7 @@
 use super::data_batches::{BatchEntry, ColumnStoreBuffer};
 use crate::error::Result;
 use crate::row::{IdentityProp, MoonlinkRow};
-use crate::storage::index::{Index, MemIndex};
+use crate::storage::index::MemIndex;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use arrow_array::RecordBatch;
@@ -58,7 +58,7 @@ impl MemSlice {
                 None
             }
         } else {
-            let locations = self.mem_index.find_record(record).await;
+            let locations = self.mem_index.find_record(record);
             for location in locations {
                 let ret = self
                     .column_store
@@ -77,7 +77,7 @@ impl MemSlice {
         record: &RawDeletionRecord,
         identity: &IdentityProp,
     ) -> Option<(u64, usize)> {
-        let locations = self.mem_index.find_record(record).await;
+        let locations = self.mem_index.find_record(record);
 
         for location in locations {
             let ret = self

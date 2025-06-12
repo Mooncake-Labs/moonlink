@@ -1,7 +1,6 @@
 use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
 use futures::executor::block_on;
 use memmap2::Mmap;
-use more_asserts as ma;
 use std::collections::{BinaryHeap, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
@@ -110,21 +109,25 @@ impl IndexBlock {
     }
 
     #[inline]
-    async fn read_bucket(
+    async fn read_buckets(
         &self,
-        bucket_idx: u32,
+        bucket_idxs: &[u32],
         reader: &mut AsyncBitReader<Cursor<&[u8]>, AsyncBigEndian>,
         metadata: &GlobalIndex,
-    ) -> (u32, u32) {
-        reader
-            .seek_bits(SeekFrom::Start(
+    ) -> Vec<(u32, u32)> {
+        let mut results = Vec::new();
+        for bucket_idx in bucket_idxs {
+            reader
+                .seek_bits(SeekFrom::Start(
                 (bucket_idx * metadata.bucket_bits) as u64 + self.bucket_start_offset,
             ))
             .await
             .unwrap();
-        let start = reader.read::<u32>(metadata.bucket_bits).await.unwrap();
-        let end = reader.read::<u32>(metadata.bucket_bits).await.unwrap();
-        (start, end)
+            let start = reader.read::<u32>(metadata.bucket_bits).await.unwrap();
+            let end = reader.read::<u32>(metadata.bucket_bits).await.unwrap();
+            results.push((start, end));
+        }
+        results
     }
 
     #[inline]
@@ -141,56 +144,43 @@ impl IndexBlock {
 
     async fn read(
         &self,
-        target_lower_hash: u64,
-        bucket_idx: u32,
+        value_and_hashes: &[(u64, u64)],
+        bucket_idxs: &[u32],
         metadata: &GlobalIndex,
-    ) -> Vec<RecordLocation> {
-        ma::assert_ge!(bucket_idx, self.bucket_start_idx);
-        ma::assert_lt!(bucket_idx, self.bucket_end_idx);
+    ) -> Vec<(u64, RecordLocation)> {
         let cursor = Cursor::new(self.data.as_ref().as_ref().unwrap().as_ref());
         let mut reader = AsyncBitReader::endian(cursor, AsyncBigEndian);
         let mut entry_reader = reader.clone();
-        let (entry_start, entry_end) = self.read_bucket(bucket_idx, &mut reader, metadata).await;
-        if entry_start != entry_end {
-            let mut results = Vec::new();
-            entry_reader
+        let entries = self.read_buckets(bucket_idxs, &mut reader, metadata).await;
+        let mut results = Vec::new();
+        for ((value, target_hash), (entry_start, entry_end)) in value_and_hashes.iter().zip(entries.iter()) {
+            let target_lower_hash = target_hash & ((1 << metadata.hash_lower_bits) - 1);
+            if entry_start != entry_end {
+                entry_reader
                 .seek_bits(SeekFrom::Start(
-                    entry_start as u64
+                    *entry_start as u64
                         * (metadata.hash_lower_bits + metadata.seg_id_bits + metadata.row_id_bits)
                             as u64,
                 ))
                 .await
                 .unwrap();
-            for _ in entry_start..entry_end {
+            for _ in *entry_start..*entry_end {
                 let (hash, seg_idx, row_idx) = self.read_entry(&mut entry_reader, metadata).await;
                 if hash == target_lower_hash {
-                    results.push(RecordLocation::DiskFile(
+                    results.push((*value, RecordLocation::DiskFile(
                         metadata.files[seg_idx].file_id(),
                         row_idx,
-                    ));
+                    )));
                 }
             }
-            results
-        } else {
-            vec![]
         }
+    }
+
+        results
     }
 }
 
 impl GlobalIndex {
-    pub async fn search(&self, value: &u64) -> Vec<RecordLocation> {
-        let target_hash = splitmix64(*value);
-        let lower_hash = target_hash & ((1 << self.hash_lower_bits) - 1);
-        let bucket_idx = (target_hash >> self.hash_lower_bits) as u32;
-
-        for block in self.index_blocks.iter() {
-            if bucket_idx >= block.bucket_start_idx && bucket_idx < block.bucket_end_idx {
-                return block.read(lower_hash, bucket_idx, self).await;
-            }
-        }
-        vec![]
-    }
-
     /// Get total index block files size.
     pub fn get_index_blocks_size(&self) -> u64 {
         self.index_blocks
@@ -201,15 +191,19 @@ impl GlobalIndex {
 
     pub async fn search_values(&self, values: &[u64]) -> Vec<(u64, RecordLocation)> {
         let mut results = Vec::new();
-        let mut hashes = values.iter().map(|value| splitmix64(*value)).collect::<Vec<_>>();
-        hashes.sort();
-        let lower_hashes = hashes.iter().map(|hash| hash & ((1 << self.hash_lower_bits) - 1)).collect::<Vec<_>>();
-        let upper_hashes = hashes.iter().map(|hash| hash >> self.hash_lower_bits).collect::<Vec<_>>();
+        let mut value_and_hashes = values.iter().map(|value| (*value, splitmix64(*value))).collect::<Vec<_>>();
+        value_and_hashes.sort_by_key(|(_, hash)| *hash);
+        let upper_hashes = value_and_hashes.iter().map(|(_, hash)| (hash >> self.hash_lower_bits) as u32).collect::<Vec<_>>();
         let mut start_idx = 0;
-        let mut end_idx = 0;
         for block in self.index_blocks.iter() {
-
-            
+            while upper_hashes[start_idx] < block.bucket_start_idx {
+                start_idx += 1;
+            }
+            let mut end_idx = start_idx;
+            while end_idx < upper_hashes.len() && upper_hashes[end_idx] < block.bucket_end_idx {
+                end_idx += 1;
+            }
+            results.extend(block.read(&value_and_hashes[start_idx..end_idx], &upper_hashes[start_idx..end_idx], self).await);            
         }
         results
     }
@@ -806,12 +800,12 @@ mod tests {
         let index = builder.build_from_flush(hash_entries.clone()).await;
 
         // Search for a non-existent key doesn't panic.
-        assert!(index.search(/*hash=*/ &0).await.is_empty());
+        assert!(index.search_values(&[0]).await.is_empty());
 
         let data_file_ids = [data_file.file_id()];
         for (hash, seg_idx, row_idx) in hash_entries.iter() {
             let expected_record_loc = RecordLocation::DiskFile(data_file_ids[*seg_idx], *row_idx);
-            assert_eq!(index.search(hash).await, vec![expected_record_loc]);
+            assert_eq!(index.search_values(&[*hash]).await, vec![(*hash, expected_record_loc)]);
         }
 
         let mut hash_entry_num = 0;
@@ -858,20 +852,20 @@ mod tests {
             .build_from_merge(HashSet::<GlobalIndex>::from([index1, index2]))
             .await;
 
-        for idx in 0u64..200u64 {
-            let ret = merged.search(&idx).await;
-            let record_location = ret.first().unwrap();
-            let RecordLocation::DiskFile(FileId(file_id), _) = record_location else {
-                panic!("No record location found for {}", idx);
+        let mut ret = merged.search_values(&(0..200).collect::<Vec<_>>()).await;
+        ret.sort_by_key(|(value, _)| *value);
+        assert_eq!(ret.len(), 200);
+        for (value, pos) in ret.iter() {
+            let RecordLocation::DiskFile(FileId(file_id), _) = pos else {
+                panic!("No record location found for {}", value);
             };
-
             // Check for the first file indice.
-            if idx < 100 {
-                assert_eq!(*file_id, idx % 3 + 1);
+            if *value < 100 {
+                assert_eq!(*file_id, *value % 3 + 1);
             }
             // Check for the second file indice.
             else {
-                assert_eq!(*file_id, (idx - 100) % 2 + 4);
+                assert_eq!(*file_id, (*value - 100) % 2 + 4);
             }
         }
     }

@@ -30,7 +30,7 @@ use crate::storage::iceberg::test_utils::{
     create_table_and_iceberg_manager_with_data_compaction_config, create_test_arrow_schema,
     load_arrow_batch, validate_recovered_snapshot,
 };
-use crate::storage::index::{FileIndex, Index, MooncakeIndex};
+use crate::storage::index::{FileIndex, MooncakeIndex};
 use crate::storage::mooncake_table::Snapshot;
 use crate::storage::storage_utils::{
     FileId, MooncakeDataFileRef, ProcessedDeletionRecord, RawDeletionRecord, RecordLocation,

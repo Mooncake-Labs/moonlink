@@ -433,11 +433,12 @@ pub(crate) async fn check_file_indices_compaction_for_multiple_compacted_files(
             NAME_VALUES[*old_row_idx],
             AGE_VALUES[*old_row_idx],
         );
-        let locs = compacted_file_indice.search(&hash_value).await;
+        let locs = compacted_file_indice.search_values(&[hash_value]).await;
         assert_eq!(locs.len(), 1);
-        if let RecordLocation::DiskFile(actual_file_id, actual_new_row_idx) = locs[0] {
-            actual_record_locations.push((actual_file_id, actual_new_row_idx));
-        }
+        let (_, RecordLocation::DiskFile(actual_file_id, actual_new_row_idx)) = locs[0] else {
+            panic!("Failed to get record location for {}", hash_value);
+        };
+        actual_record_locations.push((actual_file_id, actual_new_row_idx));
     }
     assert!(possible_expected_record_locations.contains(&actual_record_locations));
 }
@@ -478,18 +479,19 @@ pub(crate) async fn check_file_indices_compaction(
             NAME_VALUES[*old_row_idx],
             AGE_VALUES[*old_row_idx],
         );
-        let locs = compacted_file_indice.search(&hash_value).await;
+        let locs = compacted_file_indice.search_values(&[hash_value]).await;
         assert_eq!(
             locs.len(),
             1,
             "Failed to search for {}-th row in the compacted file indice",
             old_row_idx
         );
-        if let RecordLocation::DiskFile(actual_file_id, actual_new_row_idx) = locs[0] {
-            assert_eq!(expected_file_id.unwrap(), actual_file_id);
-            // Check whether the actual new row index falls in the valid range, and hasn't been visited before.
-            assert!(new_row_indices.remove(&(actual_new_row_idx as u32)));
-        }
+        let (_, RecordLocation::DiskFile(actual_file_id, actual_new_row_idx)) = locs[0] else {
+            panic!("Failed to get record location for {}", hash_value);
+        };
+        assert_eq!(expected_file_id.unwrap(), actual_file_id);
+        // Check whether the actual new row index falls in the valid range, and hasn't been visited before.
+        assert!(new_row_indices.remove(&(actual_new_row_idx as u32)));
     }
     // Check all expected row indices have been visited.
     assert!(new_row_indices.is_empty());

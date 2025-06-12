@@ -1,5 +1,4 @@
 use super::*;
-use crate::storage::index::Index;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::storage_utils::ProcessedDeletionRecord;
 use more_asserts as ma;

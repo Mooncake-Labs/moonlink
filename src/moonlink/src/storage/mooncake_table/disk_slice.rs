@@ -406,41 +406,30 @@ mod tests {
         // Get the remapped index and verify it
         let new_index = disk_slice.take_index().unwrap();
 
+        let results = new_index.search_values(&[1, 3, 5]).await;
         // Verify each key has been remapped to a disk location
-        for key in [1, 3, 5] {
-            // These should exist (undeleted rows)
-            let locations = new_index.search(&key).await;
-            assert!(
-                !locations.is_empty(),
-                "Key {key} should exist in the remapped index"
-            );
-
-            for location in locations {
-                match location {
-                    RecordLocation::DiskFile(file_id, _) => {
-                        // Verify the file exists in our output files
-                        assert!(
-                            disk_slice
-                                .output_files()
-                                .iter()
-                                .any(|(file, _)| file.file_id() == file_id),
-                            "Referenced file path should exist in output files"
-                        );
-                    }
-                    _ => panic!("Expected DiskFile location, found: {:?}", location),
+        for (_, location) in results {
+            match location {
+                RecordLocation::DiskFile(file_id, _) => {
+                    // Verify the file exists in our output files
+                    assert!(
+                        disk_slice
+                            .output_files()
+                            .iter()
+                            .any(|(file, _)| file.file_id() == file_id),
+                        "Referenced file path should exist in output files"
+                    );
                 }
+                _ => panic!("Expected DiskFile location, found: {:?}", location),
             }
         }
 
         // Check that deleted rows are not in the index
-        for key in [2, 4] {
-            // These should not exist (deleted rows)
-            let locations = new_index.search(&key).await;
-            assert!(
-                locations.is_empty(),
-                "Deleted key {key} should not exist in the remapped index"
-            );
-        }
+        let results = new_index.search_values(&[2, 4]).await;
+        assert!(
+            results.is_empty(),
+            "Deleted keys {results:?} should not exist in the remapped index"
+        );
 
         // Clean up temporary directory
         temp_dir.close().map_err(Error::Io)?;

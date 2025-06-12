@@ -1,8 +1,8 @@
 use crate::row::IdentityProp;
 use crate::storage::index::*;
 
-impl Index for MemIndex {
-    async fn find_record(&self, raw_record: &RawDeletionRecord) -> Vec<RecordLocation> {
+impl MemIndex {
+    pub fn find_record(&self, raw_record: &RawDeletionRecord) -> Vec<RecordLocation> {
         match self {
             MemIndex::SinglePrimitive(map) => {
                 if let Some(entry) = map.find(raw_record.lookup_key, |key| {
@@ -272,8 +272,7 @@ mod tests {
                 row_identity: None,
                 pos: None,
                 lsn: 0,
-            })
-            .await;
+            });
         assert!(record_locs.is_empty());
 
         // Search for an existent entry.
@@ -283,7 +282,7 @@ mod tests {
             pos: None,
             lsn: 0,
         };
-        let record_loc = mem_index.find_record(&deletion_record).await;
+        let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);
         assert!(matches!(record_loc[0], RecordLocation::MemoryBatch(_, _)));
     }
@@ -315,8 +314,7 @@ mod tests {
                 row_identity: Some(non_existent_row.clone()),
                 pos: None,
                 lsn: 0,
-            })
-            .await;
+            });
         assert!(record_loc.is_empty());
 
         // Search for a non-existent entry, with the same key, but different row identity.
@@ -326,8 +324,7 @@ mod tests {
                 row_identity: Some(non_existent_row.clone()),
                 pos: None,
                 lsn: 0,
-            })
-            .await;
+            });
         assert!(record_loc.is_empty());
 
         // Search for an existent entry.
@@ -337,7 +334,7 @@ mod tests {
             pos: None,
             lsn: 0,
         };
-        let record_loc = mem_index.find_record(&deletion_record).await;
+        let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);
         assert!(matches!(record_loc[0], RecordLocation::MemoryBatch(_, _)));
     }
@@ -369,8 +366,7 @@ mod tests {
                 row_identity: Some(non_existent_row.clone()),
                 pos: None,
                 lsn: 0,
-            })
-            .await;
+            });
         assert!(record_loc.is_empty());
 
         // Search for an existent entry.
@@ -380,7 +376,7 @@ mod tests {
             pos: None,
             lsn: 0,
         };
-        let record_loc = mem_index.find_record(&deletion_record).await;
+        let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);
         assert!(matches!(record_loc[0], RecordLocation::MemoryBatch(_, _)));
     }

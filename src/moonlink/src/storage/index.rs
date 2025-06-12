@@ -10,10 +10,6 @@ use persisted_bucket_hash_map::GlobalIndex;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-pub trait Index: Send + Sync {
-    async fn find_record(&self, raw_record: &RawDeletionRecord) -> Vec<RecordLocation>;
-}
-
 pub struct MooncakeIndex {
     pub(crate) in_memory_index: HashSet<IndexPtr>,
     pub(crate) file_indices: Vec<FileIndex>,
