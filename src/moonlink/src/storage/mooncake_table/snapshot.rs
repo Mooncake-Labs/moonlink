@@ -27,10 +27,10 @@ use more_asserts as ma;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
-
 pub(crate) struct SnapshotTableState {
     /// Mooncake table config.
     mooncake_table_config: TableConfig,
@@ -1072,42 +1072,50 @@ impl SnapshotTableState {
         index_lookup_result: Vec<RecordLocation>,
         file_id_to_lsn: &HashMap<FileId, u64>,
     ) -> Vec<ProcessedDeletionRecord> {
-        let mut candidates : Vec<RecordLocation> = index_lookup_result
+        let mut candidates: Vec<RecordLocation> = index_lookup_result
             .into_iter()
             .filter(|loc| {
-                !self.is_deleted(loc) && Self::is_visible(loc, file_id_to_lsn, deletions.get(0).unwrap().lsn)
+                !self.is_deleted(loc)
+                    && Self::is_visible(loc, file_id_to_lsn, deletions.first().unwrap().lsn)
             })
             .collect();
         // This optimization is important when working with table without primary key.
         // Postgres never distinguish row with same value, so they will almost always be processed together.
-        // thus we can avoid full row identity comparison if we also process them together.
-        if candidates.len() == deletions.len() {
-            return candidates.into_iter().zip(deletions.into_iter()).map(|(loc, deletion)| Self::build_processed_deletion(&deletion, loc)).collect();
-        }
-        else if candidates.len() < deletions.len() {
-            panic!("find less than expected candidates to deletions {:?}", deletions);
-        }
-        else {
-            let mut processed_deletions = Vec::new();
-            // multiple candidates → disambiguate via full row identity comparison.
-            for deletion in deletions.into_iter() {
-                let identity = deletion
-                .row_identity
-                .as_ref()
-                .expect("row_identity required when multiple matches");
-                let mut target_position: Option<RecordLocation> = None;
-                for (idx, loc) in candidates.iter().enumerate() {
-                    let matches = self.matches_identity(&loc, identity).await;
-                    if matches {
-                        target_position = Some(candidates.swap_remove(idx));
-                        break;
+        // Thus we can avoid full row identity comparison if we also process them together.
+        match candidates.len().cmp(&deletions.len()) {
+            Ordering::Equal => candidates
+                .into_iter()
+                .zip(deletions.iter())
+                .map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc))
+                .collect(),
+            Ordering::Less => panic!(
+                "find less than expected candidates to deletions {:?}",
+                deletions
+            ),
+            Ordering::Greater => {
+                let mut processed_deletions = Vec::new();
+                // multiple candidates → disambiguate via full row identity comparison.
+                for deletion in deletions.iter() {
+                    let identity = deletion
+                        .row_identity
+                        .as_ref()
+                        .expect("row_identity required when multiple matches");
+                    let mut target_position: Option<RecordLocation> = None;
+                    for (idx, loc) in candidates.iter().enumerate() {
+                        let matches = self.matches_identity(loc, identity).await;
+                        if matches {
+                            target_position = Some(candidates.swap_remove(idx));
+                            break;
+                        }
                     }
+                    processed_deletions.push(Self::build_processed_deletion(
+                        deletion,
+                        target_position.unwrap(),
+                    ));
                 }
-                processed_deletions.push(Self::build_processed_deletion(&deletion, target_position.unwrap()));
+                processed_deletions
             }
-            processed_deletions
         }
-
     }
 
     #[inline]
@@ -1141,11 +1149,7 @@ impl SnapshotTableState {
         }
     }
 
-    fn is_visible(
-        loc: &RecordLocation,
-        file_id_to_lsn: &HashMap<FileId, u64>,
-        lsn: u64,
-    ) -> bool {
+    fn is_visible(loc: &RecordLocation, file_id_to_lsn: &HashMap<FileId, u64>, lsn: u64) -> bool {
         match loc {
             RecordLocation::MemoryBatch(_, _) => true,
             RecordLocation::DiskFile(file_id, _) => {
@@ -1232,7 +1236,11 @@ impl SnapshotTableState {
         self.uncommitted_deletion_log = still_uncommitted;
     }
 
-    fn add_processed_deletion(&mut self, deletions: Vec<ProcessedDeletionRecord>, new_commit_lsn: u64) {
+    fn add_processed_deletion(
+        &mut self,
+        deletions: Vec<ProcessedDeletionRecord>,
+        new_commit_lsn: u64,
+    ) {
         for deletion in deletions.into_iter() {
             if deletion.lsn <= new_commit_lsn {
                 self.commit_deletion(deletion);
@@ -1247,26 +1255,33 @@ impl SnapshotTableState {
     async fn apply_new_deletions(&mut self, task: &mut SnapshotTask) {
         let mut new_deletions = take(&mut task.new_deletions);
         let mut already_processed = Vec::new();
-        new_deletions.retain(|deletion| 
+        new_deletions.retain(|deletion| {
             if let Some(pos) = deletion.pos {
                 already_processed.push(Self::build_processed_deletion(deletion, pos.into()));
                 false
             } else {
                 true
             }
-        );
+        });
         self.add_processed_deletion(already_processed, task.new_commit_lsn);
         new_deletions.sort_by_key(|deletion| deletion.lookup_key);
-        if new_deletions.len() == 0 {
+        if new_deletions.is_empty() {
             return;
         }
-        let mut index_lookup_result = self.current_snapshot.indices.find_records(&new_deletions).await;
+        let mut index_lookup_result = self
+            .current_snapshot
+            .indices
+            .find_records(&new_deletions)
+            .await;
         index_lookup_result.sort_by_key(|(key, _)| *key);
         let mut i = 0;
         let mut j = 0;
         while i < new_deletions.len() {
-            let start_i = i; 
-            while i < new_deletions.len() && new_deletions[i].lookup_key == new_deletions[start_i].lookup_key && new_deletions[i].lsn == new_deletions[start_i].lsn {
+            let start_i = i;
+            while i < new_deletions.len()
+                && new_deletions[i].lookup_key == new_deletions[start_i].lookup_key
+                && new_deletions[i].lsn == new_deletions[start_i].lsn
+            {
                 i += 1;
             }
             let deletions = &new_deletions[start_i..i];
@@ -1275,11 +1290,19 @@ impl SnapshotTableState {
                 j += 1;
             }
             let mut j_end = j;
-            while j_end < index_lookup_result.len() && index_lookup_result[j_end].0 == new_deletions[start_i].lookup_key {
+            while j_end < index_lookup_result.len()
+                && index_lookup_result[j_end].0 == new_deletions[start_i].lookup_key
+            {
                 lookup_result.push(index_lookup_result[j_end].1.clone());
                 j_end += 1;
             }
-            let processed_deletions = self.match_deletions_with_identical_key_and_lsn(deletions, lookup_result, &task.disk_file_lsn_map).await;
+            let processed_deletions = self
+                .match_deletions_with_identical_key_and_lsn(
+                    deletions,
+                    lookup_result,
+                    &task.disk_file_lsn_map,
+                )
+                .await;
             self.add_processed_deletion(processed_deletions, task.new_commit_lsn);
         }
     }

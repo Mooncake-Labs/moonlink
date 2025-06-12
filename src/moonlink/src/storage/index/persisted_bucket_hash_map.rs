@@ -119,10 +119,10 @@ impl IndexBlock {
         for bucket_idx in bucket_idxs {
             reader
                 .seek_bits(SeekFrom::Start(
-                (bucket_idx * metadata.bucket_bits) as u64 + self.bucket_start_offset,
-            ))
-            .await
-            .unwrap();
+                    (bucket_idx * metadata.bucket_bits) as u64 + self.bucket_start_offset,
+                ))
+                .await
+                .unwrap();
             let start = reader.read::<u32>(metadata.bucket_bits).await.unwrap();
             let end = reader.read::<u32>(metadata.bucket_bits).await.unwrap();
             results.push((start, end));
@@ -153,28 +153,32 @@ impl IndexBlock {
         let mut entry_reader = reader.clone();
         let entries = self.read_buckets(bucket_idxs, &mut reader, metadata).await;
         let mut results = Vec::new();
-        for ((value, target_hash), (entry_start, entry_end)) in value_and_hashes.iter().zip(entries.iter()) {
+        for ((value, target_hash), (entry_start, entry_end)) in
+            value_and_hashes.iter().zip(entries.iter())
+        {
             let target_lower_hash = target_hash & ((1 << metadata.hash_lower_bits) - 1);
             if entry_start != entry_end {
                 entry_reader
-                .seek_bits(SeekFrom::Start(
-                    *entry_start as u64
-                        * (metadata.hash_lower_bits + metadata.seg_id_bits + metadata.row_id_bits)
-                            as u64,
-                ))
-                .await
-                .unwrap();
-            for _ in *entry_start..*entry_end {
-                let (hash, seg_idx, row_idx) = self.read_entry(&mut entry_reader, metadata).await;
-                if hash == target_lower_hash {
-                    results.push((*value, RecordLocation::DiskFile(
-                        metadata.files[seg_idx].file_id(),
-                        row_idx,
-                    )));
+                    .seek_bits(SeekFrom::Start(
+                        *entry_start as u64
+                            * (metadata.hash_lower_bits
+                                + metadata.seg_id_bits
+                                + metadata.row_id_bits) as u64,
+                    ))
+                    .await
+                    .unwrap();
+                for _i in *entry_start..*entry_end {
+                    let (lower_hash, seg_idx, row_idx) =
+                        self.read_entry(&mut entry_reader, metadata).await;
+                    if lower_hash == target_lower_hash {
+                        results.push((
+                            *value,
+                            RecordLocation::DiskFile(metadata.files[seg_idx].file_id(), row_idx),
+                        ));
+                    }
                 }
             }
         }
-    }
 
         results
     }
@@ -188,12 +192,17 @@ impl GlobalIndex {
             .map(|cur_index_block| cur_index_block.file_size)
             .sum()
     }
-
     pub async fn search_values(&self, values: &[u64]) -> Vec<(u64, RecordLocation)> {
         let mut results = Vec::new();
-        let mut value_and_hashes = values.iter().map(|value| (*value, splitmix64(*value))).collect::<Vec<_>>();
+        let mut value_and_hashes = values
+            .iter()
+            .map(|value| (*value, splitmix64(*value)))
+            .collect::<Vec<_>>();
         value_and_hashes.sort_by_key(|(_, hash)| *hash);
-        let upper_hashes = value_and_hashes.iter().map(|(_, hash)| (hash >> self.hash_lower_bits) as u32).collect::<Vec<_>>();
+        let upper_hashes = value_and_hashes
+            .iter()
+            .map(|(_, hash)| (hash >> self.hash_lower_bits) as u32)
+            .collect::<Vec<_>>();
         let mut start_idx = 0;
         for block in self.index_blocks.iter() {
             while upper_hashes[start_idx] < block.bucket_start_idx {
@@ -203,11 +212,19 @@ impl GlobalIndex {
             while end_idx < upper_hashes.len() && upper_hashes[end_idx] < block.bucket_end_idx {
                 end_idx += 1;
             }
-            results.extend(block.read(&value_and_hashes[start_idx..end_idx], &upper_hashes[start_idx..end_idx], self).await);            
+            results.extend(
+                block
+                    .read(
+                        &value_and_hashes[start_idx..end_idx],
+                        &upper_hashes[start_idx..end_idx],
+                        self,
+                    )
+                    .await,
+            );
         }
         results
     }
-    
+
     pub async fn create_iterator<'a>(
         &'a self,
         file_id_remap: &'a Vec<u32>,
@@ -805,7 +822,10 @@ mod tests {
         let data_file_ids = [data_file.file_id()];
         for (hash, seg_idx, row_idx) in hash_entries.iter() {
             let expected_record_loc = RecordLocation::DiskFile(data_file_ids[*seg_idx], *row_idx);
-            assert_eq!(index.search_values(&[*hash]).await, vec![(*hash, expected_record_loc)]);
+            assert_eq!(
+                index.search_values(&[*hash]).await,
+                vec![(*hash, expected_record_loc)]
+            );
         }
 
         let mut hash_entry_num = 0;

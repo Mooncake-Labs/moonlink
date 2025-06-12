@@ -41,22 +41,36 @@ impl MooncakeIndex {
 
         // Check file indices
         for file_index_meta in &self.file_indices {
-            let locations = file_index_meta.search_values(&[raw_record.lookup_key]).await;
+            let locations = file_index_meta
+                .search_values(&[raw_record.lookup_key])
+                .await;
             res.extend(locations.into_iter().map(|(_, location)| location));
         }
         res
     }
 
-    pub async fn find_records(&self, raw_records: &[RawDeletionRecord]) -> Vec<(u64, RecordLocation)> {
+    pub async fn find_records(
+        &self,
+        raw_records: &[RawDeletionRecord],
+    ) -> Vec<(u64, RecordLocation)> {
         let mut res: Vec<(u64, RecordLocation)> = Vec::new();
 
         // Check in-memory indices
         for index in self.in_memory_index.iter() {
             for record in raw_records {
-                res.extend(index.0.find_record(record).into_iter().map(|location| (record.lookup_key, location)));
+                res.extend(
+                    index
+                        .0
+                        .find_record(record)
+                        .into_iter()
+                        .map(|location| (record.lookup_key, location)),
+                );
             }
         }
-        let mut keys = raw_records.iter().map(|record| record.lookup_key).collect::<Vec<_>>();
+        let mut keys = raw_records
+            .iter()
+            .map(|record| record.lookup_key)
+            .collect::<Vec<_>>();
         keys.dedup();
         // Check file indices
         for file_index_meta in &self.file_indices {
