@@ -18,4 +18,6 @@ pub use union_read::{ReadState, ReadStateManager};
 pub use union_read::decode_read_state_for_testing;
 
 #[cfg(feature = "bench")]
+pub use storage::GlobalIndex;
+#[cfg(feature = "bench")]
 pub use storage::GlobalIndexBuilder;

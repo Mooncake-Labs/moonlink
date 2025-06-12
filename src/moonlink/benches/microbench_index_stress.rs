@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use moonlink::create_data_file;
-use moonlink::GlobalIndexBuilder;
+use moonlink::{GlobalIndex, GlobalIndexBuilder};
 use rand::Rng;
 use tokio::runtime::Runtime;
 
@@ -23,9 +23,10 @@ fn bench_index_stress(c: &mut Criterion) {
     group.bench_function("search_10m_entries", |b| {
         b.iter(|| {
             let mut rng = rand::rng();
-            let result = black_box(
-                rt.block_on(index.search_values(&[(rng.random_range(0..10000000) as u64)])),
+            let hashes = GlobalIndex::prepare_hashes_for_lookup(
+                (vec![rng.random_range(0..10000000) as u64]).into_iter(),
             );
+            let result = black_box(rt.block_on(index.search_values(&hashes)));
             black_box(result);
         })
     });

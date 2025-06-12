@@ -64,7 +64,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 criterion = "0.5.1"
 mockall = "0.13"
-pprof = { version = "0.14", features = ["flamegraph"] }
+pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 rand = "0.9.1"
 rstest = "0.25.0"
 rstest_reuse = "0.7.0"

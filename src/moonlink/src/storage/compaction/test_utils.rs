@@ -13,7 +13,9 @@ use crate::storage::iceberg::puffin_utils;
 use crate::storage::iceberg::puffin_writer_proxy;
 use crate::storage::iceberg::test_utils as iceberg_test_utils;
 use crate::storage::iceberg::test_utils::load_arrow_batch;
-use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
+use crate::storage::index::persisted_bucket_hash_map::{
+    test_get_hashes_for_index, GlobalIndexBuilder,
+};
 use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::storage_utils::FileId;
@@ -433,7 +435,9 @@ pub(crate) async fn check_file_indices_compaction_for_multiple_compacted_files(
             NAME_VALUES[*old_row_idx],
             AGE_VALUES[*old_row_idx],
         );
-        let locs = compacted_file_indice.search_values(&[hash_value]).await;
+        let locs = compacted_file_indice
+            .search_values(&test_get_hashes_for_index(&[hash_value]))
+            .await;
         assert_eq!(locs.len(), 1);
         let (_, RecordLocation::DiskFile(actual_file_id, actual_new_row_idx)) = locs[0] else {
             panic!("Failed to get record location for {}", hash_value);
@@ -479,7 +483,9 @@ pub(crate) async fn check_file_indices_compaction(
             NAME_VALUES[*old_row_idx],
             AGE_VALUES[*old_row_idx],
         );
-        let locs = compacted_file_indice.search_values(&[hash_value]).await;
+        let locs = compacted_file_indice
+            .search_values(&test_get_hashes_for_index(&[hash_value]))
+            .await;
         assert_eq!(
             locs.len(),
             1,

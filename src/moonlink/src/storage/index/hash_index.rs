@@ -1,3 +1,4 @@
+use crate::storage::index::persisted_bucket_hash_map::splitmix64;
 use crate::storage::index::*;
 use crate::storage::storage_utils::{RawDeletionRecord, RecordLocation};
 use std::collections::HashSet;
@@ -39,11 +40,11 @@ impl MooncakeIndex {
             res.extend(index.0.find_record(raw_record));
         }
 
+        let value_and_hashes = vec![(raw_record.lookup_key, splitmix64(raw_record.lookup_key))];
+
         // Check file indices
         for file_index_meta in &self.file_indices {
-            let locations = file_index_meta
-                .search_values(&[raw_record.lookup_key])
-                .await;
+            let locations = file_index_meta.search_values(&value_and_hashes).await;
             res.extend(locations.into_iter().map(|(_, location)| location));
         }
         res
@@ -67,14 +68,15 @@ impl MooncakeIndex {
                 );
             }
         }
-        let mut keys = raw_records
-            .iter()
-            .map(|record| record.lookup_key)
-            .collect::<Vec<_>>();
-        keys.dedup();
+        if self.file_indices.is_empty() {
+            return res;
+        }
+        let value_and_hashes = GlobalIndex::prepare_hashes_for_lookup(
+            raw_records.iter().map(|record| record.lookup_key),
+        );
         // Check file indices
         for file_index_meta in &self.file_indices {
-            let locations = file_index_meta.search_values(&keys).await;
+            let locations = file_index_meta.search_values(&value_and_hashes).await;
             res.extend(locations);
         }
         res

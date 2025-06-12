@@ -2,6 +2,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
 use moonlink::{IcebergTableConfig, MooncakeTable, TableConfig};
+use pprof::criterion::{Output, PProfProfiler};
 use std::collections::HashMap;
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
@@ -170,7 +171,7 @@ fn bench_write(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default();
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = bench_write
 }
 criterion_main!(benches);

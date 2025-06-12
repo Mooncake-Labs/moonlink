@@ -226,6 +226,7 @@ impl DiskSliceWriter {
 mod tests {
     use super::*;
     use crate::row::{IdentityProp, MoonlinkRow, RowValue};
+    use crate::storage::index::persisted_bucket_hash_map::test_get_hashes_for_index;
     use crate::storage::mooncake_table::mem_slice::MemSlice;
     use crate::storage::mooncake_table::TableConfig as MooncakeTableConfig;
     use crate::storage::storage_utils::RawDeletionRecord;
@@ -406,7 +407,9 @@ mod tests {
         // Get the remapped index and verify it
         let new_index = disk_slice.take_index().unwrap();
 
-        let results = new_index.search_values(&[1, 3, 5]).await;
+        let results = new_index
+            .search_values(&test_get_hashes_for_index(&[1, 3, 5]))
+            .await;
         // Verify each key has been remapped to a disk location
         for (_, location) in results {
             match location {
@@ -425,7 +428,9 @@ mod tests {
         }
 
         // Check that deleted rows are not in the index
-        let results = new_index.search_values(&[2, 4]).await;
+        let results = new_index
+            .search_values(&test_get_hashes_for_index(&[2, 4]))
+            .await;
         assert!(
             results.is_empty(),
             "Deleted keys {results:?} should not exist in the remapped index"
