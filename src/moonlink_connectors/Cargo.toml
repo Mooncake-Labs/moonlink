@@ -4,6 +4,10 @@ version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 
+[[bin]]
+name = "repl_test"
+path = "src/bin/repl_test.rs"
+
 [dependencies]
 arrow = { workspace = true }
 arrow-schema = { workspace = true }

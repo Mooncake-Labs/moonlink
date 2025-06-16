@@ -1,5 +1,5 @@
 pub mod error;
-mod pg_replicate;
+pub mod pg_replicate;
 mod replication_connection;
 mod replication_manager;
 
