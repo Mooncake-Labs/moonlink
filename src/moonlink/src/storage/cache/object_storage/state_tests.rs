@@ -48,7 +48,7 @@ fn get_table_unique_file_id(file_id: u64) -> TableUniqueFileId {
 
 // (1) + create mooncake snapshot => (2)
 #[tokio::test]
-async fn test_cache_state_1_create_snashot() {
+async fn test_cache_state_1_create_snapshot() {
     let cache_file_directory = tempdir().unwrap();
     let test_file = create_test_file(cache_file_directory.path(), TEST_FILENAME_1).await;
     let cache_entry = CacheEntry {
