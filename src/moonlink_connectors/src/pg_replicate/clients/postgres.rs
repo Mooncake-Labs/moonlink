@@ -55,6 +55,9 @@ pub enum ReplicationClientError {
 
     #[error("failed to create slot")]
     FailedToCreateSlot,
+
+    #[error("failed to get slot with snapshot")]
+    FailedToGetSlotWithSnapshot,
 }
 
 impl ReplicationClient {
@@ -557,21 +560,53 @@ impl ReplicationClient {
         Err(ReplicationClientError::FailedToCreateSlot)
     }
 
-    /// Either return the slot info of an existing slot or creates a new
-    /// slot and returns its slot info.
-    pub async fn get_or_create_slot(
+    /// Exports a snapshot from the current transaction and returns the snapshot name.
+    pub async fn export_snapshot(&self) -> Result<String, ReplicationClientError> {
+        let rows = self
+            .postgres_client
+            .simple_query("select pg_export_snapshot();")
+            .await?;
+
+        for row in rows {
+            if let SimpleQueryMessage::Row(row) = row {
+                return Ok(row.get(0).unwrap().to_string());
+            }
+        }
+
+        Err(ReplicationClientError::FailedToCreateSlot)
+    }
+
+    /// Sets the current transaction snapshot.
+    pub async fn set_transaction_snapshot(
+        &self,
+        snapshot: &str,
+    ) -> Result<(), ReplicationClientError> {
+        let query = format!("SET TRANSACTION SNAPSHOT {};", quote_literal(snapshot));
+        self.postgres_client.simple_query(&query).await?;
+        Ok(())
+    }
+
+    /// Creates a new slot and returns its slot info along with an exported snapshot name.
+    pub async fn get_slot_with_snapshot(
+        &mut self,
+        slot_name: &str,
+    ) -> Result<(SlotInfo, String), ReplicationClientError> {
+        if let Some(slot_info) = self.get_slot(slot_name).await? {
+            return Ok((slot_info, self.export_snapshot().await?));
+        }
+        Err(ReplicationClientError::FailedToGetSlotWithSnapshot)
+    }
+
+    /// Creates a new slot and returns its slot info.
+    pub async fn create_new_slot(
         &mut self,
         slot_name: &str,
     ) -> Result<SlotInfo, ReplicationClientError> {
-        if let Some(slot_info) = self.get_slot(slot_name).await? {
-            Ok(slot_info)
-        } else {
-            self.rollback_txn().await?;
-            self.begin_readonly_transaction().await?;
-            Ok(self.create_slot(slot_name).await?)
-        }
+        self.rollback_txn().await?;
+        self.begin_readonly_transaction().await?;
+        let info = self.create_slot(slot_name).await?;
+        Ok(info)
     }
-
     /// Returns all table names in a publication
     pub async fn get_publication_table_names(
         &self,
