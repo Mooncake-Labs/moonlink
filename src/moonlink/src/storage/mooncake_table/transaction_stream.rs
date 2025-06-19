@@ -2,6 +2,7 @@ use super::*;
 use crate::storage::cache::object_storage::base_cache::{CacheEntry, CacheTrait, FileMetadata};
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::storage_utils::{ProcessedDeletionRecord, TableUniqueFileId};
+use fastbloom::BloomFilter;
 use more_asserts as ma;
 /// Used to track the state of a streamed transaction
 /// Holds appending rows in memslice and files.
@@ -15,6 +16,7 @@ pub(super) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
     pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
+    index_bloom_filter: BloomFilter,
     flushed_file_index: MooncakeIndex,
     flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
 }
@@ -50,6 +52,7 @@ impl TransactionStreamState {
             mem_slice: MemSlice::new(schema, batch_size, identity),
             local_deletions: Vec::new(),
             pending_deletions_in_main_mem_slice: Vec::new(),
+            index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             flushed_file_index: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
         }
@@ -100,7 +103,7 @@ impl MooncakeTable {
         stream_state
             .mem_slice
             .append(lookup_key, row, identity_for_key)?;
-
+        stream_state.index_bloom_filter.insert(&lookup_key);
         Ok(())
     }
 
@@ -117,44 +120,54 @@ impl MooncakeTable {
             &self.metadata,
             xact_id,
         );
-
-        // Delete from stream mem slice
-        if stream_state
-            .mem_slice
-            .delete(&record, &self.metadata.identity)
-            .await
-            .is_some()
-        {
-            return;
-        }
-        // Delete from stream flushed files
-        let matches = stream_state.flushed_file_index.find_record(&record).await;
-        if !matches.is_empty() {
-            for loc in matches {
-                let RecordLocation::DiskFile(file_id, row_id) = loc else {
-                    panic!("Unexpected record location: {:?}", record);
-                };
-                let (file, disk_file_entry) = stream_state
-                    .flushed_files
-                    .get_key_value_mut(&file_id)
-                    .expect("missing disk file");
-                if disk_file_entry.batch_deletion_vector.is_deleted(row_id) {
-                    continue;
-                }
-                if record.row_identity.is_none()
-                    || record
-                        .row_identity
-                        .as_ref()
-                        .unwrap()
-                        .equals_parquet_at_offset(file.file_path(), row_id, &self.metadata.identity)
-                        .await
-                {
-                    stream_state.local_deletions.push(ProcessedDeletionRecord {
-                        pos: loc,
-                        lsn: record.lsn,
-                    });
-                    disk_file_entry.batch_deletion_vector.delete_row(row_id);
-                    return;
+        // it is very unlikely to delete a row in current transaction,
+        // only very weird query shape could do it.
+        // use a bloom filter to skip any index lookup (which could be costly)
+        let bloom_filter_pass = stream_state.index_bloom_filter.contains(&lookup_key);
+        // skip any index lookup if bloom filter don't pass
+        if bloom_filter_pass {
+            // Delete from stream mem slice
+            if stream_state
+                .mem_slice
+                .delete(&record, &self.metadata.identity)
+                .await
+                .is_some()
+            {
+                return;
+            }
+            // Delete from stream flushed files
+            let matches = stream_state.flushed_file_index.find_record(&record).await;
+            if !matches.is_empty() {
+                for loc in matches {
+                    let RecordLocation::DiskFile(file_id, row_id) = loc else {
+                        panic!("Unexpected record location: {:?}", record);
+                    };
+                    let (file, disk_file_entry) = stream_state
+                        .flushed_files
+                        .get_key_value_mut(&file_id)
+                        .expect("missing disk file");
+                    if disk_file_entry.batch_deletion_vector.is_deleted(row_id) {
+                        continue;
+                    }
+                    if record.row_identity.is_none()
+                        || record
+                            .row_identity
+                            .as_ref()
+                            .unwrap()
+                            .equals_parquet_at_offset(
+                                file.file_path(),
+                                row_id,
+                                &self.metadata.identity,
+                            )
+                            .await
+                    {
+                        stream_state.local_deletions.push(ProcessedDeletionRecord {
+                            pos: loc,
+                            lsn: record.lsn,
+                        });
+                        disk_file_entry.batch_deletion_vector.delete_row(row_id);
+                        return;
+                    }
                 }
             }
         }

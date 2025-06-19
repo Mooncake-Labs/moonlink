@@ -18,6 +18,7 @@ bincode = "2"
 chrono = { version = "0.4", default-features = false }
 console-subscriber = "0.2"
 crc32fast = "1"
+fastbloom = "0.12.0"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15.3"
 iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "bcd1033ba5c67982b7359a6330defeade9f82526", default-features = false, features = [

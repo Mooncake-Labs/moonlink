@@ -31,6 +31,7 @@ base64 = { version = "0.22", optional = true }
 bincode = { workspace = true }
 chrono = { workspace = true, optional = true }
 crc32fast = { workspace = true }
+fastbloom = { workspace = true }
 futures = { workspace = true }
 hashbrown = { workspace = true }
 hmac = { version = "0.12", optional = true }
