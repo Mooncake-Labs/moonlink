@@ -52,6 +52,7 @@ pub struct PostgresSource {
     table_schemas: HashMap<TableId, TableSchema>,
     slot_name: Option<String>,
     publication: Option<String>,
+    snapshot_name: Option<String>,
     confirmed_flush_lsn: PgLsn,
     uri: String,
 }
@@ -59,18 +60,14 @@ pub struct PostgresSource {
 impl PostgresSource {
     pub async fn new(
         uri: &str,
-        slot_name: Option<String>,
+        slot_name: &str,
         table_names_from: TableNamesFrom,
     ) -> Result<PostgresSource, PostgresSourceError> {
         let mut replication_client = ReplicationClient::connect_no_tls(uri).await?;
         replication_client.begin_readonly_transaction().await?;
         let mut confirmed_flush_lsn = PgLsn::from(0);
-        if let Some(ref slot_name) = slot_name {
-            confirmed_flush_lsn = replication_client
-                .get_or_create_slot(slot_name)
-                .await?
-                .confirmed_flush_lsn;
-        }
+        let slot_info = replication_client.create_new_slot(&slot_name).await?;
+        confirmed_flush_lsn = slot_info.confirmed_flush_lsn;
         let (table_names, publication) =
             Self::get_table_names_and_publication(&replication_client, table_names_from).await?;
         let table_schemas = replication_client
@@ -80,7 +77,8 @@ impl PostgresSource {
             replication_client,
             table_schemas,
             publication,
-            slot_name,
+            slot_name: Some(slot_name.to_string()),
+            snapshot_name: None,
             confirmed_flush_lsn,
             uri: uri.to_string(),
         })
@@ -94,8 +92,41 @@ impl PostgresSource {
         self.slot_name.as_ref()
     }
 
+    pub fn snapshot_name(&self) -> Option<&String> {
+        self.snapshot_name.as_ref()
+    }
+
     pub fn confirmed_flush_lsn(&self) -> PgLsn {
         self.confirmed_flush_lsn
+    }
+
+    pub async fn create_copy_source(
+        &self,
+        table_names: Vec<TableName>,
+    ) -> Result<PostgresSource, PostgresSourceError> {
+        let mut replication_client = ReplicationClient::connect_no_tls(&self.uri).await?;
+        let slot_name = self.slot_name().unwrap();
+        let (slot_info, snapshot) = replication_client
+            .get_slot_with_snapshot(&slot_name)
+            .await?;
+        replication_client.begin_readonly_transaction().await?;
+        if let Some(snapshot) = self.snapshot_name() {
+            replication_client
+                .set_transaction_snapshot(snapshot)
+                .await?;
+        }
+        let table_schemas = replication_client
+            .get_table_schemas(&table_names, None)
+            .await?;
+        Ok(PostgresSource {
+            replication_client,
+            table_schemas,
+            publication: None,
+            slot_name: None,
+            snapshot_name: Some(snapshot),
+            confirmed_flush_lsn: slot_info.confirmed_flush_lsn,
+            uri: self.uri.clone(),
+        })
     }
 
     async fn get_table_names_and_publication(

@@ -216,17 +216,19 @@ impl MooncakeTable {
         Ok(())
     }
 
-    pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
+    /// Prepare a transaction stream commit without applying it to the table.
+    /// This is useful when buffering events during initial copy. The returned
+    /// `TransactionStreamCommit` can later be applied via
+    /// `commit_transaction_stream` logic.
+    pub async fn prepare_transaction_stream_commit(
+        &mut self,
+        xact_id: u32,
+        lsn: u64,
+    ) -> Result<TransactionStreamCommit> {
         self.flush_transaction_stream(xact_id).await?;
         if let Some(mut stream_state) = self.transaction_stream_states.remove(&xact_id) {
-            let snapshot_task = &mut self.next_snapshot_task;
-            snapshot_task.new_commit_lsn = lsn;
-
-            // We update our delete records with the last lsn of the transaction
-            // Note that in the stream case we dont have this until commit time
             for deletion in stream_state.pending_deletions_in_main_mem_slice.iter_mut() {
                 let pos = deletion.pos.unwrap();
-                // If the row is no longer in memslice, it must be flushed, let snapshot task find it.
                 if !self.mem_slice.try_delete_at_pos(pos) {
                     deletion.pos = None;
                 }
@@ -244,14 +246,24 @@ impl MooncakeTable {
                 local_deletions: stream_state.local_deletions,
                 pending_deletions: stream_state.pending_deletions_in_main_mem_slice,
             };
-            snapshot_task
-                .new_streaming_xact
-                .push(TransactionStreamOutput::Commit(commit));
-            snapshot_task.new_flush_lsn = Some(lsn);
-            Ok(())
+            Ok(commit)
         } else {
             Err(Error::TransactionNotFound(xact_id))
         }
+    }
+
+    pub async fn commit_transaction_stream(
+        &mut self,
+        commit: TransactionStreamCommit,
+    ) -> Result<()> {
+        let snapshot_task = &mut self.next_snapshot_task;
+        let lsn = commit.commit_lsn;
+        snapshot_task.new_commit_lsn = lsn;
+        snapshot_task
+            .new_streaming_xact
+            .push(TransactionStreamOutput::Commit(commit));
+        snapshot_task.new_flush_lsn = Some(lsn);
+        Ok(())
     }
 }
 
