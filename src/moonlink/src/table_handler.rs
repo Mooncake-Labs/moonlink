@@ -1,6 +1,6 @@
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::SnapshotOption;
-use crate::storage::MooncakeTable;
+use crate::storage::{io_utils, MooncakeTable};
 use crate::table_notify::TableNotify;
 use crate::{Error, Result};
 use more_asserts as ma;
@@ -183,10 +183,8 @@ impl TableHandler {
                 return;
             }
             tokio::task::spawn(async move {
-                for cur_data_file in evicted_file_to_delete.into_iter() {
-                    if let Err(e) = tokio::fs::remove_file(&cur_data_file).await {
-                        error!("Failed to delete object storage cache: {:?}", e);
-                    }
+                if let Err(err) = io_utils::delete_local_files(evicted_file_to_delete).await {
+                    error!("Failed to delete object storage cache: {:?}", err);
                 }
             });
         };

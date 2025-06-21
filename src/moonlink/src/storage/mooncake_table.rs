@@ -50,6 +50,8 @@ use tracing::info_span;
 use tracing::Instrument;
 use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
+#[cfg(test)]
+use crate::storage::io_utils;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
@@ -1150,9 +1152,9 @@ impl MooncakeTable {
             Self::sync_mooncake_snapshot(receiver).await;
 
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_data_files_to_delete.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         // Create iceberg snapshot if possible.
         if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
@@ -1164,8 +1166,36 @@ impl MooncakeTable {
         Ok(())
     }
 
+    // Test util function to perform index merge, block wait its completion and reflect index merge result to mooncake table.
+    // Return evicted files for assertion.
+    #[cfg(test)]
+    pub(crate) async fn perform_index_merge_for_test(
+        &mut self,
+        receiver: &mut Receiver<TableNotify>,
+        index_merge_payload: FileIndiceMergePayload,
+    ) -> Vec<String> {
+        // Perform and block wait index merge.
+        self.perform_index_merge(index_merge_payload);
+        let index_merge_result = Self::sync_index_merge(receiver).await;
+
+        self.set_file_indices_merge_res(index_merge_result);
+        assert!(self.create_snapshot(SnapshotOption {
+            force_create: true,
+            skip_iceberg_snapshot: false,
+            skip_file_indices_merge: false,
+            skip_data_file_compaction: true,
+        }));
+        let (_, _, _, evicted_files_to_delete) = Self::sync_mooncake_snapshot(receiver).await;
+        // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
+        io_utils::delete_local_files(evicted_files_to_delete.clone())
+            .await
+            .unwrap();
+
+        evicted_files_to_delete
+    }
+
     // Test util function to perform data compaction, block wait its completion and reflect compaction result to mooncake table.
-    // Return evicted files to assertion.
+    // Return evicted files for assertion.
     #[cfg(test)]
     pub(crate) async fn perform_data_compaction_for_test(
         &mut self,
@@ -1216,12 +1246,12 @@ impl MooncakeTable {
         assert!(self.create_snapshot(force_snapshot_option.clone()));
 
         // Create iceberg snapshot.
-        let (iceberg_snapshot_payload, _, _, evicted_object_storage_cache) =
+        let (iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
             Self::sync_mooncake_snapshot(receiver).await;
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_object_storage_cache.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
             self.persist_iceberg_snapshot(iceberg_snapshot_payload);
@@ -1231,12 +1261,12 @@ impl MooncakeTable {
 
         // Get data compaction payload.
         assert!(self.create_snapshot(force_snapshot_option.clone()));
-        let (iceberg_snapshot_payload, _, data_compaction_payload, evicted_object_storage_cache) =
+        let (iceberg_snapshot_payload, _, data_compaction_payload, evicted_data_files_to_delete) =
             Self::sync_mooncake_snapshot(receiver).await;
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_object_storage_cache.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         assert!(iceberg_snapshot_payload.is_none());
         let data_compaction_payload = data_compaction_payload.unwrap();
@@ -1263,12 +1293,12 @@ impl MooncakeTable {
             skip_file_indices_merge: true,
             skip_data_file_compaction: false,
         }));
-        let (iceberg_snapshot_payload, _, _, evicted_object_storage_cache) =
+        let (iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
             Self::sync_mooncake_snapshot(receiver).await;
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_object_storage_cache.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         let iceberg_snapshot_payload = iceberg_snapshot_payload.unwrap();
         self.persist_iceberg_snapshot(iceberg_snapshot_payload);
@@ -1303,12 +1333,12 @@ impl MooncakeTable {
         assert!(self.create_snapshot(force_snapshot_option.clone()));
 
         // Create iceberg snapshot.
-        let (iceberg_snapshot_payload, _, _, evicted_object_storage_cache) =
+        let (iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
             Self::sync_mooncake_snapshot(receiver).await;
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_object_storage_cache.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
             self.persist_iceberg_snapshot(iceberg_snapshot_payload);
@@ -1318,12 +1348,12 @@ impl MooncakeTable {
 
         // Perform index merge.
         assert!(self.create_snapshot(force_snapshot_option.clone()));
-        let (iceberg_snapshot_payload, file_indice_merge_payload, _, evicted_object_storage_cache) =
+        let (iceberg_snapshot_payload, file_indice_merge_payload, _, evicted_data_files_to_delete) =
             Self::sync_mooncake_snapshot(receiver).await;
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_object_storage_cache.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         assert!(iceberg_snapshot_payload.is_none());
         let file_indice_merge_payload = file_indice_merge_payload.unwrap();
@@ -1337,12 +1367,12 @@ impl MooncakeTable {
             skip_file_indices_merge: false,
             skip_data_file_compaction: false,
         }));
-        let (iceberg_snapshot_payload, _, _, evicted_object_storage_cache) =
+        let (iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
             Self::sync_mooncake_snapshot(receiver).await;
         // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
-        for cur_data_file in evicted_object_storage_cache.into_iter() {
-            tokio::fs::remove_file(&cur_data_file).await.unwrap();
-        }
+        io_utils::delete_local_files(evicted_data_files_to_delete)
+            .await
+            .unwrap();
 
         let iceberg_snapshot_payload = iceberg_snapshot_payload.unwrap();
         self.persist_iceberg_snapshot(iceberg_snapshot_payload);
@@ -1384,6 +1414,32 @@ impl MooncakeTable {
         guard.current_snapshot.disk_files.clone()
     }
 
+    /// Test util function to get all index block files.
+    #[cfg(test)]
+    pub(crate) async fn get_index_block_files(&mut self) -> Vec<String> {
+        let guard = self.snapshot.read().await;
+        let mut index_block_files = vec![];
+        for cur_file_index in guard.current_snapshot.indices.file_indices.iter() {
+            for cur_index_block in cur_file_index.index_blocks.iter() {
+                index_block_files.push(cur_index_block.index_file.file_path().clone());
+            }
+        }
+        index_block_files
+    }
+
+    /// Test util function to get all index block files size.
+    #[cfg(test)]
+    pub(crate) async fn get_index_block_files_size(&mut self) -> u64 {
+        let guard = self.snapshot.read().await;
+        let mut index_blocks_file_size = 0;
+        for cur_file_index in guard.current_snapshot.indices.file_indices.iter() {
+            for cur_index_block in cur_file_index.index_blocks.iter() {
+                index_blocks_file_size += cur_index_block.file_size;
+            }
+        }
+        index_blocks_file_size
+    }
+
     /// Test util function to get snapshot read output.
     #[cfg(test)]
     pub(crate) async fn request_read(&mut self) -> Result<SnapshotReadOutput> {
@@ -1406,3 +1462,6 @@ mod data_file_state_tests;
 
 #[cfg(test)]
 mod deletion_vector_puffin_state_tests;
+
+#[cfg(test)]
+mod file_index_state_tests;

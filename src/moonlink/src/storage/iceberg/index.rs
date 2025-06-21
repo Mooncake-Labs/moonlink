@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::iceberg::puffin_utils;
+use crate::storage::iceberg::utils::to_iceberg_error;
 use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeIndexBlock;
 /// This module defines the file index struct used for iceberg, which corresponds to in-memory mooncake table file index structs, and supports the serde between mooncake table format and iceberg format.
 use crate::storage::index::FileIndex as MooncakeFileIndex;
-use crate::storage::storage_utils::{create_data_file, FileId};
+use crate::storage::io_utils;
+use crate::storage::storage_utils::{create_data_file, FileId, TableId, TableUniqueFileId};
+use crate::ObjectStorageCache;
 
 use iceberg::io::FileIO;
 use iceberg::puffin::Blob;
@@ -93,21 +97,46 @@ impl FileIndex {
     pub(crate) async fn as_mooncake_file_index(
         &mut self,
         data_file_to_id: &HashMap<String, FileId>,
+        mut object_storage_cache: ObjectStorageCache,
+        table_id: TableId,
         next_file_id: &mut u64,
-    ) -> MooncakeFileIndex {
-        let index_block_futures = self.index_block_files.iter().map(|cur_index_block| {
+    ) -> IcebergResult<MooncakeFileIndex> {
+        // All mooncake index blocks.
+        let mut mooncake_index_blocks = vec![];
+
+        for cur_index_block in self.index_block_files.iter() {
             let cur_file_id = *next_file_id;
             *next_file_id += 1;
-            MooncakeIndexBlock::new(
+            let table_unique_file_id = TableUniqueFileId {
+                table_id,
+                file_id: FileId(cur_file_id),
+            };
+            let (cache_handle, cur_evicted_files) = object_storage_cache
+                .get_cache_entry(
+                    table_unique_file_id,
+                    /*remote_filepath=*/ &cur_index_block.filepath,
+                )
+                .await
+                .map_err(to_iceberg_error)?;
+            io_utils::delete_local_files(cur_evicted_files)
+                .await
+                .map_err(to_iceberg_error)?;
+
+            // File indices should always reside in on-disk cache.
+            let cache_handle = cache_handle.unwrap();
+            // Transform iceberg index block into mooncake index block.
+            let mut cur_index_block = MooncakeIndexBlock::new(
                 cur_index_block.bucket_start_idx,
                 cur_index_block.bucket_end_idx,
                 cur_index_block.bucket_start_offset,
                 /*index_file=*/
-                create_data_file(cur_file_id, cur_index_block.filepath.clone()),
+                create_data_file(cur_file_id, cache_handle.get_cache_filepath().to_string()),
             )
-        });
-        let index_blocks = futures::future::join_all(index_block_futures).await;
-        MooncakeFileIndex {
+            .await;
+            cur_index_block.cache_handle = Some(cache_handle);
+            mooncake_index_blocks.push(cur_index_block);
+        }
+        let file_indice = MooncakeFileIndex {
             files: self
                 .data_files
                 .iter()
@@ -123,8 +152,10 @@ impl FileIndex {
             seg_id_bits: self.seg_id_bits,
             row_id_bits: self.row_id_bits,
             bucket_bits: self.bucket_bits,
-            index_blocks,
-        }
+            index_blocks: mooncake_index_blocks,
+        };
+
+        Ok(file_indice)
     }
 }
 
@@ -222,21 +253,31 @@ impl FileIndexBlob {
 mod tests {
     use super::*;
 
-    use tempfile::NamedTempFile;
-
     use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeIndexBlock;
     use crate::storage::index::FileIndex as MooncakeFileIndex;
     use crate::storage::storage_utils::create_data_file;
 
     #[tokio::test]
     async fn test_hash_index_v1_serde() {
+        // Test table id.
+        let table_id = TableId(0);
+        // Test object storage cache.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let object_storage_cache = ObjectStorageCache::default_for_test(&temp_dir);
+
         // Fill in meaningless random bytes, mainly to verify the correctness of serde.
-        let temp_local_index_file = NamedTempFile::new().unwrap();
-        let temp_remote_index_file = NamedTempFile::new().unwrap();
+        let temp_local_index_file = temp_dir.path().join("local-index.bin");
+        let temp_remote_index_file = temp_dir.path().join("remote-index.bin");
+        tokio::fs::File::create(&temp_local_index_file)
+            .await
+            .unwrap();
+        tokio::fs::File::create(&temp_remote_index_file)
+            .await
+            .unwrap();
 
         // Notice: use the same filepath for index block and data file only for serde testing, no IO involved.
-        let local_index_filepath = temp_local_index_file.path().to_str().unwrap().to_string();
-        let remote_index_filepath = temp_remote_index_file.path().to_str().unwrap().to_string();
+        let local_index_filepath = temp_local_index_file.to_str().unwrap().to_string();
+        let remote_index_filepath = temp_remote_index_file.to_str().unwrap().to_string();
 
         let local_data_filepath = local_index_filepath.clone();
         let remote_data_filepath = remote_index_filepath.clone();
@@ -288,8 +329,14 @@ mod tests {
             HashMap::<String, FileId>::from([(remote_data_filepath.clone(), FileId(0))]);
         let mut next_file_id = 1;
         let mooncake_file_index = file_index
-            .as_mooncake_file_index(&data_file_to_id, &mut next_file_id)
-            .await;
+            .as_mooncake_file_index(
+                &data_file_to_id,
+                object_storage_cache.clone(),
+                table_id,
+                &mut next_file_id,
+            )
+            .await
+            .unwrap();
 
         // Check global index are equal before and after serde.
         assert_eq!(

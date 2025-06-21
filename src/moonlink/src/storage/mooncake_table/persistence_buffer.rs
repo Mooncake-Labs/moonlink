@@ -92,6 +92,7 @@ impl UnpersistedRecords {
             .collect::<HashSet<_>>()
     }
     /// Get unpersisted file indices as hash set for lookup.
+    #[allow(clippy::mutable_key_type)]
     pub(crate) fn get_unpersisted_file_indices_set(&self) -> HashSet<GlobalIndex> {
         self.unpersisted_file_indices
             .iter()

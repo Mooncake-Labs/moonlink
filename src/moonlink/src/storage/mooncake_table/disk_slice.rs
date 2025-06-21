@@ -1,12 +1,14 @@
 use super::data_batches::BatchEntry;
 use crate::error::{Error, Result};
+use crate::storage::cache::object_storage::base_cache::{CacheEntry, CacheTrait, FileMetadata};
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
 use crate::storage::index::{FileIndex, MemIndex};
 use crate::storage::parquet_utils;
 use crate::storage::storage_utils::{
     create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
-    MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation,
+    MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation, TableId, TableUniqueFileId,
 };
+use crate::ObjectStorageCache;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use parquet::arrow::AsyncArrowWriter;
@@ -116,6 +118,39 @@ impl DiskSliceWriter {
     /// Get the list of files in the DiskSlice
     pub(crate) fn get_file_index(&self) -> Option<FileIndex> {
         self.new_index.clone()
+    }
+
+    /// Import file indices into cache.
+    /// Return evicted files to delete.
+    pub(crate) async fn import_file_indices_to_cache(
+        &mut self,
+        mut object_storage_cache: ObjectStorageCache,
+        table_id: TableId,
+    ) -> Vec<String> {
+        // Aggregate evicted files to delete.
+        let mut evicted_files_to_delete = vec![];
+
+        if let Some(file_index) = &mut self.new_index {
+            for cur_index_block in file_index.index_blocks.iter_mut() {
+                let table_unique_file_id = TableUniqueFileId {
+                    table_id,
+                    file_id: cur_index_block.index_file.file_id(),
+                };
+                let cache_entry = CacheEntry {
+                    cache_filepath: cur_index_block.index_file.file_path().clone(),
+                    file_metadata: FileMetadata {
+                        file_size: cur_index_block.file_size,
+                    },
+                };
+                let (cache_handle, cur_evicted_files) = object_storage_cache
+                    .import_cache_entry(table_unique_file_id, cache_entry)
+                    .await;
+                evicted_files_to_delete.extend(cur_evicted_files);
+                cur_index_block.cache_handle = Some(cache_handle);
+            }
+        }
+
+        evicted_files_to_delete
     }
 
     pub(super) fn old_index(&self) -> &Arc<MemIndex> {

@@ -311,6 +311,7 @@ impl CompactionBuilder {
 
     /// Perform a compaction operation, and get the result back.
     #[tracing::instrument(name = "compaction_build", skip_all)]
+    #[allow(clippy::mutable_key_type)]
     pub(crate) async fn build(mut self) -> Result<DataCompactionResult> {
         let old_data_files = self
             .compaction_payload

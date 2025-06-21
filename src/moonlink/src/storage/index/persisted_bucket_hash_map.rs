@@ -1,5 +1,6 @@
 use crate::create_data_file;
 use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
+use crate::NonEvictableHandle;
 use futures::executor::block_on;
 use memmap2::Mmap;
 use std::collections::{BinaryHeap, HashSet};
@@ -79,7 +80,10 @@ pub(crate) struct IndexBlock {
     pub(crate) index_file: MooncakeDataFileRef,
     /// File size for the index block file, used to decide whether to trigger merge index blocks merge.
     pub(crate) file_size: u64,
+    /// Mmapped-data.
     data: Arc<Option<Mmap>>,
+    /// Cache handle within object storage cache.
+    pub(crate) cache_handle: Option<NonEvictableHandle>,
 }
 
 struct BucketEntry {
@@ -105,6 +109,7 @@ impl IndexBlock {
             index_file,
             file_size: file_metadata.len(),
             data: Arc::new(Some(data)),
+            cache_handle: None,
         }
     }
 
@@ -509,6 +514,7 @@ impl GlobalIndexBuilder {
     // ================================
     // Build from merge
     // ================================
+    #[allow(clippy::mutable_key_type)]
     pub async fn build_from_merge(
         mut self,
         indices: HashSet<GlobalIndex>,

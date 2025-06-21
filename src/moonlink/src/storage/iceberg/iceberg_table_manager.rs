@@ -207,6 +207,7 @@ impl IcebergTableManager {
             });
         }
 
+        // Load mooncake file indices from iceberg file index blobs.
         let file_index_blob =
             FileIndexBlob::load_from_index_blob(file_io.clone(), entry.data_file()).await?;
         self.persisted_file_indices
@@ -215,9 +216,15 @@ impl IcebergTableManager {
         let mut file_id_to_file_indices =
             HashMap::with_capacity(self.remote_data_file_to_file_id.len());
         for mut cur_iceberg_file_indice in file_index_blob.file_indices.into_iter() {
+            let table_id = TableId(self.mooncake_table_metadata.id);
             let cur_mooncake_file_indice = cur_iceberg_file_indice
-                .as_mooncake_file_index(&self.remote_data_file_to_file_id, next_file_id)
-                .await;
+                .as_mooncake_file_index(
+                    &self.remote_data_file_to_file_id,
+                    self.object_storage_cache.clone(),
+                    table_id,
+                    next_file_id,
+                )
+                .await?;
             file_indices.push(cur_mooncake_file_indice.clone());
 
             for cur_data_file in cur_mooncake_file_indice.files.iter() {
@@ -791,10 +798,7 @@ impl TableManager for IcebergTableManager {
         for manifest_file in manifest_list.entries().iter() {
             let manifest = manifest_file.load_manifest(&file_io).await?;
             let (manifest_entries, _) = manifest.into_parts();
-            assert!(
-                !manifest_entries.is_empty(),
-                "Shouldn't have empty manifest file"
-            );
+            assert!(!manifest_entries.is_empty());
 
             // On load, we do three pass on all entries.
             // Data files are loaded first, because we need to get <data file, file id> mapping, which is used for later deletion vector and file indices recovery.

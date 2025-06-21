@@ -61,6 +61,8 @@ pub struct DataCompactionResult {
     /// New compacted file indices.
     pub(crate) new_file_indices: Vec<FileIndex>,
     /// Compaction interacts with object storage cache, this field records evicted files to delete.
+    ///
+    /// TODO(hjiang): No need to pass the files out, could directly delete in compaction.
     pub(crate) evicted_files_to_delete: Vec<String>,
 }
 

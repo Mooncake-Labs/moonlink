@@ -44,6 +44,37 @@ impl TransactionStreamCommit {
     pub(crate) fn get_file_indices(&self) -> Vec<FileIndex> {
         self.flushed_file_index.file_indices.clone()
     }
+    /// Import file index into cache.
+    /// Return evicted files to delete.
+    pub(crate) async fn import_file_index_into_cache(
+        &mut self,
+        mut object_storage_cache: ObjectStorageCache,
+        table_id: TableId,
+    ) -> Vec<String> {
+        let mut evicted_files_to_delete = vec![];
+
+        for cur_file_index in self.flushed_file_index.file_indices.iter_mut() {
+            for cur_index_block in cur_file_index.index_blocks.iter_mut() {
+                let table_unique_file_id = TableUniqueFileId {
+                    table_id,
+                    file_id: cur_index_block.index_file.file_id(),
+                };
+                let cache_entry = CacheEntry {
+                    cache_filepath: cur_index_block.index_file.file_path().clone(),
+                    file_metadata: FileMetadata {
+                        file_size: cur_index_block.file_size,
+                    },
+                };
+                let (cache_handle, cur_evicted_files) = object_storage_cache
+                    .import_cache_entry(table_unique_file_id, cache_entry)
+                    .await;
+                cur_index_block.cache_handle = Some(cache_handle);
+                evicted_files_to_delete.extend(cur_evicted_files);
+            }
+        }
+
+        evicted_files_to_delete
+    }
 }
 
 impl TransactionStreamState {
@@ -284,6 +315,8 @@ impl SnapshotTableState {
                     for (file, mut disk_file_entry) in commit.flushed_files.into_iter() {
                         task.disk_file_lsn_map
                             .insert(file.file_id(), commit.commit_lsn);
+
+                        // Import data files into cache.
                         let file_id = TableUniqueFileId {
                             table_id: TableId(self.mooncake_table_metadata.id),
                             file_id: file.file_id(),

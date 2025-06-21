@@ -132,7 +132,7 @@ async fn test_1_persist_2() {
             .await
             .non_evictable_cache
             .len(),
-        1, // Puffin file.
+        2, // Puffin file and index block.
     );
     assert_eq!(
         object_storage_cache
@@ -208,7 +208,7 @@ async fn test_1_recover_2() {
             .await
             .non_evictable_cache
             .len(),
-        1, // Puffin file.
+        2, // Puffin file and index block.
     );
     assert_eq!(
         object_storage_cache_for_recovery
@@ -267,7 +267,7 @@ async fn test_2_read() {
             .await
             .non_evictable_cache
             .len(),
-        2, // Puffin file and data file.
+        3, // Puffin file, data file, and index block.
     );
     assert_eq!(
         object_storage_cache
@@ -309,7 +309,7 @@ async fn test_2_read() {
             .await
             .non_evictable_cache
             .len(),
-        1, // puffin file
+        2, // puffin file and index block.
     );
     assert_eq!(
         object_storage_cache
@@ -420,6 +420,8 @@ async fn test_2_compact() {
         );
     }
     assert_eq!(old_compacted_puffin_files.len(), 2);
+    let old_compacted_index_block_files = table.get_index_block_files().await;
+    assert_eq!(old_compacted_index_block_files.len(), 2);
 
     // Check cache state.
     assert_eq!(
@@ -447,7 +449,7 @@ async fn test_2_compact() {
             .await
             .non_evictable_cache
             .len(),
-        2, // Puffin files.
+        4, // Puffin files and index blocks.
     );
     assert_eq!(
         object_storage_cache
@@ -466,10 +468,12 @@ async fn test_2_compact() {
     let evicted_files = table
         .perform_data_compaction_for_test(&mut table_notify, data_compaction_payload.unwrap())
         .await;
-    // Include both two data files and their puffin files.
-    assert_eq!(evicted_files.len(), 4);
+    // Include both two data files and their puffin files, index blocks.
+    assert_eq!(evicted_files.len(), 6);
     assert!(evicted_files.contains(&old_compacted_puffin_files[0]));
     assert!(evicted_files.contains(&old_compacted_puffin_files[1]));
+    assert!(evicted_files.contains(&old_compacted_index_block_files[0]));
+    assert!(evicted_files.contains(&old_compacted_index_block_files[1]));
 
     // Check data file has been pinned in mooncake table.
     let disk_files = table.get_disk_files_for_snapshot().await;
