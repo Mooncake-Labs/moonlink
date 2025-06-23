@@ -158,7 +158,7 @@ impl ColumnStoreBuffer {
         offset: usize,
         identity: &IdentityProp,
     ) -> bool {
-        if record.row_identity.is_some() {
+        if record.row_identity.is_some() && identity.requires_identity_check_in_mem_slice() {
             if let Some(batch) = &batch.data {
                 record
                     .row_identity
@@ -170,7 +170,7 @@ impl ColumnStoreBuffer {
                     .row_identity
                     .as_ref()
                     .unwrap()
-                    .equals_full_row(self.current_rows.get_row(offset), identity)
+                    .equals_moonlink_row(self.current_rows.get_row(offset), identity)
             }
         } else {
             true

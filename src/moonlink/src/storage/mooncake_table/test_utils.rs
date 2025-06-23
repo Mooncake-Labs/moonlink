@@ -69,7 +69,8 @@ pub async fn test_table(
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),
     };
-    let table_config = TableConfig::new(context.temp_dir.path().to_str().unwrap().to_string());
+    let mut table_config = TableConfig::new(context.temp_dir.path().to_str().unwrap().to_string());
+    table_config.batch_size = 2;
     MooncakeTable::new(
         test_schema(),
         table_name.to_string(),

@@ -18,23 +18,19 @@ impl MoonlinkRow {
         Self { values }
     }
 
-    /// Apply identity properties projection for the current row.
-    fn project<'a>(&'a self, identity: &IdentityProp) -> Vec<&'a RowValue> {
+    fn is_extracted_identity_row(&self, identity: &IdentityProp) -> bool {
         match identity {
-            IdentityProp::SinglePrimitiveKey(idx) => vec![&self.values[*idx]],
-            IdentityProp::Keys(indices) => indices.iter().map(|i| &self.values[*i]).collect(),
-            IdentityProp::FullRow => self.values.iter().collect(),
+            IdentityProp::SinglePrimitiveKey(_) => {
+                panic!("Single primitive key should not need any identity check")
+            }
+            IdentityProp::Keys(indices) => self.values.len() == indices.len(),
+            IdentityProp::FullRow => true,
         }
     }
 
     /// Check whether the `offset`-th record batch matches the current moonlink row.
     /// The `batch` here has been projected.
-    fn equals_record_batch_at_offset_impl(
-        &self,
-        batch: &RecordBatch,
-        offset: usize,
-        identity: &IdentityProp,
-    ) -> bool {
+    fn equals_record_batch_at_offset_impl(&self, batch: &RecordBatch, offset: usize) -> bool {
         if offset >= batch.num_rows() {
             panic!("Offset is out of bounds");
         }
@@ -127,10 +123,7 @@ impl MoonlinkRow {
             }
         };
 
-        let projected_cols = self.project(identity);
-        assert_eq!(projected_cols.len(), batch.columns().len());
-
-        projected_cols
+        self.values
             .iter()
             .zip(batch.columns())
             .all(|(value, column)| value_matches_column(value, column))
@@ -144,14 +137,14 @@ impl MoonlinkRow {
         offset: usize,
         identity: &IdentityProp,
     ) -> bool {
-        assert_eq!(batch.columns().len(), self.values.len());
+        assert!(self.is_extracted_identity_row(identity));
         let indices = match identity {
             IdentityProp::SinglePrimitiveKey(idx) => batch.project(std::slice::from_ref(idx)),
             IdentityProp::Keys(keys) => batch.project(keys.as_slice()),
             IdentityProp::FullRow => Ok(batch.clone()),
         }
         .unwrap();
-        self.equals_record_batch_at_offset_impl(&indices, offset, identity)
+        self.equals_record_batch_at_offset_impl(&indices, offset)
     }
 
     pub async fn equals_parquet_at_offset(
@@ -160,6 +153,7 @@ impl MoonlinkRow {
         offset: usize,
         identity: &IdentityProp,
     ) -> bool {
+        assert!(self.is_extracted_identity_row(identity));
         let file = tokio::fs::File::open(file_name).await.unwrap();
         let stream_builder = ParquetRecordBatchStreamBuilder::new(file).await.unwrap();
         let row_groups = stream_builder.metadata().row_groups();
@@ -186,12 +180,12 @@ impl MoonlinkRow {
             .unwrap();
         let mut batch_reader = reader.next_row_group().await.unwrap().unwrap();
         let batch = batch_reader.next().unwrap().unwrap();
-        self.equals_record_batch_at_offset_impl(&batch, 0, identity)
+        self.equals_record_batch_at_offset_impl(&batch, 0)
     }
 }
 
 impl MoonlinkRow {
-    pub fn equals_full_row(&self, other: &Self, identity: &IdentityProp) -> bool {
+    pub fn equals_moonlink_row(&self, other: &Self, identity: &IdentityProp) -> bool {
         match identity {
             IdentityProp::Keys(keys) => {
                 assert_eq!(self.values.len(), keys.len());
@@ -282,6 +276,14 @@ impl IdentityProp {
             }
         }
     }
+
+    pub fn requires_identity_check_in_mem_slice(&self) -> bool {
+        match self {
+            IdentityProp::SinglePrimitiveKey(_) => false,
+            IdentityProp::Keys(_) => false,
+            IdentityProp::FullRow => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -323,22 +325,22 @@ mod tests {
         // All columns: identity_row and full_row
         let id_row1_all = identity_all.extract_identity_columns(row1.clone()).unwrap();
 
-        assert!(id_row1_all.equals_full_row(&row2, &identity_all));
-        assert!(!id_row1_all.equals_full_row(&row3, &identity_all));
-        assert!(!id_row1_all.equals_full_row(&row4, &identity_all));
+        assert!(id_row1_all.equals_moonlink_row(&row2, &identity_all));
+        assert!(!id_row1_all.equals_moonlink_row(&row3, &identity_all));
+        assert!(!id_row1_all.equals_moonlink_row(&row4, &identity_all));
 
         // Only first column matters: all rows should be equal
         let id_row1_first = identity_first
             .extract_identity_columns(row1.clone())
             .unwrap();
 
-        assert!(id_row1_first.equals_full_row(&row2, &identity_first));
-        assert!(id_row1_first.equals_full_row(&row3, &identity_first));
-        assert!(id_row1_first.equals_full_row(&row4, &identity_first));
+        assert!(id_row1_first.equals_moonlink_row(&row2, &identity_first));
+        assert!(id_row1_first.equals_moonlink_row(&row3, &identity_first));
+        assert!(id_row1_first.equals_moonlink_row(&row4, &identity_first));
 
         // You can also check that the identity_row equals its own full row
-        assert!(id_row1_all.equals_full_row(&row1, &identity_all));
-        assert!(id_row1_first.equals_full_row(&row1, &identity_first));
+        assert!(id_row1_all.equals_moonlink_row(&row1, &identity_all));
+        assert!(id_row1_first.equals_moonlink_row(&row1, &identity_first));
     }
 
     #[test]
@@ -371,25 +373,16 @@ mod tests {
             &IdentityProp::FullRow
         ));
 
-        // Check record batch match for single primary key identify property.
-        assert!(!row.equals_record_batch_at_offset(
-            &record_batch,
-            /*offset=*/ 0,
-            &IdentityProp::SinglePrimitiveKey(1)
-        ));
-        assert!(row.equals_record_batch_at_offset(
-            &record_batch,
-            /*offset=*/ 1,
-            &IdentityProp::SinglePrimitiveKey(1)
-        ));
-
+        let identity = IdentityProp::Keys(vec![1])
+            .extract_identity_columns(row.clone())
+            .unwrap();
         // Check record batch match for specified keys identify property.
-        assert!(!row.equals_record_batch_at_offset(
+        assert!(!identity.equals_record_batch_at_offset(
             &record_batch,
             /*offset=*/ 0,
             &IdentityProp::Keys(vec![1])
         ));
-        assert!(row.equals_record_batch_at_offset(
+        assert!(identity.equals_record_batch_at_offset(
             &record_batch,
             /*offset=*/ 1,
             &IdentityProp::Keys(vec![1])
@@ -443,40 +436,27 @@ mod tests {
             .await
         );
 
-        // Check cases with single primary key as identity propety.
-        assert!(
-            row.equals_parquet_at_offset(
-                file_path.to_str().unwrap(),
-                /*offset=*/ 1,
-                &IdentityProp::SinglePrimitiveKey(1)
-            )
-            .await
-        );
-        assert!(
-            !row.equals_parquet_at_offset(
-                file_path.to_str().unwrap(),
-                /*offset=*/ 0,
-                &IdentityProp::SinglePrimitiveKey(1)
-            )
-            .await
-        );
-
+        let identity = IdentityProp::Keys(vec![1])
+            .extract_identity_columns(row.clone())
+            .unwrap();
         // Check cases with specified keys.
         assert!(
-            row.equals_parquet_at_offset(
-                file_path.to_str().unwrap(),
-                /*offset=*/ 1,
-                &IdentityProp::Keys(vec![1])
-            )
-            .await
+            identity
+                .equals_parquet_at_offset(
+                    file_path.to_str().unwrap(),
+                    /*offset=*/ 1,
+                    &IdentityProp::Keys(vec![1])
+                )
+                .await
         );
         assert!(
-            !row.equals_parquet_at_offset(
-                file_path.to_str().unwrap(),
-                /*offset=*/ 0,
-                &IdentityProp::Keys(vec![1])
-            )
-            .await
+            !identity
+                .equals_parquet_at_offset(
+                    file_path.to_str().unwrap(),
+                    /*offset=*/ 0,
+                    &IdentityProp::Keys(vec![1])
+                )
+                .await
         );
     }
 }
