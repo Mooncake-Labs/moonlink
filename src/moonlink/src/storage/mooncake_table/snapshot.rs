@@ -1261,11 +1261,12 @@ impl SnapshotTableState {
         file_id_to_lsn: &HashMap<FileId, u64>,
     ) -> Vec<ProcessedDeletionRecord> {
         let mut candidates: Vec<RecordLocation> = index_lookup_result
-            .into_iter()
+            .iter()
             .filter(|loc| {
                 !self.is_deleted(loc)
                     && Self::is_visible(loc, file_id_to_lsn, deletions.first().unwrap().lsn)
             })
+            .cloned()
             .collect();
         // This optimization is important when working with table without primary key.
         // Postgres never distinguish row with same value, so they will almost always be processed together.
@@ -1277,8 +1278,11 @@ impl SnapshotTableState {
                 .map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc))
                 .collect(),
             Ordering::Less => panic!(
-                "find less than expected candidates to deletions {:?}",
-                deletions
+                "find less than expected candidates to deletions {:?}, lookup result: {:?}, file_id_to_lsn: {:?} on table: {:?}",
+                deletions,
+                index_lookup_result,
+                file_id_to_lsn,
+                self.current_snapshot.metadata
             ),
             Ordering::Greater => {
                 let mut processed_deletions = Vec::new();
