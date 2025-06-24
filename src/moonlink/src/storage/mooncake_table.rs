@@ -621,10 +621,7 @@ impl MooncakeTable {
             pos: None,
             row_identity: self.metadata.identity.extract_identity_columns(row),
         };
-        let pos = self
-            .mem_slice
-            .delete(&record, &self.metadata.identity)
-            .await;
+        let pos = self.mem_slice.delete(&record, &self.metadata.identity);
         record.pos = pos;
         self.next_snapshot_task.new_deletions.push(record);
     }
@@ -701,6 +698,7 @@ impl MooncakeTable {
     // - tracks all record batches by current snapshot task
     // - persists all full batch records to local filesystem
     pub async fn flush(&mut self, lsn: u64) -> Result<()> {
+        println!("flush for table {:?} at lsn: {:?}", self.metadata.name, lsn);
         self.next_snapshot_task.new_flush_lsn = Some(lsn);
 
         if self.mem_slice.is_empty() {

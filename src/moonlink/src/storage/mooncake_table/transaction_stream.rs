@@ -146,7 +146,6 @@ impl MooncakeTable {
             if stream_state
                 .mem_slice
                 .delete(&record, &self.metadata.identity)
-                .await
                 .is_some()
             {
                 return;
@@ -211,6 +210,10 @@ impl MooncakeTable {
     }
 
     pub async fn flush_transaction_stream(&mut self, xact_id: u32) -> Result<()> {
+        println!(
+            "flush_transaction_stream for table {:?} at xact_id: {:?}",
+            self.metadata.name, xact_id
+        );
         if let Some(stream_state) = self.transaction_stream_states.get_mut(&xact_id) {
             let next_file_id = self.next_file_id;
             self.next_file_id += 1;

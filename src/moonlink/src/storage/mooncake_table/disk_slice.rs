@@ -397,28 +397,24 @@ mod tests {
         }
 
         // Delete a couple of rows to test that only active rows are mapped
-        mem_slice
-            .delete(
-                &RawDeletionRecord {
-                    lookup_key: 2,
-                    row_identity: None,
-                    pos: Some((0, 1)),
-                    lsn: 1,
-                },
-                &IdentityProp::SinglePrimitiveKey(0),
-            )
-            .await; // Delete Bob (ID 2)
-        mem_slice
-            .delete(
-                &RawDeletionRecord {
-                    lookup_key: 4,
-                    row_identity: None,
-                    pos: Some((0, 3)),
-                    lsn: 1,
-                },
-                &IdentityProp::SinglePrimitiveKey(0),
-            )
-            .await; // Delete David (ID 4)
+        mem_slice.delete(
+            &RawDeletionRecord {
+                lookup_key: 2,
+                row_identity: None,
+                pos: Some((0, 1)),
+                lsn: 1,
+            },
+            &IdentityProp::SinglePrimitiveKey(0),
+        ); // Delete Bob (ID 2)
+        mem_slice.delete(
+            &RawDeletionRecord {
+                lookup_key: 4,
+                row_identity: None,
+                pos: Some((0, 3)),
+                lsn: 1,
+            },
+            &IdentityProp::SinglePrimitiveKey(0),
+        ); // Delete David (ID 4)
 
         let (_new_batch, entries, index) = mem_slice.drain().unwrap();
 

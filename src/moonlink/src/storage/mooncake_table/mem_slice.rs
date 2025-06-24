@@ -44,7 +44,7 @@ impl MemSlice {
     }
 
     /// Delete the given record from mem slice, and return its location if exists.
-    pub(super) async fn delete(
+    pub(super) fn delete(
         &mut self,
         record: &RawDeletionRecord,
         identity: &IdentityProp,
@@ -197,45 +197,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            mem_table
-                .delete(
-                    &RawDeletionRecord {
-                        lookup_key: 2,
-                        lsn: 0,
-                        pos: None,
-                        row_identity: None,
-                    },
-                    &IdentityProp::SinglePrimitiveKey(0)
-                )
-                .await,
+            mem_table.delete(
+                &RawDeletionRecord {
+                    lookup_key: 2,
+                    lsn: 0,
+                    pos: None,
+                    row_identity: None,
+                },
+                &IdentityProp::SinglePrimitiveKey(0)
+            ),
             Some((0, 1))
         );
         assert_eq!(
-            mem_table
-                .delete(
-                    &RawDeletionRecord {
-                        lookup_key: 3,
-                        lsn: 0,
-                        pos: None,
-                        row_identity: None,
-                    },
-                    &IdentityProp::SinglePrimitiveKey(0)
-                )
-                .await,
+            mem_table.delete(
+                &RawDeletionRecord {
+                    lookup_key: 3,
+                    lsn: 0,
+                    pos: None,
+                    row_identity: None,
+                },
+                &IdentityProp::SinglePrimitiveKey(0)
+            ),
             Some((0, 2))
         );
         assert_eq!(
-            mem_table
-                .delete(
-                    &RawDeletionRecord {
-                        lookup_key: 1,
-                        lsn: 0,
-                        pos: None,
-                        row_identity: None,
-                    },
-                    &IdentityProp::SinglePrimitiveKey(0)
-                )
-                .await,
+            mem_table.delete(
+                &RawDeletionRecord {
+                    lookup_key: 1,
+                    lsn: 0,
+                    pos: None,
+                    row_identity: None,
+                },
+                &IdentityProp::SinglePrimitiveKey(0)
+            ),
             Some((0, 0))
         );
     }
