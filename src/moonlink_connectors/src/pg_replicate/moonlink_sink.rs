@@ -130,6 +130,12 @@ impl Sink {
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
+                    if xact_id.is_none() {
+                        println!(
+                            "insert event: {:?} at lsn: {:?}",
+                            table_row, self.transaction_state.final_lsn
+                        );
+                    }
                     if let Err(e) = event_sender
                         .send(TableEvent::Append {
                             row: PostgresTableRow(table_row).into(),
@@ -162,6 +168,10 @@ impl Sink {
                         .unwrap()
                         .final_lsn
                 } else {
+                    println!(
+                        "update event: {:?} at lsn: {:?}",
+                        old_table_row, self.transaction_state.final_lsn
+                    );
                     self.transaction_state.touched_tables.insert(table_id);
                     self.transaction_state.final_lsn
                 };
@@ -201,6 +211,10 @@ impl Sink {
                         .unwrap()
                         .final_lsn
                 } else {
+                    println!(
+                        "delete event: {:?} at lsn: {:?}",
+                        table_row, self.transaction_state.final_lsn
+                    );
                     self.transaction_state.touched_tables.insert(table_id);
                     self.transaction_state.final_lsn
                 };
