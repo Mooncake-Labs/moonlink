@@ -261,7 +261,7 @@ impl MooncakeTable {
             }
 
             for deletion in stream_state.local_deletions.iter_mut() {
-                deletion.lsn = lsn;
+                deletion.lsn = lsn - 1;
             }
 
             let commit = TransactionStreamCommit {
@@ -343,13 +343,13 @@ impl SnapshotTableState {
                     self.uncommitted_deletion_log.iter_mut().for_each(|row| {
                         if let Some(deletion) = row {
                             if deletion.lsn == get_lsn_for_pending_xact(commit.xact_id) {
-                                deletion.lsn = commit.commit_lsn;
+                                deletion.lsn = commit.commit_lsn - 1;
                             }
                         }
                     });
                     task.new_deletions.iter_mut().for_each(|deletion| {
                         if deletion.lsn == get_lsn_for_pending_xact(commit.xact_id) {
-                            deletion.lsn = commit.commit_lsn;
+                            deletion.lsn = commit.commit_lsn - 1;
                         }
                     });
                 }
