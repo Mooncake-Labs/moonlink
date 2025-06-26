@@ -318,9 +318,9 @@ impl ReplicationConnection {
 
     async fn remove_table_from_replication(&mut self, table_id: u32) -> Result<()> {
         debug!(table_id, "removing table from replication");
-        self.drop_iceberg_table(table_id).await?;
-
         self.table_readers.remove_entry(&table_id).unwrap();
+        // Notify the table handler to clean up cache, mooncake and iceberg table state.
+        self.drop_iceberg_table(table_id).await?;
         self.iceberg_table_event_managers
             .remove_entry(&table_id)
             .unwrap();
@@ -386,6 +386,7 @@ impl ReplicationConnection {
     pub async fn drop_table(&mut self, table_id: u32) -> Result<()> {
         info!(table_id, "dropping table");
         let table_name = self.source.get_table_name_from_id(table_id);
+
         // Remove table from publication as the first step, to prevent further events.
         self.remove_table_from_publication(&table_name).await?;
         self.source.remove_table_schema(table_id);
