@@ -420,9 +420,6 @@ pub struct MooncakeTable {
     /// Stream state per transaction, keyed by xact-id.
     transaction_stream_states: HashMap<u32, TransactionStreamState>,
 
-    /// LSN of the latest commit.
-    last_commit_lsn: u64,
-
     /// Auto increment id for generating unique file ids.
     /// Note, these ids is only used locally, and not persisted.
     next_file_id: u32,
@@ -493,7 +490,6 @@ impl MooncakeTable {
             )),
             next_snapshot_task: SnapshotTask::new(table_metadata.as_ref().config.clone()),
             transaction_stream_states: HashMap::new(),
-            last_commit_lsn:table_metadata.id,
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
             next_file_id,
@@ -648,11 +644,11 @@ impl MooncakeTable {
         Ok(())
     }
 
-    pub async fn delete(&mut self, row: MoonlinkRow) {
+    pub async fn delete(&mut self, row: MoonlinkRow, lsn: u64) {
         let lookup_key = self.metadata.identity.get_lookup_key(&row);
         let mut record = RawDeletionRecord {
             lookup_key,
-            lsn: self.last_commit_lsn,
+            lsn,
             pos: None,
             row_identity: self.metadata.identity.extract_identity_columns(row),
         };
@@ -665,7 +661,6 @@ impl MooncakeTable {
     }
 
     pub fn commit(&mut self, lsn: u64) {
-        self.last_commit_lsn = lsn;
         self.next_snapshot_task.new_commit_lsn = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
     }

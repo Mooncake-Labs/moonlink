@@ -156,8 +156,14 @@ impl SnapshotTableState {
     ) -> HashMap<MooncakeDataFileRef, BatchDeletionVector> {
         let mut aggregated_deletion_logs = HashMap::new();
         for cur_deletion_log in self.committed_deletion_log.iter() {
-            ma::assert_le!(cur_deletion_log.lsn, self.current_snapshot.snapshot_version);
-            if cur_deletion_log.lsn > flush_lsn {
+            ma::assert_le!(
+                cur_deletion_log.lsn,
+                self.current_snapshot.snapshot_version,
+                "Committed deletion log {:?} is later than current snapshot LSN {}",
+                cur_deletion_log,
+                self.current_snapshot.snapshot_version
+            );
+            if cur_deletion_log.lsn >= flush_lsn {
                 continue;
             }
             if let RecordLocation::DiskFile(file_id, row_idx) = &cur_deletion_log.pos {
@@ -1345,7 +1351,8 @@ impl SnapshotTableState {
         match loc {
             RecordLocation::MemoryBatch(_, _) => true,
             RecordLocation::DiskFile(file_id, _) => {
-                file_id_to_lsn.get(file_id).is_none() || file_id_to_lsn.get(file_id).unwrap() <= &lsn
+                file_id_to_lsn.get(file_id).is_none()
+                    || file_id_to_lsn.get(file_id).unwrap() <= &lsn
             }
         }
     }

@@ -107,8 +107,8 @@ async fn test_deletion_before_flush(#[case] identity: IdentityProp) -> Result<()
     table.commit(1);
     snapshot(&mut table, &mut event_completion_rx).await;
 
-    table.delete(test_row(2, "Row 2", 32), 2).await;
-    table.delete(test_row(4, "Row 4", 34), 2).await;
+    table.delete(test_row(2, "Row 2", 32), 1).await;
+    table.delete(test_row(4, "Row 4", 34), 1).await;
     table.commit(2);
     snapshot(&mut table, &mut event_completion_rx).await;
 
@@ -131,7 +131,7 @@ async fn test_deletion_after_flush(#[case] identity: IdentityProp) -> Result<()>
 
     table.delete(test_row(2, "Row 2", 32), 2).await;
     table.delete(test_row(4, "Row 4", 34), 2).await;
-    table.commit(2);
+    table.commit(3);
     snapshot(&mut table, &mut event_completion_rx).await;
 
     let mut snapshot = table.snapshot.write().await;
@@ -281,7 +281,7 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     snapshot(&mut table, &mut event_completion_rx).await;
 
     // Delete one duplicate before flush (row1)
-    table.delete(row1.clone(), 2).await;
+    table.delete(row1.clone(), 1).await;
     table.commit(2);
     snapshot(&mut table, &mut event_completion_rx).await;
 
@@ -310,7 +310,7 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     snapshot(&mut table, &mut event_completion_rx).await;
 
     // Delete one duplicate during flush (row3)
-    table.delete(row3.clone(), 4).await;
+    table.delete(row3.clone(), 3).await;
     table.commit(4);
     snapshot(&mut table, &mut event_completion_rx).await;
 
@@ -335,7 +335,7 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     }
 
     // Delete one duplicate after flush (row5)
-    table.delete(row5.clone(), 5).await;
+    table.delete(row5.clone(), 4).await;
     table.commit(5);
     snapshot(&mut table, &mut event_completion_rx).await;
 
@@ -377,7 +377,7 @@ async fn test_duplicate_deletion() -> Result<()> {
 
     // Update operation.
     let new_row = old_row.clone();
-    table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 200).await;
+    table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 100).await;
     table.append(new_row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
     table.flush(/*lsn=*/ 200).await.unwrap();
