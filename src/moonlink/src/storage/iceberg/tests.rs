@@ -1279,7 +1279,7 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) {
     // --------------------------------------
     // Operation series 2: no more additional rows appended, only to delete the first row in the table.
     // Expects to see a new deletion vector, because its corresponding data file has been persisted.
-    table.delete(row2.clone(), /*flush_lsn=*/ 300).await;
+    table.delete(row2.clone(), /*flush_lsn=*/ 200).await;
     table.commit(/*flush_lsn=*/ 300);
     table.flush(/*flush_lsn=*/ 300).await.unwrap();
     create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
@@ -1344,7 +1344,7 @@ async fn mooncake_table_snapshot_persist_impl(warehouse_uri: String) {
     // --------------------------------------
     // Operation series 3: no more additional rows appended, only to delete the last row in the table.
     // Expects to see the existing deletion vector updated, because its corresponding data file has been persisted.
-    table.delete(row3.clone(), /*flush_lsn=*/ 400).await;
+    table.delete(row3.clone(), /*flush_lsn=*/ 300).await;
     table.flush(/*flush_lsn=*/ 400).await.unwrap();
     table.commit(/*flush_lsn=*/ 400);
     create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;

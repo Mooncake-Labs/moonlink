@@ -816,11 +816,11 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
 
     // Before create snapshot for compaction results, perform another deletion operations.
     for (cur_row, lsn) in injected_committed_deletion_rows {
-        table.delete(cur_row, lsn).await;
+        table.delete(cur_row, lsn - 1).await;
         table.commit(/*lsn=*/ lsn);
     }
     for (cur_row, lsn) in injected_uncommitted_deletion_rows {
-        table.delete(cur_row, lsn).await;
+        table.delete(cur_row, lsn - 1).await;
     }
 
     // Set data compaction result and trigger another iceberg snapshot.
