@@ -54,7 +54,7 @@ pub struct MoonlinkBackend<T: Eq + Hash> {
 
 impl<T: Eq + Hash + Clone + std::fmt::Display> Default for MoonlinkBackend<T> {
     fn default() -> Self {
-        Self::new(DEFAULT_MOONLINK_TABLE_BASE_PATH.to_string())
+        Self::new(DEFAULT_MOONLINK_TABLE_BASE_PATH.to_string(), Vec::new())
     }
 }
 
@@ -85,7 +85,8 @@ fn create_default_object_storage_cache(
 }
 
 impl<T: Eq + Hash + Clone + std::fmt::Display> MoonlinkBackend<T> {
-    pub fn new(base_path: String) -> Self {
+    pub fn new(base_path: String, uris: Vec<String>) -> Self {
+        println!("MoonlinkBackend::new {uris:?}");
         logging::init_logging();
 
         // Re-create directory for temporary files directory and cache files directory under base directory.
