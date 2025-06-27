@@ -1,5 +1,6 @@
 use crate::pg_replicate::clients::postgres::ReplicationClient;
 use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
+use crate::pg_replicate::initial_copy::start_initial_copy;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
@@ -36,6 +37,12 @@ pub enum Command {
         flush_lsn_rx: watch::Receiver<u64>,
     },
     DropTable {
+        table_id: TableId,
+    },
+    StartTableCopy {
+        table_id: TableId,
+    },
+    FinishTableCopy {
         table_id: TableId,
     },
     Shutdown,
@@ -299,18 +306,51 @@ impl ReplicationConnection {
             .insert(table_id, resources.read_state_manager);
         self.iceberg_table_event_managers
             .insert(table_id, resources.iceberg_table_event_manager);
+
+        // Add the table to the replication task.
         if let Err(e) = self
             .cmd_tx
             .send(Command::AddTable {
                 table_id,
                 schema: schema.clone(),
-                event_sender: resources.event_sender,
+                event_sender: resources.event_sender.clone(),
                 commit_lsn_tx: resources.commit_lsn_tx,
                 flush_lsn_rx: resources.flush_lsn_rx,
             })
             .await
         {
             error!(error = ?e, "failed to enqueue AddTable command");
+        }
+
+        // Notify the replication task we are starting a table copy and to begin buffering CDC events.
+        self.cmd_tx
+            .send(Command::StartTableCopy { table_id })
+            .await
+            .unwrap();
+
+        // Create a dedicated source for the copy and register and snapshot the table.
+        let copy_source = PostgresSource::new(
+            &self.uri,
+            Some(self.slot_name.clone()),
+            TableNamesFrom::Vec(vec![schema.table_name.clone()]),
+        )
+        .await?;
+
+        let handle = start_initial_copy(
+            table_id,
+            schema.clone(),
+            copy_source,
+            resources.event_sender,
+        );
+
+        // Await the handle in the foreground so that copy table blocks until the copy is complete
+        // TODO: Refine this, we should look at the copy progress
+        if let Some(handle) = handle {
+            let _ = handle.await;
+            self.cmd_tx
+                .send(Command::FinishTableCopy { table_id })
+                .await
+                .unwrap();
         }
 
         debug!(table_id, "table added to replication");
@@ -497,6 +537,16 @@ async fn run_event_loop(
                                 sink.drop_table(table_id);
                                 flush_lsn_rxs.remove(&table_id);
                                 stream.as_mut().remove_table_schema(table_id);
+                            }
+                            Command::StartTableCopy { table_id } => {
+                                if let Err(e) = sink.start_table_copy(table_id).await {
+                                    error!(error = ?e, table_id, "failed to start table copy");
+                                }
+                            }
+                            Command::FinishTableCopy { table_id } => {
+                                if let Err(e) = sink.finish_table_copy(table_id).await {
+                                    error!(error = ?e, table_id, "failed to finish table copy");
+                                }
                             }
                             Command::Shutdown => {
                                 info!("received shutdown command");

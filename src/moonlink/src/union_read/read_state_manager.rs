@@ -6,6 +6,7 @@ use crate::ReadState;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
+use tracing::debug;
 
 pub struct ReadStateManager {
     last_read_lsn: AtomicU64,
@@ -24,7 +25,7 @@ impl ReadStateManager {
     ) -> Self {
         let (table_snapshot, table_snapshot_watch_receiver) = table.get_state_for_reader();
         ReadStateManager {
-            last_read_lsn: AtomicU64::new(0),
+            last_read_lsn: AtomicU64::new(u64::MAX),
             last_read_state: RwLock::new(Arc::new(ReadState::new(
                 /*data_files=*/ Vec::new(),
                 /*puffin_cache_handles=*/ Vec::new(),
@@ -48,8 +49,8 @@ impl ReadStateManager {
         snapshot_lsn: u64,
         commit_lsn: u64,
     ) -> bool {
-        // Never use cache if it's uninitialized (cached_lsn = 0)
-        if cached_lsn == 0 {
+        // Never use cache if it's uninitialized (cached_lsn = u64::MAX)
+        if cached_lsn == u64::MAX {
             return false;
         }
 
@@ -72,6 +73,7 @@ impl ReadStateManager {
 
         let use_cache =
             Self::should_use_cache(requested_lsn, cached_lsn, snapshot_lsn_now, commit_lsn_now);
+        debug!("try_read with requested_lsn: {:?}, cached_lsn: {:?}, snapshot_lsn: {:?}, commit_lsn: {:?}, use_cache: {:?}", requested_lsn, cached_lsn, snapshot_lsn_now, commit_lsn_now, use_cache);
 
         if use_cache {
             return Ok(self.last_read_state.read().await.clone());
@@ -143,17 +145,23 @@ impl ReadStateManager {
         let mut last_read_state_guard = self.last_read_state.write().await;
         let is_snapshot_clean = current_snapshot_lsn == current_commit_lsn;
 
-        if self.last_read_lsn.load(Ordering::Acquire) < current_snapshot_lsn {
-            // If the snapshot is fully committed and replication has progressed further,
-            // we can consider the state valid up to the replication LSN.
-            let effective_lsn =
+        let last_read_lsn = self.last_read_lsn.load(Ordering::Acquire);
+        if last_read_lsn < current_snapshot_lsn || last_read_lsn == u64::MAX {
+            let snapshot_read_output = table_state_snapshot.request_read().await?;
+
+            // Only calculate effective_lsn if we're not uninitialized
+            let effective_lsn = if last_read_lsn == u64::MAX {
+                // For uninitialized cache, just use the current snapshot LSN
+                current_snapshot_lsn
+            } else {
+                // If the snapshot is fully committed and replication has progressed further,
+                // we can consider the state valid up to the replication LSN.
                 if is_snapshot_clean && current_snapshot_lsn < current_replication_lsn {
                     current_replication_lsn
                 } else {
                     current_snapshot_lsn
-                };
-
-            let snapshot_read_output = table_state_snapshot.request_read().await?;
+                }
+            };
 
             self.last_read_lsn.store(effective_lsn, Ordering::Release);
             *last_read_state_guard = snapshot_read_output.take_as_read_state().await;
@@ -263,10 +271,10 @@ mod tests {
                 commit: 65,
                 expect: false,
             },
-            // miss: uninitialized cache (cached_lsn = 0)
+            // miss: uninitialized cache (cached_lsn = u64::MAX)
             Case {
                 requested: Some(10),
-                cached: 0,
+                cached: u64::MAX,
                 snap: 10,
                 commit: 10,
                 expect: false,
@@ -274,26 +282,26 @@ mod tests {
             // miss: uninitialized cache for latest read
             Case {
                 requested: None,
-                cached: 0,
+                cached: u64::MAX,
                 snap: 10,
                 commit: 10,
                 expect: false,
             },
-            // miss: uninitialized cache with all LSNs at 0 (initial state)
+            // hit: valid LSN 0 cache, bounded read within bound
             Case {
                 requested: Some(5),
                 cached: 0,
                 snap: 0,
                 commit: 0,
-                expect: false,
+                expect: true,
             },
-            // miss: uninitialized cache with all LSNs at 0 for latest read
+            // hit: valid LSN 0 cache for latest read, snapshot clean
             Case {
                 requested: None,
                 cached: 0,
                 snap: 0,
                 commit: 0,
-                expect: false,
+                expect: true,
             },
         ];
 

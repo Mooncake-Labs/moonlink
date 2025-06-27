@@ -1,173 +1,17 @@
+mod common;
+
 #[cfg(test)]
 mod tests {
-    use arrow_array::Int64Array;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
+
+    use super::common::{current_wal_lsn, ids_from_state, smoke_create_and_insert, TestGuard};
 
     use serial_test::serial;
-    use std::{collections::HashSet, fs::File};
+    use std::collections::HashSet;
 
-    use moonlink::decode_read_state_for_testing;
-    use moonlink_backend::{
-        recreate_directory, MoonlinkBackend, ReadState, DEFAULT_MOONLINK_TEMP_FILE_PATH,
-    };
+    use moonlink_backend::recreate_directory;
 
     const URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
-
-    // ───────────────────── Helper functions & fixtures ─────────────────────
-
-    struct TestGuard {
-        backend: Arc<MoonlinkBackend<&'static str>>,
-        table_name: &'static str,
-        tmp: Option<TempDir>,
-    }
-
-    impl TestGuard {
-        async fn new(table_name: &'static str) -> (Self, Client) {
-            let (tmp, backend, client) = setup_backend(table_name).await;
-            let guard = Self {
-                backend: Arc::new(backend),
-                table_name,
-                tmp: Some(tmp),
-            };
-            (guard, client)
-        }
-    }
-
-    impl Drop for TestGuard {
-        fn drop(&mut self) {
-            // move everything we need into the async block
-            let backend = Arc::clone(&self.backend);
-            let table = self.table_name;
-            let tmp = self.tmp.take();
-
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    let _ = backend.drop_table(table).await;
-                    let _ = backend.shutdown_connection(URI).await;
-                    let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
-                    drop(tmp);
-                });
-            });
-        }
-    }
-
-    /// Return the current WAL LSN as a simple `u64`.
-    async fn current_wal_lsn(client: &Client) -> u64 {
-        let row = client
-            .query_one("SELECT pg_current_wal_lsn()", &[])
-            .await
-            .unwrap();
-        let lsn: PgLsn = row.get(0);
-        lsn.into()
-    }
-
-    /// Read the first column of a Parquet file into a `Vec<Option<i64>>`.
-    fn read_ids_from_parquet(path: &str) -> Vec<Option<i64>> {
-        let file = File::open(path).unwrap_or_else(|_| panic!("open {path}"));
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
-            .unwrap();
-        let batch = reader.into_iter().next().unwrap().unwrap();
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        (0..col.len()).map(|i| Some(col.value(i))).collect()
-    }
-
-    /// Extract **all** primary-key IDs referenced in `read_state`.
-    fn ids_from_state(read_state: &ReadState) -> HashSet<i64> {
-        let (files, _, _, _) = decode_read_state_for_testing(read_state);
-        files
-            .into_iter()
-            .flat_map(|f| read_ids_from_parquet(&f).into_iter().flatten())
-            .collect()
-    }
-
-    /// Spin up a backend + scratch TempDir + psql client, and guarantee
-    /// a **fresh table** named `table_name` exists and is registered with
-    /// Moonlink.
-    async fn setup_backend(
-        table_name: &'static str,
-    ) -> (TempDir, MoonlinkBackend<&'static str>, Client) {
-        let temp_dir = TempDir::new().unwrap();
-        let uri = URI;
-        let backend =
-            MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
-
-        // Connect to Postgres.
-        let (client, connection) = connect(uri, NoTls).await.unwrap();
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-
-        // Clear any leftover replication slot from previous runs.
-        let _ = client
-            .simple_query(
-                "SELECT pg_terminate_backend(active_pid)
-             FROM pg_replication_slots
-             WHERE slot_name = 'moonlink_slot_postgres';",
-            )
-            .await;
-        let _ = client
-            .simple_query("SELECT pg_drop_replication_slot('moonlink_slot_postgres')")
-            .await;
-
-        // Re-create the working table.
-        client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {0};
-                 CREATE TABLE {0} (id BIGINT PRIMARY KEY, name TEXT);",
-                table_name
-            ))
-            .await
-            .unwrap();
-        backend
-            .create_table(table_name, &format!("public.{table_name}"), uri)
-            .await
-            .unwrap();
-
-        (temp_dir, backend, client)
-    }
-
-    /// Reusable helper for the "create table / insert rows / detect change"
-    /// scenario used in two places.
-    async fn smoke_create_and_insert(
-        backend: &MoonlinkBackend<&'static str>,
-        client: &Client,
-        uri: &str,
-    ) {
-        client
-            .simple_query(
-                "DROP TABLE IF EXISTS test;
-                           CREATE TABLE test (id BIGINT PRIMARY KEY, name TEXT);",
-            )
-            .await
-            .unwrap();
-
-        backend
-            .create_table("test", "public.test", uri)
-            .await
-            .unwrap();
-
-        // First two rows.
-        client
-            .simple_query("INSERT INTO test VALUES (1,'foo'),(2,'bar');")
-            .await
-            .unwrap();
-
-        let old = backend.scan_table(&"test", None).await.unwrap();
-        let lsn = current_wal_lsn(client).await;
-        let new = backend.scan_table(&"test", Some(lsn)).await.unwrap();
-        assert_ne!(old.data, new.data);
-
-        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
-    }
 
     // ───────────────────────────── Tests ─────────────────────────────
 
@@ -194,8 +38,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_moonlink_service() {
-        let (guard, client) = TestGuard::new("test").await;
-        let backend = &guard.backend;
+        let (guard, client) = TestGuard::new(Some("test")).await;
+        let backend = guard.backend();
 
         smoke_create_and_insert(backend, &client, URI).await;
         backend.drop_table("test").await.unwrap();
@@ -206,8 +50,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_scan_returns_inserted_rows() {
-        let (guard, client) = TestGuard::new("scan_test").await;
-        let backend = &guard.backend;
+        let (guard, client) = TestGuard::new(Some("scan_test")).await;
+        let backend = guard.backend();
 
         client
             .simple_query("INSERT INTO scan_test VALUES (1,'a'),(2,'b');")
@@ -233,8 +77,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_scan_table_with_lsn() {
-        let (guard, client) = TestGuard::new("lsn_test").await;
-        let backend = &guard.backend;
+        let (guard, client) = TestGuard::new(Some("lsn_test")).await;
+        let backend = guard.backend();
 
         client
             .simple_query("INSERT INTO lsn_test VALUES (1,'a');")
@@ -259,8 +103,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_create_iceberg_snapshot() {
-        let (guard, client) = TestGuard::new("snapshot_test").await;
-        let backend = &guard.backend;
+        let (guard, client) = TestGuard::new(Some("snapshot_test")).await;
+        let backend = guard.backend();
 
         client
             .simple_query("INSERT INTO snapshot_test VALUES (1,'a');")
@@ -278,8 +122,7 @@ mod tests {
 
         // Look for any file in the Iceberg metadata dir.
         let meta_dir = guard
-            .tmp
-            .as_ref()
+            .tmp()
             .unwrap()
             .path()
             .join("public")
@@ -295,31 +138,30 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_replication_connection_cleanup() {
-        let (guard, client) = TestGuard::new("repl_test").await;
-        let backend = &guard.backend;
-
-        // Drop the table that setup_backend created so we can test the full cycle
-        backend.drop_table("repl_test").await.unwrap();
-
-        // First cycle: add table, insert data, verify it works
-        backend
-            .create_table("repl_test", "public.repl_test", URI)
-            .await
-            .unwrap();
+        let (guard, client) = TestGuard::new(Some("repl_test")).await;
+        let backend = guard.backend();
 
         client
             .simple_query("INSERT INTO repl_test VALUES (1,'first');")
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
+        let lsn = current_wal_lsn(&client).await;
+        let ids = ids_from_state(&backend.scan_table(&"repl_test", Some(lsn)).await.unwrap());
         assert_eq!(ids, HashSet::from([1]));
 
         // Drop the table (this should clean up the replication connection)
+        client
+            .simple_query("DROP TABLE IF EXISTS repl_test;")
+            .await
+            .unwrap();
         backend.drop_table("repl_test").await.unwrap();
 
         // Second cycle: add table again, insert different data, verify it works
+        client
+            .simple_query("CREATE TABLE repl_test (id BIGINT PRIMARY KEY, name TEXT);")
+            .await
+            .unwrap();
         backend
             .create_table("repl_test", "public.repl_test", URI)
             .await
@@ -329,9 +171,9 @@ mod tests {
             .simple_query("INSERT INTO repl_test VALUES (2,'second');")
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
+        let lsn = current_wal_lsn(&client).await;
+        let ids = ids_from_state(&backend.scan_table(&"repl_test", Some(lsn)).await.unwrap());
         // Should only see the new row (2), not the old one (1)
         assert_eq!(ids, HashSet::from([2]));
     }
@@ -340,8 +182,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_bulk_insert_one_million_rows() {
-        let (guard, client) = TestGuard::new("bulk_test").await;
-        let backend = &guard.backend;
+        let (guard, client) = TestGuard::new(Some("bulk_test")).await;
+        let backend = guard.backend();
 
         client
             .simple_query(

@@ -55,7 +55,12 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{watch, RwLock};
 use tracing::info_span;
 use tracing::Instrument;
-use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
+use transaction_stream::{
+    TransactionStreamCommit, TransactionStreamOutput, TransactionStreamState,
+};
+
+/// Special transaction id used when buffering CDC events during initial table copy.
+pub(crate) const INITIAL_COPY_XACT_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IcebergPersistenceConfig {
@@ -432,6 +437,13 @@ pub struct MooncakeTable {
 
     /// Table notifier, which is used to sent multiple types of event completion information.
     table_notify: Option<Sender<TableNotify>>,
+
+    /// Whether table is in initial copy mode. When true, incoming CDC events
+    /// will be buffered into a streaming transaction and committed once copy
+    /// finishes.
+    in_initial_copy: bool,
+    /// Commits while in copy mode. Applied when finalizing the initial copy.
+    initial_copy_buffered_commits: Vec<TransactionStreamCommit>,
 }
 
 impl MooncakeTable {
@@ -496,6 +508,8 @@ impl MooncakeTable {
             iceberg_table_manager: Some(table_manager),
             last_iceberg_snapshot_lsn: None,
             table_notify: None,
+            in_initial_copy: false,
+            initial_copy_buffered_commits: Vec::new(),
         })
     }
 
@@ -843,6 +857,52 @@ impl MooncakeTable {
 
     pub(crate) fn notify_snapshot_reader(&self, lsn: u64) {
         self.table_snapshot_watch_sender.send(lsn).unwrap();
+    }
+
+    /// Enter initial copy mode. Subsequent CDC events will be
+    /// buffered in a dedicated streaming memslice until
+    /// `finish_initial_copy` is called.
+    /// In this case of a streaming transaction, we simply use the already provided `xact_id` to identify the transaction. In the case of non-streaming, we use `INITIAL_COPY_XACT_ID` to identify the transaction.
+    /// All commits are buffered and deferred until initial copy finishes.
+    pub fn start_initial_copy(&mut self) {
+        self.in_initial_copy = true;
+        self.initial_copy_buffered_commits.clear();
+    }
+
+    /// Exit initial copy mode and commit all buffered changes.
+    pub async fn finish_initial_copy(&mut self) -> Result<()> {
+        if !self.in_initial_copy {
+            return Ok(());
+        }
+
+        // First: commit the copied rows that were added directly to main mem_slice
+        // Use LSN 0 to ensure copied data comes before any CDC events
+        self.commit(0);
+        // Force create the snapshot with LSN 0
+        self.create_snapshot(SnapshotOption {
+            force_create: true,
+            ..SnapshotOption::default()
+        });
+
+        // Second: apply all buffered streaming transaction commits
+        let commits = self
+            .initial_copy_buffered_commits
+            .drain(..)
+            .collect::<Vec<_>>();
+        for commit in commits {
+            let _ = self.commit_transaction_stream(commit).await;
+        }
+        self.in_initial_copy = false;
+        Ok(())
+    }
+
+    pub fn is_in_initial_copy(&self) -> bool {
+        self.in_initial_copy
+    }
+
+    /// Buffer a commit seen during initial copy.
+    pub fn buffer_initial_copy_commit(&mut self, commit: TransactionStreamCommit) {
+        self.initial_copy_buffered_commits.push(commit);
     }
 
     /// Persist an iceberg snapshot.

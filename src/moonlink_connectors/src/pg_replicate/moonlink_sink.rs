@@ -57,6 +57,42 @@ impl Sink {
         self.commit_lsn_txs.remove(&table_id).unwrap();
     }
 
+    pub async fn start_table_copy(
+        &mut self,
+        table_id: TableId,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let sender = self
+            .event_senders
+            .get(&table_id)
+            .cloned()
+            .ok_or_else(|| format!("No event sender found for table_id: {:?}", table_id))?;
+
+        sender
+            .send(TableEvent::StartInitialCopy)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        Ok(())
+    }
+
+    pub async fn finish_table_copy(
+        &mut self,
+        table_id: TableId,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let sender = self
+            .event_senders
+            .get(&table_id)
+            .cloned()
+            .ok_or_else(|| format!("No event sender found for table_id: {:?}", table_id))?;
+
+        sender
+            .send(TableEvent::FinishInitialCopy)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        Ok(())
+    }
+
     pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<(), Infallible> {
         match event {
             CdcEvent::Begin(begin_body) => {
@@ -130,6 +166,7 @@ impl Sink {
                         .send(TableEvent::Append {
                             row: PostgresTableRow(table_row).into(),
                             xact_id,
+                            is_copied: false,
                         })
                         .await
                     {
@@ -178,6 +215,7 @@ impl Sink {
                         .send(TableEvent::Append {
                             row: PostgresTableRow(new_table_row).into(),
                             xact_id,
+                            is_copied: false,
                         })
                         .await
                     {

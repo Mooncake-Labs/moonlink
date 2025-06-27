@@ -1,5 +1,6 @@
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::SnapshotOption;
+use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_notify::TableNotify;
 use crate::{Error, Result};
@@ -10,7 +11,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::Instrument;
-use tracing::{error, info, info_span};
+use tracing::{debug, error, info, info_span, warn};
 
 /// Event types that can be processed by the TableHandler
 #[derive(Debug)]
@@ -19,6 +20,7 @@ pub enum TableEvent {
     Append {
         row: MoonlinkRow,
         xact_id: Option<u32>,
+        is_copied: bool,
     },
     /// Delete a row from the table
     Delete {
@@ -40,6 +42,10 @@ pub enum TableEvent {
     ForceSnapshot { lsn: u64, tx: Sender<Result<()>> },
     /// Drop table.
     DropTable,
+    /// Start initial table copy. Incoming non-streaming events will be buffered.
+    StartInitialCopy,
+    /// Finish initial table copy and merge buffered changes.
+    FinishInitialCopy,
 }
 
 /// Handler for table operations
@@ -129,6 +135,9 @@ impl TableHandler {
 
         // Whether requested to drop table.
         let mut drop_table_requested = false;
+
+        // Whether we are buffering CDC events during initial table copy.
+        let mut initial_copy = table.is_in_initial_copy();
 
         // Whether iceberg snapshot result has been consumed by the latest mooncake snapshot, when creating a mooncake snapshot.
         //
@@ -227,29 +236,35 @@ impl TableHandler {
                     };
 
                     match event {
-                        TableEvent::Append { row, xact_id } => {
-                            let result = match xact_id {
-                                Some(xact_id) => {
-                                    let res = table.append_in_stream_batch(row, xact_id);
-                                    if table.should_transaction_flush(xact_id) {
-                                        if let Err(e) = table.flush_transaction_stream(xact_id).await {
-                                            error!(error = %e, "flush failed in append");
-                                        }
-                                    }
-                                    res
-                                },
-                                None => table.append(row),
-                            };
+                        TableEvent::Append { is_copied, row, xact_id } => {
+                            if is_copied || (!initial_copy && xact_id.is_none()) {
+                                if let Err(e) = table.append(row) {
+                                    warn!(error = %e, "failed to append row");
+                                }
+                                continue;
+                            }
 
-                            if let Err(e) = result {
-                                error!(error = %e, "failed to append row");
+                            let xid = xact_id.unwrap_or(INITIAL_COPY_XACT_ID);
+
+                            if let Err(e) = table.append_in_stream_batch(row, xid) {
+                                warn!(error = %e, "failed to append row in batch");
+                                continue;
+                            }
+
+                            if table.should_transaction_flush(xid) {
+                                if let Err(e) = table.flush_transaction_stream(xid).await {
+                                    warn!(error = %e, "flush failed in append");
+                                }
                             }
                         }
                         TableEvent::Delete { row, lsn, xact_id } => {
-                            match xact_id {
-                                Some(xact_id) => table.delete_in_stream_batch(row, xact_id).await,
-                                None => table.delete(row, lsn).await,
-                            };
+                            if !initial_copy && xact_id.is_none() {
+                                table.delete(row, lsn).await;
+                                continue;
+                            }
+
+                            let xid = xact_id.unwrap_or(INITIAL_COPY_XACT_ID);
+                            table.delete_in_stream_batch(row, xid).await;
                         }
                         TableEvent::Commit { lsn, xact_id } => {
                             // Force create snapshot if
@@ -260,18 +275,24 @@ impl TableHandler {
                                 && lsn >= *force_snapshot_lsns.iter().next().as_ref().unwrap().0
                                 && !mooncake_snapshot_ongoing;
 
-                            match xact_id {
-                                Some(xact_id) => {
-                                    if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
-                                        error!(error = %e, "stream commit flush failed");
-                                    }
+                            if initial_copy {
+                                let xid = xact_id.unwrap_or(INITIAL_COPY_XACT_ID);
+                                let commit = table
+                                    .prepare_transaction_stream_commit(xid, lsn)
+                                    .await.unwrap();
+                                table.buffer_initial_copy_commit(commit);
+                            } else if let Some(xid) = xact_id {
+                                let commit = table
+                                    .prepare_transaction_stream_commit(xid, lsn)
+                                    .await.unwrap();
+                                if let Err(e) = table.commit_transaction_stream(commit).await {
+                                    warn!(error = %e, "stream commit flush failed");
                                 }
-                                None => {
-                                    table.commit(lsn);
-                                    if table.should_flush() || force_snapshot {
-                                        if let Err(e) = table.flush(lsn).await {
-                                            error!(error = %e, "flush failed in commit");
-                                        }
+                            } else {
+                                table.commit(lsn);
+                                if table.should_flush() || force_snapshot {
+                                    if let Err(e) = table.flush(lsn).await {
+                                        warn!(error = %e, "flush failed in commit");
                                     }
                                 }
                             }
@@ -291,8 +312,12 @@ impl TableHandler {
                             table.abort_in_stream_batch(xact_id);
                         }
                         TableEvent::Flush { lsn } => {
-                            if let Err(e) = table.flush(lsn).await {
-                                error!(error = %e, "explicit flush failed");
+                            if initial_copy {
+                                if let Err(e) = table.flush_transaction_stream(INITIAL_COPY_XACT_ID).await {
+                                    warn!(error = %e, "explicit flush failed");
+                                }
+                            } else if let Err(e) = table.flush(lsn).await {
+                                warn!(error = %e, "explicit flush failed");
                             }
                         }
                         TableEvent::StreamFlush { xact_id } => {
@@ -335,6 +360,18 @@ impl TableHandler {
 
                             // Otherwise, leave a drop marker to clean up states later.
                             drop_table_requested = true;
+                        }
+                        TableEvent::StartInitialCopy => {
+                            debug!("starting initial copy");
+                            table.start_initial_copy();
+                            initial_copy = true;
+                        }
+                        TableEvent::FinishInitialCopy => {
+                            debug!("finishing initial copy");
+                            if let Err(e) = table.finish_initial_copy().await {
+                                warn!(error = %e, "failed to finish initial copy");
+                            }
+                            initial_copy = false;
                         }
                     }
                 }

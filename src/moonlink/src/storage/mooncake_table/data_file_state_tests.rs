@@ -102,10 +102,11 @@ async fn prepare_test_disk_file_for_read(
         table
             .append_in_stream_batch(row.clone(), /*xact_id=*/ 0)
             .unwrap();
-        table
-            .commit_transaction_stream(/*xact_id-*/ 0, /*lsn=*/ 1)
+        let commit = table
+            .prepare_transaction_stream_commit(/*xact_id=*/ 0, /*lsn=*/ 1)
             .await
             .unwrap();
+        table.commit_transaction_stream(commit).await.unwrap();
     }
 
     (table, table_notify)
