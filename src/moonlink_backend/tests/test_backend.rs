@@ -14,13 +14,18 @@ mod tests {
         recreate_directory, MoonlinkBackend, ReadState, DEFAULT_MOONLINK_TEMP_FILE_PATH,
     };
 
-    const URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+    const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+    const DST_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+
+    type DatabaseId = u64;
+    type TableId = u64;
+    const DATABASE_ID: DatabaseId = 0;
+    const TABLE_ID: TableId = 0;
 
     // ───────────────────── Helper functions & fixtures ─────────────────────
 
     struct TestGuard {
-        backend: Arc<MoonlinkBackend<&'static str>>,
-        table_name: &'static str,
+        backend: Arc<MoonlinkBackend<DatabaseId, TableId>>,
         tmp: Option<TempDir>,
     }
 
@@ -29,7 +34,6 @@ mod tests {
             let (tmp, backend, client) = setup_backend(table_name).await;
             let guard = Self {
                 backend: Arc::new(backend),
-                table_name,
                 tmp: Some(tmp),
             };
             (guard, client)
@@ -40,13 +44,12 @@ mod tests {
         fn drop(&mut self) {
             // move everything we need into the async block
             let backend = Arc::clone(&self.backend);
-            let table = self.table_name;
             let tmp = self.tmp.take();
 
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
-                    let _ = backend.drop_table(table).await;
-                    let _ = backend.shutdown_connection(URI).await;
+                    let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+                    let _ = backend.shutdown_connection(SRC_URI).await;
                     let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
                     drop(tmp);
                 });
@@ -94,14 +97,13 @@ mod tests {
     /// Moonlink.
     async fn setup_backend(
         table_name: &'static str,
-    ) -> (TempDir, MoonlinkBackend<&'static str>, Client) {
+    ) -> (TempDir, MoonlinkBackend<DatabaseId, TableId>, Client) {
         let temp_dir = TempDir::new().unwrap();
-        let uri = URI;
         let backend =
-            MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
+            MoonlinkBackend::<DatabaseId, TableId>::new(temp_dir.path().to_str().unwrap().into());
 
         // Connect to Postgres.
-        let (client, connection) = connect(uri, NoTls).await.unwrap();
+        let (client, connection) = connect(SRC_URI, NoTls).await.unwrap();
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -128,7 +130,13 @@ mod tests {
             .await
             .unwrap();
         backend
-            .create_table(table_name, &format!("public.{table_name}"), uri)
+            .create_table(
+                DATABASE_ID,
+                /*table_id=*/ TABLE_ID,
+                DST_URI.to_string(),
+                /*src_table_name=*/ format!("public.{table_name}"),
+                SRC_URI.to_string(),
+            )
             .await
             .unwrap();
 
@@ -138,20 +146,26 @@ mod tests {
     /// Reusable helper for the "create table / insert rows / detect change"
     /// scenario used in two places.
     async fn smoke_create_and_insert(
-        backend: &MoonlinkBackend<&'static str>,
+        backend: &MoonlinkBackend<DatabaseId, TableId>,
         client: &Client,
         uri: &str,
     ) {
         client
             .simple_query(
                 "DROP TABLE IF EXISTS test;
-                           CREATE TABLE test (id BIGINT PRIMARY KEY, name TEXT);",
+                CREATE TABLE test (id BIGINT PRIMARY KEY, name TEXT);",
             )
             .await
             .unwrap();
 
         backend
-            .create_table("test", "public.test", uri)
+            .create_table(
+                DATABASE_ID,
+                /*table_id*=*/ TABLE_ID,
+                DST_URI.to_string(),
+                /*table_name=*/ "public.test".to_string(),
+                uri.to_string(),
+            )
             .await
             .unwrap();
 
@@ -161,9 +175,15 @@ mod tests {
             .await
             .unwrap();
 
-        let old = backend.scan_table(&"test", None).await.unwrap();
+        let old = backend
+            .scan_table(DATABASE_ID, TABLE_ID, /*lsn=*/ None)
+            .await
+            .unwrap();
         let lsn = current_wal_lsn(client).await;
-        let new = backend.scan_table(&"test", Some(lsn)).await.unwrap();
+        let new = backend
+            .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+            .await
+            .unwrap();
         assert_ne!(old.data, new.data);
 
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
@@ -197,9 +217,9 @@ mod tests {
         let (guard, client) = TestGuard::new("test").await;
         let backend = &guard.backend;
 
-        smoke_create_and_insert(backend, &client, URI).await;
-        backend.drop_table("test").await.unwrap();
-        smoke_create_and_insert(backend, &client, URI).await;
+        smoke_create_and_insert(backend, &client, SRC_URI).await;
+        backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        smoke_create_and_insert(backend, &client, SRC_URI).await;
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
@@ -215,7 +235,12 @@ mod tests {
             .unwrap();
         let lsn = current_wal_lsn(&client).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"scan_test", Some(lsn)).await.unwrap());
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .await
+                .unwrap(),
+        );
         assert_eq!(ids, HashSet::from([1, 2]));
 
         // Add one more row.
@@ -225,7 +250,12 @@ mod tests {
             .unwrap();
         let lsn = current_wal_lsn(&client).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"scan_test", Some(lsn)).await.unwrap());
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .await
+                .unwrap(),
+        );
         assert_eq!(ids, HashSet::from([1, 2, 3]));
     }
 
@@ -242,7 +272,12 @@ mod tests {
             .unwrap();
         let lsn1 = current_wal_lsn(&client).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"lsn_test", Some(lsn1)).await.unwrap());
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn1))
+                .await
+                .unwrap(),
+        );
         assert_eq!(ids, HashSet::from([1]));
 
         client
@@ -251,7 +286,12 @@ mod tests {
             .unwrap();
         let lsn2 = current_wal_lsn(&client).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"lsn_test", Some(lsn2)).await.unwrap());
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn2))
+                .await
+                .unwrap(),
+        );
         assert_eq!(ids, HashSet::from([1, 2]));
     }
 
@@ -272,7 +312,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         backend
-            .create_iceberg_snapshot(&"snapshot_test", lsn)
+            .create_snapshot(DATABASE_ID, TABLE_ID, lsn)
             .await
             .unwrap();
 
@@ -283,7 +323,7 @@ mod tests {
             .unwrap()
             .path()
             .join("public")
-            .join("snapshot_test")
+            .join(format!("{}.{}", DATABASE_ID, TABLE_ID))
             .join("metadata");
         assert!(meta_dir.exists());
         assert!(meta_dir.read_dir().unwrap().next().is_some());
@@ -299,11 +339,17 @@ mod tests {
         let backend = &guard.backend;
 
         // Drop the table that setup_backend created so we can test the full cycle
-        backend.drop_table("repl_test").await.unwrap();
+        backend.drop_table(DATABASE_ID, TABLE_ID).await;
 
         // First cycle: add table, insert data, verify it works
         backend
-            .create_table("repl_test", "public.repl_test", URI)
+            .create_table(
+                DATABASE_ID,
+                TABLE_ID,
+                DST_URI.to_string(),
+                "public.repl_test".to_string(),
+                SRC_URI.to_string(),
+            )
             .await
             .unwrap();
 
@@ -313,15 +359,26 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE_ID, TABLE_ID, None)
+                .await
+                .unwrap(),
+        );
         assert_eq!(ids, HashSet::from([1]));
 
         // Drop the table (this should clean up the replication connection)
-        backend.drop_table("repl_test").await.unwrap();
+        backend.drop_table(DATABASE_ID, TABLE_ID).await;
 
         // Second cycle: add table again, insert different data, verify it works
         backend
-            .create_table("repl_test", "public.repl_test", URI)
+            .create_table(
+                DATABASE_ID,
+                TABLE_ID,
+                DST_URI.to_string(),
+                /*table_name=*/ "public.repl_test".to_string(),
+                SRC_URI.to_string(),
+            )
             .await
             .unwrap();
 
@@ -331,7 +388,12 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE_ID, TABLE_ID, /*lsn=*/ None)
+                .await
+                .unwrap(),
+        );
         // Should only see the new row (2), not the old one (1)
         assert_eq!(ids, HashSet::from([2]));
     }
@@ -356,7 +418,7 @@ mod tests {
 
         let ids = ids_from_state(
             &backend
-                .scan_table(&"bulk_test", Some(lsn_after_insert))
+                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn_after_insert))
                 .await
                 .unwrap(),
         );

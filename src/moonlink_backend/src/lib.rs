@@ -1,6 +1,8 @@
+pub mod columnstore_table_id;
 mod error;
 mod logging;
 
+use columnstore_table_id::ColumnstoreTableId;
 pub use error::{Error, Result};
 pub use moonlink::ReadState;
 use moonlink::{ObjectStorageCache, ObjectStorageCacheConfig};
@@ -11,8 +13,6 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-// Default local filesystem directory where all tables data will be stored under.
-const DEFAULT_MOONLINK_TABLE_BASE_PATH: &str = "./mooncake/";
 // Default local filesystem directory under the above base directory (which defaults to `PGDATA/pg_mooncake`) where all temporary files (used for union read) will be stored under.
 // The whole directory is cleaned up at moonlink backend start, to prevent file leak.
 pub const DEFAULT_MOONLINK_TEMP_FILE_PATH: &str = "./temp/";
@@ -47,15 +47,12 @@ pub fn recreate_directory(dir: &str) -> Result<()> {
     Ok(())
 }
 
-pub struct MoonlinkBackend<T: Eq + Hash> {
+pub struct MoonlinkBackend<
+    D: Eq + Hash + Clone + std::fmt::Display,
+    T: Eq + Hash + Clone + std::fmt::Display,
+> {
     // Could be either relative or absolute path.
-    replication_manager: RwLock<ReplicationManager<T>>,
-}
-
-impl<T: Eq + Hash + Clone + std::fmt::Display> Default for MoonlinkBackend<T> {
-    fn default() -> Self {
-        Self::new(DEFAULT_MOONLINK_TABLE_BASE_PATH.to_string())
-    }
+    replication_manager: RwLock<ReplicationManager<ColumnstoreTableId<D, T>>>,
 }
 
 /// Util function to get filesystem size for cache directory
@@ -84,7 +81,11 @@ fn create_default_object_storage_cache(
     ObjectStorageCache::new(cache_config)
 }
 
-impl<T: Eq + Hash + Clone + std::fmt::Display> MoonlinkBackend<T> {
+impl<D, T> MoonlinkBackend<D, T>
+where
+    D: Eq + Hash + Clone + std::fmt::Display,
+    T: Eq + Hash + Clone + std::fmt::Display,
+{
     pub fn new(base_path: String) -> Self {
         logging::init_logging();
 
@@ -103,22 +104,66 @@ impl<T: Eq + Hash + Clone + std::fmt::Display> MoonlinkBackend<T> {
         }
     }
 
-    pub async fn create_table(&self, table_id: T, table_name: &str, uri: &str) -> Result<()> {
-        let mut manager = self.replication_manager.write().await;
-        manager.add_table(uri, table_id, table_name).await?;
+    /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
+    pub async fn create_snapshot(&self, database_id: D, table_id: T, lsn: u64) -> Result<()> {
+        let mut rx = {
+            let mut manager = self.replication_manager.write().await;
+            let columnstore_table_id = ColumnstoreTableId {
+                database_id,
+                table_id,
+            };
+            let writer = manager.get_iceberg_table_event_manager(&columnstore_table_id);
+            writer.initiate_snapshot(lsn).await
+        };
+        rx.recv().await.unwrap()?;
         Ok(())
     }
 
-    pub async fn drop_table(&self, table_id: T) -> Result<()> {
+    /// # Arguments
+    ///
+    /// * src_uri: connection string for source database.
+    /// * dst_uri: connection string for
+    pub async fn create_table(
+        &self,
+        database_id: D,
+        table_id: T,
+        _dst_uri: String,
+        src_table_name: String,
+        src_uri: String,
+    ) -> Result<()> {
         let mut manager = self.replication_manager.write().await;
-        manager.drop_table(table_id).await?;
+        let columnstore_table_id = ColumnstoreTableId {
+            database_id,
+            table_id,
+        };
+        manager
+            .add_table(&src_uri, columnstore_table_id, &src_table_name)
+            .await?;
         Ok(())
     }
 
-    pub async fn scan_table(&self, table_id: &T, lsn: Option<u64>) -> Result<Arc<ReadState>> {
+    pub async fn drop_table(&self, database_id: D, table_id: T) {
+        let mut manager = self.replication_manager.write().await;
+        let columnstore_table_id = ColumnstoreTableId {
+            database_id,
+            table_id,
+        };
+        manager.drop_table(columnstore_table_id).await.unwrap();
+    }
+
+    pub async fn scan_table(
+        &self,
+        database_id: D,
+        table_id: T,
+        lsn: Option<u64>,
+    ) -> Result<Arc<ReadState>> {
         let read_state = {
             let manager = self.replication_manager.read().await;
-            let table_reader = manager.get_table_reader(table_id);
+            let columnstore_table_id = ColumnstoreTableId {
+                database_id,
+                table_id,
+            };
+            let table_reader = manager.get_table_reader(&columnstore_table_id);
             table_reader.try_read(lsn).await?
         };
 
@@ -129,16 +174,5 @@ impl<T: Eq + Hash + Clone + std::fmt::Display> MoonlinkBackend<T> {
     pub async fn shutdown_connection(&self, uri: &str) {
         let mut manager = self.replication_manager.write().await;
         manager.shutdown_connection(uri);
-    }
-
-    /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
-    pub async fn create_iceberg_snapshot(&self, table_id: &T, lsn: u64) -> Result<()> {
-        let mut rx = {
-            let mut manager = self.replication_manager.write().await;
-            let writer = manager.get_iceberg_table_event_manager(table_id);
-            writer.initiate_snapshot(lsn).await
-        };
-        rx.recv().await.unwrap()?;
-        Ok(())
     }
 }

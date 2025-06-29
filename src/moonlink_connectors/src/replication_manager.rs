@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 /// provides a single entry point to add new tables to a running
 /// replication. A new replication will automatically be started when a
 /// table is added for a URI that is not currently being replicated.
-pub struct ReplicationManager<T: Eq + Hash> {
+pub struct ReplicationManager<T: Clone + Eq + Hash + std::fmt::Display> {
     /// Maps from uri to replication connection.
     connections: HashMap<String, ReplicationConnection>,
     /// Maps from table id (string format) to (uri, table id).
@@ -28,7 +28,7 @@ pub struct ReplicationManager<T: Eq + Hash> {
     shutdown_handles: Vec<JoinHandle<Result<()>>>,
 }
 
-impl<T: Eq + Hash + Clone + std::fmt::Display> ReplicationManager<T> {
+impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
     pub fn new(
         table_base_path: String,
         table_temp_files_directory: String,
@@ -81,13 +81,13 @@ impl<T: Eq + Hash + Clone + std::fmt::Display> ReplicationManager<T> {
             replication_connection.start_replication().await?;
         }
 
-        let table_id = replication_connection
+        let rowstore_table_id = replication_connection
             .add_table(table_name, &external_table_id)
             .await?;
         self.table_info
-            .insert(external_table_id, (uri.to_string(), table_id));
+            .insert(external_table_id, (uri.to_string(), rowstore_table_id));
 
-        info!(table_id, "table added through manager");
+        info!(rowstore_table_id, "table added through manager");
 
         Ok(())
     }
@@ -123,7 +123,10 @@ impl<T: Eq + Hash + Clone + std::fmt::Display> ReplicationManager<T> {
         &mut self,
         table_id: &T,
     ) -> &mut IcebergTableEventManager {
-        let (uri, table_id) = self.table_info.get(table_id).expect("table not found");
+        let (uri, table_id) = self
+            .table_info
+            .get(table_id)
+            .unwrap_or_else(|| panic!("table {} not found", table_id));
         let connection = self.connections.get_mut(uri).expect("connection not found");
         connection.get_iceberg_table_event_manager(*table_id)
     }
