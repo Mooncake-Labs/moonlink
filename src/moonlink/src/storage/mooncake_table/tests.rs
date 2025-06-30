@@ -68,7 +68,7 @@ async fn test_delete_and_append(#[case] identity: IdentityProp) -> Result<()> {
     ];
     append_commit_flush_snapshot(&mut table, &mut event_completion_rx, initial_rows, 1).await?;
 
-    table.delete(test_row(2, "Row 2", 32), 2).await;
+    table.delete(test_row(2, "Row 2", 32), 1).await;
     table.commit(2);
     snapshot(&mut table, &mut event_completion_rx).await;
 

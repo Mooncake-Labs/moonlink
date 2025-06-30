@@ -663,6 +663,14 @@ impl MooncakeTable {
     pub fn commit(&mut self, lsn: u64) {
         self.next_snapshot_task.new_commit_lsn = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
+        assert!(
+            self.next_snapshot_task.new_deletions.is_empty()
+                || self.next_snapshot_task.new_deletions.last().unwrap().lsn >= transaction_stream::LSN_START_FOR_STREAMING_XACT
+                || self.next_snapshot_task.new_deletions.last().unwrap().lsn < lsn,
+            "We expect commit LSN to be strictly greater than the last deletion LSN, but got commit LSN {} and last deletion LSN {}",
+            lsn,
+            self.next_snapshot_task.new_deletions.last().unwrap().lsn,
+        );
     }
 
     /// Shutdown the current table, which unpins all referenced data files in the global data file.

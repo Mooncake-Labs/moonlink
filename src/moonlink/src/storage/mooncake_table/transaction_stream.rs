@@ -75,12 +75,13 @@ impl TransactionStreamState {
     }
 }
 
+pub(crate) const LSN_START_FOR_STREAMING_XACT: u64 = 0xFFFF_FFFF_0000_0000;
 // DevNote:
 // This is a trick to track xact of uncommitted deletions
 // we set first 32 bits to 1, so it will be 'uncommitted' as the value is larger than any possible lsn.
 // And we use the last 32 bits to store the xact_id, so we can find deletion for a given xact_id.
 fn get_lsn_for_pending_xact(xact_id: u32) -> u64 {
-    0xFFFF_FFFF_0000_0000 | xact_id as u64
+    LSN_START_FOR_STREAMING_XACT | xact_id as u64
 }
 
 impl MooncakeTable {
