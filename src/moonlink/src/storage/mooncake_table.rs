@@ -399,6 +399,13 @@ impl SnapshotOption {
 /// And periodically disk slices will be merged and compacted.
 /// Single thread is used to write to the table.
 ///
+/// LSN is used for visiblity control of mooncake table.
+/// Currently it has following rules:
+/// For read at lsn X, any record committed at lsn <= X is visible.
+/// For commit at lsn X, any record whose lsn < X is committed.
+///
+/// COMMIT_LSN_xact_1 <= DELETE_LSN_xact_2 < COMMIT_LSN_xact_2
+///
 pub struct MooncakeTable {
     /// Current metadata of the table.
     ///

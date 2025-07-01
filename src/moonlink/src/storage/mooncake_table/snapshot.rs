@@ -156,13 +156,7 @@ impl SnapshotTableState {
     ) -> HashMap<MooncakeDataFileRef, BatchDeletionVector> {
         let mut aggregated_deletion_logs = HashMap::new();
         for cur_deletion_log in self.committed_deletion_log.iter() {
-            ma::assert_le!(
-                cur_deletion_log.lsn,
-                self.current_snapshot.snapshot_version,
-                "Committed deletion log {:?} is later than current snapshot LSN {}",
-                cur_deletion_log,
-                self.current_snapshot.snapshot_version
-            );
+            ma::assert_le!(cur_deletion_log.lsn, self.current_snapshot.snapshot_version);
             if cur_deletion_log.lsn >= flush_lsn {
                 continue;
             }
@@ -201,12 +195,7 @@ impl SnapshotTableState {
 
         let old_committed_deletion_logs = std::mem::take(&mut self.committed_deletion_log);
         for cur_deletion_log in old_committed_deletion_logs.into_iter() {
-            assert!(
-                cur_deletion_log.lsn < self.current_snapshot.snapshot_version,
-                "Committed deletion log {:?} is later than current snapshot LSN {}",
-                cur_deletion_log,
-                self.current_snapshot.snapshot_version
-            );
+            ma::assert_le!(cur_deletion_log.lsn, self.current_snapshot.snapshot_version);
             if cur_deletion_log.lsn >= flush_point_lsn {
                 new_committed_deletion_log.push(cur_deletion_log);
                 continue;
