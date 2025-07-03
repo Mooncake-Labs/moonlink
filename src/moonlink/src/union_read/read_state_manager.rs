@@ -221,13 +221,13 @@ mod tests {
                 commit: 42,
                 expect: true,
             },
-            // miss: bounded read, cache newer than caller wants
+            // hit: bounded read, cache newer than caller wants
             Case {
                 requested: Some(10),
                 cached: 20,
                 snap: 20,
                 commit: 20,
-                expect: false,
+                expect: true,
             },
             // hit: latest read, snapshot clean
             Case {
@@ -293,13 +293,13 @@ mod tests {
                 commit: 10,
                 expect: false,
             },
-            // hit: valid LSN 0 cache, bounded read within bound
+            // miss: valid LSN 0 cache, bounded read outside of request
             Case {
                 requested: Some(5),
                 cached: 0,
                 snap: 0,
                 commit: 0,
-                expect: true,
+                expect: false,
             },
             // hit: valid LSN 0 cache for latest read, snapshot clean
             Case {
