@@ -3,6 +3,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
 use moonlink::{IcebergTableConfig, ObjectStorageCache};
 use moonlink::{MooncakeTable, MooncakeTableConfig};
+use pprof::criterion::{Output, PProfProfiler};
 use std::collections::HashMap;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -84,7 +85,7 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default();
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = bench_write_mooncake_table
 }
 criterion_main!(benches);

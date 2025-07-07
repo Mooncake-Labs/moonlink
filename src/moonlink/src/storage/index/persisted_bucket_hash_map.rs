@@ -489,7 +489,7 @@ impl GlobalIndexBuilder {
         for entry in &mut entries {
             entry.0 = splitmix64(entry.0);
         }
-        entries.sort_by_key(|entry| entry.0);
+        entries.sort_unstable_by_key(|entry| entry.0);
         self.build(entries.into_iter(), file_id).await
     }
 
