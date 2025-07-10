@@ -1,0 +1,12 @@
+[package]
+name = "moonlink_service"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+clap = { workspace = true }
+moonlink_backend = { path = "../moonlink_backend" }
+moonlink_rpc = { path = "../moonlink_rpc" }
+thiserror = { workspace = true }
+tokio = { workspace = true }

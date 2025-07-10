@@ -4,6 +4,8 @@ members = [
     "src/moonlink_backend",
     "src/moonlink_connectors",
     "src/moonlink_metadata_store",
+    "src/moonlink_rpc",
+    "src/moonlink_service",
 ]
 resolver = "2"
 
@@ -19,8 +21,9 @@ arrow = { version = "55", default-features = false, features = [
 arrow-array = "55"
 arrow-schema = "55"
 async-trait = "0.1"
-bincode = "2"
+bincode = { version = "2", features = ["serde"] }
 chrono = { version = "0.4", default-features = false }
+clap = { version = "4", features = ["derive"] }
 console-subscriber = "0.2"
 crc32fast = "1"
 fastbloom = "0.12.0"
@@ -44,6 +47,7 @@ parquet = { version = "55", default-features = false, features = [
   "async",
   "arrow_canonical_extension_types",
 ] }
+paste = "1"
 postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
 postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5", features = ["with-serde_json-1"] }
 rand = "0.9"
@@ -54,8 +58,10 @@ serial_test = "3.0"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.46", default-features = false, features = [
-  "rt-multi-thread",
+  "io-util",
   "macros",
+  "rt-multi-thread",
+  "signal",
   "sync",
   "time",
   "tracing",
