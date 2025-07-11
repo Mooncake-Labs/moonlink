@@ -39,6 +39,10 @@ pub enum TableEvent {
     Commit { lsn: u64, xact_id: Option<u32> },
     /// Abort current stream with given xact_id
     StreamAbort { xact_id: u32 },
+    /// ==============================
+    /// Test events
+    /// ==============================
+    ///
     /// Flush the table to disk
     Flush { lsn: u64 },
     /// Flush the transaction stream with given xact_id
@@ -58,6 +62,12 @@ pub enum TableEvent {
     },
     /// Drop table.
     DropTable,
+    /// Alter table,
+    AlterTable { column_to_drop: Vec<String> },
+    /// Start initial table copy.
+    StartInitialCopy,
+    /// Finish initial table copy and merge buffered changes.
+    FinishInitialCopy,
     /// ==============================
     /// Table internal events
     /// ==============================
@@ -102,8 +112,42 @@ pub enum TableEvent {
         /// Evicted data files by object storage cache.
         evicted_data_files: Vec<String>,
     },
-    /// Start initial table copy.
-    StartInitialCopy,
-    /// Finish initial table copy and merge buffered changes.
-    FinishInitialCopy,
+}
+
+impl TableEvent {
+    pub fn is_ingest_event(&self) -> bool {
+        #[cfg(test)]
+        {
+            matches!(
+                self,
+                TableEvent::Append { .. }
+                    | TableEvent::Delete { .. }
+                    | TableEvent::Commit { .. }
+                    | TableEvent::StreamAbort { .. }
+                    | TableEvent::Flush { .. }
+                    | TableEvent::StreamFlush { .. }
+            )
+        }
+        #[cfg(not(test))]
+        {
+            matches!(
+                self,
+                TableEvent::Append { .. }
+                    | TableEvent::Delete { .. }
+                    | TableEvent::Commit { .. }
+                    | TableEvent::StreamAbort { .. }
+            )
+        }
+    }
+
+    pub fn get_lsn_for_ingest_event(&self) -> Option<u64> {
+        match self {
+            TableEvent::Append { lsn, .. } => Some(*lsn),
+            TableEvent::Delete { lsn, .. } => Some(*lsn),
+            TableEvent::Commit { lsn, .. } => Some(*lsn),
+            TableEvent::StreamAbort { .. } => None,
+            TableEvent::Flush { lsn } => Some(*lsn),
+            _ => None,
+        }
+    }
 }

@@ -16,7 +16,6 @@ use more_asserts as ma;
 pub(super) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
-    buffered_deletions: Vec<RawDeletionRecord>,
     pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
     index_bloom_filter: BloomFilter,
     flushed_file_index: MooncakeIndex,
@@ -68,7 +67,6 @@ impl TransactionStreamState {
         Self {
             mem_slice: MemSlice::new(schema, batch_size, identity),
             local_deletions: Vec::new(),
-            buffered_deletions: Vec::new(),
             pending_deletions_in_main_mem_slice: Vec::new(),
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             flushed_file_index: MooncakeIndex::new(),
@@ -135,16 +133,11 @@ impl MooncakeTable {
             row_identity: self.metadata.identity.extract_identity_columns(row),
         };
 
-        let in_initial_copy = self.is_in_initial_copy();
         let stream_state = Self::get_or_create_stream_state(
             &mut self.transaction_stream_states,
             &self.metadata,
             xact_id,
         );
-        if in_initial_copy {
-            stream_state.buffered_deletions.push(record);
-            return;
-        }
 
         // it is very unlikely to delete a row in current transaction,
         // only very weird query shape could do it.
