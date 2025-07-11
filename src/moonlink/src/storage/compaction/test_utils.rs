@@ -428,7 +428,7 @@ pub(crate) async fn check_file_indices_compaction_for_multiple_compacted_files(
             .await;
         assert_eq!(locs.len(), 1);
         let (_, RecordLocation::DiskFile(actual_file_id, actual_new_row_idx)) = locs[0] else {
-            panic!("Failed to get record location for {}", hash_value);
+            panic!("Failed to get record location for {hash_value}");
         };
         actual_record_locations.push((actual_file_id, actual_new_row_idx));
     }
@@ -476,11 +476,10 @@ pub(crate) async fn check_file_indices_compaction(
         assert_eq!(
             locs.len(),
             1,
-            "Failed to search for {}-th row in the compacted file indice",
-            old_row_idx
+            "Failed to search for {old_row_idx}-th row in the compacted file indice"
         );
         let (_, RecordLocation::DiskFile(actual_file_id, actual_new_row_idx)) = locs[0] else {
-            panic!("Failed to get record location for {}", hash_value);
+            panic!("Failed to get record location for {hash_value}");
         };
         assert_eq!(expected_file_id.unwrap(), actual_file_id);
         // Check whether the actual new row index falls in the valid range, and hasn't been visited before.

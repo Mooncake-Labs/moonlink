@@ -281,10 +281,7 @@ mod tests {
 
         // Intentionally drop schema, which means current database is not managed by moonlink.
         client
-            .simple_query(&format!(
-                "DROP SCHEMA IF EXISTS {0} CASCADE;",
-                MOONLINK_SCHEMA
-            ))
+            .simple_query(&format!("DROP SCHEMA IF EXISTS {MOONLINK_SCHEMA} CASCADE;"))
             .await
             .unwrap();
 

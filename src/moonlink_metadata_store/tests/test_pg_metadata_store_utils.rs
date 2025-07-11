@@ -22,22 +22,20 @@ mod tests {
         // Spawn connection driver in background to keep eventloop alive.
         let _pg_connection = tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Postgres connection error: {}", e);
+                eprintln!("Postgres connection error: {e}");
             }
         });
 
         // Re-create mooncake schema.
         postgres_client
             .simple_query(&format!(
-                "DROP SCHEMA IF EXISTS {0} CASCADE; CREATE SCHEMA {0};",
-                EXISTENT_SCHEMA
+                "DROP SCHEMA IF EXISTS {EXISTENT_SCHEMA} CASCADE; CREATE SCHEMA {EXISTENT_SCHEMA};"
             ))
             .await
             .unwrap();
         postgres_client
             .simple_query(&format!(
-                "DROP SCHEMA IF EXISTS {0} CASCADE;",
-                NON_EXISTENT_SCHEMA
+                "DROP SCHEMA IF EXISTS {NON_EXISTENT_SCHEMA} CASCADE;"
             ))
             .await
             .unwrap();
@@ -65,22 +63,20 @@ mod tests {
         // Spawn connection driver in background to keep eventloop alive.
         let _pg_connection = tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Postgres connection error: {}", e);
+                eprintln!("Postgres connection error: {e}");
             }
         });
 
         // Re-create mooncake schema.
         postgres_client
             .simple_query(&format!(
-                "DROP SCHEMA IF EXISTS {0} CASCADE; CREATE SCHEMA {0};",
-                EXISTENT_SCHEMA
+                "DROP SCHEMA IF EXISTS {EXISTENT_SCHEMA} CASCADE; CREATE SCHEMA {EXISTENT_SCHEMA};"
             ))
             .await
             .unwrap();
         postgres_client
             .simple_query(&format!(
-                "DROP SCHEMA IF EXISTS {0} CASCADE;",
-                NON_EXISTENT_SCHEMA
+                "DROP SCHEMA IF EXISTS {NON_EXISTENT_SCHEMA} CASCADE;"
             ))
             .await
             .unwrap();
@@ -102,8 +98,7 @@ mod tests {
         // Case-3: schema existent and table existent.
         postgres_client
             .simple_query(&format!(
-                "CREATE TABLE {0}.{1} (id INT);",
-                EXISTENT_SCHEMA, EXISTENT_TABLE,
+                "CREATE TABLE {EXISTENT_SCHEMA}.{EXISTENT_TABLE} (id INT);",
             ))
             .await
             .unwrap();

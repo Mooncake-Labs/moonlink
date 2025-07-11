@@ -135,7 +135,7 @@ pub fn append_rows(table: &mut MooncakeTable, rows: Vec<MoonlinkRow>) -> Result<
 
 pub fn batch_rows(start_id: i32, count: i32) -> Vec<MoonlinkRow> {
     (start_id..start_id + count)
-        .map(|id| test_row(id, &format!("Row {}", id), 30 + id))
+        .map(|id| test_row(id, &format!("Row {id}"), 30 + id))
         .collect()
 }
 

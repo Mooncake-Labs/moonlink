@@ -166,7 +166,7 @@ impl MooncakeTable {
             if !matches.is_empty() {
                 for loc in matches {
                     let RecordLocation::DiskFile(file_id, row_id) = loc else {
-                        panic!("Unexpected record location: {:?}", record);
+                        panic!("Unexpected record location: {record:?}");
                     };
                     let (file, disk_file_entry) = stream_state
                         .flushed_files

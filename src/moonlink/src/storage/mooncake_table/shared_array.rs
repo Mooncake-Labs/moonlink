@@ -50,13 +50,13 @@ impl SharedRowBuffer {
     }
 
     pub fn get_row(&self, index: usize) -> &MoonlinkRow {
-        unsafe { &(*self.buffer.get())[index] }
+        unsafe { &(&(*self.buffer.get()))[index] }
     }
 }
 
 impl SharedRowBufferSnapshot {
     pub fn get_buffer(&self, size: usize) -> &[MoonlinkRow] {
         assert_le!(size, self.length);
-        unsafe { &(*self.buffer.get())[..size] }
+        unsafe { &(&(*self.buffer.get()))[..size] }
     }
 }

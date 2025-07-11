@@ -14,7 +14,7 @@ use tokio::runtime::Runtime;
 fn create_test_row(id: i32) -> MoonlinkRow {
     MoonlinkRow::new(vec![
         RowValue::Int32(id),
-        RowValue::ByteArray(format!("Row {}", id).into_bytes()),
+        RowValue::ByteArray(format!("Row {id}").into_bytes()),
         RowValue::Int32(30 + id),
     ])
 }

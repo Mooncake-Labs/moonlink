@@ -23,10 +23,7 @@ pub(crate) fn validate_puffin_manifest_entry(entry: &ManifestEntry) -> IcebergRe
     if data_file.file_path().is_empty() {
         return Err(iceberg::Error::new(
             iceberg::ErrorKind::DataInvalid,
-            format!(
-                "Puffin manifest doesn't have file path assigned for data file {:?}",
-                data_file
-            ),
+            format!("Puffin manifest doesn't have file path assigned for data file {data_file:?}"),
         ));
     }
 
@@ -46,10 +43,7 @@ pub(crate) fn validate_puffin_manifest_entry(entry: &ManifestEntry) -> IcebergRe
     if data_file.referenced_data_file().is_none() {
         return Err(iceberg::Error::new(
             iceberg::ErrorKind::DataInvalid,
-            format!(
-                "Puffin deletion vector should reference to data file {:?}",
-                data_file
-            ),
+            format!("Puffin deletion vector should reference to data file {data_file:?}"),
         ));
     }
 
@@ -58,8 +52,7 @@ pub(crate) fn validate_puffin_manifest_entry(entry: &ManifestEntry) -> IcebergRe
         return Err(iceberg::Error::new(
             iceberg::ErrorKind::DataInvalid,
             format!(
-                "Puffin deletion vector should have content offset and blob size assigned for data file {:?}",
-                data_file
+                "Puffin deletion vector should have content offset and blob size assigned for data file {data_file:?}"
             )
         ));
     }

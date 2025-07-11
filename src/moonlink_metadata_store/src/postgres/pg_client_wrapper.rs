@@ -17,7 +17,7 @@ impl PgClientWrapper {
         // Spawn connection driver in background to keep eventloop alive.
         let _pg_connection = tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Postgres connection error: {}", e);
+                eprintln!("Postgres connection error: {e}");
             }
         });
 

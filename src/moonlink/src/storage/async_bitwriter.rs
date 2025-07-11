@@ -257,7 +257,7 @@ mod tests {
         let result = bit_writer.writer.into_inner();
         assert_eq!(result.len(), iterations);
         for (i, byte) in result.iter().enumerate() {
-            assert_eq!(*byte, (i % 256) as u8, "mismatch at index {}", i);
+            assert_eq!(*byte, (i % 256) as u8, "mismatch at index {i}");
         }
         if iterations >= BUFFER_SIZE {
             assert!(switched);
@@ -304,7 +304,7 @@ mod tests {
             decoded.push(val);
         }
         for (i, actual) in decoded.iter().enumerate() {
-            assert_eq!(*actual, (i % 128) as u8, "mismatch at index {}", i);
+            assert_eq!(*actual, (i % 128) as u8, "mismatch at index {i}");
         }
         assert!(switched);
     }

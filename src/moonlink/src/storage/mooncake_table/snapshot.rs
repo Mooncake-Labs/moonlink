@@ -1312,10 +1312,9 @@ impl SnapshotTableState {
                 .zip(deletions.iter())
                 .map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc))
                 .collect(),
-            Ordering::Less => panic!(
-                "find less than expected candidates to deletions {:?}",
-                deletions
-            ),
+            Ordering::Less => {
+                panic!("find less than expected candidates to deletions {deletions:?}")
+            }
             Ordering::Greater => {
                 let mut processed_deletions = Vec::new();
                 // multiple candidates → disambiguate via full row identity comparison.

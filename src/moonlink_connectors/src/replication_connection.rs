@@ -107,7 +107,7 @@ impl ReplicationConnection {
         let slot_name = if db_name.is_empty() {
             "moonlink_slot".to_string()
         } else {
-            format!("moonlink_slot_{}", db_name)
+            format!("moonlink_slot_{db_name}")
         };
 
         let postgres_source = PostgresSource::new(
@@ -147,10 +147,7 @@ impl ReplicationConnection {
     /// Include full row in cdc stream (not just primary keys).
     async fn alter_table_replica_identity(&self, table_name: &str) -> Result<()> {
         self.postgres_client
-            .simple_query(&format!(
-                "ALTER TABLE {} REPLICA IDENTITY FULL;",
-                table_name
-            ))
+            .simple_query(&format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;"))
             .await?;
         Ok(())
     }
@@ -158,8 +155,7 @@ impl ReplicationConnection {
     async fn add_table_to_publication(&self, table_name: &str) -> Result<()> {
         self.postgres_client
             .simple_query(&format!(
-                "ALTER PUBLICATION moonlink_pub ADD TABLE {};",
-                table_name
+                "ALTER PUBLICATION moonlink_pub ADD TABLE {table_name};"
             ))
             .await?;
         Ok(())
@@ -213,8 +209,7 @@ impl ReplicationConnection {
 
     async fn remove_table_from_publication(&mut self, table_name: &str) -> Result<()> {
         self.attempt_drop_else_retry(&format!(
-            "ALTER PUBLICATION moonlink_pub DROP TABLE {};",
-            table_name
+            "ALTER PUBLICATION moonlink_pub DROP TABLE {table_name};"
         ))
         .await?;
         Ok(())

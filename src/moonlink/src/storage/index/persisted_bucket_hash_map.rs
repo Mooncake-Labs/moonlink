@@ -871,13 +871,13 @@ impl IndexBlock {
         block_on(reader.seek_bits(SeekFrom::Start(self.bucket_start_offset))).unwrap();
         for _i in 0..self.bucket_end_idx {
             num = block_on(reader.read::<u32>(metadata.bucket_bits)).unwrap();
-            write!(f, "{} ", num)?;
+            write!(f, "{num} ")?;
         }
         write!(f, "\n   Entries: ")?;
         block_on(reader.seek_bits(SeekFrom::Start(0))).unwrap();
         for _i in 0..num {
             let (hash, seg_idx, row_idx) = block_on(self.read_entry(&mut reader, metadata));
-            write!(f, "\n     {} {} {}", hash, seg_idx, row_idx)?;
+            write!(f, "\n     {hash} {seg_idx} {row_idx}")?;
         }
         write!(f, "\n}}")?;
         Ok(())
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(ret.len(), 200);
         for (value, pos) in ret.iter() {
             let RecordLocation::DiskFile(FileId(file_id), _) = pos else {
-                panic!("No record location found for {}", value);
+                panic!("No record location found for {value}");
             };
             // Check for the first file indice.
             // The second batch of data file ids starts with 1.

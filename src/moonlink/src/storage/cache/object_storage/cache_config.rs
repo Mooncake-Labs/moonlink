@@ -45,7 +45,7 @@ impl ObjectStorageCacheConfig {
             Ok(()) => {}
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    panic!("Failed to remove directory: {:?}", e);
+                    panic!("Failed to remove directory: {e:?}");
                 }
             }
         }

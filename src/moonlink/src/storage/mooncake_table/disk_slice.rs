@@ -457,7 +457,7 @@ mod tests {
                         "Referenced file path should exist in output files"
                     );
                 }
-                _ => panic!("Expected DiskFile location, found: {:?}", location),
+                _ => panic!("Expected DiskFile location, found: {location:?}"),
             }
         }
 

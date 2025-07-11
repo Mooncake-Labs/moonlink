@@ -404,7 +404,7 @@ impl TableHandler {
                                 Err(e) => {
                                     for (_, tx) in force_snapshot_lsns.iter() {
                                         for cur_tx in tx {
-                                            let err = Error::IcebergMessage(format!("Failed to create iceberg snapshot: {:?}", e));
+                                            let err = Error::IcebergMessage(format!("Failed to create iceberg snapshot: {e:?}"));
                                             if let Some(cur_tx) = cur_tx {
                                                 cur_tx.send(Err(err)).await.unwrap();
                                             }

@@ -235,7 +235,7 @@ async fn test_stream_delete_unflushed_non_streamed_row() {
     env.set_replication_lsn(initial_insert_lsn);
 
     // Verify: The row (PK=1) should be visible in a snapshot at initial_insert_lsn.
-    println!("1 Verifying snapshot at LSN {}", initial_insert_lsn);
+    println!("1 Verifying snapshot at LSN {initial_insert_lsn}");
     env.verify_snapshot(initial_insert_lsn, &[1]).await;
 
     // --- Phase 2: Action - Delete the non-streamed, unflushed row via a streaming transaction ---
@@ -268,7 +268,7 @@ async fn test_stream_delete_unflushed_non_streamed_row() {
     // --- Phase 3: Verification ---
     // Verify: The row (PK=1) should NOT be visible in a snapshot at stream_commit_lsn.
     // The effective LSN for the read will be min(target_lsn=20, table_commit_lsn=20, replication_cap=20) = 20.
-    println!("2 Verifying snapshot at LSN {}", stream_commit_lsn);
+    println!("2 Verifying snapshot at LSN {stream_commit_lsn}");
     env.verify_snapshot(stream_commit_lsn, &[]).await; // Expect empty slice (PK=1 deleted)
 
     env.shutdown().await;
@@ -678,8 +678,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
             .collect_deleted_rows();
         assert!(
             deleted_rows.is_empty(),
-            "Deletion vector for the second data file is {:?}",
-            deleted_rows
+            "Deletion vector for the second data file is {deleted_rows:?}"
         );
         check_deletion_vector_consistency(&cur_deletion_vector).await;
     }
@@ -879,8 +878,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
             .collect_deleted_rows();
         assert!(
             deleted_rows.is_empty(),
-            "Deletion vector for the second data file is {:?}",
-            deleted_rows
+            "Deletion vector for the second data file is {deleted_rows:?}"
         );
         check_deletion_vector_consistency(&cur_deletion_vector).await;
     }
@@ -1153,7 +1151,7 @@ async fn test_flush_lsn_consistency_across_snapshots() {
         // Add data and commit
         env.append_row(
             lsn as i32,
-            &format!("User{}", lsn),
+            &format!("User{lsn}"),
             25,
             /*lsn=*/ lsn - 5,
             None,

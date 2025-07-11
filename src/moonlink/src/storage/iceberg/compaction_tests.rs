@@ -103,8 +103,7 @@ fn parse_processed_deletion_log(
     match process_deletion_log.pos {
         RecordLocation::DiskFile(file_id, row_idx) => (file_id, row_idx),
         _ => panic!(
-            "Process deletion record is expected to be disk file, but receives {:?}",
-            process_deletion_log
+            "Process deletion record is expected to be disk file, but receives {process_deletion_log:?}"
         ),
     }
 }
@@ -180,8 +179,7 @@ async fn check_loaded_arrow_batches(data_file: &str, row_indices: Vec<usize>) {
     let actual_record_batch = load_arrow_batch(&file_io, data_file).await.unwrap();
     assert!(
         possible_arrow_batches.contains(&actual_record_batch),
-        "Actual record batch is {:?}",
-        actual_record_batch
+        "Actual record batch is {actual_record_batch:?}"
     );
 }
 
@@ -207,8 +205,7 @@ async fn check_loaded_file_index(file_index: FileIndex, row_indices: Vec<usize>)
         assert_eq!(
             record_locations.len(),
             1,
-            "Actual record locations are {:?}",
-            record_locations
+            "Actual record locations are {record_locations:?}"
         );
         match record_locations[0] {
             RecordLocation::DiskFile(_, row_idx) => result_row_indices.push(row_idx),
@@ -424,8 +421,7 @@ async fn test_compaction_1_1_2() {
     let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
     assert!(
         deleted_rows == vec![1] || deleted_rows == vec![3],
-        "Deleted rows are {:?}",
-        deleted_rows
+        "Deleted rows are {deleted_rows:?}"
     );
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;
@@ -511,8 +507,7 @@ async fn test_compaction_1_2_1() {
     let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
     assert!(
         deleted_rows == vec![0] || deleted_rows == vec![2],
-        "Deleted rows are {:?}",
-        deleted_rows
+        "Deleted rows are {deleted_rows:?}"
     );
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;
@@ -598,8 +593,7 @@ async fn test_compaction_1_2_2() {
     let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
     assert!(
         deleted_rows == vec![0, 1] || deleted_rows == vec![2, 3],
-        "Deleted rows are {:?}",
-        deleted_rows
+        "Deleted rows are {deleted_rows:?}"
     );
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;
@@ -699,8 +693,7 @@ async fn test_compaction_2_2_1() {
     let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
     assert!(
         deleted_rows == vec![0] || deleted_rows == vec![1],
-        "Deleted rows are {:?}",
-        deleted_rows
+        "Deleted rows are {deleted_rows:?}"
     );
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;
@@ -790,8 +783,7 @@ async fn test_compaction_2_2_2() {
     // Due to the non-deterministic nature of hashmap, the row indices in the compacted data file is also non-deterministic.
     assert!(
         deleted_rows == vec![0, 1] || deleted_rows == vec![0, 2],
-        "Deleted rows are {:?}",
-        deleted_rows
+        "Deleted rows are {deleted_rows:?}"
     );
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;

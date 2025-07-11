@@ -286,7 +286,7 @@ pub(crate) async fn get_data_file_from_local_parquet_file(
     builder.build().map_err(|e| {
         IcebergError::new(
             ErrorKind::Unexpected,
-            format!("Failed to get data file because {:?}", e),
+            format!("Failed to get data file because {e:?}"),
         )
     })
 }

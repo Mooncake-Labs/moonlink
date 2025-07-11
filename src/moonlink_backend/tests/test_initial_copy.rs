@@ -27,15 +27,13 @@ mod tests {
         initial_client
             .simple_query(&format!(
                 "DROP TABLE IF EXISTS {table_name};
-                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);",
-                table_name = table_name
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
             ))
             .await
             .unwrap();
         initial_client
             .simple_query(&format!(
-                "INSERT INTO {table_name} VALUES (1,'old_a'),(2,'old_b');",
-                table_name = table_name
+                "INSERT INTO {table_name} VALUES (1,'old_a'),(2,'old_b');"
             ))
             .await
             .unwrap();
@@ -58,10 +56,7 @@ mod tests {
 
         // While copy is in-flight, send an additional row that must be *buffered*
         initial_client
-            .simple_query(&format!(
-                "INSERT INTO {table_name} VALUES (3,'new_c');",
-                table_name = table_name
-            ))
+            .simple_query(&format!("INSERT INTO {table_name} VALUES (3,'new_c');"))
             .await
             .unwrap();
 
@@ -78,10 +73,7 @@ mod tests {
 
         // Manually drop the table we created
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
@@ -102,8 +94,7 @@ mod tests {
         initial_client
             .simple_query(&format!(
                 "DROP TABLE IF EXISTS {table_name};
-                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);",
-                table_name = table_name
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
             ))
             .await
             .unwrap();
@@ -114,8 +105,6 @@ mod tests {
                 "INSERT INTO {table_name}
                  SELECT gs, 'base'
                  FROM generate_series(1, {row_count}) AS gs;",
-                table_name = table_name,
-                row_count = row_count,
             ))
             .await
             .unwrap();
@@ -153,10 +142,7 @@ mod tests {
 
         // Manually drop the table we created
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
@@ -181,8 +167,6 @@ mod tests {
                  INSERT INTO {table_name}
                  SELECT gs, 'base'
                  FROM generate_series(1, {row_count}) AS gs;",
-                table_name = table_name,
-                row_count = row_count,
             ))
             .await
             .unwrap();
@@ -230,10 +214,7 @@ mod tests {
         assert_eq!(ids, expected);
 
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
@@ -258,8 +239,6 @@ mod tests {
                  INSERT INTO {table_name}
                  SELECT gs, 'base'
                  FROM generate_series(1, {row_count}) AS gs;",
-                table_name = table_name,
-                row_count = row_count,
             ))
             .await
             .unwrap();
@@ -294,10 +273,7 @@ mod tests {
             .unwrap();
         // Delete id 2
         initial_client
-            .simple_query(&format!(
-                "DELETE FROM {table_name} WHERE id = 2;",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DELETE FROM {table_name} WHERE id = 2;"))
             .await
             .unwrap();
         // Insert a brand new row
@@ -339,10 +315,7 @@ mod tests {
         assert_eq!(ids, expected);
 
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
@@ -361,8 +334,7 @@ mod tests {
         initial_client
             .simple_query(&format!(
                 "DROP TABLE IF EXISTS {table_name};
-                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);",
-                table_name = table_name
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
             ))
             .await
             .unwrap();
@@ -372,8 +344,7 @@ mod tests {
             .simple_query(&format!(
                 "INSERT INTO {table_name}
                  SELECT gs, 'base'
-                 FROM generate_series(1, {row_count}) AS gs;",
-                table_name = table_name
+                 FROM generate_series(1, {row_count}) AS gs;"
             ))
             .await
             .unwrap();
@@ -395,10 +366,7 @@ mod tests {
 
         // Delete one of the rows while copy is executing
         new_client
-            .simple_query(&format!(
-                "DELETE FROM {table_name} WHERE id = 1;",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DELETE FROM {table_name} WHERE id = 1;"))
             .await
             .unwrap();
 
@@ -427,10 +395,7 @@ mod tests {
         assert_eq!(ids, expected);
 
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
@@ -454,8 +419,6 @@ mod tests {
                  INSERT INTO {table_name}
                  SELECT gs, 'base'
                  FROM generate_series(1, {row_count}) AS gs;",
-                table_name = table_name,
-                row_count = row_count,
             ))
             .await
             .unwrap();
@@ -501,10 +464,7 @@ mod tests {
         assert_eq!(ids, expected);
 
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
@@ -535,9 +495,7 @@ mod tests {
                  CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);
                  INSERT INTO {table_name}
                  SELECT gs, 'base'
-                 FROM generate_series(1, {row_count}) AS gs;",
-                table_name = table_name,
-                row_count = row_count
+                 FROM generate_series(1, {row_count}) AS gs;"
             ))
             .await
             .unwrap();
@@ -588,8 +546,7 @@ mod tests {
         new_client
             .simple_query(&format!(
                 "DELETE FROM {table_name}
-                 WHERE id % 5::BIGINT = 0;",
-                table_name = table_name
+                 WHERE id % 5::BIGINT = 0;"
             ))
             .await
             .unwrap();
@@ -649,10 +606,7 @@ mod tests {
 
         // Clean-up.
         initial_client
-            .simple_query(&format!(
-                "DROP TABLE IF EXISTS {table_name};",
-                table_name = table_name
-            ))
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
         let _ = backend.drop_table(guard.database_id, TABLE_ID).await;

@@ -834,7 +834,7 @@ async fn test_large_number_of_data_files() {
         let index_block_file_id = target_data_files_to_compact + idx;
 
         // Prepare data files to compact.
-        let data_file_path = temp_dir.path().join(format!("test-{}.parquet", idx));
+        let data_file_path = temp_dir.path().join(format!("test-{idx}.parquet"));
         let data_file = create_data_file(
             data_file_file_id,
             data_file_path.to_str().unwrap().to_string(),

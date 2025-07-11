@@ -42,8 +42,8 @@ pub(crate) fn get_bucket_and_warehouse(
         })
         .collect();
     (
-        format!("{}{}", bucket_prefix, random_string),
-        format!("{}{}", warehouse_uri_prefix, random_string),
+        format!("{bucket_prefix}{random_string}"),
+        format!("{warehouse_uri_prefix}{random_string}"),
     )
 }
 

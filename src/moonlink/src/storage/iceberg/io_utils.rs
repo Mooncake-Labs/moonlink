@@ -38,10 +38,7 @@ pub(crate) async fn write_record_batch_to_iceberg(
         .map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::Unexpected,
-                format!(
-                    "Failed to copy from {} to {}: {:?}",
-                    local_filepath, remote_filepath, e
-                ),
+                format!("Failed to copy from {local_filepath} to {remote_filepath}: {e:?}"),
             )
         })?;
 
@@ -75,10 +72,7 @@ pub(crate) async fn upload_index_file(
         .map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::Unexpected,
-                format!(
-                    "Failed to copy from {} to {}: {:?}",
-                    local_index_filepath, remote_filepath, e
-                ),
+                format!("Failed to copy from {local_index_filepath} to {remote_filepath}: {e:?}"),
             )
         })?;
     Ok(remote_filepath)
@@ -115,7 +109,7 @@ pub(crate) fn create_file_io(config: &FileSystemConfig) -> IcebergResult<FileIO>
                 let cred_json = gcs_cred_utils::load_gcs_credentials(cred_path).map_err(|e| {
                     IcebergError::new(
                         iceberg::ErrorKind::Unexpected,
-                        format!("Failed to load GCS credential {:?}: {:?}", cred_path, e),
+                        format!("Failed to load GCS credential {cred_path:?}: {e:?}"),
                     )
                 })?;
                 file_io_builder =

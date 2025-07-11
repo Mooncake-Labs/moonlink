@@ -35,10 +35,7 @@ pub(crate) fn get_test_gcs_bucket_and_warehouse() -> (String /*bucket*/, String 
 
 async fn create_gcs_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/storage/v1/b?project={}",
-        GCS_TEST_ENDPOINT, GCS_TEST_PROJECT
-    );
+    let url = format!("{GCS_TEST_ENDPOINT}/storage/v1/b?project={GCS_TEST_PROJECT}");
     let res = client
         .post(&url)
         .json(&serde_json::json!({ "name": *bucket }))
@@ -59,7 +56,7 @@ async fn create_gcs_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
 
 /// Util function to delete all objects in a GCS bucket.
 async fn delete_gcs_bucket_objects(bucket: &str) -> IcebergResult<()> {
-    let filesystem_config = create_gcs_filesystem_config(&format!("gs://{}", bucket));
+    let filesystem_config = create_gcs_filesystem_config(&format!("gs://{bucket}"));
     let filesystem_accessor = FileSystemAccessor::new(filesystem_config);
     filesystem_accessor
         .remove_directory("/")
@@ -67,7 +64,7 @@ async fn delete_gcs_bucket_objects(bucket: &str) -> IcebergResult<()> {
         .map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::Unexpected,
-                format!("Failed to remove directory in bucket {}: {}", bucket, e),
+                format!("Failed to remove directory in bucket {bucket}: {e}"),
             )
         })?;
     Ok(())
@@ -79,14 +76,11 @@ async fn delete_gcs_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
 
     // Now delete the bucket.
     let client = reqwest::Client::new();
-    let url = format!("{}/storage/v1/b/{}", GCS_TEST_ENDPOINT, bucket);
+    let url = format!("{GCS_TEST_ENDPOINT}/storage/v1/b/{bucket}");
     let res = client.delete(&url).send().await.map_err(|e| {
         IcebergError::new(
             iceberg::ErrorKind::Unexpected,
-            format!(
-                "Failed to delete bucket {} in fake-gcs-server: {}",
-                bucket, e
-            ),
+            format!("Failed to delete bucket {bucket} in fake-gcs-server: {e}"),
         )
     })?;
 

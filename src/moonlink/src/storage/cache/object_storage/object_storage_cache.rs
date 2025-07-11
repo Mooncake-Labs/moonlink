@@ -136,10 +136,7 @@ impl ObjectStorageCacheInternal {
             if exists_in_cache {
                 assert!(self.evicted_entries.insert(file_id));
             } else if panic_if_non_existent {
-                panic!(
-                    "Requested file id {:?} should exist in object storage cache",
-                    file_id
-                );
+                panic!("Requested file id {file_id:?} should exist in object storage cache");
             }
         }
 
@@ -515,7 +512,7 @@ mod tests {
         mut object_storage_cache: ObjectStorageCache,
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> NonEvictableHandle {
-        let filename = format!("{}.parquet", file_index);
+        let filename = format!("{file_index}.parquet");
         let test_file = create_test_file(remote_file_directory.as_path(), &filename).await;
         let data_file = create_data_file(
             /*file_id=*/ file_index as u64,

@@ -95,7 +95,7 @@ impl ColumnArrayBuilder {
                 array_builder,
             ),
             DataType::List(inner) => ColumnArrayBuilder::new(inner.data_type(), capacity, true),
-            _ => panic!("data type: {:?}", data_type),
+            _ => panic!("data type: {data_type:?}"),
         }
     }
     /// Append a value to this builder
@@ -373,8 +373,7 @@ impl ColumnArrayBuilder {
         } else {
             cast(&array, logical_type).unwrap_or_else(|_| {
                 panic!(
-                    "Fail to cast to correct type in ColumnArrayBuilder::finish for {:?}",
-                    logical_type
+                    "Fail to cast to correct type in ColumnArrayBuilder::finish for {logical_type:?}"
                 )
             })
         }

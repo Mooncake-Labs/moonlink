@@ -1536,8 +1536,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     .unwrap();
     assert_eq!(
         loaded_arrow_batch, expected_arrow_batch,
-        "Expected arrow data is {:?}, actual data is {:?}",
-        expected_arrow_batch, loaded_arrow_batch
+        "Expected arrow data is {expected_arrow_batch:?}, actual data is {loaded_arrow_batch:?}"
     );
     let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
     assert!(
@@ -1601,8 +1600,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         .unwrap();
     assert_eq!(
         loaded_arrow_batch, expected_arrow_batch,
-        "Expected arrow data is {:?}, actual data is {:?}",
-        expected_arrow_batch, loaded_arrow_batch
+        "Expected arrow data is {expected_arrow_batch:?}, actual data is {loaded_arrow_batch:?}"
     );
 
     let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
@@ -1664,8 +1662,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         .unwrap();
     assert_eq!(
         loaded_arrow_batch, expected_arrow_batch,
-        "Expected arrow data is {:?}, actual data is {:?}",
-        expected_arrow_batch, loaded_arrow_batch
+        "Expected arrow data is {expected_arrow_batch:?}, actual data is {loaded_arrow_batch:?}"
     );
 
     let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
@@ -1741,8 +1738,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
     assert!(
         deleted_rows.is_empty(),
-        "The new appended data file should have no deletion vector aside, but actually it contains deletion vector {:?}",
-        deleted_rows
+        "The new appended data file should have no deletion vector aside, but actually it contains deletion vector {deleted_rows:?}"
     );
 }
 

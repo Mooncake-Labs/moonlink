@@ -255,15 +255,11 @@ async fn test_list_operation_impl(catalog: FileCatalog) -> IcebergResult<()> {
     assert_eq!(res.len(), 2,);
     assert!(
         res.contains(&child_namespace_1),
-        "Expects children namespace {:?}, but actually {:?}",
-        child_namespace_1,
-        res
+        "Expects children namespace {child_namespace_1:?}, but actually {res:?}"
     );
     assert!(
         res.contains(&child_namespace_2),
-        "Expects children namespace {:?}, but actually {:?}",
-        child_namespace_2,
-        res
+        "Expects children namespace {child_namespace_2:?}, but actually {res:?}"
     );
 
     // List tables under default namespace and check.
@@ -276,20 +272,15 @@ async fn test_list_operation_impl(catalog: FileCatalog) -> IcebergResult<()> {
     assert_eq!(
         res.len(),
         2,
-        "Expect two children tables, actually there're {:?}",
-        res
+        "Expect two children tables, actually there're {res:?}"
     );
     assert!(
         res.contains(&child_table_1),
-        "Expects children table {:?}, but actually {:?}",
-        child_table_1,
-        res
+        "Expects children table {child_table_1:?}, but actually {res:?}"
     );
     assert!(
         res.contains(&child_table_2),
-        "Expects children table {:?}, but actually {:?}",
-        child_table_2,
-        res
+        "Expects children table {child_table_2:?}, but actually {res:?}"
     );
 
     Ok(())

@@ -152,7 +152,7 @@ impl FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to read version hint file on load table: {}", e),
+                    format!("Failed to read version hint file on load table: {e}"),
                 )
             })?;
         let version = version_str
@@ -175,7 +175,7 @@ impl FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to read table metadata file on load table: {}", e),
+                    format!("Failed to read table metadata file on load table: {e}"),
                 )
             })?;
         let metadata = serde_json::from_slice::<TableMetadata>(&metadata_bytes)
@@ -283,8 +283,7 @@ impl Catalog for FileCatalog {
                 return Err(IcebergError::new(
                     iceberg::ErrorKind::NamespaceNotFound,
                     format!(
-                        "When list namespace, parent namespace {:?} doesn't exist.",
-                        namespace_ident
+                        "When list namespace, parent namespace {namespace_ident:?} doesn't exist."
                     ),
                 ));
             }
@@ -302,7 +301,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to list namespaces: {}", e),
+                    format!("Failed to list namespaces: {e}"),
                 )
             })?;
 
@@ -356,10 +355,7 @@ impl Catalog for FileCatalog {
             if !exists {
                 return Err(IcebergError::new(
                     iceberg::ErrorKind::NamespaceNotFound,
-                    format!(
-                        "Parent Namespace {:?} doesn't exists",
-                        parent_namespace_ident
-                    ),
+                    format!("Parent Namespace {parent_namespace_ident:?} doesn't exists"),
                 ));
             }
         }
@@ -372,7 +368,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to write metadata file at namespace creation: {}", e),
+                    format!("Failed to write metadata file at namespace creation: {e}"),
                 )
             })?;
 
@@ -387,7 +383,7 @@ impl Catalog for FileCatalog {
         }
         Err(IcebergError::new(
             iceberg::ErrorKind::NamespaceNotFound,
-            format!("Namespace {:?} does not exist", namespace_ident),
+            format!("Namespace {namespace_ident:?} does not exist"),
         ))
     }
 
@@ -401,10 +397,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!(
-                        "Failed to check namespace {:?} existence: {:?}",
-                        namespace_ident, e
-                    ),
+                    format!("Failed to check namespace {namespace_ident:?} existence: {e:?}"),
                 )
             })?;
         Ok(exists)
@@ -419,10 +412,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!(
-                        "Failed to drop namespace {:?} existence: {:?}",
-                        namespace_ident, e
-                    ),
+                    format!("Failed to drop namespace {namespace_ident:?} existence: {e:?}"),
                 )
             })?;
         Ok(())
@@ -438,10 +428,7 @@ impl Catalog for FileCatalog {
         if !exists {
             return Err(IcebergError::new(
                 iceberg::ErrorKind::NamespaceNotFound,
-                format!(
-                    "Namespace {:?} doesn't exist when list tables within.",
-                    namespace_ident
-                ),
+                format!("Namespace {namespace_ident:?} doesn't exist when list tables within."),
             ));
         }
 
@@ -453,7 +440,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to list tables: {}", e),
+                    format!("Failed to list tables: {e}"),
                 )
             })?;
 
@@ -499,7 +486,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to write version hint file at table creation: {}", e),
+                    format!("Failed to write version hint file at table creation: {e}"),
                 )
             })?;
 
@@ -519,7 +506,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to write metadata file at table creation: {}", e),
+                    format!("Failed to write metadata file at table creation: {e}"),
                 )
             })?;
 
@@ -555,7 +542,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to delete directory {}: {:?}", directory, e),
+                    format!("Failed to delete directory {directory}: {e:?}"),
                 )
             })?;
         Ok(())
@@ -576,8 +563,7 @@ impl Catalog for FileCatalog {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
                     format!(
-                        "Failed to check version hint file existence {:?}: {:?}",
-                        version_hint_filepath, e
+                        "Failed to check version hint file existence {version_hint_filepath:?}: {e:?}"
                     ),
                 )
             })?;
@@ -612,7 +598,7 @@ impl Catalog for FileCatalog {
             commit.identifier().namespace().to_url_string(),
             commit.identifier().name()
         );
-        let new_metadata_filepath = format!("{}/v{}.metadata.json", metadata_directory, version,);
+        let new_metadata_filepath = format!("{metadata_directory}/v{version}.metadata.json",);
         let metadata_json = serde_json::to_vec(&metadata)?;
         self.filesystem_accessor
             .write_object(&new_metadata_filepath, metadata_json)
@@ -620,7 +606,7 @@ impl Catalog for FileCatalog {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
-                    format!("Failed to write metadata file at table update: {}", e),
+                    format!("Failed to write metadata file at table update: {e}"),
                 )
             })?;
 
@@ -637,7 +623,7 @@ impl Catalog for FileCatalog {
         .await?;
 
         // Write version hint file.
-        let version_hint_path = format!("{}/version-hint.text", metadata_directory);
+        let version_hint_path = format!("{metadata_directory}/version-hint.text");
         self.filesystem_accessor
             .write_object(&version_hint_path, format!("{version}").as_bytes().to_vec())
             .await
@@ -645,8 +631,7 @@ impl Catalog for FileCatalog {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
                     format!(
-                        "Failed to write version hint file existencee {}: {:?}",
-                        version_hint_path, e
+                        "Failed to write version hint file existencee {version_hint_path}: {e:?}"
                     ),
                 )
             })?;

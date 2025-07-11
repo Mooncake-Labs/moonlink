@@ -12,7 +12,7 @@ impl TestEnvironment {
         let (postgres_client, connection) = connect(uri, NoTls).await.unwrap();
         let _connection_handle = tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Postgres connection error: {}", e);
+                eprintln!("Postgres connection error: {e}");
             }
         });
         postgres_client

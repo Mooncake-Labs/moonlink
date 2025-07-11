@@ -127,11 +127,11 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         let (uri, table_id) = self
             .table_info
             .get(mooncake_table_id)
-            .unwrap_or_else(|| panic!("table {} not found", mooncake_table_id));
+            .unwrap_or_else(|| panic!("table {mooncake_table_id} not found"));
         let connection = self
             .connections
             .get(uri)
-            .unwrap_or_else(|| panic!("connection for {} not found", uri));
+            .unwrap_or_else(|| panic!("connection for {uri} not found"));
         connection.get_table_reader(*table_id)
     }
 
@@ -139,11 +139,11 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         let (uri, table_id) = self
             .table_info
             .get(table_id)
-            .unwrap_or_else(|| panic!("table {} not found", table_id));
+            .unwrap_or_else(|| panic!("table {table_id} not found"));
         let connection = self
             .connections
             .get_mut(uri)
-            .unwrap_or_else(|| panic!("connection {} not found", uri));
+            .unwrap_or_else(|| panic!("connection {uri} not found"));
         connection.get_table_event_manager(*table_id)
     }
 

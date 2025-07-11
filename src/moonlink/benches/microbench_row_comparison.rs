@@ -46,13 +46,12 @@ fn create_test_batch() -> RecordBatch {
 
     for i in 0..1000 {
         ids.push(i as i64);
-        names.push(format!("User{}", i));
+        names.push(format!("User{i}"));
         ages.push(20 + (i % 50) as i64);
         scores.push(50.0 + (i % 50) as f64);
         is_active.push(i % 2 == 0);
         descriptions.push(format!(
-            "Description for user {} with some additional text to make it longer",
-            i
+            "Description for user {i} with some additional text to make it longer"
         ));
     }
 

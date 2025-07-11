@@ -23,7 +23,7 @@ async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
 
     // Copy from src to dst.
     let filesystem_accessor = FileSystemAccessor::new(gcs_filesystem_config);
-    let dst_filepath = format!("{}/dst", warehouse_uri);
+    let dst_filepath = format!("{warehouse_uri}/dst");
     filesystem_accessor
         .copy_from_local_to_remote(&src_filepath, &dst_filepath)
         .await
@@ -51,7 +51,7 @@ async fn test_copy_from_remote_to_local(#[case] file_size: usize) {
     let gcs_filesystem_config = create_gcs_filesystem_config(&warehouse_uri);
 
     // Prepare src file.
-    let src_filepath = format!("{}/src", warehouse_uri);
+    let src_filepath = format!("{warehouse_uri}/src");
     let expected_content =
         create_remote_file(&src_filepath, gcs_filesystem_config.clone(), file_size).await;
 

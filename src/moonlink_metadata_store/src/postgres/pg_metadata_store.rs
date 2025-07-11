@@ -94,8 +94,7 @@ impl MetadataStoreTrait for PgMetadataStore {
 
         if !utils::schema_exists(&pg_client.postgres_client, MOONLINK_SCHEMA).await? {
             return Err(Error::MetadataStoreFailedPrecondition(format!(
-                "Schema {} doesn't exist when store table metadata",
-                MOONLINK_SCHEMA
+                "Schema {MOONLINK_SCHEMA} doesn't exist when store table metadata"
             )));
         }
         if !utils::table_exists(

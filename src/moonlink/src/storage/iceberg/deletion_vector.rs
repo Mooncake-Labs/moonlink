@@ -58,7 +58,7 @@ impl DeletionVector {
             .map_err(|e| {
                 IcebergError::new(
                     iceberg::ErrorKind::DataInvalid,
-                    format!("Failed to deserialize DeletionVector: {}", e),
+                    format!("Failed to deserialize DeletionVector: {e}"),
                 )
             })
     }
@@ -67,13 +67,11 @@ impl DeletionVector {
     fn check_properties(properties: &HashMap<String, String>) {
         assert!(
             properties.contains_key(DELETION_VECTOR_CADINALITY),
-            "Deletion vector blob properties should contain {}",
-            DELETION_VECTOR_CADINALITY
+            "Deletion vector blob properties should contain {DELETION_VECTOR_CADINALITY}"
         );
         assert!(
             properties.contains_key(DELETION_VECTOR_REFERENCED_DATA_FILE),
-            "Deletion vector blob properties should contain {}",
-            DELETION_VECTOR_REFERENCED_DATA_FILE
+            "Deletion vector blob properties should contain {DELETION_VECTOR_REFERENCED_DATA_FILE}"
         );
     }
 

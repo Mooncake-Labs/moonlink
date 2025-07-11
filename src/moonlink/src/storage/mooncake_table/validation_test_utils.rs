@@ -136,9 +136,7 @@ pub(crate) async fn check_row_index_nonexistent(snapshot: &Snapshot, row: &Moonl
         .await;
     assert!(
         locs.is_empty(),
-        "Deletion record {:?} exists for row {:?}",
-        locs,
-        row
+        "Deletion record {locs:?} exists for row {row:?}"
     );
 }
 
@@ -158,13 +156,7 @@ pub(crate) async fn check_row_index_on_disk(
             lsn: 0, // LSN has nothing to do with deletion record search
         })
         .await;
-    assert_eq!(
-        locs.len(),
-        1,
-        "Actual location for row {:?} is {:?}",
-        row,
-        locs
-    );
+    assert_eq!(locs.len(), 1, "Actual location for row {row:?} is {locs:?}");
     match &locs[0] {
         RecordLocation::DiskFile(file_id, _) => {
             let filepath = snapshot
@@ -175,7 +167,7 @@ pub(crate) async fn check_row_index_on_disk(
                 .0
                 .file_path();
             let exists = filesystem_accessor.object_exists(filepath).await.unwrap();
-            assert!(exists, "Data file {:?} doesn't exist", filepath);
+            assert!(exists, "Data file {filepath:?} doesn't exist");
         }
         _ => {
             panic!("Unexpected location {:?}", locs[0]);

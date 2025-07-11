@@ -181,7 +181,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
     ///
     async fn list_direct_subdirectories(&self, folder: &str) -> Result<Vec<String>> {
         let sanitized_folder = self.sanitize_path(folder);
-        let prefix = format!("{}/", sanitized_folder);
+        let prefix = format!("{sanitized_folder}/");
         let mut dirs = Vec::new();
         let lister = self.get_operator().await?.list(&prefix).await?;
 
@@ -210,7 +210,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let path = if directory.ends_with('/') {
             directory.to_string()
         } else {
-            format!("{}/", directory)
+            format!("{directory}/")
         };
         let sanitized_path = self.sanitize_path(&path);
 
@@ -266,7 +266,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let meta = operator
             .stat(sanitized)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let file_size = meta.content_length();
         Ok(file_size)
     }
@@ -371,7 +371,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
             let reader = operator
                 .reader(&sanitized_src)
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let mut start_offset = 0;
             while start_offset < file_size {
@@ -380,7 +380,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
                 let buf = reader
                     .read(range)
                     .await
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                 tx.send(buf).await.unwrap();
                 start_offset = end;
             }

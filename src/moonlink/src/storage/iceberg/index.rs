@@ -212,7 +212,7 @@ impl FileIndexBlob {
         let blob_bytes = serde_json::to_vec(self).map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::DataInvalid,
-                format!("Failed to serialize file index into json: {:?}", e),
+                format!("Failed to serialize file index into json: {e:?}"),
             )
         })?;
         let mut properties = HashMap::new();
@@ -264,7 +264,7 @@ impl FileIndexBlob {
         serde_json::from_slice(blob.data()).map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::DataInvalid,
-                format!("Failed to deserialize blob from json string: {:?}", e),
+                format!("Failed to deserialize blob from json string: {e:?}"),
             )
         })
     }

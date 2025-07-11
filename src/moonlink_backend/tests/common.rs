@@ -298,9 +298,8 @@ async fn setup_backend(
     if let Some(table_name) = table_name {
         client
             .simple_query(&format!(
-                "DROP TABLE IF EXISTS {0};
-                 CREATE TABLE {0} (id BIGINT PRIMARY KEY, name TEXT);",
-                table_name
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
             ))
             .await
             .unwrap();

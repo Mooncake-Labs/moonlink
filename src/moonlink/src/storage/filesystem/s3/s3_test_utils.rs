@@ -47,14 +47,14 @@ pub(crate) fn get_test_s3_bucket_and_warehouse(
 /// Create test bucket in minio server.
 async fn create_test_s3_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
     let date = Utc::now().format("%a, %d %b %Y %T GMT").to_string();
-    let string_to_sign = format!("PUT\n\n\n{}\n/{}", date, bucket);
+    let string_to_sign = format!("PUT\n\n\n{date}\n/{bucket}");
 
     let mut mac = HmacSha1::new_from_slice(S3_TEST_SECRET_ACCESS_KEY.as_bytes()).unwrap();
     mac.update(string_to_sign.as_bytes());
     let signature = base64.encode(mac.finalize().into_bytes());
 
-    let auth_header = format!("AWS {}:{}", S3_TEST_ACCESS_KEY_ID, signature);
-    let url = format!("{}/{}", S3_TEST_ENDPOINT, bucket);
+    let auth_header = format!("AWS {S3_TEST_ACCESS_KEY_ID}:{signature}");
+    let url = format!("{S3_TEST_ENDPOINT}/{bucket}");
     let client = reqwest::Client::new();
     client
         .put(&url)
@@ -65,10 +65,7 @@ async fn create_test_s3_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
         .map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::Unexpected,
-                format!(
-                    "Failed to create bucket {} in minio with url {}: {}",
-                    bucket, url, e
-                ),
+                format!("Failed to create bucket {bucket} in minio with url {url}: {e}"),
             )
         })?;
     Ok(())
@@ -97,7 +94,7 @@ pub(crate) async fn create_test_s3_bucket(bucket: String) -> IcebergResult<()> {
 
 /// Util function to delete all objects in a S3 bucket.
 async fn delete_s3_bucket_objects(bucket: &str) -> IcebergResult<()> {
-    let filesystem_config = create_s3_filesystem_config(&format!("s3://{}", bucket));
+    let filesystem_config = create_s3_filesystem_config(&format!("s3://{bucket}"));
     let filesystem_accessor = FileSystemAccessor::new(filesystem_config);
     filesystem_accessor
         .remove_directory("/")
@@ -105,7 +102,7 @@ async fn delete_s3_bucket_objects(bucket: &str) -> IcebergResult<()> {
         .map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::Unexpected,
-                format!("Failed to remove directory in bucket {}: {}", bucket, e),
+                format!("Failed to remove directory in bucket {bucket}: {e}"),
             )
         })?;
     Ok(())
@@ -118,13 +115,13 @@ pub async fn delete_test_s3_bucket_impl(bucket: Arc<String>) -> IcebergResult<()
 
     // Now delete the bucket.
     let date = Utc::now().format("%a, %d %b %Y %T GMT").to_string();
-    let string_to_sign = format!("DELETE\n\n\n{}\n/{}", date, bucket);
+    let string_to_sign = format!("DELETE\n\n\n{date}\n/{bucket}");
 
     let mut mac = HmacSha1::new_from_slice(S3_TEST_SECRET_ACCESS_KEY.as_bytes()).unwrap();
     mac.update(string_to_sign.as_bytes());
     let signature = base64.encode(mac.finalize().into_bytes());
-    let auth_header = format!("AWS {}:{}", S3_TEST_ACCESS_KEY_ID, signature);
-    let url = format!("{}/{}", S3_TEST_ENDPOINT, bucket);
+    let auth_header = format!("AWS {S3_TEST_ACCESS_KEY_ID}:{signature}");
+    let url = format!("{S3_TEST_ENDPOINT}/{bucket}");
 
     let client = reqwest::Client::new();
     client
@@ -136,7 +133,7 @@ pub async fn delete_test_s3_bucket_impl(bucket: Arc<String>) -> IcebergResult<()
         .map_err(|e| {
             IcebergError::new(
                 iceberg::ErrorKind::Unexpected,
-                format!("Failed to delete bucket {} in minio {}", bucket, e),
+                format!("Failed to delete bucket {bucket} in minio {e}"),
             )
         })?;
 
