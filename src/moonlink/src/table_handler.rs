@@ -571,13 +571,16 @@ impl TableHandler {
             TableEvent::Append {
                 is_copied: true,
                 ..
-            } 
+            }
         );
         if table_handler_state.is_in_blocking_state() && !is_initial_copy_event {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
-        assert_eq!(is_initial_copy_event, table_handler_state.special_table_state == SpecialTableState::InitialCopy);
+        assert_eq!(
+            is_initial_copy_event,
+            table_handler_state.special_table_state == SpecialTableState::InitialCopy
+        );
 
         match event {
             TableEvent::Append {
