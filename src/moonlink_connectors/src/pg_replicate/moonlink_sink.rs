@@ -25,6 +25,7 @@ pub struct Sink {
     streaming_transactions_state: HashMap<u32, TransactionState>,
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
+    relation_cache: HashMap<SrcTableId, postgres_replication::protocol::RelationBody>,
 }
 
 impl Sink {
@@ -38,6 +39,7 @@ impl Sink {
                 touched_tables: HashSet::new(),
             },
             replication_state,
+            relation_cache: HashMap::new(),
         }
     }
 }
@@ -260,6 +262,38 @@ impl Sink {
                     relation_name = relation_body.name().unwrap_or("unknown"),
                     "Relation"
                 );
+                let src_table_id = relation_body.rel_id();
+                let cache_entry = self.relation_cache.get_mut(&src_table_id);
+                if let Some(cache_entry) = cache_entry {
+                    if cache_entry.columns().len() != relation_body.columns().len() {
+                        let event_sender = self.event_senders.get(&src_table_id);
+                        if let Some(event_sender) = event_sender {
+                            assert!(cache_entry.columns().len() > relation_body.columns().len());
+                            let columns_to_drop = cache_entry
+                                .columns()
+                                .iter()
+                                .filter_map(|old_column| {
+                                    if !relation_body.columns().iter().any(|new_column| {
+                                        old_column.name().unwrap().to_string()
+                                            == new_column.name().unwrap().to_string()
+                                    }) {
+                                        Some(old_column.name().unwrap().to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<String>>();
+                            if let Err(e) = event_sender
+                                .send(TableEvent::AlterTable {
+                                    column_to_drop: columns_to_drop,
+                                })
+                                .await
+                            {
+                                warn!(error = ?e, "failed to send alter table event");
+                            }
+                        }
+                    }
+                }
             }
             CdcEvent::Type(type_body) => {
                 debug!(

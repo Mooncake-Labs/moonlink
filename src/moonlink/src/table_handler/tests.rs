@@ -19,7 +19,7 @@ use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
 use crate::storage::PersistenceResult;
 use crate::storage::TableManager;
-use crate::table_handler::is_iceberg_snapshot_satisfy_force_snapshot;
+use crate::table_handler::TableHandlerState;
 use crate::ObjectStorageCache;
 
 use std::collections::HashMap;
@@ -1511,18 +1511,20 @@ async fn test_discard_duplicate_writes() {
 /// - replication lsn >= iceberg snapshot lsn, if assigned
 #[test]
 fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
+    let mut table_handler_state = TableHandlerState::new();
     // Case-1: iceberg snapshot already satisfies requested lsn.
     {
         let requested_lsn = 0;
         let iceberg_snapshot_lsn = Some(1);
         let replication_lsn = 1;
-        let table_consistent_view_lsn = Some(1);
-        assert!(is_iceberg_snapshot_satisfy_force_snapshot(
-            requested_lsn,
-            iceberg_snapshot_lsn,
-            replication_lsn,
-            table_consistent_view_lsn
-        ));
+        table_handler_state.table_consistent_view_lsn = Some(1);
+        assert!(
+            table_handler_state.is_iceberg_snapshot_satisfy_force_snapshot(
+                requested_lsn,
+                iceberg_snapshot_lsn,
+                replication_lsn,
+            )
+        );
     }
 
     // Case-2: iceberg snapshot doesn't satisfied requested, and table not consistent.
@@ -1530,13 +1532,14 @@ fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
         let requested_lsn = 2;
         let iceberg_snapshot_lsn = Some(1);
         let replication_lsn = 1;
-        let table_consistent_view_lsn = None;
-        assert!(!is_iceberg_snapshot_satisfy_force_snapshot(
-            requested_lsn,
-            iceberg_snapshot_lsn,
-            replication_lsn,
-            table_consistent_view_lsn
-        ));
+        table_handler_state.table_consistent_view_lsn = None;
+        assert!(
+            !table_handler_state.is_iceberg_snapshot_satisfy_force_snapshot(
+                requested_lsn,
+                iceberg_snapshot_lsn,
+                replication_lsn,
+            )
+        );
     }
 
     // Case-3: iceberg snapshot doesn't satisfied requested, table at consistent state, and replication satisifies requested.
@@ -1544,13 +1547,14 @@ fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
         let requested_lsn = 2;
         let iceberg_snapshot_lsn = Some(1);
         let replication_lsn = 2;
-        let table_consistent_view_lsn = Some(1);
-        assert!(is_iceberg_snapshot_satisfy_force_snapshot(
-            requested_lsn,
-            iceberg_snapshot_lsn,
-            replication_lsn,
-            table_consistent_view_lsn
-        ));
+        table_handler_state.table_consistent_view_lsn = Some(1);
+        assert!(
+            table_handler_state.is_iceberg_snapshot_satisfy_force_snapshot(
+                requested_lsn,
+                iceberg_snapshot_lsn,
+                replication_lsn,
+            )
+        );
     }
 
     // Case-4: iceberg snapshot doesn't satisfied requested, table at consistent state, and replication doesn't satisify requested.
@@ -1558,13 +1562,14 @@ fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
         let requested_lsn = 3;
         let iceberg_snapshot_lsn = Some(1);
         let replication_lsn = 2;
-        let table_consistent_view_lsn = Some(1);
-        assert!(!is_iceberg_snapshot_satisfy_force_snapshot(
-            requested_lsn,
-            iceberg_snapshot_lsn,
-            replication_lsn,
-            table_consistent_view_lsn
-        ));
+        table_handler_state.table_consistent_view_lsn = Some(1);
+        assert!(
+            !table_handler_state.is_iceberg_snapshot_satisfy_force_snapshot(
+                requested_lsn,
+                iceberg_snapshot_lsn,
+                replication_lsn,
+            )
+        );
     }
 
     // Case-5: iceberg snapshot doesn't satisfied requested, and iceberg / mooncake LSN doesn't match.
@@ -1572,12 +1577,13 @@ fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
         let requested_lsn = 2;
         let iceberg_snapshot_lsn = Some(1);
         let replication_lsn = 1;
-        let table_consistent_view_lsn = Some(2);
-        assert!(!is_iceberg_snapshot_satisfy_force_snapshot(
-            requested_lsn,
-            iceberg_snapshot_lsn,
-            replication_lsn,
-            table_consistent_view_lsn
-        ));
+        table_handler_state.table_consistent_view_lsn = Some(2);
+        assert!(
+            !table_handler_state.is_iceberg_snapshot_satisfy_force_snapshot(
+                requested_lsn,
+                iceberg_snapshot_lsn,
+                replication_lsn,
+            )
+        );
     }
 }

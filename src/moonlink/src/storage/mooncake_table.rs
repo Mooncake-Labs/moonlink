@@ -488,14 +488,6 @@ pub struct MooncakeTable {
 
     /// Table notifier, which is used to sent multiple types of event completion information.
     table_notify: Option<Sender<TableEvent>>,
-
-    /// Whether table is in initial copy mode. When true, incoming CDC events
-    /// will be buffered into a streaming transaction and committed once copy
-    /// finishes.
-    in_initial_copy: bool,
-
-    // Buffered events during initial copy.
-    pub(crate) initial_copy_buffered_events: Vec<TableEvent>,
 }
 
 impl MooncakeTable {
@@ -575,8 +567,6 @@ impl MooncakeTable {
             iceberg_table_manager: Some(table_manager),
             last_iceberg_snapshot_lsn,
             table_notify: None,
-            in_initial_copy: false,
-            initial_copy_buffered_events: Vec::new(),
         })
     }
 
@@ -950,39 +940,6 @@ impl MooncakeTable {
     #[cfg(test)]
     pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {
         self.table_snapshot_watch_sender.clone()
-    }
-
-    /// Enter initial copy mode. Subsequent CDC events will be
-    /// buffered in a dedicated streaming memslice until
-    /// `finish_initial_copy` is called.
-    /// In this case of a streaming transaction, we simply use the already provided `xact_id` to identify the transaction. In the case of non-streaming, we use `INITIAL_COPY_XACT_ID` to identify the transaction.
-    /// All commits are buffered and deferred until initial copy finishes.
-    pub fn start_initial_copy(&mut self) {
-        assert!(!self.in_initial_copy);
-        assert!(self.initial_copy_buffered_events.is_empty());
-        self.in_initial_copy = true;
-    }
-
-    /// Exit initial copy mode and commit all buffered changes.
-    pub async fn finish_initial_copy(&mut self) -> Result<()> {
-        assert!(self.in_initial_copy);
-        self.in_initial_copy = false;
-
-        // First: commit the initial copied rows that were added directly to streaming write buffer
-        // Use LSN 0 to ensure copied data comes before any CDC events
-        if self
-            .transaction_stream_states
-            .contains_key(&INITIAL_COPY_XACT_ID)
-        {
-            self.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0)
-                .await
-                .unwrap();
-        }
-        Ok(())
-    }
-
-    pub fn is_in_initial_copy(&self) -> bool {
-        self.in_initial_copy
     }
 
     /// Persist an iceberg snapshot.
