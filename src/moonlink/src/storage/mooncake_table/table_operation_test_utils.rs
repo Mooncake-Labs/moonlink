@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{channel, Receiver};
 
 #[cfg(test)]
 use crate::row::MoonlinkRow;
@@ -24,8 +24,16 @@ pub(crate) async fn flush_table_and_sync(
     _receiver: &mut Receiver<TableEvent>,
     lsn: u64,
 ) -> Result<()> {
-    // TODO(Nolan): Use receiver to block wait until table flush finishes.
-    table.flush(lsn).await
+    table.flush(lsn).unwrap();
+    let (notify_tx, mut notify_rx) = channel(100);
+    table.register_table_notify(notify_tx).await;
+    let flush_result = notify_rx.recv().await.unwrap();
+    if let TableEvent::FlushResult { flush_result, lsn } = flush_result {
+        table.set_flush_result(flush_result, lsn);
+    } else {
+        panic!("Expected FlushResult as first event, but got others.");
+    }
+    Ok(())
 }
 
 /// ===============================

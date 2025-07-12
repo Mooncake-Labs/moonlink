@@ -3,6 +3,7 @@ use tokio::sync::mpsc::Sender;
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::DataCompactionPayload;
 use crate::storage::mooncake_table::DataCompactionResult;
+use crate::storage::mooncake_table::DiskSliceWriter;
 use crate::storage::mooncake_table::FileIndiceMergePayload;
 use crate::storage::mooncake_table::FileIndiceMergeResult;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
@@ -91,6 +92,13 @@ pub enum TableEvent {
     DataCompaction {
         /// Result for data compaction.
         data_compaction_result: Result<DataCompactionResult>,
+    },
+    /// Non-streaming flush completes.
+    FlushResult {
+        /// Result for mem slice flush.
+        flush_result: Result<DiskSliceWriter>,
+        /// LSN of the flush.
+        lsn: u64,
     },
     /// Read request completion.
     ReadRequest {

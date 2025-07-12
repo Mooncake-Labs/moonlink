@@ -61,7 +61,7 @@ async fn prepare_test_deletion_vector_for_read(
     cache: ObjectStorageCache,
     use_batch_write: bool,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
-    let (mut table, mut table_notify) =
+    let (mut table, table_notify) =
         create_mooncake_table_and_notify_for_read(temp_dir, cache).await;
 
     // Append a new row.
@@ -74,16 +74,12 @@ async fn prepare_test_deletion_vector_for_read(
     if use_batch_write {
         table.append(row.clone()).unwrap();
         table.commit(/*lsn=*/ 1);
-        flush_table_and_sync(&mut table, &mut table_notify, /*lsn=*/ 1)
-            .await
-            .unwrap();
+        table.flush(/*lsn=*/ 1).unwrap();
 
         // Delete the row.
         table.delete(/*row=*/ row.clone(), /*lsn=*/ 2).await;
         table.commit(/*lsn=*/ 3);
-        flush_table_and_sync(&mut table, &mut table_notify, /*lsn=*/ 3)
-            .await
-            .unwrap();
+        table.flush(/*lsn=*/ 3).unwrap();
     } else {
         table
             .append_in_stream_batch(row.clone(), /*xact_id=*/ 0)
@@ -416,7 +412,7 @@ async fn prepare_test_disk_files_with_deletion_vector_for_compaction(
     temp_dir: &TempDir,
     cache: ObjectStorageCache,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
-    let (mut table, mut table_notify) =
+    let (mut table, table_notify) =
         create_mooncake_table_and_notify_for_compaction(temp_dir, cache).await;
 
     // Append, commit and flush the first row.
@@ -427,16 +423,12 @@ async fn prepare_test_disk_files_with_deletion_vector_for_compaction(
     ]);
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 1);
-    flush_table_and_sync(&mut table, &mut table_notify, /*lsn=*/ 1)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 1).unwrap();
 
     // Deletion, commit and flush the first row.
     table.delete(/*row=*/ row.clone(), /*lsn=*/ 2).await;
     table.commit(/*lsn=*/ 3);
-    flush_table_and_sync(&mut table, &mut table_notify, /*lsn=*/ 3)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 3).unwrap();
 
     // Append, commit and flush the second row.
     let row = MoonlinkRow::new(vec![
@@ -446,16 +438,12 @@ async fn prepare_test_disk_files_with_deletion_vector_for_compaction(
     ]);
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 4);
-    flush_table_and_sync(&mut table, &mut table_notify, /*lsn=*/ 4)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 4).unwrap();
 
     // Deletion, commit and flush the second row.
     table.delete(/*row=*/ row.clone(), /*lsn=*/ 5).await;
     table.commit(/*lsn=*/ 6);
-    flush_table_and_sync(&mut table, &mut table_notify, /*lsn=*/ 6)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 6).unwrap();
 
     (table, table_notify)
 }

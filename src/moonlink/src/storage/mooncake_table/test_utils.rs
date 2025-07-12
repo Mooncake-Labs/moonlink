@@ -147,7 +147,7 @@ pub async fn append_commit_flush_create_mooncake_snapshot_for_test(
 ) -> Result<()> {
     append_rows(table, rows)?;
     table.commit(lsn);
-    flush_table_and_sync(table, completion_rx, lsn).await?;
+    table.flush(lsn)?;
     create_mooncake_snapshot_for_test(table, completion_rx).await;
     Ok(())
 }

@@ -196,7 +196,7 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
     table.append(row2.clone())?;
     table.append(row3.clone())?;
     table.commit(/*lsn=*/ 100);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 100).await?;
+    table.flush(/*lsn=*/ 100)?;
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
     {
         let mut table_snapshot = table.snapshot.write().await;
@@ -222,7 +222,7 @@ async fn test_update_rows(#[case] identity: IdentityProp) -> Result<()> {
     table.append(updated_row2.clone())?;
     table.append(row4.clone())?;
     table.commit(/*lsn=*/ 300);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 300).await?;
+    table.flush(/*lsn=*/ 300)?;
 
     // Check update result.
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
@@ -283,17 +283,13 @@ async fn test_force_snapshot_without_new_commits() {
     // Perform and check initial append operation.
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 100)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 100).unwrap();
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
 
     // Now there're no new commits, create a force snapshot again.
     //
     // Force snapshot is possible to flush with latest commit LSN if table at clean state.
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 100)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 100).unwrap();
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
     {
         let mut table_snapshot = table.snapshot.write().await;
@@ -377,7 +373,7 @@ async fn test_full_row_with_duplication_and_identical() -> Result<()> {
     }
 
     // Flush the table
-    flush_table_and_sync(&mut table, &mut event_completion_rx, 3).await?;
+    table.flush(3)?;
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
 
     // Delete one duplicate during flush (row3)
@@ -443,9 +439,7 @@ async fn test_duplicate_deletion() -> Result<()> {
     let old_row = test_row(1, "John", 30);
     table.append(old_row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 100)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 100).unwrap();
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
 
     // Update operation.
@@ -453,9 +447,7 @@ async fn test_duplicate_deletion() -> Result<()> {
     table.delete(/*row=*/ old_row.clone(), /*lsn=*/ 100).await;
     table.append(new_row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 200)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 200).unwrap();
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
 
     {
@@ -493,9 +485,7 @@ async fn test_table_recovery() {
     let row = test_row(1, "John", 30);
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 100)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 100).unwrap();
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
 
     // Recovery from iceberg snapshot and check mooncake table recovery.
@@ -603,9 +593,7 @@ async fn test_snapshot_store_failure() {
     let row = test_row(1, "A", 20);
     table.append(row).unwrap();
     table.commit(/*lsn=*/ 100);
-    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 100)
-        .await
-        .unwrap();
+    table.flush(/*lsn=*/ 100).unwrap();
 
     let (_, iceberg_snapshot_payload, _, _, evicted_data_files_cache) =
         create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;

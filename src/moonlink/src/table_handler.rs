@@ -319,7 +319,7 @@ impl TableHandler {
                             // Check whether a flush and force snapshot is needed.
                             if !force_snapshot_lsns.is_empty() {
                                 if let Some(commit_lsn) = table_consistent_view_lsn {
-                                    table.flush(commit_lsn).await.unwrap();
+                                    table.flush(commit_lsn).unwrap();
                                     Self::reset_iceberg_state_at_mooncake_snapshot(&mut iceberg_snapshot_result_consumed, &mut iceberg_snapshot_ongoing);
                                     assert!(table.create_snapshot(SnapshotOption {
                                         force_create: true,
@@ -434,6 +434,9 @@ impl TableHandler {
                                 }
                             }
                             maintainance_ongoing = false;
+                        }
+                        TableEvent::FlushResult { flush_result, lsn} => {
+                            table.set_flush_result(flush_result, lsn);
                         }
                         TableEvent::ReadRequest { cache_handles } => {
                             table.set_read_request_res(cache_handles);
@@ -570,7 +573,7 @@ impl TableHandler {
                         }
                         table.commit(lsn);
                         if table.should_flush() || force_snapshot {
-                            if let Err(e) = table.flush(lsn).await {
+                            if let Err(e) = table.flush(lsn) {
                                 error!(error = %e, "flush failed in commit");
                             }
                         }
@@ -604,7 +607,7 @@ impl TableHandler {
                         .push(TableEvent::Flush { lsn });
                     return;
                 }
-                if let Err(e) = table.flush(lsn).await {
+                if let Err(e) = table.flush(lsn) {
                     error!(error = %e, "explicit flush failed");
                 }
             }
