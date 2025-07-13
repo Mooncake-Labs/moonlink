@@ -63,7 +63,7 @@ pub enum TableEvent {
     /// Drop table.
     DropTable,
     /// Alter table,
-    AlterTable { column_to_drop: Vec<String> },
+    AlterTable { columns_to_drop: Vec<String> },
     /// Start initial table copy.
     StartInitialCopy,
     /// Finish initial table copy and merge buffered changes.

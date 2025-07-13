@@ -32,14 +32,14 @@ pub struct EventSyncSender {
 }
 
 #[derive(PartialEq)]
-pub enum SpecialTableState {
+enum SpecialTableState {
     Normal,
     InitialCopy,
     _AlterTable,
     DropTable,
 }
 
-pub struct TableHandlerState {
+struct TableHandlerState {
     // cached table states
     //
     // Initial persisted LSN.
@@ -78,7 +78,7 @@ pub struct TableHandlerState {
 }
 
 impl TableHandlerState {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             iceberg_snapshot_result_consumed: true,
             iceberg_snapshot_ongoing: false,
@@ -93,7 +93,7 @@ impl TableHandlerState {
         }
     }
 
-    pub fn update_table_lsns(&mut self, event: &TableEvent) {
+    fn update_table_lsns(&mut self, event: &TableEvent) {
         if event.is_ingest_event() {
             match event {
                 TableEvent::Commit { lsn, .. } => {
@@ -111,11 +111,11 @@ impl TableHandlerState {
     // The completion of an iceberg snapshot is **NOT** marked as the finish of snapshot thread, but the handling of its results.
     // We can only create a new iceberg snapshot when (1) there's no ongoing iceberg snapshot; and (2) previous snapshot results have been acknowledged.
     //
-    pub fn can_initiate_iceberg_snapshot(&self) -> bool {
+    fn can_initiate_iceberg_snapshot(&self) -> bool {
         self.iceberg_snapshot_result_consumed && !self.iceberg_snapshot_ongoing
     }
 
-    pub fn reset_iceberg_state_at_mooncake_snapshot(&mut self) {
+    fn reset_iceberg_state_at_mooncake_snapshot(&mut self) {
         // Validate iceberg snapshot state before mooncake snapshot creation.
         //
         // Assertion on impossible state.
@@ -128,7 +128,7 @@ impl TableHandlerState {
         }
     }
 
-    pub fn force_snapshot_requested(&self, cur_lsn: u64) -> bool {
+    fn force_snapshot_requested(&self, cur_lsn: u64) -> bool {
         !self.pending_force_snapshot_lsns.is_empty()
             && cur_lsn
                 >= *self
@@ -141,7 +141,7 @@ impl TableHandlerState {
             && !self.mooncake_snapshot_ongoing
     }
 
-    pub fn should_discard_event(&self, event: &TableEvent) -> bool {
+    fn should_discard_event(&self, event: &TableEvent) -> bool {
         if self.initial_persistence_lsn.is_none() {
             return false;
         }
@@ -153,7 +153,7 @@ impl TableHandlerState {
         }
     }
 
-    pub fn is_in_blocking_state(&self) -> bool {
+    fn is_in_blocking_state(&self) -> bool {
         self.special_table_state != SpecialTableState::Normal
     }
 
@@ -162,15 +162,15 @@ impl TableHandlerState {
     /// `finish_initial_copy` is called.
     /// In this case of a streaming transaction, we simply use the already provided `xact_id` to identify the transaction. In the case of non-streaming, we use `INITIAL_COPY_XACT_ID` to identify the transaction.
     /// All commits are buffered and deferred until initial copy finishes.
-    pub fn start_initial_copy(&mut self) {
+    fn start_initial_copy(&mut self) {
         self.special_table_state = SpecialTableState::InitialCopy;
     }
 
-    pub fn finish_initial_copy(&mut self) {
+    fn finish_initial_copy(&mut self) {
         self.special_table_state = SpecialTableState::Normal;
     }
 
-    pub fn start_drop_table(&mut self) {
+    fn mark_drop_table(&mut self) {
         self.special_table_state = SpecialTableState::DropTable;
     }
 }
@@ -364,10 +364,10 @@ impl TableHandler {
                             }
 
                             // Otherwise, leave a drop marker to clean up states later.
-                            table_handler_state.start_drop_table();
+                            table_handler_state.mark_drop_table();
                         }
-                        TableEvent::AlterTable { column_to_drop } => {
-                            debug!("altering table, dropping columns: {:?}", column_to_drop);
+                        TableEvent::AlterTable { columns_to_drop } => {
+                            debug!("altering table, dropping columns: {:?}", columns_to_drop);
                         }
                         TableEvent::StartInitialCopy => {
                             debug!("starting initial copy");

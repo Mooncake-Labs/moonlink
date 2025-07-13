@@ -59,50 +59,6 @@ impl Sink {
         self.commit_lsn_txs.remove(&src_table_id).unwrap();
     }
 
-    pub async fn start_table_copy(
-        &mut self,
-        table_id: SrcTableId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let sender = self
-            .event_senders
-            .get(&table_id)
-            .cloned()
-            .ok_or_else(|| format!("No event sender found for table_id: {:?}", table_id))?;
-
-        sender.send(TableEvent::StartInitialCopy).await.map_err(
-            |e| -> Box<dyn std::error::Error + Send + Sync> {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            },
-        )?;
-
-        Ok(())
-    }
-
-    pub async fn finish_table_copy(
-        &mut self,
-        table_id: SrcTableId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let sender = self
-            .event_senders
-            .get(&table_id)
-            .cloned()
-            .ok_or_else(|| format!("No event sender found for table_id: {:?}", table_id))?;
-
-        sender.send(TableEvent::FinishInitialCopy).await.map_err(
-            |e| -> Box<dyn std::error::Error + Send + Sync> {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            },
-        )?;
-
-        Ok(())
-    }
-
     /// Get final lsn for the current transaction.
     fn get_final_lsn(&mut self, table_id: SrcTableId, xact_id: Option<u32>) -> u64 {
         if let Some(xid) = xact_id {
@@ -284,9 +240,7 @@ impl Sink {
                                 })
                                 .collect::<Vec<String>>();
                             if let Err(e) = event_sender
-                                .send(TableEvent::AlterTable {
-                                    column_to_drop: columns_to_drop,
-                                })
+                                .send(TableEvent::AlterTable { columns_to_drop })
                                 .await
                             {
                                 warn!(error = ?e, "failed to send alter table event");

@@ -20,26 +20,23 @@ pub struct CopyProgress {
 
 /// Start the copy for `table_id` using `event_sender`
 /// to deliver the copied rows.
-pub fn start_initial_copy(
+pub async fn initial_table_copy(
     table_id: SrcTableId,
     schema: TableSchema,
     source: PostgresSource,
-    event_sender: Sender<TableEvent>,
-) -> Option<JoinHandle<Result<CopyProgress>>> {
-    let handle = tokio::spawn(async move {
-        let stream = source
-            .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
-            .await?;
-        copy_table_stream_impl(schema, stream, event_sender).await
-    });
-    Some(handle)
+    event_sender: &Sender<TableEvent>,
+) -> Result<CopyProgress> {
+    let stream = source
+        .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
+        .await?;
+    copy_table_stream_impl(schema, stream, event_sender).await
 }
 
 /// Reads rows from `stream` and sends them to the provided `event_sender`.
 async fn copy_table_stream_impl(
     table_schema: TableSchema,
     mut stream: TableCopyStream,
-    event_sender: Sender<TableEvent>,
+    event_sender: &Sender<TableEvent>,
 ) -> Result<CopyProgress> {
     // `TableEvent::Append` events. These events must be written to the
     // Mooncake table via `event_sender`.
