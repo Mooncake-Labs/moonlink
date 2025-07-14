@@ -1,3 +1,4 @@
+use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::DataCompactionResult;
 use crate::storage::mooncake_table::MaintainanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
@@ -42,7 +43,9 @@ pub struct EventSyncSender {
 enum SpecialTableState {
     Normal,
     InitialCopy,
-    _AlterTable,
+    AlterTable {
+        alter_table_request: Option<AlterTableRequest>,
+    },
     DropTable,
 }
 
@@ -248,6 +251,19 @@ impl TableHandlerState {
 
     fn mark_drop_table(&mut self) {
         self.special_table_state = SpecialTableState::DropTable;
+    }
+
+    fn start_alter_table(&mut self, alter_table_request: AlterTableRequest) {
+        // Alter table will block any events, so table must be at a consistent view.
+        assert!(self.table_consistent_view_lsn.is_some());
+        assert!(self.special_table_state == SpecialTableState::Normal);
+        self.pending_force_snapshot_lsns
+            .entry(self.table_consistent_view_lsn.unwrap())
+            .or_default()
+            .push(None);
+        self.special_table_state = SpecialTableState::AlterTable {
+            alter_table_request: Some(alter_table_request),
+        };
     }
 }
 
@@ -456,6 +472,11 @@ impl TableHandler {
                         }
                         TableEvent::AlterTable { columns_to_drop } => {
                             debug!("altering table, dropping columns: {:?}", columns_to_drop);
+                            let alter_table_request = AlterTableRequest {
+                                new_columns: vec![],
+                                dropped_columns: columns_to_drop,
+                            };
+                            table_handler_state.start_alter_table(alter_table_request);
                         }
                         TableEvent::StartInitialCopy => {
                             debug!("starting initial copy");
@@ -475,12 +496,7 @@ impl TableHandler {
                             }));
                             table_handler_state.mooncake_snapshot_ongoing = true;
                             table_handler_state.finish_initial_copy();
-
-                            // Apply the buffered events.
-                            let buffered_events = table_handler_state.initial_copy_buffered_events.drain(..).collect::<Vec<_>>();
-                            for event in buffered_events {
-                                Self::process_cdc_table_event(event, &mut table, &mut table_handler_state).await;
-                            }
+                            Self::process_blocked_events(&mut table, &mut table_handler_state).await;
                         }
                         // ==============================
                         // Table internal events
@@ -523,6 +539,7 @@ impl TableHandler {
 
                             // Mark mooncake snapshot as completed.
                             table.mark_mooncake_snapshot_completed();
+                            table_handler_state.mooncake_snapshot_ongoing = false;
 
                             // Drop table if requested, and table at a clean state.
                             if table_handler_state.special_table_state == SpecialTableState::DropTable && !table_handler_state.iceberg_snapshot_ongoing {
@@ -538,6 +555,15 @@ impl TableHandler {
                             if table_handler_state.can_initiate_iceberg_snapshot(lsn, min_pending_flush_lsn) {
                                 if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
                                     table_handler_state.iceberg_snapshot_ongoing = true;
+                                    if let SpecialTableState::AlterTable { ref mut alter_table_request } = table_handler_state.special_table_state {
+                                        if let Some(alter_table_request) = alter_table_request.take() {
+                                            table.alter_table(alter_table_request);
+                                        }
+                                        else {
+                                            error!("alter table request is not set");
+                                        }
+                                    }
+                                    // TODO(hjiang): perform alter table on iceberg table
                                     table.persist_iceberg_snapshot(iceberg_snapshot_payload);
                                 }
                             }
@@ -561,8 +587,6 @@ impl TableHandler {
                                     table.perform_index_merge(file_indice_merge_payload);
                                 }
                             }
-
-                            table_handler_state.mooncake_snapshot_ongoing = false;
                         }
                         TableEvent::IcebergSnapshot { iceberg_snapshot_result } => {
                             table_handler_state.iceberg_snapshot_ongoing = false;
@@ -576,9 +600,6 @@ impl TableHandler {
                                     // Notify all waiters with LSN satisfied.
                                     let replication_lsn = *replication_lsn_rx.borrow();
                                     table_handler_state.update_force_iceberg_snapshot_requests(iceberg_flush_lsn, replication_lsn).await;
-
-                                    // mark alter table as completed if needed
-
                                 }
                                 Err(e) => {
                                     for (_, tx) in table_handler_state.pending_force_snapshot_lsns.iter() {
@@ -765,6 +786,19 @@ impl TableHandler {
             _ => {
                 unreachable!("unexpected event: {:?}", event)
             }
+        }
+    }
+
+    async fn process_blocked_events(
+        table: &mut MooncakeTable,
+        table_handler_state: &mut TableHandlerState,
+    ) {
+        let buffered_events = table_handler_state
+            .initial_copy_buffered_events
+            .drain(..)
+            .collect::<Vec<_>>();
+        for event in buffered_events {
+            Self::process_cdc_table_event(event, table, table_handler_state).await;
         }
     }
 }

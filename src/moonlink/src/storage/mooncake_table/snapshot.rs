@@ -137,6 +137,15 @@ impl SnapshotTableState {
         })
     }
 
+    pub(crate) fn reset_for_alter(&mut self, new_metadata: Arc<MooncakeTableMetadata>) {
+        self.batches = BTreeMap::new();
+        self.batches
+            .insert(0, InMemoryBatch::new(new_metadata.config.batch_size));
+        self.rows = None;
+        self.last_commit = RecordLocation::MemoryBatch(0, 0);
+        self.current_snapshot.metadata = new_metadata.clone();
+        self.mooncake_table_metadata = new_metadata;
+    }
     /// Util function to get table unique file id.
     fn get_table_unique_file_id(&self, file_id: FileId) -> TableUniqueFileId {
         TableUniqueFileId {

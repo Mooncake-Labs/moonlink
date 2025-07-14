@@ -621,3 +621,73 @@ async fn test_snapshot_store_failure() {
     .await;
     assert!(iceberg_snapshot_result.is_err());
 }
+
+#[tokio::test]
+async fn test_alter_table_with_operations() {
+    let context = TestContext::new("alter_table");
+    let mut table = test_table(&context, "alter_table", IdentityProp::Keys(vec![0])).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Insert a row before altering the table
+    let row_before = test_row(1, "A", 20);
+    table.append(row_before.clone()).unwrap();
+    table.commit(1);
+
+    // Check that the schema contains the "age" field before alteration
+    let fields_before: Vec<_> = table
+        .metadata
+        .schema
+        .fields
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert!(fields_before.contains(&"age".to_string()));
+
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    // Alter the table (removes the "age" field)
+    alter_table(&mut table).await;
+
+    // Check that the schema no longer contains the "age" field
+    let fields_after: Vec<_> = table
+        .metadata
+        .schema
+        .fields
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert!(!fields_after.contains(&"age".to_string()));
+    // Ensure other fields are still present
+    assert!(fields_after.contains(&"id".to_string()));
+    assert!(fields_after.contains(&"name".to_string()));
+
+    let row_after = MoonlinkRow::new(vec![
+        crate::row::RowValue::Int32(2),
+        crate::row::RowValue::ByteArray("B".as_bytes().to_vec()),
+    ]);
+    table.append(row_after.clone()).unwrap();
+    table.commit(2);
+
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Verify that the table now contains both the old and new rows
+    let mut table_snapshot = table.snapshot.write().await;
+    let SnapshotReadOutput {
+        data_file_paths,
+        puffin_cache_handles,
+        position_deletes,
+        deletion_vectors,
+        ..
+    } = table_snapshot.request_read().await.unwrap();
+    verify_files_and_deletions(
+        get_data_files_for_read(&data_file_paths).as_slice(),
+        get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+        position_deletes,
+        deletion_vectors,
+        &[1, 2],
+    )
+    .await;
+}

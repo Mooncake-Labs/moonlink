@@ -180,7 +180,36 @@ pub struct TableMetadata {
     /// function to get lookup key from row
     pub(crate) identity: IdentityProp,
 }
+#[derive(Debug, PartialEq)]
+pub struct AlterTableRequest {
+    pub(crate) new_columns: Vec<arrow_schema::FieldRef>,
+    pub(crate) dropped_columns: Vec<String>,
+}
 
+impl TableMetadata {
+    pub fn new_for_alter_table(
+        previous_metadata: Arc<TableMetadata>,
+        alter_table_request: AlterTableRequest,
+    ) -> Self {
+        let mut new_columns = vec![];
+        for field in previous_metadata.schema.fields.iter() {
+            if !alter_table_request.dropped_columns.contains(field.name()) {
+                new_columns.push(field.clone());
+            }
+        }
+        new_columns.extend(alter_table_request.new_columns);
+        let new_schema =
+            Schema::new_with_metadata(new_columns, previous_metadata.schema.metadata.clone());
+        Self {
+            name: previous_metadata.name.clone(),
+            table_id: previous_metadata.table_id,
+            schema: Arc::new(new_schema),
+            config: previous_metadata.config.clone(),
+            path: previous_metadata.path.clone(),
+            identity: previous_metadata.identity.clone(),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub(crate) struct DiskFileEntry {
     /// Cache handle. If assigned, it's pinned in object storage cache.
@@ -583,6 +612,31 @@ impl MooncakeTable {
             table_notify: None,
             pending_flush_lsns: BTreeSet::new(),
         })
+    }
+
+    pub(crate) fn alter_table(&mut self, alter_table_request: AlterTableRequest) {
+        assert!(
+            self.mem_slice.get_num_rows() == 0,
+            "Cannot alter table with non-empty mem slice"
+        );
+
+        let new_metadata = Arc::new(TableMetadata::new_for_alter_table(
+            self.metadata.clone(),
+            alter_table_request,
+        ));
+
+        let mut guard = self.snapshot.try_write().unwrap();
+        guard.reset_for_alter(new_metadata.clone());
+        assert!(
+            self.metadata.schema.fields.len() != new_metadata.schema.fields.len(),
+            "Only support alter table with add/drop fields"
+        );
+        self.mem_slice = MemSlice::new(
+            new_metadata.schema.clone(),
+            new_metadata.config.batch_size,
+            new_metadata.identity.clone(),
+        );
+        self.metadata = new_metadata;
     }
 
     /// Register event completion notifier.
