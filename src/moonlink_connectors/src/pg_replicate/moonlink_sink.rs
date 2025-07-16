@@ -2,9 +2,10 @@ use crate::pg_replicate::util::PostgresTableRow;
 use crate::pg_replicate::{
     conversions::{cdc_event::CdcEvent, table_row::TableRow},
     replication_state::ReplicationState,
-    table::SrcTableId,
+    table::{SrcTableId, TableSchema},
 };
 use moonlink::TableEvent;
+use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -19,13 +20,18 @@ struct TransactionState {
     touched_tables: HashSet<SrcTableId>,
 }
 
+struct ColumnInfo {
+    name: String,
+    typ: u32,
+    modifier: i32,
+}
 pub struct Sink {
     event_senders: HashMap<SrcTableId, Sender<TableEvent>>,
     commit_lsn_txs: HashMap<SrcTableId, watch::Sender<u64>>,
     streaming_transactions_state: HashMap<u32, TransactionState>,
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
-    relation_cache: HashMap<SrcTableId, postgres_replication::protocol::RelationBody>,
+    relation_cache: HashMap<SrcTableId, Vec<ColumnInfo>>,
 }
 
 impl Sink {
@@ -50,9 +56,20 @@ impl Sink {
         src_table_id: SrcTableId,
         event_sender: Sender<TableEvent>,
         commit_lsn_tx: watch::Sender<u64>,
+        table_schema: &TableSchema,
     ) {
         self.event_senders.insert(src_table_id, event_sender);
         self.commit_lsn_txs.insert(src_table_id, commit_lsn_tx);
+        let columns = table_schema
+            .column_schemas
+            .iter()
+            .map(|c| ColumnInfo {
+                name: c.name.clone(),
+                typ: c.typ.oid(),
+                modifier: c.modifier,
+            })
+            .collect();
+        self.relation_cache.insert(src_table_id, columns);
     }
     pub fn drop_table(&mut self, src_table_id: SrcTableId) {
         self.event_senders.remove(&src_table_id).unwrap();
@@ -221,19 +238,17 @@ impl Sink {
                 let src_table_id = relation_body.rel_id();
                 let cache_entry = self.relation_cache.get_mut(&src_table_id);
                 if let Some(cache_entry) = cache_entry {
-                    if cache_entry.columns().len() != relation_body.columns().len() {
+                    if cache_entry.len() != relation_body.columns().len() {
                         let event_sender = self.event_senders.get(&src_table_id);
                         if let Some(event_sender) = event_sender {
-                            assert!(cache_entry.columns().len() > relation_body.columns().len());
+                            assert!(cache_entry.len() > relation_body.columns().len());
                             let columns_to_drop = cache_entry
-                                .columns()
                                 .iter()
                                 .filter_map(|old_column| {
                                     if !relation_body.columns().iter().any(|new_column| {
-                                        old_column.name().unwrap().to_string()
-                                            == new_column.name().unwrap().to_string()
+                                        old_column.name == new_column.name().unwrap().to_string()
                                     }) {
-                                        Some(old_column.name().unwrap().to_string())
+                                        Some(old_column.name.clone())
                                     } else {
                                         None
                                     }
@@ -245,6 +260,16 @@ impl Sink {
                             {
                                 warn!(error = ?e, "failed to send alter table event");
                             }
+                            let cache_entry = relation_body
+                                .columns()
+                                .iter()
+                                .map(|c| ColumnInfo {
+                                    name: c.name().unwrap().to_string(),
+                                    typ: c.type_id() as u32,
+                                    modifier: c.type_modifier(),
+                                })
+                                .collect();
+                            self.relation_cache.insert(src_table_id, cache_entry);
                         }
                     }
                 }

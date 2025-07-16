@@ -518,7 +518,7 @@ async fn run_event_loop(
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
                 Command::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx } => {
-                    sink.add_table(src_table_id, event_sender, commit_lsn_tx);
+                    sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                     stream.as_mut().add_table_schema(schema);
                 }
