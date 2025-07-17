@@ -28,6 +28,7 @@ rpcs! {
     create_snapshot(database_id: u32, table_id: u32, lsn: u64) -> ();
     create_table(database_id: u32, table_id: u32, dst_uri: String, src: String, src_uri: String) -> ();
     drop_table(database_id: u32, table_id: u32) -> ();
+    optimize_table(database_id: u32, table_id: u32, mode: String) -> ();
     scan_table_begin(database_id: u32, table_id: u32, lsn: u64) -> Vec<u8>;
     scan_table_end(database_id: u32, table_id: u32) -> ();
 }

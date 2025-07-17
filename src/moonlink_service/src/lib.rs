@@ -76,6 +76,17 @@ async fn handle_stream(
                 backend.drop_table(database_id, table_id).await;
                 write(&mut stream, &()).await?;
             }
+            Request::OptimizeTable {
+                database_id,
+                table_id,
+                mode,
+            } => {
+                backend
+                    .optimize_table(database_id, table_id, &mode)
+                    .await
+                    .unwrap();
+                write(&mut stream, &()).await?;
+            }
             Request::ScanTableBegin {
                 database_id,
                 table_id,
