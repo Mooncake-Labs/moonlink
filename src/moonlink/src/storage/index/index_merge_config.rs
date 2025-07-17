@@ -12,15 +12,20 @@ pub struct FileIndexMergeConfig {
 }
 
 impl FileIndexMergeConfig {
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub const DEFAULT_FILE_INDICES_TO_MERGE: u32 = u32::MAX;
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub const DEFAULT_INDEX_BLOCK_FINAL_SIZE: u64 = u64::MAX;
 
-    #[cfg(not(debug_assertions))]
-    pub const DEFAULT_FILE_INDICES_TO_MERGE: u32 = u32::MAX;
-    #[cfg(not(debug_assertions))]
-    pub const DEFAULT_INDEX_BLOCK_FINAL_SIZE: u64 = u64::MAX;
+    #[cfg(all(not(test), debug_assertions))]
+    pub const DEFAULT_FILE_INDICES_TO_MERGE: u32 = 4;
+    #[cfg(all(not(test), debug_assertions))]
+    pub const DEFAULT_INDEX_BLOCK_FINAL_SIZE: u64 = 1 << 10; // 1KiB
+
+    #[cfg(all(not(test), not(debug_assertions)))]
+    pub const DEFAULT_FILE_INDICES_TO_MERGE: u32 = 32;
+    #[cfg(all(not(test), not(debug_assertions)))]
+    pub const DEFAULT_INDEX_BLOCK_FINAL_SIZE: u64 = 1 << 29; // 512MiB
 }
 
 impl Default for FileIndexMergeConfig {
