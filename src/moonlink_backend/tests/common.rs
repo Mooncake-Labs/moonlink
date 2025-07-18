@@ -1,4 +1,5 @@
 use arrow_array::Int64Array;
+use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -15,7 +16,6 @@ pub type TableId = u64;
 pub const TABLE_ID: TableId = 0;
 
 pub const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
-pub const DST_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestGuardMode {
@@ -248,9 +248,13 @@ async fn setup_backend(
     DatabaseId,
 ) {
     let temp_dir = TempDir::new().unwrap();
+    let metadata_store_accessor =
+        SqliteMetadataStore::new_with_directory(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
     let backend = MoonlinkBackend::<DatabaseId, TableId>::new(
         temp_dir.path().to_str().unwrap().into(),
-        /*metadata_store_uris=*/ vec![],
+        Box::new(metadata_store_accessor),
     )
     .await
     .unwrap();
@@ -288,7 +292,6 @@ async fn setup_backend(
             .create_table(
                 database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
             )
@@ -339,7 +342,6 @@ pub async fn smoke_create_and_insert(
         .create_table(
             database_id,
             TABLE_ID,
-            DST_URI.to_string(),
             "public.test".to_string(),
             uri.to_string(),
         )

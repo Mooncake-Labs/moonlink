@@ -13,7 +13,6 @@ mod tests {
     use std::collections::HashSet;
 
     const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
-    const DST_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
 
     // ───────────────────────────── Tests ─────────────────────────────
 
@@ -191,7 +190,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 /*table_name=*/ "public.repl_test".to_string(),
                 SRC_URI.to_string(),
             )
@@ -299,7 +297,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 "public.recovery".to_string(),
                 SRC_URI.to_string(),
             )
@@ -330,16 +327,18 @@ mod tests {
         drop(guard);
 
         // Attempt recovery logic.
-        let backend = MoonlinkBackend::<DatabaseId, TableId>::new(
-            testing_directory_before_recovery
-                .path()
-                .to_str()
-                .unwrap()
-                .to_string(),
-            /*metadata_store_uris=*/ vec![],
-        )
-        .await
-        .unwrap();
+        let base_path = testing_directory_before_recovery
+            .path()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let sqlite_metadata_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend =
+            MoonlinkBackend::<DatabaseId, TableId>::new(base_path, Box::new(sqlite_metadata_store))
+                .await
+                .unwrap();
         let ids = ids_from_state(
             &backend
                 .scan_table(database_id, TABLE_ID, Some(lsn))

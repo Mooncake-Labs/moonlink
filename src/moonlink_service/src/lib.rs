@@ -2,6 +2,7 @@ mod error;
 
 pub use error::{Error, Result};
 use moonlink_backend::MoonlinkBackend;
+use moonlink_metadata_store::SqliteMetadataStore;
 use moonlink_rpc::{read, write, Request};
 use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
@@ -10,9 +11,13 @@ use tokio::fs;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 
-pub async fn start(base_path: String, metadata_store_uris: Vec<String>) -> Result<()> {
+pub async fn start(base_path: String) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
-    let backend = MoonlinkBackend::new(base_path.clone(), metadata_store_uris).await?;
+    let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(&base_path)
+        .await
+        .unwrap();
+    let backend =
+        MoonlinkBackend::new(base_path.clone(), Box::new(sqlite_metadata_accessor)).await?;
     let backend = Arc::new(backend);
     let socket_path = std::path::PathBuf::from(base_path).join("moonlink.sock");
     if fs::metadata(&socket_path).await.is_ok() {
@@ -59,12 +64,11 @@ async fn handle_stream(
             Request::CreateTable {
                 database_id,
                 table_id,
-                dst_uri,
                 src,
                 src_uri,
             } => {
                 backend
-                    .create_table(database_id, table_id, dst_uri, src, src_uri)
+                    .create_table(database_id, table_id, src, src_uri)
                     .await
                     .unwrap();
                 write(&mut stream, &()).await?;

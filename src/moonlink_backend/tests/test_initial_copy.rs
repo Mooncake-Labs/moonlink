@@ -3,8 +3,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::{
-        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, DST_URI, SRC_URI,
-        TABLE_ID,
+        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, SRC_URI, TABLE_ID,
     };
     use serial_test::serial;
     use std::collections::HashSet;
@@ -47,7 +46,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
             )
@@ -118,7 +116,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
             )
@@ -181,7 +178,6 @@ mod tests {
                 .create_table(
                     guard.database_id,
                     TABLE_ID,
-                    DST_URI.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
                 )
@@ -253,7 +249,6 @@ mod tests {
                 .create_table(
                     guard.database_id,
                     TABLE_ID,
-                    DST_URI.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
                 )
@@ -357,7 +352,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
             )
@@ -431,7 +425,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
             )
@@ -509,7 +502,6 @@ mod tests {
             .create_table(
                 guard.database_id,
                 TABLE_ID,
-                DST_URI.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
             )

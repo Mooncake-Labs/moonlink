@@ -2796,6 +2796,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "moonlink_backend",
+ "moonlink_metadata_store",
  "moonlink_rpc",
  "thiserror 2.0.12",
  "tokio",
