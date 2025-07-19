@@ -130,6 +130,14 @@ impl IcebergTableManager {
         })
     }
 
+    /// Get table identity.
+    pub(super) fn get_table_ident(&self) -> TableIdent {
+        TableIdent {
+            namespace: NamespaceIdent::from_strs(&self.config.namespace).unwrap(),
+            name: self.config.table_name.clone(),
+        }
+    }
+
     /// Get a unique puffin filepath under table warehouse uri.
     pub(super) fn get_unique_deletion_vector_filepath(&self) -> String {
         let location_generator =
@@ -182,6 +190,13 @@ impl IcebergTableManager {
 /// TODO(hjiang): Parallelize all IO operations.
 #[async_trait]
 impl TableManager for IcebergTableManager {
+    async fn alter_table_schema(
+        &mut self,
+        updated_table_metadata: Arc<MooncakeTableMetadata>,
+    ) -> IcebergResult<()> {
+        self.alter_table_schema_impl(updated_table_metadata).await
+    }
+
     async fn sync_snapshot(
         &mut self,
         snapshot_payload: IcebergSnapshotPayload,

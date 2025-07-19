@@ -1,6 +1,7 @@
 pub(super) mod catalog_utils;
 pub(super) mod deletion_vector;
 pub(super) mod file_catalog;
+mod iceberg_schema_manager;
 pub(super) mod iceberg_table_config;
 mod iceberg_table_loader;
 pub(super) mod iceberg_table_manager;
@@ -15,6 +16,7 @@ pub(super) mod puffin_utils;
 pub(super) mod puffin_writer_proxy;
 #[cfg(test)]
 pub(super) mod schema_utils;
+mod table_commit_proxy;
 pub(super) mod table_event_manager;
 pub(super) mod table_manager;
 pub(super) mod table_property;

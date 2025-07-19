@@ -86,6 +86,20 @@ pub(crate) fn create_test_arrow_schema() -> Arc<ArrowSchema> {
     ]))
 }
 
+/// Test util function to create an arrow schema for schema evolution.
+pub(crate) fn create_test_updated_arrow_schema() -> Arc<ArrowSchema> {
+    Arc::new(ArrowSchema::new(vec![
+        Field::new("a_new_id", DataType::Int32, false).with_metadata(HashMap::from([(
+            "PARQUET:field_id".to_string(),
+            "3".to_string(),
+        )])),
+        Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
+            "PARQUET:field_id".to_string(),
+            "1".to_string(),
+        )])),
+    ]))
+}
+
 /// Test util function to create local filesystem accessor from iceberg table config.
 pub(crate) fn create_test_filesystem_accessor(
     iceberg_table_config: &IcebergTableConfig,
@@ -101,6 +115,22 @@ pub(crate) fn create_test_table_metadata(
 ) -> Arc<MooncakeTableMetadata> {
     let config = MooncakeTableConfig::new(local_table_directory.clone());
     create_test_table_metadata_with_config(local_table_directory, config)
+}
+
+/// Test util function to create mooncake table metadata with schema.
+pub(crate) fn create_test_table_metadata_with_schema(
+    local_table_directory: String,
+    arrow_schema: Arc<ArrowSchema>,
+) -> Arc<MooncakeTableMetadata> {
+    let config = MooncakeTableConfig::new(local_table_directory.clone());
+    Arc::new(MooncakeTableMetadata {
+        name: ICEBERG_TEST_TABLE.to_string(),
+        table_id: 0,
+        schema: arrow_schema,
+        config,
+        path: std::path::PathBuf::from(local_table_directory),
+        identity: RowIdentity::FullRow,
+    })
 }
 
 /// Test util function to create mooncake table metadata with mooncake table config.

@@ -15,6 +15,9 @@ pub(crate) fn assert_is_same_schema(lhs: IcebergSchema, rhs: IcebergSchema) {
     let rhs_highest_field_id = rhs.highest_field_id();
     assert_eq!(lhs_highest_field_id, rhs_highest_field_id);
 
+    println!("left schema = {lhs:?}");
+    println!("right schema = {rhs:?}");
+
     for cur_field_id in 0..=lhs_highest_field_id {
         let lhs_name = lhs.name_by_field_id(cur_field_id);
         let rhs_name = rhs.name_by_field_id(cur_field_id);

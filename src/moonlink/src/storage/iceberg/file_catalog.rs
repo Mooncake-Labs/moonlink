@@ -3,10 +3,11 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 use crate::storage::filesystem::filesystem_config::FileSystemConfig;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
-use crate::storage::iceberg::moonlink_catalog::PuffinWrite;
+use crate::storage::iceberg::moonlink_catalog::{PuffinWrite, SchemaUpdate};
 use crate::storage::iceberg::puffin_writer_proxy::{
     get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
 };
+use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 
 use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
@@ -44,7 +45,8 @@ use async_trait::async_trait;
 use iceberg::io::FileIO;
 use iceberg::puffin::PuffinWriter;
 use iceberg::spec::{
-    Schema as IcebergSchema, TableMetadata, TableMetadataBuildResult, TableMetadataBuilder,
+    Schema as IcebergSchema, SchemaId, TableMetadata, TableMetadataBuildResult,
+    TableMetadataBuilder,
 };
 use iceberg::table::Table;
 use iceberg::Result as IcebergResult;
@@ -218,8 +220,17 @@ impl FileCatalog {
                 TableUpdate::RemoveProperties { removals } => {
                     builder = builder.remove_properties(removals)?;
                 }
+                TableUpdate::AddSchema { schema } => {
+                    builder = builder.add_schema(schema.clone());
+                }
+                TableUpdate::SetCurrentSchema { schema_id } => {
+                    builder = builder.set_current_schema(*schema_id)?;
+                }
+                TableUpdate::RemoveSchemas { schema_ids } => {
+                    builder = builder.remove_schemas(schema_ids)?;
+                }
                 _ => {
-                    unreachable!("Only snapshot updates are expected in this implementation");
+                    unreachable!("Unimplemented table update: {:?}", update);
                 }
             }
         }
@@ -660,5 +671,21 @@ impl Catalog for FileCatalog {
         _metadata_location: String,
     ) -> IcebergResult<Table> {
         todo!("register existing table is not supported")
+    }
+}
+
+#[async_trait]
+impl SchemaUpdate for FileCatalog {
+    async fn update_table_schema(
+        &mut self,
+        schema: IcebergSchema,
+        old_schema_id: SchemaId,
+        table_ident: TableIdent,
+    ) -> IcebergResult<()> {
+        let mut table_commit_proxy = TableCommitProxy::new(table_ident);
+        table_commit_proxy.update_schema(schema, old_schema_id);
+        let table_commit = table_commit_proxy.take_as_table_commit();
+        self.update_table(table_commit).await?;
+        Ok(())
     }
 }

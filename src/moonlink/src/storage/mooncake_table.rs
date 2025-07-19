@@ -262,6 +262,19 @@ pub(crate) struct IcebergPersistedRecords {
 }
 
 impl IcebergPersistedRecords {
+    /// Return whether persistence result is empty.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        if self.flush_lsn.is_none() {
+            assert!(self.import_result.is_empty());
+            assert!(self.index_merge_result.is_empty());
+            assert!(self.data_compaction_result.is_empty());
+            return true;
+        }
+
+        false
+    }
+
     /// Get persisted data files.
     pub fn get_data_files_to_reflect_persistence(&self) -> Vec<MooncakeDataFileRef> {
         let mut persisted_data_files = vec![];
@@ -357,6 +370,37 @@ impl SnapshotTask {
             // Iceberg persistence result.
             iceberg_persisted_records: IcebergPersistedRecords::default(),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        if !self.new_disk_slices.is_empty() {
+            assert!(!self.disk_file_lsn_map.is_empty());
+            assert!(self.new_flush_lsn.is_some());
+            return false;
+        }
+        if !self.new_deletions.is_empty() {
+            return false;
+        }
+        if !self.new_mem_indices.is_empty() {
+            return false;
+        }
+        if !self.new_streaming_xact.is_empty() {
+            return false;
+        }
+        if !self.read_cache_handles.is_empty() {
+            return false;
+        }
+        if !self.index_merge_result.is_empty() {
+            return false;
+        }
+        if !self.data_compaction_result.is_empty() {
+            return false;
+        }
+        if !self.iceberg_persisted_records.is_empty() {
+            return false;
+        }
+        true
     }
 
     pub fn should_create_snapshot(&self) -> bool {
@@ -964,6 +1008,22 @@ impl MooncakeTable {
             }
             .instrument(info_span!("data_compaction")),
         );
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn alter_table_schema(
+        &mut self,
+        updated_table_metadata: Arc<TableMetadata>,
+    ) -> Result<()> {
+        self.metadata = updated_table_metadata;
+        assert!(self.mem_slice.is_empty());
+        assert!(self.next_snapshot_task.is_empty());
+        self.iceberg_table_manager
+            .as_mut()
+            .unwrap()
+            .alter_table_schema(self.metadata.clone())
+            .await?;
+        Ok(())
     }
 
     pub(crate) fn notify_snapshot_reader(&self, lsn: u64) {

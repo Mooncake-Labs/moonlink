@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 /// A trait which defines deletion vector write related interfaces.
 use iceberg::puffin::PuffinWriter;
-use iceberg::{Catalog, Result as IcebergResult};
+use iceberg::spec::{Schema as IcebergSchema, SchemaId};
+use iceberg::{Catalog, Result as IcebergResult, TableIdent};
 
 use std::collections::HashSet;
 
@@ -26,5 +27,18 @@ pub trait PuffinWrite {
     fn clear_puffin_metadata(&mut self);
 }
 
-pub trait MoonlinkCatalog: PuffinWrite + Catalog {}
-impl<T: PuffinWrite + Catalog> MoonlinkCatalog for T {}
+/// TODO(hjiang): iceberg-rust currently doesn't support schema evolution, to workaround and reduce code change,
+/// we do schema evolution by directly setting table commits.
+#[async_trait]
+pub trait SchemaUpdate {
+    /// Update table schema, and return the updated iceberg table.
+    async fn update_table_schema(
+        &mut self,
+        schema: IcebergSchema,
+        old_schema_id: SchemaId,
+        table_ident: TableIdent,
+    ) -> IcebergResult<()>;
+}
+
+pub trait MoonlinkCatalog: PuffinWrite + SchemaUpdate + Catalog {}
+impl<T: PuffinWrite + SchemaUpdate + Catalog> MoonlinkCatalog for T {}

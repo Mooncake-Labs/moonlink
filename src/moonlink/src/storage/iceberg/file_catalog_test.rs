@@ -14,8 +14,10 @@ use crate::storage::iceberg::file_catalog_test_utils::*;
 #[cfg(feature = "storage-gcs")]
 use crate::storage::iceberg::gcs_test_utils as iceberg_gcs_test_utils;
 use crate::storage::iceberg::moonlink_catalog::PuffinWrite;
+use crate::storage::iceberg::moonlink_catalog::SchemaUpdate;
 #[cfg(feature = "storage-s3")]
 use crate::storage::iceberg::s3_test_utils as iceberg_s3_test_utils;
+use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -379,7 +381,35 @@ async fn test_update_table_impl(mut catalog: FileCatalog) -> IcebergResult<()> {
     Ok(())
 }
 
-/// -------------------------
+async fn test_update_schema_impl(mut catalog: FileCatalog) {
+    create_test_table(&catalog).await.unwrap();
+    let old_schema = get_test_schema();
+    let old_schema_id = old_schema.schema_id();
+
+    let namespace_ident = NamespaceIdent::from_strs(["default"]).unwrap();
+    let table_name = "test_table".to_string();
+    let table_ident = TableIdent::new(namespace_ident, table_name);
+
+    let new_schema = get_updated_test_schema();
+    let new_schema_id = new_schema.schema_id();
+    catalog
+        .update_table_schema(new_schema.clone(), old_schema_id, table_ident.clone())
+        .await
+        .unwrap();
+
+    // Load table metadata to check schema.
+    let (_, table_metadata) = catalog.load_metadata(&table_ident).await.unwrap();
+    let table_schema_id = table_metadata.current_schema_id();
+    assert_eq!(table_schema_id, new_schema_id);
+
+    let table_schema = table_metadata.current_schema();
+    assert_eq!(**table_schema, new_schema);
+}
+
+/// ==============================
+/// Test with features
+/// ==============================
+///
 /// Namespace operations test.
 #[tokio::test]
 async fn test_catalog_namespace_operations_filesystem() {
@@ -462,4 +492,26 @@ async fn test_update_table_gcs() -> IcebergResult<()> {
     let (catalog, _test_guard) = create_gcs_catalog().await;
     create_test_table(&catalog).await?;
     test_update_table_impl(catalog).await
+}
+
+/// Update schema test.
+#[tokio::test]
+async fn test_update_schema() {
+    let temp_dir = TempDir::new().unwrap();
+    let catalog = create_test_file_catalog(&temp_dir, get_test_schema());
+    test_update_schema_impl(catalog).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "storage-s3")]
+async fn test_update_schema_s3() {
+    let (catalog, _test_guard) = create_s3_catalog().await;
+    create_test_table(&catalog).await.unwrap();
+    test_update_schema_impl(catalog).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "storage-gcs")]
+async fn test_update_schema_gcs() {
+    let (catalog, _test_guard) = create_gcs_catalog().await;
+    create_test_table(&catalog).await.unwrap();
+    test_update_schema_impl(catalog).await;
 }

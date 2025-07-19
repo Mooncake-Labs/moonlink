@@ -1,10 +1,12 @@
 /// This module define interface for table manager.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
 use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
+use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
 
@@ -36,6 +38,15 @@ pub struct PersistenceResult {
 #[async_trait]
 #[cfg_attr(test, automock)]
 pub trait TableManager: Send {
+    /// Perform a schema evoluation the current iceberg table.
+    ///
+    /// Precondition: all table updates under the old schema HAVE TO be persisted already.
+    #[allow(async_fn_in_trait)]
+    async fn alter_table_schema(
+        &mut self,
+        updated_table_metadata: Arc<MooncakeTableMetadata>,
+    ) -> IcebergResult<()>;
+
     /// Write a new snapshot to iceberg table.
     /// It could be called for multiple times to write and commit multiple snapshots.
     ///
