@@ -70,12 +70,16 @@ impl PostgresSource {
         uri: &str,
         slot_name: Option<String>,
         table_names_from: TableNamesFrom,
+        replication_mode: bool,
     ) -> Result<PostgresSource, PostgresSourceError> {
-        let (mut replication_client, connection) = ReplicationClient::connect_no_tls(uri).await?;
+        let (mut replication_client, connection) =
+            ReplicationClient::connect_no_tls(uri, replication_mode).await?;
         tokio::spawn(
             Self::drive_connection(connection).instrument(info_span!("postgres_client_monitor")),
         );
-        replication_client.begin_readonly_transaction().await?;
+        if replication_mode {
+            replication_client.begin_readonly_transaction().await?;
+        }
         let mut confirmed_flush_lsn = PgLsn::from(0);
         if let Some(ref slot_name) = slot_name {
             confirmed_flush_lsn = replication_client
@@ -112,6 +116,24 @@ impl PostgresSource {
         }
     }
 
+    pub async fn add_table_to_publication(
+        &mut self,
+        table_name: &TableName,
+    ) -> Result<(), PostgresSourceError> {
+        self.replication_client
+            .add_table_to_publication(table_name)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_row_count(
+        &mut self,
+        table_name: &TableName,
+    ) -> Result<i64, PostgresSourceError> {
+        let row_count = self.replication_client.get_row_count(table_name).await?;
+        Ok(row_count)
+    }
+
     async fn get_table_names_and_publication(
         replication_client: &ReplicationClient,
         table_names_from: TableNamesFrom,
@@ -145,7 +167,7 @@ impl PostgresSource {
     ) -> Result<TableSchema, PostgresSourceError> {
         // Open new connection to get table schema
         let (mut replication_client, connection) =
-            ReplicationClient::connect_no_tls(&self.uri).await?;
+            ReplicationClient::connect_no_tls(&self.uri, false).await?;
         tokio::spawn(
             Self::drive_connection(connection).instrument(info_span!("postgres_client_monitor")),
         );
@@ -179,13 +201,13 @@ impl PostgresSource {
     }
 
     pub async fn get_table_copy_stream(
-        &self,
+        &mut self,
         table_name: &TableName,
         column_schemas: &[ColumnSchema],
     ) -> Result<TableCopyStream, PostgresSourceError> {
         debug!("starting table copy stream for table {table_name}");
 
-        let stream = self
+        let (stream, lsn) = self
             .replication_client
             .get_table_copy_stream(table_name, column_schemas)
             .await
@@ -194,6 +216,7 @@ impl PostgresSource {
         Ok(TableCopyStream {
             stream,
             column_schemas: column_schemas.to_vec(),
+            start_lsn: lsn,
         })
     }
 
@@ -266,6 +289,7 @@ pin_project! {
         #[pin]
         stream: CopyOutStream,
         column_schemas: Vec<ColumnSchema>,
+        pub(crate) start_lsn: PgLsn,
     }
 }
 

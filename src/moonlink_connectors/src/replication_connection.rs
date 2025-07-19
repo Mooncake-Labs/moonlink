@@ -1,6 +1,6 @@
 use crate::pg_replicate::clients::postgres::ReplicationClient;
 use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
-use crate::pg_replicate::initial_copy::initial_table_copy;
+use crate::pg_replicate::initial_copy::copy_table_stream_impl;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
@@ -109,6 +109,7 @@ impl ReplicationConnection {
             &uri,
             Some(slot_name.clone()),
             TableNamesFrom::Publication("moonlink_pub".to_string()),
+            true,
         )
         .await?;
 
@@ -143,15 +144,6 @@ impl ReplicationConnection {
     async fn alter_table_replica_identity(&self, table_name: &str) -> Result<()> {
         self.postgres_client
             .simple_query(&format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;"))
-            .await?;
-        Ok(())
-    }
-
-    async fn add_table_to_publication(&self, table_name: &str) -> Result<()> {
-        self.postgres_client
-            .simple_query(&format!(
-                "ALTER PUBLICATION moonlink_pub ADD TABLE {table_name};"
-            ))
             .await?;
         Ok(())
     }
@@ -255,7 +247,7 @@ impl ReplicationConnection {
         let cfg = self.source.get_cdc_stream_config().unwrap();
 
         tokio::spawn(async move {
-            let (client, connection) = ReplicationClient::connect_no_tls(&uri)
+            let (client, connection) = ReplicationClient::connect_no_tls(&uri, true)
                 .await
                 .map_err(PostgresSourceError::from)?;
 
@@ -290,13 +282,6 @@ impl ReplicationConnection {
 
         let event_sender_clone = table_resources.event_sender.clone();
 
-        // Mark the table as being in initial copy, before receiving any events.
-        if !is_recovery {
-            if let Err(e) = event_sender_clone.send(TableEvent::StartInitialCopy).await {
-                error!(error = ?e, "failed to send StartInitialCopy event");
-            }
-        }
-
         self.table_readers
             .insert(src_table_id, table_resources.read_state_manager);
         self.table_event_managers
@@ -315,28 +300,54 @@ impl ReplicationConnection {
             error!(error = ?e, "failed to enqueue AddTable command");
         }
 
-        // Only perform initial copy for new tables, not during recovery.
-        if !is_recovery {
-            // Create a dedicated source for the copy and register and snapshot the table.
-            let copy_source = PostgresSource::new(
-                &self.uri,
-                Some(self.slot_name.clone()),
-                TableNamesFrom::Vec(vec![schema.table_name.clone()]),
-            )
+        // Create a dedicated source for the copy
+        let mut copy_source = PostgresSource::new(
+            &self.uri,
+            Some(self.slot_name.clone()),
+            TableNamesFrom::Vec(vec![schema.table_name.clone()]),
+            false,
+        )
+        .await?;
+
+        // Add table to publication first to begin accumulating any cdc events.
+        // We can check where our initial copy started from and discard any rows we have already seen.
+        // We should add to publication regardless of whether we are recovering or not.
+        copy_source
+            .add_table_to_publication(&schema.table_name)
             .await?;
+
+        // Check if there are existing rows
+        let row_count = copy_source.get_row_count(&schema.table_name).await?;
+
+        // Only perform initial copy for new tables, not during recovery.
+        // Early return if there are no rows to copy.
+        if !is_recovery && row_count > 0 {
+            let stream = copy_source
+                .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
+                .await?;
+            let start_lsn = stream.start_lsn.into();
+            if let Err(e) = event_sender_clone
+                .send(TableEvent::StartInitialCopy { start_lsn })
+                .await
+            {
+                error!(error = ?e, "failed to send StartInitialCopy event");
+            }
+
             let schema_clone = schema.clone();
             tokio::spawn(async move {
-                let res = initial_table_copy(
-                    src_table_id,
-                    schema_clone,
-                    copy_source,
-                    &event_sender_clone,
-                )
-                .await;
+                let res = copy_table_stream_impl(schema_clone, stream, &event_sender_clone).await;
+                // We have finsihed consuming the stream, so commit the transaction
+                // We keep the transaction open since the COMMIT will block until the COPY TO is complete.
+                if let Err(e) = copy_source.commit_transaction().await {
+                    error!(error = ?e, "failed to commit transaction");
+                }
                 if let Err(e) = res {
                     error!(error = ?e, table_id = src_table_id, "failed to copy table");
                 }
-                if let Err(e) = event_sender_clone.send(TableEvent::FinishInitialCopy).await {
+                if let Err(e) = event_sender_clone
+                    .send(TableEvent::FinishInitialCopy { start_lsn })
+                    .await
+                {
                     error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
                 }
             });
@@ -405,8 +416,6 @@ impl ReplicationConnection {
                 is_recovery,
             )
             .await?;
-
-        self.add_table_to_publication(table_name).await?;
 
         debug!(src_table_id = table_schema.src_table_id, "table added");
 

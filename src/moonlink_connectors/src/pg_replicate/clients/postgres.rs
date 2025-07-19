@@ -61,11 +61,14 @@ impl ReplicationClient {
     /// Connect to a postgres database in logical replication mode without TLS
     pub async fn connect_no_tls(
         uri: &str,
+        replication_mode: bool,
     ) -> Result<(ReplicationClient, Connection<Socket, NoTlsStream>), ReplicationClientError> {
         debug!("connecting to postgres");
 
         let mut config = uri.parse::<Config>()?;
-        config.replication_mode(ReplicationMode::Logical);
+        if replication_mode {
+            config.replication_mode(ReplicationMode::Logical);
+        }
         let (postgres_client, connection) = config.connect(NoTls).await?;
 
         debug!("successfully connected to postgres");
@@ -89,6 +92,14 @@ impl ReplicationClient {
         Ok(())
     }
 
+    // Gets the current wal lsn
+    pub async fn get_current_wal_lsn(&mut self) -> Result<PgLsn, ReplicationClientError> {
+        let query = "SELECT pg_current_wal_lsn();";
+        let result = self.postgres_client.query_one(query, &[]).await?;
+        let lsn = result.get(0);
+        Ok(lsn)
+    }
+
     /// Commits a transaction
     pub async fn commit_txn(&mut self) -> Result<(), ReplicationClientError> {
         if self.in_txn {
@@ -106,18 +117,51 @@ impl ReplicationClient {
         Ok(())
     }
 
+    pub async fn add_table_to_publication(
+        &mut self,
+        table_name: &TableName,
+    ) -> Result<(), ReplicationClientError> {
+        let query = format!(
+            "ALTER PUBLICATION moonlink_pub ADD TABLE {};",
+            table_name.as_quoted_identifier()
+        );
+        self.postgres_client.simple_query(&query).await?;
+        Ok(())
+    }
+
+    pub async fn get_row_count(
+        &mut self,
+        table_name: &TableName,
+    ) -> Result<i64, ReplicationClientError> {
+        let query = format!(
+            "SELECT COUNT(*) FROM {};",
+            table_name.as_quoted_identifier()
+        );
+        let result = self.postgres_client.query_one(&query, &[]).await?;
+        let row_count = result.get(0);
+        Ok(row_count)
+    }
+
     /// Returns a [CopyOutStream] for a table
     pub async fn get_table_copy_stream(
-        &self,
+        &mut self,
         table_name: &TableName,
         column_schemas: &[ColumnSchema],
-    ) -> Result<CopyOutStream, ReplicationClientError> {
+    ) -> Result<(CopyOutStream, PgLsn), ReplicationClientError> {
         let column_list = column_schemas
             .iter()
             .map(|col| quote_identifier(&col.name))
             .collect::<Vec<_>>()
             .join(", ");
 
+        // start a transaction
+        self.postgres_client.simple_query("BEGIN;").await?;
+        self.in_txn = true;
+
+        // Get the current LSN
+        let current_wal_lsn = self.get_current_wal_lsn().await?;
+
+        // TODO(nbiscaro): Use binary format instead of text.
         let copy_query = format!(
             r#"COPY {} ({column_list}) TO STDOUT WITH (FORMAT text);"#,
             table_name.as_quoted_identifier(),
@@ -125,7 +169,10 @@ impl ReplicationClient {
 
         let stream = self.postgres_client.copy_out_simple(&copy_query).await?;
 
-        Ok(stream)
+        // Note that we keep the transaction open
+        // Once we are done consuming the stream, we will commit the transaction
+
+        Ok((stream, current_wal_lsn))
     }
 
     /// Returns a vector of columns of a table, optionally filtered by a publication's column list

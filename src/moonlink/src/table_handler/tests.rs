@@ -1220,7 +1220,7 @@ async fn test_initial_copy_basic() {
 
     // Start initial copy workflow.
     sender
-        .send(TableEvent::StartInitialCopy)
+        .send(TableEvent::StartInitialCopy { start_lsn: 0 })
         .await
         .expect("send start initial copy");
 
@@ -1250,7 +1250,7 @@ async fn test_initial_copy_basic() {
 
     // Finish the copy which applies buffered changes.
     sender
-        .send(TableEvent::FinishInitialCopy)
+        .send(TableEvent::FinishInitialCopy { start_lsn: 0 })
         .await
         .expect("send finish initial copy");
 

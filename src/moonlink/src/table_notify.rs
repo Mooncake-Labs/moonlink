@@ -67,9 +67,11 @@ pub enum TableEvent {
     /// Alter table,
     AlterTable { columns_to_drop: Vec<String> },
     /// Start initial table copy.
-    StartInitialCopy,
+    /// `start_lsn` is the `pg_current_wal_lsn` when the initial copy starts.
+    StartInitialCopy { start_lsn: u64 },
     /// Finish initial table copy and merge buffered changes.
-    FinishInitialCopy,
+    /// `start_lsn` is the `pg_current_wal_lsn` when the initial copy starts. We want this in FinishInitialCopy so we can set the commit LSN correctly.
+    FinishInitialCopy { start_lsn: u64 },
     /// ==============================
     /// Table internal events
     /// ==============================

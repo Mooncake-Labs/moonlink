@@ -71,8 +71,8 @@ struct TableHandlerState {
     // Initial persisted LSN.
     // On moonlink recovery, it's possible that moonlink hasn't sent back latest flush LSN back to source table, so source database (i.e. postgres) will replay unacknowledged parts, which might contain already persisted content.
     // To avoid duplicate records, we compare iceberg initial flush LSN with new coming messages' LSN.
-    // - For streaming events, we keep a buffer as usual, and decide whether to keep or discard the buffer at stream commit;
-    // - For non-streaming events, they start with a [`Begin`] message containing the final LSN of the current transaction, which we could leverage to decide keep or not.
+    // This also is used in the initial copy mode to discard cdc events that may be already included in the initial copy.
+    // If we have already seen this LSN, we simply discard the event.
     initial_persistence_lsn: Option<u64>,
     // Record LSN if the last handled table event is a commit operation, which indicates mooncake table stays at a consistent view, so table could be flushed safely.
     table_consistent_view_lsn: Option<u64>,
@@ -300,12 +300,11 @@ impl TableHandlerState {
     }
 
     /// Enter initial copy mode. Subsequent CDC events will be
-    /// buffered in a dedicated streaming memslice until
-    /// `finish_initial_copy` is called.
-    /// In this case of a streaming transaction, we simply use the already provided `xact_id` to identify the transaction. In the case of non-streaming, we use `INITIAL_COPY_XACT_ID` to identify the transaction.
-    /// All commits are buffered and deferred until initial copy finishes.
-    fn start_initial_copy(&mut self) {
+    /// buffered in `initial_copy_buffered_events` until `finish_initial_copy` is called.
+    /// We set `initial_persistence_lsn` to the start LSN to avoid duplicate events that may have already been captured by the initial copy.
+    fn start_initial_copy(&mut self, start_lsn: u64) {
         self.special_table_state = SpecialTableState::InitialCopy;
+        self.initial_persistence_lsn = Some(start_lsn);
     }
 
     fn finish_initial_copy(&mut self) {
@@ -588,13 +587,13 @@ impl TableHandler {
                         TableEvent::AlterTable { columns_to_drop } => {
                             debug!("altering table, dropping columns: {:?}", columns_to_drop);
                         }
-                        TableEvent::StartInitialCopy => {
+                        TableEvent::StartInitialCopy { start_lsn } => {
                             debug!("starting initial copy");
-                            table_handler_state.start_initial_copy();
+                            table_handler_state.start_initial_copy(start_lsn);
                         }
-                        TableEvent::FinishInitialCopy => {
+                        TableEvent::FinishInitialCopy { start_lsn } => {
                             debug!("finishing initial copy");
-                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0).await {
+                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, start_lsn).await {
                                 error!(error = %e, "failed to finish initial copy");
                             }
                             // Force create the snapshot with LSN 0
@@ -793,9 +792,6 @@ impl TableHandler {
         // Replication events
         // ==============================
         //
-        if table_handler_state.should_discard_event(&event) {
-            return;
-        }
         let is_initial_copy_event = matches!(
             event,
             TableEvent::Append {
@@ -803,6 +799,11 @@ impl TableHandler {
                 ..
             }
         );
+
+        // In the case that this is an initial copy event we acutally expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
+        if table_handler_state.should_discard_event(&event) && !is_initial_copy_event {
+            return;
+        }
         if table_handler_state.is_in_blocking_state() && !is_initial_copy_event {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;

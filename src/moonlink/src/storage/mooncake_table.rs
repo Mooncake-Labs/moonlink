@@ -17,7 +17,7 @@ use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::index_merge_config::FileIndexMergeConfig;
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::row::{IdentityProp, MoonlinkRow};
 use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
