@@ -1,8 +1,4 @@
 pub(crate) mod wal_persistence_metadata;
-
-#[cfg(test)]
-mod test_utils;
-
 use crate::row::MoonlinkRow;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
@@ -14,10 +10,9 @@ use futures::{future, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-enum WalEventEnum {
+pub(crate) enum WalEventEnum {
     Append {
         row: MoonlinkRow,
         xact_id: Option<u32>,
@@ -38,14 +33,25 @@ enum WalEventEnum {
     },
 }
 
+pub(crate) struct PersistAndTruncateResult {
+    pub file_persisted: Option<WalFileInfo>,
+    pub highest_deleted_file: Option<WalFileInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalFileInfo {
+    pub file_number: u64,
+    pub highest_lsn: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct WalEvent {
+pub(crate) struct WalEvent {
     pub lsn: u64,
     pub event: WalEventEnum,
 }
 
 impl WalEvent {
-    pub fn new_from_table_event(table_event: &TableEvent, last_highest_lsn: u64) -> Self {
+    pub fn new(table_event: &TableEvent, last_highest_lsn: u64) -> Self {
         // Try to get LSN from the table event, fallback to last_highest_lsn for events without LSN
         let lsn = table_event
             .get_lsn_for_ingest_event()
@@ -121,131 +127,147 @@ impl InMemWal {
 }
 
 /// Wal tracks both the in-memory WAL and the flushed WALs.
-/// The in-memory WAL may be modified concurrently with persist_and_truncate, but
-/// there is only meant to be one live call to persist_and_truncate at a time.
-pub struct Wal {
-    in_mem_wal: Mutex<InMemWal>,
+/// Note that wal manager is meant to be used in a single thread. While
+/// persist and delete_files can be called concurrently, their results
+/// have to be handled serially.
+pub(crate) struct WalManager {
+    in_mem_wal: InMemWal,
     /// The wal file numbers that are still live. Each entry is (file_number, highest_lsn within file).
     /// Gets modified by persist and truncate, which are only called serially in the persist table handler.
-    live_wal_file_tracker: Mutex<Vec<(u64, u64)>>,
-    // Tracks the file number to be assigned to the next persisted wal file
-    curr_file_number: Mutex<u64>,
+    live_wal_file_tracker: Vec<WalFileInfo>,
+    /// Tracks the file number to be assigned to the next persisted wal file
+    curr_file_number: u64,
 
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
 }
 
-impl Wal {
+impl WalManager {
     pub fn new(config: FileSystemConfig) -> Self {
         // TODO(Paul): Add a more robust constructor when implementing recovery
         Self {
-            in_mem_wal: Mutex::new(InMemWal::new(0)),
-            live_wal_file_tracker: Mutex::new(Vec::new()),
-            curr_file_number: Mutex::new(0),
+            in_mem_wal: InMemWal::new(0),
+            live_wal_file_tracker: Vec::new(),
+            curr_file_number: 0,
             file_system_accessor: Arc::new(FileSystemAccessor::new(config)),
         }
     }
 
-    pub async fn insert(&self, row: &TableEvent) {
-        let mut in_mem_wal = self.in_mem_wal.lock().await;
-        let wal_event = WalEvent::new_from_table_event(row, in_mem_wal.highest_lsn);
-        in_mem_wal.buf.push(wal_event);
+    pub fn insert(&mut self, table_event: &TableEvent) {
+        let wal_event = WalEvent::new(table_event, self.in_mem_wal.highest_lsn);
+        self.in_mem_wal.buf.push(wal_event);
 
         // Update highest_lsn if this event has a higher LSN
-        if let Some(lsn) = row.get_lsn_for_ingest_event() {
-            in_mem_wal.highest_lsn = std::cmp::max(in_mem_wal.highest_lsn, lsn);
+        if let Some(lsn) = table_event.get_lsn_for_ingest_event() {
+            assert!(lsn >= self.in_mem_wal.highest_lsn);
+            self.in_mem_wal.highest_lsn = lsn;
         }
 
         // TODO(Paul): Implement streaming flush (if cross threshold, begin streaming write)
     }
 
-    async fn take_and_replace(&self) -> (Option<Vec<WalEvent>>, u64) {
-        let mut in_mem_wal = self.in_mem_wal.lock().await;
-        if in_mem_wal.buf.is_empty() {
-            return (None, in_mem_wal.highest_lsn);
-        }
-        let mut new_buf = Vec::new();
-        std::mem::swap(&mut in_mem_wal.buf, &mut new_buf);
-        (Some(new_buf), in_mem_wal.highest_lsn)
+    fn take(&mut self) -> Vec<WalEvent> {
+        std::mem::take(&mut self.in_mem_wal.buf)
     }
 
     pub fn get_file_name(file_number: u64) -> String {
         format!("wal_{file_number}.json")
     }
 
-    #[cfg(test)]
-    /// Get the file system accessor for testing purposes
-    pub(crate) fn get_file_system_accessor(&self) -> Arc<dyn BaseFileSystemAccess> {
-        self.file_system_accessor.clone()
-    }
-
-    async fn persist(&self) -> Result<Option<u64>> {
-        let (old_wal, highest_lsn) = self.take_and_replace().await;
-        if let Some(old_wal) = old_wal {
-            let wal_json = serde_json::to_vec(&old_wal).unwrap();
-
-            let mut curr_file_number = self.curr_file_number.lock().await;
-            let mut live_wal_file_tracker = self.live_wal_file_tracker.lock().await;
-
-            let wal_file_path = Wal::get_file_name(*curr_file_number);
-            self.file_system_accessor
-                .write_object(&wal_file_path, wal_json)
-                .await?;
-            live_wal_file_tracker.push((*curr_file_number, highest_lsn));
-            let latest_flushed_wal_file_number = *curr_file_number;
-
-            *curr_file_number += 1;
-            Ok(Some(latest_flushed_wal_file_number))
-        } else {
-            Ok(None)
+    pub fn get_to_persist_wal_file_info(&self) -> WalFileInfo {
+        WalFileInfo {
+            file_number: self.curr_file_number,
+            highest_lsn: self.in_mem_wal.highest_lsn,
         }
     }
 
-    async fn truncate_flushed_wals(&self, truncate_from_lsn: u64) -> Result<()> {
-        let mut live_wal_file_tracker = self.live_wal_file_tracker.lock().await;
-        // Step 1: Find the last index to be truncated
-        let last_truncate_idx = live_wal_file_tracker
-            .iter()
-            .rposition(|&(_, highest_lsn)| highest_lsn < truncate_from_lsn);
+    pub async fn persist(
+        file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+        wal_to_persist: &Vec<WalEvent>,
+        wal_file_info: &WalFileInfo,
+    ) -> Result<()> {
+        if !wal_to_persist.is_empty() {
+            let wal_json = serde_json::to_vec(&wal_to_persist).unwrap();
 
-        if let Some(idx) = last_truncate_idx {
-            // Step 2: Drop all the files <= that index
-            let delete_file_names = live_wal_file_tracker
-                .iter()
-                .take(idx + 1)
-                .map(|(file_number, _)| Wal::get_file_name(*file_number))
-                .collect::<Vec<String>>();
-            let delete_futures = delete_file_names
-                .iter()
-                .map(|file_name| self.file_system_accessor.delete_object(file_name));
-            future::try_join_all(delete_futures).await?;
-            // Step 3: Truncate the tracking vector
-            live_wal_file_tracker.drain(0..=idx);
+            let wal_file_path = WalManager::get_file_name(wal_file_info.file_number);
+            file_system_accessor
+                .write_object(&wal_file_path, wal_json)
+                .await?;
         }
         Ok(())
     }
 
-    pub async fn persist_and_truncate(
-        &self,
-        last_iceberg_snapshot_lsn: Option<u64>,
-    ) -> Result<Option<u64>> {
-        let latest_flushed_wal_file_number = self.persist().await?;
-        if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
-            self.truncate_flushed_wals(last_iceberg_snapshot_lsn)
-                .await?;
+    fn handle_complete_persist(&mut self, persist_and_truncate_result: &PersistAndTruncateResult) {
+        if let Some(file_persisted) = &persist_and_truncate_result.file_persisted {
+            assert!(file_persisted.file_number == self.curr_file_number);
+            // Add the persisted file to the live tracker
+            self.live_wal_file_tracker.push(file_persisted.clone());
+            self.curr_file_number += 1;
         }
-        Ok(latest_flushed_wal_file_number)
+    }
+
+    pub fn get_files_to_truncate(&self, truncate_from_lsn: u64) -> Vec<WalFileInfo> {
+        let last_truncate_idx = self
+            .live_wal_file_tracker
+            .iter()
+            .rposition(|wal_file_info| wal_file_info.highest_lsn < truncate_from_lsn);
+
+        if let Some(idx) = last_truncate_idx {
+            self.live_wal_file_tracker
+                .iter()
+                .take(idx + 1)
+                .cloned()
+                .collect::<Vec<WalFileInfo>>()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub async fn delete_files(
+        file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+        wal_file_numbers: &[WalFileInfo],
+    ) -> Result<()> {
+        let file_names = wal_file_numbers
+            .iter()
+            .map(|wal_file_info| WalManager::get_file_name(wal_file_info.file_number))
+            .collect::<Vec<String>>();
+        let delete_futures = file_names
+            .iter()
+            .map(|file_name| file_system_accessor.delete_object(file_name));
+        future::try_join_all(delete_futures).await?;
+        Ok(())
+    }
+
+    fn handle_complete_truncate(&mut self, persist_and_truncate_result: &PersistAndTruncateResult) {
+        if let Some(highest_deleted_file) = &persist_and_truncate_result.highest_deleted_file {
+            let last_truncate_idx = self
+                .live_wal_file_tracker
+                .iter()
+                .rposition(|wal_file_info| wal_file_info == highest_deleted_file);
+
+            assert!(last_truncate_idx.is_some());
+            // Remove all files up to and including the last truncated file
+            self.live_wal_file_tracker
+                .drain(0..=last_truncate_idx.unwrap());
+        }
+    }
+
+    pub fn handle_completed_persist_and_truncate(
+        &mut self,
+        persist_and_truncate_result: &PersistAndTruncateResult,
+    ) {
+        self.handle_complete_persist(persist_and_truncate_result);
+        self.handle_complete_truncate(persist_and_truncate_result);
     }
 
     fn recover_flushed_wals(
-        &self,
+        file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         start_file_number: u64,
         begin_from_lsn: u64,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<TableEvent>>> + Send>> {
-        let file_system_accessor = self.file_system_accessor.clone();
         Box::pin(stream::unfold(start_file_number, move |file_number| {
             let file_system_accessor = file_system_accessor.clone();
             async move {
-                let file_name = Wal::get_file_name(file_number);
+                let file_name = WalManager::get_file_name(file_number);
                 let exists = file_system_accessor.object_exists(&file_name).await;
                 match exists {
                     Ok(exists) => {
@@ -290,11 +312,11 @@ impl Wal {
     }
 
     pub fn recover_flushed_wals_flat(
-        &self,
+        file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         start_file_number: u64,
         begin_from_lsn: u64,
     ) -> Pin<Box<dyn Stream<Item = Result<TableEvent>> + Send>> {
-        self.recover_flushed_wals(start_file_number, begin_from_lsn)
+        WalManager::recover_flushed_wals(file_system_accessor, start_file_number, begin_from_lsn)
             .flat_map(|result| match result {
                 Ok(events) => stream::iter(events.into_iter().map(Ok).collect::<Vec<_>>()),
                 Err(e) => stream::iter(vec![Err(e)]),
@@ -305,3 +327,6 @@ impl Wal {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_utils;

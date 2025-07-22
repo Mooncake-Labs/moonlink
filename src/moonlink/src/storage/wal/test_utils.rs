@@ -1,10 +1,63 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::{test_row, TestContext};
-use crate::storage::wal::{Wal, WalEvent};
+use crate::storage::wal::{PersistAndTruncateResult, WalEvent, WalManager};
 use crate::table_notify::TableEvent;
 use crate::FileSystemConfig;
+use crate::Result;
 use futures::StreamExt;
 use std::sync::Arc;
+
+impl WalManager {
+    /// Get the file system accessor for testing purposes
+    pub fn get_file_system_accessor(&self) -> Arc<dyn BaseFileSystemAccess> {
+        self.file_system_accessor.clone()
+    }
+
+    /// Mock function for how this gets called in table handler. We retrieve some data from the wal,
+    /// asynchronously update the file system,
+    /// and then call handle_completed_persist_and_truncate to update the wal.
+    pub async fn persist_and_truncate(
+        &mut self,
+        last_iceberg_snapshot_lsn: Option<u64>,
+    ) -> Result<()> {
+        // handle the persist side
+        let wal_to_persist = self.take();
+        let file_info_to_persist = self.get_to_persist_wal_file_info();
+
+        let persisted_wal_file = if wal_to_persist.is_empty() {
+            None
+        } else {
+            WalManager::persist(
+                self.file_system_accessor.clone(),
+                &wal_to_persist,
+                &file_info_to_persist,
+            )
+            .await?;
+            Some(file_info_to_persist)
+        };
+
+        let mut highest_deleted_file = None;
+
+        if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
+            let files_to_truncate = self.get_files_to_truncate(last_iceberg_snapshot_lsn);
+            highest_deleted_file = if files_to_truncate.is_empty() {
+                None
+            } else {
+                WalManager::delete_files(self.file_system_accessor.clone(), &files_to_truncate)
+                    .await?;
+                files_to_truncate.last().cloned()
+            };
+        }
+
+        let persist_and_truncate_result = PersistAndTruncateResult {
+            file_persisted: persisted_wal_file,
+            highest_deleted_file,
+        };
+
+        self.handle_completed_persist_and_truncate(&persist_and_truncate_result);
+        Ok(())
+    }
+}
 
 pub async fn extract_file_contents(
     file_path: &str,
@@ -22,7 +75,7 @@ pub fn convert_to_wal_events_vector(table_events: Vec<TableEvent>) -> Vec<WalEve
             if let Some(event_lsn) = event.get_lsn_for_ingest_event() {
                 highest_lsn = std::cmp::max(highest_lsn, event_lsn);
             }
-            WalEvent::new_from_table_event(&event, highest_lsn)
+            WalEvent::new(&event, highest_lsn)
         })
         .collect()
 }
@@ -140,13 +193,17 @@ pub fn assert_ingestion_events_vectors_equal(actual: &[TableEvent], expected: &[
 }
 
 pub async fn get_table_events_vector_recovery(
-    wal: &Wal,
+    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
     start_file_name: u64,
     begin_from_lsn: u64,
 ) -> Vec<TableEvent> {
     // Recover events using flat stream
     let mut recovered_events = Vec::new();
-    let mut stream = wal.recover_flushed_wals_flat(start_file_name, begin_from_lsn);
+    let mut stream = WalManager::recover_flushed_wals_flat(
+        file_system_accessor,
+        start_file_name,
+        begin_from_lsn,
+    );
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => recovered_events.push(event),
@@ -157,8 +214,8 @@ pub async fn get_table_events_vector_recovery(
 }
 
 // Helper function to create a WAL with some test data
-pub async fn create_test_wal(context: &TestContext) -> (Wal, Vec<TableEvent>) {
-    let wal = Wal::new(FileSystemConfig::FileSystem {
+pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEvent>) {
+    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
         root_directory: context.path().to_str().unwrap().to_string(),
     });
     let mut expected_events = Vec::new();
@@ -170,8 +227,7 @@ pub async fn create_test_wal(context: &TestContext) -> (Wal, Vec<TableEvent>) {
             xact_id: None,
             lsn: 100 + i,
             is_copied: false,
-        })
-        .await;
+        });
         expected_events.push(TableEvent::Append {
             row: row.clone(),
             xact_id: None,

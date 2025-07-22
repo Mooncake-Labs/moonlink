@@ -172,7 +172,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
 
     #[cfg(not(feature = "storage-gcs"))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {
-        let sanitized_directory = self.sanitize_path(&directory);
+        let sanitized_directory = self.sanitize_path(directory);
         let op = self.get_operator().await?.clone();
         op.remove_all(sanitized_directory).await?;
         Ok(())
