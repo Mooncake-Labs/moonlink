@@ -723,7 +723,6 @@ impl TableHandler {
                                         table_handler_state.finish_alter_table();
                                         Self::process_blocked_events(&mut table, &mut table_handler_state).await;
                                     }
-                                    // TODO(hjiang): perform alter table on iceberg table
                                     table.persist_iceberg_snapshot(iceberg_snapshot_payload);
                                 }
                             }
