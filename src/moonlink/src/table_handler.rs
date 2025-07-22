@@ -400,7 +400,14 @@ impl TableHandlerState {
         // Alter table will block any events, so table must be at a consistent view.
         assert!(self.table_consistent_view_lsn.is_some());
         assert!(self.special_table_state == SpecialTableState::Normal);
-        self.largest_force_snapshot_lsn = Some(self.table_consistent_view_lsn.unwrap());
+        // Trigger a force snapshot.
+        // Note: if there's pending force snapshot that's larger than current table consistent view LSN,
+        // we will keep the larger one.
+        // And we need to make sure 'PeriodicalMooncakeTableSnapshot' will still trigger a force snapshot immediately.
+        self.largest_force_snapshot_lsn = match self.largest_force_snapshot_lsn {
+            Some(lsn) => Some(std::cmp::max(lsn, self.table_consistent_view_lsn.unwrap())),
+            None => Some(self.table_consistent_view_lsn.unwrap()),
+        };
         self.special_table_state = SpecialTableState::AlterTable {
             alter_table_lsn: self.table_consistent_view_lsn.unwrap(),
             alter_table_request: Some(alter_table_request),

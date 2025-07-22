@@ -692,10 +692,15 @@ impl MooncakeTable {
         alter_table_request: AlterTableRequest,
     ) -> Arc<TableMetadata> {
         assert!(
-            self.mem_slice.get_num_rows() == 0,
+            self.mem_slice.is_empty(),
             "Cannot alter table with non-empty mem slice"
         );
+        assert!(
+            self.next_snapshot_task.is_empty(),
+            "Cannot alter table with pending snapshot task"
+        );
 
+        // Create new table metadata.
         let new_metadata = Arc::new(TableMetadata::new_for_alter_table(
             self.metadata.clone(),
             alter_table_request,
