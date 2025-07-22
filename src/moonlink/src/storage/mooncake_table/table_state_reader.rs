@@ -219,9 +219,8 @@ mod tests {
             temp_dir.path().to_str().unwrap().to_string(),
             create_test_updated_arrow_schema(),
         );
-        table.alter_table_schema(updated_mooncake_table_metadata.clone());
+        table.force_empty_iceberg_payload();
 
-        // Trigger a mooncake and iceberg snapshot, so schema update gets reflected to snapshot.
         create_mooncake_and_persist_for_test(&mut table, &mut notifier).await;
 
         // Get table state and check.

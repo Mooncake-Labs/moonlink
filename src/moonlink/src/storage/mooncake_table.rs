@@ -187,7 +187,36 @@ pub struct TableMetadata {
     /// function to get lookup key from row
     pub(crate) identity: IdentityProp,
 }
+#[derive(Debug, PartialEq)]
+pub struct AlterTableRequest {
+    pub(crate) new_columns: Vec<arrow_schema::FieldRef>,
+    pub(crate) dropped_columns: Vec<String>,
+}
 
+impl TableMetadata {
+    pub fn new_for_alter_table(
+        previous_metadata: Arc<TableMetadata>,
+        alter_table_request: AlterTableRequest,
+    ) -> Self {
+        let mut new_columns = vec![];
+        for field in previous_metadata.schema.fields.iter() {
+            if !alter_table_request.dropped_columns.contains(field.name()) {
+                new_columns.push(field.clone());
+            }
+        }
+        new_columns.extend(alter_table_request.new_columns);
+        let new_schema =
+            Schema::new_with_metadata(new_columns, previous_metadata.schema.metadata.clone());
+        Self {
+            name: previous_metadata.name.clone(),
+            table_id: previous_metadata.table_id,
+            schema: Arc::new(new_schema),
+            config: previous_metadata.config.clone(),
+            path: previous_metadata.path.clone(),
+            identity: previous_metadata.identity.clone(),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub(crate) struct DiskFileEntry {
     /// Cache handle. If assigned, it's pinned in object storage cache.
@@ -336,7 +365,7 @@ pub struct SnapshotTask {
     new_streaming_xact: Vec<TransactionStreamOutput>,
 
     /// Schema change.
-    new_metadata: Option<Arc<TableMetadata>>,
+    force_empty_iceberg_payload: bool,
 
     /// --- States related to WAL operation ---
     new_wal_persistence_metadata: Option<WalPersistenceMetadata>,
@@ -371,7 +400,7 @@ impl SnapshotTask {
             new_flush_lsn: None,
             new_commit_point: None,
             new_streaming_xact: Vec::new(),
-            new_metadata: None,
+            force_empty_iceberg_payload: false,
             // WAL related fields.
             new_wal_persistence_metadata: None,
             // Read request related fields.
@@ -416,16 +445,10 @@ impl SnapshotTask {
         true
     }
 
-    /// Return whether current snapshot buffer has pending schema update.
-    pub(crate) fn has_schema_update(&self) -> bool {
-        self.new_metadata.is_some()
-    }
-
     pub fn should_create_snapshot(&self) -> bool {
         // If mooncake has new transaction commits.
         self.new_commit_lsn > 0
-        // If mooncake table is requested to update schema.
-            || self.new_metadata.is_some()
+            || self.force_empty_iceberg_payload
         // If mooncake table accumulated large enough writes.
             || !self.new_disk_slices.is_empty()
             || self.new_deletions.len()
@@ -662,6 +685,35 @@ impl MooncakeTable {
             last_wal_persisted_metadata,
             table_notify: None,
         })
+    }
+
+    pub(crate) fn alter_table(
+        &mut self,
+        alter_table_request: AlterTableRequest,
+    ) -> Arc<TableMetadata> {
+        assert!(
+            self.mem_slice.get_num_rows() == 0,
+            "Cannot alter table with non-empty mem slice"
+        );
+
+        let new_metadata = Arc::new(TableMetadata::new_for_alter_table(
+            self.metadata.clone(),
+            alter_table_request,
+        ));
+
+        let mut guard = self.snapshot.try_write().unwrap();
+        guard.reset_for_alter(new_metadata.clone());
+        assert!(
+            self.metadata.schema.fields.len() != new_metadata.schema.fields.len(),
+            "Only support alter table with add/drop fields"
+        );
+        self.mem_slice = MemSlice::new(
+            new_metadata.schema.clone(),
+            new_metadata.config.batch_size,
+            new_metadata.identity.clone(),
+        );
+        self.metadata = new_metadata.clone();
+        new_metadata
     }
 
     /// Register event completion notifier.
@@ -973,9 +1025,6 @@ impl MooncakeTable {
         // Re-initialize mooncake table fields.
         self.next_snapshot_task = SnapshotTask::new(self.metadata.config.clone());
 
-        // Special handle schema update.
-        self.reinit_fields_by_schema_change(&next_snapshot_task);
-
         let cur_snapshot = self.snapshot.clone();
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(
@@ -1071,9 +1120,9 @@ impl MooncakeTable {
     /// Update table schema to the provided [`updated_table_metadata`].
     /// To synchronize on its completion, caller should trigger a force snapshot and block wait iceberg snapshot complet
     #[allow(dead_code)]
-    pub(crate) fn alter_table_schema(&mut self, updated_table_metadata: Arc<TableMetadata>) {
-        assert!(self.next_snapshot_task.new_metadata.is_none());
-        self.next_snapshot_task.new_metadata = Some(updated_table_metadata);
+    pub(crate) fn force_empty_iceberg_payload(&mut self) {
+        assert!(!self.next_snapshot_task.force_empty_iceberg_payload);
+        self.next_snapshot_task.force_empty_iceberg_payload = true;
     }
 
     pub(crate) fn notify_snapshot_reader(&self, lsn: u64) {
@@ -1083,19 +1132,6 @@ impl MooncakeTable {
     #[cfg(test)]
     pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {
         self.table_snapshot_watch_sender.clone()
-    }
-
-    /// Certain mooncake table fields need to be re-initialized due to schema change.
-    fn reinit_fields_by_schema_change(&mut self, next_snapshot_task: &SnapshotTask) {
-        if !next_snapshot_task.has_schema_update() {
-            return;
-        }
-        self.metadata = next_snapshot_task.new_metadata.as_ref().unwrap().clone();
-        self.mem_slice = MemSlice::new(
-            self.metadata.schema.clone(),
-            self.metadata.config.batch_size,
-            self.metadata.identity.clone(),
-        );
     }
 
     /// Persist an iceberg snapshot.

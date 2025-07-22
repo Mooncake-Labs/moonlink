@@ -9,6 +9,7 @@
 /// - persisted table LSN: the largest LSN where all updates have been persisted into iceberg
 ///   Suppose we have two tables, table-A has persisted all updated into iceberg; with table-B taking new updates. persisted table LSN for table-A grows with table-B.
 use crate::event_sync::EventSyncSender;
+use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::DataCompactionResult;
 use crate::storage::mooncake_table::MaintenanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
@@ -39,7 +40,10 @@ pub struct TableHandler {
 enum SpecialTableState {
     Normal,
     InitialCopy,
-    _AlterTable,
+    AlterTable {
+        alter_table_lsn: u64,
+        alter_table_request: Option<AlterTableRequest>,
+    },
     DropTable,
 }
 
@@ -307,6 +311,29 @@ impl TableHandlerState {
     }
 
     fn finish_initial_copy(&mut self) {
+        assert!(self.special_table_state == SpecialTableState::InitialCopy);
+        self.special_table_state = SpecialTableState::Normal;
+        self.latest_commit_lsn = Some(0);
+        self.table_consistent_view_lsn = Some(0);
+    }
+
+    fn should_complete_alter_table(&self, iceberg_snapshot_lsn: u64) -> bool {
+        if let SpecialTableState::AlterTable {
+            alter_table_lsn, ..
+        } = self.special_table_state
+        {
+            assert!(iceberg_snapshot_lsn <= alter_table_lsn);
+            iceberg_snapshot_lsn == alter_table_lsn
+        } else {
+            false
+        }
+    }
+
+    fn finish_alter_table(&mut self) {
+        assert!(matches!(
+            self.special_table_state,
+            SpecialTableState::AlterTable { .. }
+        ));
         self.special_table_state = SpecialTableState::Normal;
     }
 
@@ -367,6 +394,17 @@ impl TableHandlerState {
         {
             error!(error = ?e, "failed to notify force snapshot, because receiver end has closed channel");
         }
+    }
+
+    fn start_alter_table(&mut self, alter_table_request: AlterTableRequest) {
+        // Alter table will block any events, so table must be at a consistent view.
+        assert!(self.table_consistent_view_lsn.is_some());
+        assert!(self.special_table_state == SpecialTableState::Normal);
+        self.largest_force_snapshot_lsn = Some(self.table_consistent_view_lsn.unwrap());
+        self.special_table_state = SpecialTableState::AlterTable {
+            alter_table_lsn: self.table_consistent_view_lsn.unwrap(),
+            alter_table_request: Some(alter_table_request),
+        };
     }
 }
 
@@ -584,6 +622,11 @@ impl TableHandler {
                         }
                         TableEvent::AlterTable { columns_to_drop } => {
                             debug!("altering table, dropping columns: {:?}", columns_to_drop);
+                            let alter_table_request = AlterTableRequest {
+                                new_columns: vec![],
+                                dropped_columns: columns_to_drop,
+                            };
+                            table_handler_state.start_alter_table(alter_table_request);
                         }
                         TableEvent::StartInitialCopy => {
                             debug!("starting initial copy");
@@ -607,10 +650,7 @@ impl TableHandler {
                             // Drop any events that have LSN less than the start LSN during apply.
                             table_handler_state.initial_persistence_lsn = Some(start_lsn);
                             // Apply the buffered events.
-                            let buffered_events = table_handler_state.initial_copy_buffered_events.drain(..).collect::<Vec<_>>();
-                            for event in buffered_events {
-                                Self::process_cdc_table_event(event, &mut table, &mut table_handler_state).await;
-                            }
+                            Self::process_blocked_events(&mut table, &mut table_handler_state).await;
                         }
                         // ==============================
                         // Table internal events
@@ -627,6 +667,9 @@ impl TableHandler {
                                 if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
                                     table.flush(commit_lsn).await.unwrap();
                                     table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
+                                    if let SpecialTableState::AlterTable { .. } = table_handler_state.special_table_state {
+                                        table.force_empty_iceberg_payload();
+                                    }
                                     assert!(table.create_snapshot(table_handler_state.get_mooncake_snapshot_option(/*request_force=*/true)));
                                     table_handler_state.mooncake_snapshot_ongoing = true;
                                     continue;
@@ -643,6 +686,7 @@ impl TableHandler {
 
                             // Mark mooncake snapshot as completed.
                             table.mark_mooncake_snapshot_completed();
+                            table_handler_state.mooncake_snapshot_ongoing = false;
 
                             // Drop table if requested, and table at a clean state.
                             if table_handler_state.special_table_state == SpecialTableState::DropTable && !table_handler_state.iceberg_snapshot_ongoing {
@@ -655,13 +699,24 @@ impl TableHandler {
 
                             // Process iceberg snapshot and trigger iceberg snapshot if necessary.
                             if table_handler_state.can_initiate_iceberg_snapshot() {
-                                if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
+                                if let Some(mut iceberg_snapshot_payload) = iceberg_snapshot_payload {
                                     // Update table maintainence status.
                                     if iceberg_snapshot_payload.contains_table_maintenance_payload() && table_handler_state.table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
                                         table_handler_state.table_maintenance_process_status = MaintenanceProcessStatus::InPersist;
                                     }
-
                                     table_handler_state.iceberg_snapshot_ongoing = true;
+                                    if table_handler_state.should_complete_alter_table(iceberg_snapshot_payload.flush_lsn) {
+                                        if let SpecialTableState::AlterTable { ref mut alter_table_request, .. } = table_handler_state.special_table_state {
+                                            let new_table_metadata = table.alter_table(alter_table_request.take().unwrap());
+                                            iceberg_snapshot_payload.new_table_schema = Some(new_table_metadata);
+                                        }
+                                        else {
+                                            unreachable!("alter table request is not set");
+                                        }
+                                        table_handler_state.finish_alter_table();
+                                        Self::process_blocked_events(&mut table, &mut table_handler_state).await;
+                                    }
+                                    // TODO(hjiang): perform alter table on iceberg table
                                     table.persist_iceberg_snapshot(iceberg_snapshot_payload);
                                 }
                             }
@@ -689,8 +744,6 @@ impl TableHandler {
                                     table.perform_index_merge(file_indice_merge_payload);
                                 }
                             }
-
-                            table_handler_state.mooncake_snapshot_ongoing = false;
                         }
                         TableEvent::IcebergSnapshotResult { iceberg_snapshot_result } => {
                             table_handler_state.iceberg_snapshot_ongoing = false;
@@ -711,8 +764,6 @@ impl TableHandler {
                                     // Notify all waiters with LSN satisfied.
                                     let replication_lsn = *replication_lsn_rx.borrow();
                                     table_handler_state.update_force_iceberg_snapshot_requests(iceberg_flush_lsn, replication_lsn);
-
-                                    // mark alter table as completed if needed
                                 }
                                 Err(e) => {
                                     let err = Err(Error::IcebergMessage(format!("Failed to create iceberg snapshot: {e:?}")));
@@ -899,6 +950,19 @@ impl TableHandler {
             _ => {
                 unreachable!("unexpected event: {:?}", event)
             }
+        }
+    }
+
+    async fn process_blocked_events(
+        table: &mut MooncakeTable,
+        table_handler_state: &mut TableHandlerState,
+    ) {
+        let buffered_events = table_handler_state
+            .initial_copy_buffered_events
+            .drain(..)
+            .collect::<Vec<_>>();
+        for event in buffered_events {
+            Self::process_cdc_table_event(event, table, table_handler_state).await;
         }
     }
 }

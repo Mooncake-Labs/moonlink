@@ -125,6 +125,15 @@ impl SnapshotTableState {
         })
     }
 
+    pub(crate) fn reset_for_alter(&mut self, new_metadata: Arc<MooncakeTableMetadata>) {
+        self.batches = BTreeMap::new();
+        self.batches
+            .insert(0, InMemoryBatch::new(new_metadata.config.batch_size));
+        self.rows = None;
+        self.last_commit = RecordLocation::MemoryBatch(0, 0);
+        self.current_snapshot.metadata = new_metadata.clone();
+        self.mooncake_table_metadata = new_metadata;
+    }
     /// Util function to get table unique file id.
     pub(super) fn get_table_unique_file_id(&self, file_id: FileId) -> TableUniqueFileId {
         TableUniqueFileId {
@@ -458,10 +467,6 @@ impl SnapshotTableState {
             self.last_commit = cp;
         }
 
-        let flush_by_schema_change = task.new_metadata.is_some();
-        if let Some(new_metadata) = task.new_metadata.as_ref() {
-            self.mooncake_table_metadata = new_metadata.clone();
-        }
 
         // Till this point, committed changes have been reflected to current snapshot; sync the latest change to iceberg.
         // To reduce iceberg persistence overhead, there're certain cases an iceberg snapshot will be triggered:
@@ -474,6 +479,7 @@ impl SnapshotTableState {
         let flush_by_new_files_or_maintainence = self
             .unpersisted_records
             .if_persist_by_new_files_or_maintainence(opt.force_create);
+        let force_empty_iceberg_payload = task.force_empty_iceberg_payload;
 
         // Decide whether to perform a data compaction.
         //
@@ -492,7 +498,7 @@ impl SnapshotTableState {
             && (flush_by_new_files_or_maintainence || flush_by_deletion);
 
         // TODO(hjiang): When there's only schema evolution, we should also flush even no flush.
-        if !opt.skip_iceberg_snapshot && (flush_by_schema_change || flush_by_table_write) {
+        if !opt.skip_iceberg_snapshot && (force_empty_iceberg_payload || flush_by_table_write) {
             // Getting persistable committed deletion logs is not cheap, which requires iterating through all logs,
             // so we only aggregate when there's committed deletion.
             let flush_lsn = self.current_snapshot.data_file_flush_lsn.unwrap_or(0);
@@ -502,13 +508,11 @@ impl SnapshotTableState {
             // Only create iceberg snapshot when there's something to import.
             if !aggregated_committed_deletion_logs.is_empty()
                 || flush_by_new_files_or_maintainence
-                || flush_by_schema_change
+                || force_empty_iceberg_payload
             {
-                let new_metadata = std::mem::take(&mut task.new_metadata);
                 iceberg_snapshot_payload = Some(self.get_iceberg_snapshot_payload(
                     flush_lsn,
                     self.current_snapshot.wal_persistence_metadata.clone(),
-                    new_metadata,
                     aggregated_committed_deletion_logs,
                 ));
             }

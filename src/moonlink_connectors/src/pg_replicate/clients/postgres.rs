@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::pg_replicate::conversions::text::TextFormatConverter;
 use crate::pg_replicate::table::{ColumnSchema, LookupKey, SrcTableId, TableName, TableSchema};
+use futures::future::err;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
@@ -49,6 +50,9 @@ pub enum ReplicationClientError {
 
     #[error("table {0} doesn't exist")]
     MissingTable(TableName),
+
+    #[error("table with oid {0} doesn't exist")]
+    MissingTableId(SrcTableId),
 
     #[error("not a valid PgLsn")]
     InvalidPgLsn,
@@ -447,33 +451,12 @@ impl ReplicationClient {
         Ok(LookupKey::FullRow)
     }
 
-    pub async fn get_table_schemas(
-        &self,
-        table_names: &[TableName],
-        publication: Option<&str>,
-    ) -> Result<HashMap<SrcTableId, TableSchema>, ReplicationClientError> {
-        let mut table_schemas = HashMap::new();
-
-        for table_name in table_names {
-            let table_schema = self
-                .get_table_schema(table_name.clone(), publication)
-                .await?;
-            table_schemas.insert(table_schema.src_table_id, table_schema);
-        }
-
-        Ok(table_schemas)
-    }
-
     pub async fn get_table_schema(
         &self,
+        src_table_id: SrcTableId,
         table_name: TableName,
         publication: Option<&str>,
     ) -> Result<TableSchema, ReplicationClientError> {
-        let src_table_id = self
-            .get_src_table_id(&table_name)
-            .await?
-            .ok_or(ReplicationClientError::MissingTable(table_name.clone()))?;
-
         let column_schemas = self
             .get_column_schemas(src_table_id, &table_name, publication)
             .await?;
@@ -538,6 +521,38 @@ impl ReplicationClient {
         }
 
         Ok(None)
+    }
+
+    pub async fn get_table_name_from_id(
+        &self,
+        src_table_id: SrcTableId,
+    ) -> Result<TableName, ReplicationClientError> {
+        let query = format!(
+            "select n.nspname, c.relname from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.oid = {};",
+            src_table_id
+        );
+        let result = self.postgres_client.simple_query(&query).await?;
+        for res in &result {
+            if let SimpleQueryMessage::Row(row) = res {
+                let schema = row
+                    .get("nspname")
+                    .ok_or(ReplicationClientError::MissingColumn(
+                        "nspname".to_string(),
+                        "pg_namespace".to_string(),
+                    ))?;
+                let name = row
+                    .get("relname")
+                    .ok_or(ReplicationClientError::MissingColumn(
+                        "relname".to_string(),
+                        "pg_class".to_string(),
+                    ))?;
+                return Ok(TableName {
+                    schema: schema.to_string(),
+                    name: name.to_string(),
+                });
+            }
+        }
+        Err(ReplicationClientError::MissingTableId(src_table_id))
     }
 
     /// Returns the slot info of an existing slot. The slot info currently only has the

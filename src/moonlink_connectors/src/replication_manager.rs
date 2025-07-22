@@ -123,7 +123,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         debug!(src_table_id, %table_uri, "dropping table through manager");
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
         repl_conn.drop_table(src_table_id).await?;
-        if repl_conn.table_readers_count() == 0 {
+        if repl_conn.table_count() == 0 {
             self.shutdown_connection(&table_uri);
         }
 

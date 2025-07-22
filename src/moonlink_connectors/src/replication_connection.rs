@@ -1,9 +1,9 @@
 use crate::pg_replicate::clients::postgres::ReplicationClient;
 use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
 use crate::pg_replicate::initial_copy::copy_table_stream_impl;
-use crate::pg_replicate::moonlink_sink::Sink;
+use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
-    CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
+    CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
 use crate::pg_replicate::table_init::build_table_components;
 use crate::Result;
@@ -44,6 +44,12 @@ pub enum Command {
     Shutdown,
 }
 
+struct TableState {
+    schema: TableSchema,
+    reader: ReadStateManager,
+    event_manager: TableEventManager,
+    state_reader: TableStateReader,
+}
 /// Manages replication for table(s) within a database.
 pub struct ReplicationConnection {
     uri: String,
@@ -51,13 +57,11 @@ pub struct ReplicationConnection {
     table_temp_files_directory: String,
     postgres_client: Client,
     handle: Option<JoinHandle<Result<()>>>,
-    table_readers: HashMap<SrcTableId, ReadStateManager>,
-    table_event_managers: HashMap<SrcTableId, TableEventManager>,
-    table_state_readers: HashMap<SrcTableId, TableStateReader>,
+    table_states: HashMap<SrcTableId, TableState>,
     cmd_tx: mpsc::Sender<Command>,
     cmd_rx: Option<mpsc::Receiver<Command>>,
     replication_state: Arc<ReplicationState>,
-    source: PostgresSource,
+    source: Arc<PostgresSource>,
     replication_started: bool,
     slot_name: String,
     /// Object storage cache.
@@ -110,7 +114,7 @@ impl ReplicationConnection {
         let postgres_source = PostgresSource::new(
             &uri,
             Some(slot_name.clone()),
-            TableNamesFrom::Publication("moonlink_pub".to_string()),
+            Some("moonlink_pub".to_string()),
             true,
         )
         .await?;
@@ -125,13 +129,11 @@ impl ReplicationConnection {
             table_temp_files_directory,
             postgres_client,
             handle: None,
-            table_readers: HashMap::new(),
-            table_state_readers: HashMap::new(),
-            table_event_managers: HashMap::new(),
+            table_states: HashMap::new(),
             cmd_tx,
             cmd_rx: Some(cmd_rx),
             replication_state: ReplicationState::new(),
-            source: postgres_source,
+            source: Arc::new(postgres_source),
             replication_started: false,
             slot_name,
             object_storage_cache,
@@ -230,19 +232,23 @@ impl ReplicationConnection {
     }
 
     pub fn get_table_reader(&self, src_table_id: SrcTableId) -> &ReadStateManager {
-        self.table_readers.get(&src_table_id).unwrap()
+        &self.table_states.get(&src_table_id).unwrap().reader
     }
 
     pub fn get_table_state_reader(&self, src_table_id: SrcTableId) -> &TableStateReader {
-        self.table_state_readers.get(&src_table_id).unwrap()
+        &self.table_states.get(&src_table_id).unwrap().state_reader
     }
 
-    pub fn table_readers_count(&self) -> usize {
-        self.table_readers.len()
+    pub fn table_count(&self) -> usize {
+        self.table_states.len()
     }
 
     pub fn get_table_event_manager(&mut self, src_table_id: SrcTableId) -> &mut TableEventManager {
-        self.table_event_managers.get_mut(&src_table_id).unwrap()
+        &mut self
+            .table_states
+            .get_mut(&src_table_id)
+            .unwrap()
+            .event_manager
     }
 
     async fn spawn_replication_task(
@@ -252,13 +258,14 @@ impl ReplicationConnection {
     ) -> JoinHandle<Result<()>> {
         let uri = self.uri.clone();
         let cfg = self.source.get_cdc_stream_config().unwrap();
+        let source = self.source.clone();
 
         tokio::spawn(async move {
             let (client, connection) = ReplicationClient::connect_no_tls(&uri, true)
                 .await
                 .map_err(PostgresSourceError::from)?;
 
-            run_event_loop(client, cfg, connection, sink, cmd_rx).await
+            run_event_loop(client, cfg, connection, sink, cmd_rx, source).await
         })
     }
 
@@ -289,12 +296,15 @@ impl ReplicationConnection {
 
         let event_sender_clone = table_resources.event_sender.clone();
 
-        self.table_readers
-            .insert(src_table_id, table_resources.read_state_manager);
-        self.table_event_managers
-            .insert(src_table_id, table_resources.table_event_manager);
-        self.table_state_readers
-            .insert(src_table_id, table_resources.table_state_reader);
+        self.table_states.insert(
+            src_table_id,
+            TableState {
+                schema: schema.clone(),
+                reader: table_resources.read_state_manager,
+                event_manager: table_resources.table_event_manager,
+                state_reader: table_resources.table_state_reader,
+            },
+        );
         if let Err(e) = self
             .cmd_tx
             .send(Command::AddTable {
@@ -310,13 +320,7 @@ impl ReplicationConnection {
         }
 
         // Create a dedicated source for the copy
-        let mut copy_source = PostgresSource::new(
-            &self.uri,
-            None,
-            TableNamesFrom::Vec(vec![schema.table_name.clone()]),
-            false,
-        )
-        .await?;
+        let mut copy_source = PostgresSource::new(&self.uri, None, None, false).await?;
 
         // Check if there are existing rows
         let row_count = copy_source.get_row_count(&schema.table_name).await?;
@@ -375,26 +379,17 @@ impl ReplicationConnection {
 
     async fn remove_table_from_replication(&mut self, src_table_id: SrcTableId) -> Result<()> {
         debug!(src_table_id, "removing table from replication");
-        self.table_readers.remove_entry(&src_table_id).unwrap();
-        self.table_state_readers
-            .remove_entry(&src_table_id)
-            .unwrap();
+        let table_state = self.table_states.remove(&src_table_id).unwrap();
         // Notify the table handler to clean up cache, mooncake and iceberg table state.
-        self.drop_iceberg_table(src_table_id).await?;
+        debug!(src_table_id, "drop table from table handler");
+        let mut table_event_manager = table_state.event_manager;
+        table_event_manager.drop_table().await?;
         if let Err(e) = self.cmd_tx.send(Command::DropTable { src_table_id }).await {
             error!(error = ?e, "failed to enqueue DropTable command");
         }
 
         debug!(src_table_id, "table removed from replication");
 
-        Ok(())
-    }
-
-    /// Clean up iceberg table in a blocking manner.
-    async fn drop_iceberg_table(&mut self, table_id: u32) -> Result<()> {
-        debug!(table_id, "dropping iceberg table");
-        let mut table_state_manager = self.table_event_managers.remove(&table_id).unwrap();
-        table_state_manager.drop_table().await?;
         Ok(())
     }
 
@@ -423,7 +418,10 @@ impl ReplicationConnection {
         debug!(table_name, "adding table");
         // TODO: We should not naively alter the replica identity of a table. We should only do this if we are sure that the table does not already have a FULL replica identity. [https://github.com/Mooncake-Labs/moonlink/issues/104]
         self.alter_table_replica_identity(table_name).await?;
-        let table_schema = self.source.fetch_table_schema(table_name, None).await?;
+        let table_schema = self
+            .source
+            .fetch_table_schema(None, Some(table_name), None)
+            .await?;
 
         let moonlink_table_config = self
             .add_table_to_replication(
@@ -443,11 +441,16 @@ impl ReplicationConnection {
     /// Remove the given table from connection.
     pub async fn drop_table(&mut self, src_table_id: u32) -> Result<()> {
         debug!(src_table_id, "dropping table");
-        let table_name = self.source.get_table_name_from_id(src_table_id);
+        let table_name = self
+            .table_states
+            .get(&src_table_id)
+            .unwrap()
+            .schema
+            .table_name
+            .to_string();
 
         // Remove table from publication as the first step, to prevent further events.
         self.remove_table_from_publication(&table_name).await?;
-        self.source.remove_table_schema(src_table_id);
         self.remove_table_from_replication(src_table_id).await?;
 
         debug!(src_table_id, "table dropped");
@@ -504,6 +507,7 @@ async fn run_event_loop(
     connection: Connection<Socket, NoTlsStream>,
     mut sink: Sink,
     mut cmd_rx: mpsc::Receiver<Command>,
+    postgres_source: Arc<PostgresSource>,
 ) -> Result<()> {
     pin!(connection);
 
@@ -545,7 +549,7 @@ async fn run_event_loop(
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
                 Command::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx } => {
-                    sink.add_table(src_table_id, event_sender, commit_lsn_tx);
+                    sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                     stream.as_mut().add_table_schema(schema);
                 }
@@ -579,7 +583,12 @@ async fn run_event_loop(
                         break;
                     }
                     Ok(event) => {
-                        sink.process_cdc_event(event).await.unwrap();
+                        let res = sink.process_cdc_event(event).await.unwrap();
+                        if let Some(SchemaChangeRequest(src_table_id)) = res {
+                            let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
+                            sink.alter_table(src_table_id, &table_schema).await;
+                            stream.as_mut().add_table_schema(table_schema);
+                        }
                     }
                 }
             }

@@ -10,6 +10,7 @@ use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::test_utils_commons::*;
+use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::IcebergPersistenceConfig;
 use crate::storage::mooncake_table::{MooncakeTableConfig, TableMetadata as MooncakeTableMetadata};
 use crate::storage::MooncakeTable;
@@ -338,4 +339,12 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
     table.register_table_notify(notify_tx).await;
 
     (table, notify_rx)
+}
+
+pub(crate) async fn alter_table(table: &mut MooncakeTable) {
+    let alter_table_request = AlterTableRequest {
+        new_columns: vec![],
+        dropped_columns: vec!["age".to_string()],
+    };
+    table.alter_table(alter_table_request);
 }
