@@ -215,17 +215,11 @@ mod tests {
             TableStateReader::new(FAKE_TABLE_ID, &iceberg_table_config, &table);
 
         // Perform an schema update.
-        let updated_mooncake_table_metadata = create_test_table_metadata_with_schema(
-            temp_dir.path().to_str().unwrap().to_string(),
-            create_test_updated_arrow_schema(),
-        );
-        table.force_empty_iceberg_payload();
-
-        create_mooncake_and_persist_for_test(&mut table, &mut notifier).await;
+        let _ = alter_table_and_persist_to_iceberg(&mut table, &mut notifier).await;
 
         // Get table state and check.
         let actual_table_schema = table_state_reader.get_current_table_schema().await.unwrap();
-        let expected_table_schema = create_test_updated_arrow_schema();
+        let expected_table_schema = create_test_updated_arrow_schema_remove_age();
         assert_eq!(actual_table_schema, expected_table_schema);
     }
 }

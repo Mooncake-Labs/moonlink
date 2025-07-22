@@ -6,8 +6,9 @@ use tokio::sync::mpsc::Receiver;
 use crate::row::MoonlinkRow;
 use crate::storage::io_utils;
 use crate::storage::mooncake_table::{
-    DataCompactionPayload, DataCompactionResult, FileIndiceMergePayload, FileIndiceMergeResult,
-    IcebergSnapshotPayload, IcebergSnapshotResult, MaintenanceOption, SnapshotOption,
+    AlterTableRequest, DataCompactionPayload, DataCompactionResult, FileIndiceMergePayload,
+    FileIndiceMergeResult, IcebergSnapshotPayload, IcebergSnapshotResult, MaintenanceOption,
+    SnapshotOption, TableMetadata as MooncakeTableMetadata,
 };
 use crate::table_notify::TableEvent;
 use crate::{MooncakeTable, SnapshotReadOutput};
@@ -445,5 +446,29 @@ pub(crate) async fn sync_read_request_for_test(
         table.set_read_request_res(cache_handles);
     } else {
         panic!("Receive other notifications other than read request")
+    }
+}
+
+pub(crate) async fn alter_table_and_persist_to_iceberg(
+    table: &mut MooncakeTable,
+    notify_rx: &mut Receiver<TableEvent>,
+) -> Arc<MooncakeTableMetadata> {
+    table.force_empty_iceberg_payload();
+    // Create a mooncake and iceberg snapshot to reflect both data files and schema changes.
+    let (_, iceberg_snapshot_payload, _, _, _) =
+        create_mooncake_snapshot_for_test(table, notify_rx).await;
+    if let Some(mut iceberg_snapshot_payload) = iceberg_snapshot_payload {
+        let alter_table_request = AlterTableRequest {
+            new_columns: vec![],
+            dropped_columns: vec!["age".to_string()],
+        };
+        let new_table_metadata = table.alter_table(alter_table_request);
+        iceberg_snapshot_payload.new_table_schema = Some(new_table_metadata.clone());
+        let iceberg_snapshot_result =
+            create_iceberg_snapshot(table, Some(iceberg_snapshot_payload), notify_rx).await;
+        table.set_iceberg_snapshot_res(iceberg_snapshot_result.unwrap());
+        new_table_metadata
+    } else {
+        panic!("Iceberg snapshot payload is not set");
     }
 }

@@ -467,7 +467,6 @@ impl SnapshotTableState {
             self.last_commit = cp;
         }
 
-
         // Till this point, committed changes have been reflected to current snapshot; sync the latest change to iceberg.
         // To reduce iceberg persistence overhead, there're certain cases an iceberg snapshot will be triggered:
         // (1) there're persisted data files

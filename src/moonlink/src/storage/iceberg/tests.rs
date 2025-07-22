@@ -1919,15 +1919,8 @@ async fn test_schema_update_with_no_table_write_impl(iceberg_table_config: Icebe
     )
     .await;
 
-    // Perform an schema update.
-    let updated_mooncake_table_metadata = create_test_table_metadata_with_schema(
-        local_table_directory,
-        create_test_updated_arrow_schema(),
-    );
-    table.force_empty_iceberg_payload();
-
-    // Create a mooncake and iceberg snapshot to reflect both data files and schema changes.
-    create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
+    let updated_mooncake_table_metadata =
+        alter_table_and_persist_to_iceberg(&mut table, &mut notify_rx).await;
 
     // Now the iceberg table has been created, create an iceberg table manager and check table status.
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
@@ -2063,22 +2056,8 @@ async fn test_schema_update_impl(iceberg_table_config: IcebergTableConfig) {
         .unwrap();
 
     // Perform an schema update.
-    let updated_mooncake_table_metadata = create_test_table_metadata_with_schema(
-        local_table_directory,
-        create_test_updated_arrow_schema(),
-    );
-    table.force_empty_iceberg_payload();
-
-    // Create a mooncake and iceberg snapshot to reflect both data files and schema changes.
-    let (_, iceberg_snapshot_payload, _, _, _) =
-        create_mooncake_snapshot_for_test(&mut table, &mut notify_rx).await;
-    if let Some(mut iceberg_snapshot_payload) = iceberg_snapshot_payload {
-        iceberg_snapshot_payload.new_table_schema = Some(updated_mooncake_table_metadata.clone());
-        let iceberg_snapshot_result =
-            create_iceberg_snapshot(&mut table, Some(iceberg_snapshot_payload), &mut notify_rx)
-                .await;
-        table.set_iceberg_snapshot_res(iceberg_snapshot_result.unwrap());
-    }
+    let updated_mooncake_table_metadata =
+        alter_table_and_persist_to_iceberg(&mut table, &mut notify_rx).await;
 
     // Now the iceberg table has been created, create an iceberg table manager and check table status.
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
