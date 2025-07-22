@@ -35,7 +35,7 @@ pub struct PersistenceResult {
 
 #[async_trait]
 #[cfg_attr(test, automock)]
-pub trait TableManager: Send {
+pub trait TableManager: Send + Sync {
     /// Write a new snapshot to iceberg table.
     /// It could be called for multiple times to write and commit multiple snapshots.
     ///

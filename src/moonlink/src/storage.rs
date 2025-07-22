@@ -9,7 +9,8 @@ pub(crate) mod mooncake_table;
 pub(crate) mod parquet_utils;
 pub(crate) mod path_utils;
 pub(crate) mod storage_utils;
-mod wal;
+#[allow(dead_code)]
+pub(crate) mod wal;
 
 pub use crate::event_sync::EventSyncReceiver;
 pub use cache::object_storage::cache_config::ObjectStorageCacheConfig;

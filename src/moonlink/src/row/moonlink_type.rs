@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
 // Corresponds to the Parquet Types
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum RowValue {
     Int32(i32),
     Int64(i64),

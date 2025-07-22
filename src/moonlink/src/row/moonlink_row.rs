@@ -5,10 +5,11 @@ use arrow::datatypes::Field;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::ProjectionMask;
+use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::mem::take;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct MoonlinkRow {
     pub values: Vec<RowValue>,
 }
@@ -184,6 +185,12 @@ impl MoonlinkRow {
     }
 }
 
+impl Clone for MoonlinkRow {
+    fn clone(&self) -> Self {
+        MoonlinkRow::new(self.values.clone())
+    }
+}
+
 impl MoonlinkRow {
     pub fn equals_moonlink_row(&self, other: &Self, identity: &IdentityProp) -> bool {
         match identity {
@@ -297,12 +304,6 @@ mod tests {
     use arrow_array::{Int32Array, Int64Array};
     use parquet::{arrow::AsyncArrowWriter, file::properties::WriterProperties};
     use tempfile::tempdir;
-
-    impl Clone for MoonlinkRow {
-        fn clone(&self) -> Self {
-            MoonlinkRow::new(self.values.clone())
-        }
-    }
 
     #[test]
     fn test_equals_full_row_with_identity() {

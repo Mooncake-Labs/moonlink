@@ -45,6 +45,9 @@ pub enum Error {
 
     #[error("Join error: {source}")]
     JoinError { source: Arc<tokio::task::JoinError> },
+
+    #[error("JSON serialization/deserialization error: {source}")]
+    Json { source: Arc<serde_json::Error> },
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -92,6 +95,14 @@ impl From<tokio::task::JoinError> for Error {
 impl From<ParquetError> for Error {
     fn from(source: ParquetError) -> Self {
         Error::Parquet {
+            source: Arc::new(source),
+        }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(source: serde_json::Error) -> Self {
+        Error::Json {
             source: Arc::new(source),
         }
     }
