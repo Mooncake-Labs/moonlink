@@ -132,8 +132,7 @@ impl InMemWal {
 /// have to be handled serially.
 pub(crate) struct WalManager {
     in_mem_wal: InMemWal,
-    /// The wal file numbers that are still live. Each entry is (file_number, highest_lsn within file).
-    /// Gets modified by persist and truncate, which are only called serially in the persist table handler.
+    /// The wal file numbers that are still live.
     live_wal_file_tracker: Vec<WalFileInfo>,
     /// Tracks the file number to be assigned to the next persisted wal file
     curr_file_number: u64,
