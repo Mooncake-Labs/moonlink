@@ -162,12 +162,16 @@ impl TextFormatConverter {
                 |str| Ok(Some(parse_bool(str)?)),
                 ArrayCell::Bool,
             ),
-            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+            Type::CHAR | Type::BPCHAR => {
+                Ok(Cell::String(str.trim_end().to_string()))
+            }
+            Type::VARCHAR | Type::NAME | Type::TEXT => {
                 Ok(Cell::String(str.to_string()))
             }
-            Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
+            Type::CHAR_ARRAY | Type::BPCHAR_ARRAY => {
+                TextFormatConverter::parse_array(str, |str| Ok(Some(str.trim_end().to_string())), ArrayCell::String)
+            }
+            Type::VARCHAR_ARRAY
             | Type::NAME_ARRAY
             | Type::TEXT_ARRAY => TextFormatConverter::parse_array(
                 str,
@@ -395,6 +399,56 @@ mod tests {
                 assert_eq!(v, vec![Some("a".to_string()), None]);
             }
             _ => panic!("unexpected cell"),
+        }
+    }
+
+    #[test]
+    fn parse_char_vs_varchar_trailing_spaces() {
+        // CHAR/BPCHAR should trim trailing spaces
+        let char_cell = TextFormatConverter::try_from_str(&Type::CHAR, "hello   ").unwrap();
+        match char_cell {
+            Cell::String(s) => assert_eq!(s, "hello"),
+            _ => panic!("expected string cell"),
+        }
+
+        let bpchar_cell = TextFormatConverter::try_from_str(&Type::BPCHAR, "world   ").unwrap();
+        match bpchar_cell {
+            Cell::String(s) => assert_eq!(s, "world"),
+            _ => panic!("expected string cell"),
+        }
+
+        // VARCHAR/NAME/TEXT should preserve trailing spaces
+        let varchar_cell = TextFormatConverter::try_from_str(&Type::VARCHAR, "hello   ").unwrap();
+        match varchar_cell {
+            Cell::String(s) => assert_eq!(s, "hello   "),
+            _ => panic!("expected string cell"),
+        }
+
+        let text_cell = TextFormatConverter::try_from_str(&Type::TEXT, "world   ").unwrap();
+        match text_cell {
+            Cell::String(s) => assert_eq!(s, "world   "),
+            _ => panic!("expected string cell"),
+        }
+    }
+
+    #[test]
+    fn parse_char_array_vs_varchar_array_trailing_spaces() {
+        // CHAR_ARRAY/BPCHAR_ARRAY should trim trailing spaces
+        let char_array_cell = TextFormatConverter::try_from_str(&Type::CHAR_ARRAY, "{\"hello   \",\"world   \"}").unwrap();
+        match char_array_cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![Some("hello".to_string()), Some("world".to_string())]);
+            }
+            _ => panic!("expected string array cell"),
+        }
+
+        // VARCHAR_ARRAY should preserve trailing spaces
+        let varchar_array_cell = TextFormatConverter::try_from_str(&Type::VARCHAR_ARRAY, "{\"hello   \",\"world   \"}").unwrap();
+        match varchar_array_cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![Some("hello   ".to_string()), Some("world   ".to_string())]);
+            }
+            _ => panic!("expected string array cell"),
         }
     }
 }
