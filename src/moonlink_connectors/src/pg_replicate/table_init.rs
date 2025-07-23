@@ -89,8 +89,13 @@ pub async fn build_table_components(
         ReadStateManager::new(&table, replication_state.subscribe(), commit_lsn_rx);
     let table_state_reader = TableStateReader::new(table_id, &iceberg_table_config, &table);
     let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
-    let table_handler =
-        TableHandler::new(table, event_sync_sender, replication_state.subscribe()).await;
+    let table_handler = TableHandler::new(
+        table,
+        event_sync_sender,
+        replication_state.subscribe(),
+        /*event_replay_tx=*/ None,
+    )
+    .await;
     let flush_lsn_rx = event_sync_receiver.flush_lsn_rx.clone();
     let table_event_manager =
         TableEventManager::new(table_handler.get_event_sender(), event_sync_receiver);

@@ -183,9 +183,7 @@ impl MoonlinkRow {
         let batch = batch_reader.next().unwrap().unwrap();
         self.equals_record_batch_at_offset_impl(&batch, 0)
     }
-}
 
-impl MoonlinkRow {
     pub fn equals_moonlink_row(&self, other: &Self, identity: &IdentityProp) -> bool {
         match identity {
             IdentityProp::Keys(keys) => {

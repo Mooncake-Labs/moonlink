@@ -10,6 +10,7 @@ use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::test_utils_commons::*;
+use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::IcebergPersistenceConfig;
 use crate::storage::mooncake_table::{MooncakeTableConfig, TableMetadata as MooncakeTableMetadata};
 use crate::storage::MooncakeTable;
@@ -87,11 +88,11 @@ pub(crate) fn create_test_arrow_schema() -> Arc<ArrowSchema> {
 }
 
 /// Test util function to create an arrow schema for schema evolution.
-pub(crate) fn create_test_updated_arrow_schema() -> Arc<ArrowSchema> {
+pub(crate) fn create_test_updated_arrow_schema_remove_age() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![
-        Field::new("a_new_id", DataType::Int32, false).with_metadata(HashMap::from([(
+        Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
             "PARQUET:field_id".to_string(),
-            "3".to_string(),
+            "0".to_string(),
         )])),
         Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
             "PARQUET:field_id".to_string(),
@@ -115,22 +116,6 @@ pub(crate) fn create_test_table_metadata(
 ) -> Arc<MooncakeTableMetadata> {
     let config = MooncakeTableConfig::new(local_table_directory.clone());
     create_test_table_metadata_with_config(local_table_directory, config)
-}
-
-/// Test util function to create mooncake table metadata with schema.
-pub(crate) fn create_test_table_metadata_with_schema(
-    local_table_directory: String,
-    arrow_schema: Arc<ArrowSchema>,
-) -> Arc<MooncakeTableMetadata> {
-    let config = MooncakeTableConfig::new(local_table_directory.clone());
-    Arc::new(MooncakeTableMetadata {
-        name: ICEBERG_TEST_TABLE.to_string(),
-        table_id: 0,
-        schema: arrow_schema,
-        config,
-        path: std::path::PathBuf::from(local_table_directory),
-        identity: RowIdentity::FullRow,
-    })
 }
 
 /// Test util function to create mooncake table metadata with mooncake table config.
@@ -272,13 +257,13 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
     (table, notify_rx)
 }
 
-/// Test util function to create mooncake table and table notify.
-pub(crate) async fn create_mooncake_table_and_notify(
+/// Test util function to create mooncake table.
+pub(crate) async fn create_mooncake_table(
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
     iceberg_table_config: IcebergTableConfig,
     object_storage_cache: ObjectStorageCache,
-) -> (MooncakeTable, Receiver<TableEvent>) {
-    let mut table = MooncakeTable::new(
+) -> MooncakeTable {
+    let table = MooncakeTable::new(
         create_test_arrow_schema().as_ref().clone(),
         ICEBERG_TEST_TABLE.to_string(),
         /*version=*/ TEST_TABLE_ID.0,
@@ -292,6 +277,21 @@ pub(crate) async fn create_mooncake_table_and_notify(
     .await
     .unwrap();
 
+    table
+}
+
+/// Test util function to create mooncake table and table notify.
+pub(crate) async fn create_mooncake_table_and_notify(
+    mooncake_table_metadata: Arc<MooncakeTableMetadata>,
+    iceberg_table_config: IcebergTableConfig,
+    object_storage_cache: ObjectStorageCache,
+) -> (MooncakeTable, Receiver<TableEvent>) {
+    let mut table = create_mooncake_table(
+        mooncake_table_metadata,
+        iceberg_table_config,
+        object_storage_cache,
+    )
+    .await;
     let (notify_tx, notify_rx) = mpsc::channel(100);
     table.register_table_notify(notify_tx).await;
 
@@ -338,4 +338,12 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
     table.register_table_notify(notify_tx).await;
 
     (table, notify_rx)
+}
+
+pub(crate) async fn alter_table(table: &mut MooncakeTable) {
+    let alter_table_request = AlterTableRequest {
+        new_columns: vec![],
+        dropped_columns: vec!["age".to_string()],
+    };
+    table.alter_table(alter_table_request);
 }

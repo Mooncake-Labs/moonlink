@@ -33,6 +33,8 @@ storage-gcs = [
 
 bench = []
 
+chaos-test = []
+
 [dependencies]
 ahash = "0.8.11"
 arrow = { workspace = true }

@@ -92,6 +92,7 @@ impl TestEnvironment {
             mooncake_table,
             table_event_sync_sender,
             replication_rx.clone(),
+            /*event_replay_tx=*/ None,
         )
         .await;
         let table_event_manager =

@@ -5,7 +5,6 @@ use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::table_snapshot::IcebergSnapshotDataCompactionPayload;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::SnapshotTask;
-use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::mooncake_table::{
     IcebergSnapshotImportPayload, IcebergSnapshotIndexMergePayload,
 };
@@ -15,7 +14,6 @@ use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 /// This file stores snapshot persistence related features.
 use crate::storage::SnapshotTableState;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 impl SnapshotTableState {
     /// Util function to decide whether to create iceberg snapshot by deletion vectors.
@@ -34,13 +32,12 @@ impl SnapshotTableState {
         &self,
         flush_lsn: u64,
         wal_persistence_metadata: Option<WalPersistenceMetadata>,
-        new_table_schema: Option<Arc<MooncakeTableMetadata>>,
         new_committed_deletion_logs: HashMap<MooncakeDataFileRef, BatchDeletionVector>,
     ) -> IcebergSnapshotPayload {
         IcebergSnapshotPayload {
             flush_lsn,
             wal_persistence_metadata,
-            new_table_schema,
+            new_table_schema: None,
             import_payload: IcebergSnapshotImportPayload {
                 data_files: self.unpersisted_records.get_unpersisted_data_files(),
                 new_deletion_vector: new_committed_deletion_logs,

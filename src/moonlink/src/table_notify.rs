@@ -14,7 +14,7 @@ use crate::Result;
 /// TODO(hjiang): Revisit whether we need to place the payload into box.
 #[allow(clippy::large_enum_variant)]
 /// Event types that can be processed by the TableHandler
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TableEvent {
     /// ==============================
     /// Replication events
