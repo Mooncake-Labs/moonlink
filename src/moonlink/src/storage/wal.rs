@@ -115,18 +115,18 @@ pub struct InMemWal {
     pub buf: Vec<WalEvent>,
     /// Tracks an LSN in case of a stream flush (or similar events) which has no accompanying LSN.
     /// A new instance will take the highest_lsn from the previous instance before it is populated.
-    pub highest_lsn: u64,
+    highest_lsn: u64,
 }
 
 impl InMemWal {
-    pub fn new(highest_lsn: u64) -> Self {
+    fn new(highest_lsn: u64) -> Self {
         Self {
             buf: Vec::new(),
             highest_lsn,
         }
     }
 
-    pub fn push(&mut self, table_event: &TableEvent) {
+    fn push(&mut self, table_event: &TableEvent) {
         let wal_event = WalEvent::new(table_event, self.highest_lsn);
         self.buf.push(wal_event);
 
@@ -140,10 +140,11 @@ impl InMemWal {
 
 /// Wal tracks both the in-memory WAL and the flushed WALs.
 /// Note that wal manager is meant to be used in a single thread. While
-/// persist and delete_files can be called concurrently, their results
-/// have to be handled serially.
+/// persist and delete_files can be called asynchronously, their results returned
+/// from those operations have to be handled serially.
 /// There is one instance of WalManager per table.
 pub struct WalManager {
+    /// In Mem Wal that gets appended to. When we need to flush, we call take on the buffer inside.
     pub in_mem_wal: InMemWal,
     /// The wal file numbers that are still live.
     live_wal_files_tracker: Vec<WalFileInfo>,
@@ -173,6 +174,7 @@ impl WalManager {
         format!("wal_{file_number}.json")
     }
 
+    /// Get the file info for the next wal file to be persisted.
     pub fn get_to_persist_wal_file_info(&self) -> WalFileInfo {
         WalFileInfo {
             file_number: self.curr_file_number,
@@ -180,6 +182,8 @@ impl WalManager {
         }
     }
 
+    /// Persist a series of wal events to the file system.
+    /// Should be called asynchronously after we call take on the in_mem_wal.
     pub async fn persist(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_to_persist: &Vec<WalEvent>,
@@ -210,6 +214,7 @@ impl WalManager {
 
     /// Returns a list of files to be dropped, i.e. all files with highest_lsn < truncate_from_lsn
     /// List of files returned is sorted in ascending order of file number.
+    /// Should be called in preparation to asynchronously delete the files.
     pub fn get_files_to_truncate(&self, truncate_from_lsn: u64) -> Vec<WalFileInfo> {
         let last_truncate_idx = self
             .live_wal_files_tracker
@@ -227,6 +232,8 @@ impl WalManager {
         }
     }
 
+    /// Delete a list of wal files from the file system.
+    /// Should be called asynchronously after we call get_files_to_truncate.
     pub async fn delete_files(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_file_numbers: &[WalFileInfo],
@@ -259,6 +266,7 @@ impl WalManager {
         }
     }
 
+    /// For now, we handle the persist and truncate results together.
     pub fn handle_completed_persist_and_truncate(
         &mut self,
         persist_and_truncate_result: &PersistAndTruncateResult,
