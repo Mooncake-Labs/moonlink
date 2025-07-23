@@ -57,7 +57,7 @@ async fn test_wal_file_numbering_sequence() {
         lsn: 100,
         is_copied: false,
     };
-    wal.insert(&event1);
+    wal.push(&event1);
     wal.persist_and_truncate(None).await.unwrap();
 
     // Second persist
@@ -67,7 +67,7 @@ async fn test_wal_file_numbering_sequence() {
         lsn: 101,
         is_copied: false,
     };
-    wal.insert(&event2);
+    wal.push(&event2);
     wal.persist_and_truncate(None).await.unwrap();
 
     // Third persist
@@ -77,7 +77,7 @@ async fn test_wal_file_numbering_sequence() {
         lsn: 102,
         is_copied: false,
     };
-    wal.insert(&event3);
+    wal.push(&event3);
     wal.persist_and_truncate(None).await.unwrap();
 
     // Verify files exist
@@ -127,7 +127,7 @@ async fn test_wal_truncation_deletes_files() {
             lsn: 100 + i,
             is_copied: false,
         };
-        wal.insert(&event);
+        wal.push(&event);
         wal.persist_and_truncate(None).await.unwrap();
     }
 
@@ -178,7 +178,7 @@ async fn test_wal_truncation_deletes_all_files() {
 
     // Test truncation that should delete all files
     let row = test_row(1, "Alice", 30);
-    wal.insert(&TableEvent::Append {
+    wal.push(&TableEvent::Append {
         row: row.clone(),
         xact_id: None,
         lsn: 100,
@@ -218,7 +218,7 @@ async fn test_wal_persist_and_truncate() {
     ];
 
     for event in &events {
-        wal.insert(event);
+        wal.push(event);
     }
     // first persist the wal
     wal.persist_and_truncate(None).await.unwrap();
@@ -328,7 +328,7 @@ async fn test_wal_recovery_mixed_event_types() {
     ];
 
     for event in &events {
-        wal.insert(event);
+        wal.push(event);
     }
 
     wal.persist_and_truncate(None).await.unwrap();
@@ -387,7 +387,7 @@ async fn test_wal_multiple_persist_truncate_recovery() {
     for cycle in 0..outer_iterations {
         // Add events for this cycle
         for i in 0..inner_iterations {
-            wal.insert(&TableEvent::Append {
+            wal.push(&TableEvent::Append {
                 row: row.clone(),
                 xact_id: None,
                 lsn: cycle * 10 + i,

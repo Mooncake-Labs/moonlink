@@ -1,4 +1,4 @@
-pub(crate) mod wal_persistence_metadata;
+pub mod wal_persistence_metadata;
 use crate::row::MoonlinkRow;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
@@ -7,12 +7,13 @@ use crate::table_notify::TableEvent;
 use crate::Result;
 use futures::stream::{self, Stream};
 use futures::{future, StreamExt};
+use more_asserts::assert_ge;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub(crate) enum WalEventEnum {
+enum WalEventEnum {
     Append {
         row: MoonlinkRow,
         xact_id: Option<u32>,
@@ -33,21 +34,21 @@ pub(crate) enum WalEventEnum {
     },
 }
 
-pub(crate) struct PersistAndTruncateResult {
-    pub file_persisted: Option<WalFileInfo>,
-    pub highest_deleted_file: Option<WalFileInfo>,
+pub struct PersistAndTruncateResult {
+    file_persisted: Option<WalFileInfo>,
+    highest_deleted_file: Option<WalFileInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WalFileInfo {
-    pub file_number: u64,
-    pub highest_lsn: u64,
+pub struct WalFileInfo {
+    file_number: u64,
+    highest_lsn: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub(crate) struct WalEvent {
-    pub lsn: u64,
-    pub event: WalEventEnum,
+pub struct WalEvent {
+    lsn: u64,
+    event: WalEventEnum,
 }
 
 impl WalEvent {
@@ -124,16 +125,28 @@ impl InMemWal {
             highest_lsn,
         }
     }
+
+    pub fn push(&mut self, table_event: &TableEvent) {
+        let wal_event = WalEvent::new(table_event, self.highest_lsn);
+        self.buf.push(wal_event);
+
+        // Update highest_lsn if this event has a higher LSN
+        if let Some(lsn) = table_event.get_lsn_for_ingest_event() {
+            assert_ge!(lsn, self.highest_lsn);
+            self.highest_lsn = lsn;
+        }
+    }
 }
 
 /// Wal tracks both the in-memory WAL and the flushed WALs.
 /// Note that wal manager is meant to be used in a single thread. While
 /// persist and delete_files can be called concurrently, their results
 /// have to be handled serially.
-pub(crate) struct WalManager {
+/// There is one instance of WalManager per table.
+pub struct WalManager {
     in_mem_wal: InMemWal,
     /// The wal file numbers that are still live.
-    live_wal_file_tracker: Vec<WalFileInfo>,
+    live_wal_files_tracker: Vec<WalFileInfo>,
     /// Tracks the file number to be assigned to the next persisted wal file
     curr_file_number: u64,
 
@@ -145,22 +158,14 @@ impl WalManager {
         // TODO(Paul): Add a more robust constructor when implementing recovery
         Self {
             in_mem_wal: InMemWal::new(0),
-            live_wal_file_tracker: Vec::new(),
+            live_wal_files_tracker: Vec::new(),
             curr_file_number: 0,
             file_system_accessor: Arc::new(FileSystemAccessor::new(config)),
         }
     }
 
-    pub fn insert(&mut self, table_event: &TableEvent) {
-        let wal_event = WalEvent::new(table_event, self.in_mem_wal.highest_lsn);
-        self.in_mem_wal.buf.push(wal_event);
-
-        // Update highest_lsn if this event has a higher LSN
-        if let Some(lsn) = table_event.get_lsn_for_ingest_event() {
-            assert!(lsn >= self.in_mem_wal.highest_lsn);
-            self.in_mem_wal.highest_lsn = lsn;
-        }
-
+    pub fn push(&mut self, table_event: &TableEvent) {
+        self.in_mem_wal.push(table_event);
         // TODO(Paul): Implement streaming flush (if cross threshold, begin streaming write)
     }
 
@@ -195,23 +200,27 @@ impl WalManager {
         Ok(())
     }
 
-    fn handle_complete_persist(&mut self, persist_and_truncate_result: &PersistAndTruncateResult) {
+    fn handle_complete_persistence(
+        &mut self,
+        persist_and_truncate_result: &PersistAndTruncateResult,
+    ) {
         if let Some(file_persisted) = &persist_and_truncate_result.file_persisted {
-            assert!(file_persisted.file_number == self.curr_file_number);
+            assert_eq!(file_persisted.file_number, self.curr_file_number);
             // Add the persisted file to the live tracker
-            self.live_wal_file_tracker.push(file_persisted.clone());
+            self.live_wal_files_tracker.push(file_persisted.clone());
             self.curr_file_number += 1;
         }
     }
 
+    /// Returns a list of files to be dropped, i.e. all files with highest_lsn < truncate_from_lsn
     pub fn get_files_to_truncate(&self, truncate_from_lsn: u64) -> Vec<WalFileInfo> {
         let last_truncate_idx = self
-            .live_wal_file_tracker
+            .live_wal_files_tracker
             .iter()
             .rposition(|wal_file_info| wal_file_info.highest_lsn < truncate_from_lsn);
 
         if let Some(idx) = last_truncate_idx {
-            self.live_wal_file_tracker
+            self.live_wal_files_tracker
                 .iter()
                 .take(idx + 1)
                 .cloned()
@@ -232,20 +241,23 @@ impl WalManager {
         let delete_futures = file_names
             .iter()
             .map(|file_name| file_system_accessor.delete_object(file_name));
-        future::try_join_all(delete_futures).await?;
+        let delete_results = future::join_all(delete_futures).await;
+        for result in delete_results {
+            result?;
+        }
         Ok(())
     }
 
     fn handle_complete_truncate(&mut self, persist_and_truncate_result: &PersistAndTruncateResult) {
         if let Some(highest_deleted_file) = &persist_and_truncate_result.highest_deleted_file {
             let last_truncate_idx = self
-                .live_wal_file_tracker
+                .live_wal_files_tracker
                 .iter()
                 .rposition(|wal_file_info| wal_file_info == highest_deleted_file);
 
             assert!(last_truncate_idx.is_some());
             // Remove all files up to and including the last truncated file
-            self.live_wal_file_tracker
+            self.live_wal_files_tracker
                 .drain(0..=last_truncate_idx.unwrap());
         }
     }
@@ -254,7 +266,7 @@ impl WalManager {
         &mut self,
         persist_and_truncate_result: &PersistAndTruncateResult,
     ) {
-        self.handle_complete_persist(persist_and_truncate_result);
+        self.handle_complete_persistence(persist_and_truncate_result);
         self.handle_complete_truncate(persist_and_truncate_result);
     }
 

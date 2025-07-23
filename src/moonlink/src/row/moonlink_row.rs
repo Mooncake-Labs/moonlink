@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::mem::take;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MoonlinkRow {
     pub values: Vec<RowValue>,
 }
@@ -182,12 +182,6 @@ impl MoonlinkRow {
         let mut batch_reader = reader.next_row_group().await.unwrap().unwrap();
         let batch = batch_reader.next().unwrap().unwrap();
         self.equals_record_batch_at_offset_impl(&batch, 0)
-    }
-}
-
-impl Clone for MoonlinkRow {
-    fn clone(&self) -> Self {
-        MoonlinkRow::new(self.values.clone())
     }
 }
 

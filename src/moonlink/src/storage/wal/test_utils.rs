@@ -222,7 +222,7 @@ pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEve
     let row = test_row(1, "Alice", 30);
 
     for i in 0..5 {
-        wal.insert(&TableEvent::Append {
+        wal.push(&TableEvent::Append {
             row: row.clone(),
             xact_id: None,
             lsn: 100 + i,
