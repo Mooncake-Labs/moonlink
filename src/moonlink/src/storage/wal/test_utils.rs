@@ -6,6 +6,7 @@ use crate::FileSystemConfig;
 use crate::Result;
 use futures::StreamExt;
 use std::sync::Arc;
+use tokio::fs;
 
 impl WalManager {
     /// Get the file system accessor for testing purposes
@@ -21,7 +22,7 @@ impl WalManager {
         last_iceberg_snapshot_lsn: Option<u64>,
     ) -> Result<()> {
         // handle the persist side
-        let wal_to_persist = self.take();
+        let wal_to_persist = std::mem::take(&mut self.in_mem_wal.buf);
         let file_info_to_persist = self.get_to_persist_wal_file_info();
 
         let persisted_wal_file = if wal_to_persist.is_empty() {
@@ -67,15 +68,15 @@ pub async fn extract_file_contents(
     serde_json::from_slice(&file_content).unwrap()
 }
 
-pub fn convert_to_wal_events_vector(table_events: Vec<TableEvent>) -> Vec<WalEvent> {
+pub fn convert_to_wal_events_vector(table_events: &[TableEvent]) -> Vec<WalEvent> {
     let mut highest_lsn = 0;
     table_events
-        .into_iter()
+        .iter()
         .map(|event| {
             if let Some(event_lsn) = event.get_lsn_for_ingest_event() {
                 highest_lsn = std::cmp::max(highest_lsn, event_lsn);
             }
-            WalEvent::new(&event, highest_lsn)
+            WalEvent::new(event, highest_lsn)
         })
         .collect()
 }
@@ -222,18 +223,21 @@ pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEve
     let row = test_row(1, "Alice", 30);
 
     for i in 0..5 {
-        wal.push(&TableEvent::Append {
+        let event = TableEvent::Append {
             row: row.clone(),
             xact_id: None,
             lsn: 100 + i,
             is_copied: false,
-        });
-        expected_events.push(TableEvent::Append {
-            row: row.clone(),
-            xact_id: None,
-            lsn: 100 + i,
-            is_copied: false,
-        });
+        };
+
+        wal.push(&event);
+        expected_events.push(event);
     }
     (wal, expected_events)
+}
+
+// Helper to check if a directory is empty
+pub async fn local_dir_is_empty(path: &std::path::Path) -> bool {
+    let mut entries = fs::read_dir(path).await.unwrap();
+    entries.next_entry().await.unwrap().is_none()
 }

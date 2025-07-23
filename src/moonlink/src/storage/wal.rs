@@ -110,7 +110,7 @@ impl WalEvent {
         }
     }
 }
-struct InMemWal {
+pub struct InMemWal {
     /// The in_mem_wal could have insertions done by incoming CDC events
     pub buf: Vec<WalEvent>,
     /// Tracks an LSN in case of a stream flush (or similar events) which has no accompanying LSN.
@@ -144,7 +144,7 @@ impl InMemWal {
 /// have to be handled serially.
 /// There is one instance of WalManager per table.
 pub struct WalManager {
-    in_mem_wal: InMemWal,
+    pub in_mem_wal: InMemWal,
     /// The wal file numbers that are still live.
     live_wal_files_tracker: Vec<WalFileInfo>,
     /// Tracks the file number to be assigned to the next persisted wal file
@@ -167,10 +167,6 @@ impl WalManager {
     pub fn push(&mut self, table_event: &TableEvent) {
         self.in_mem_wal.push(table_event);
         // TODO(Paul): Implement streaming flush (if cross threshold, begin streaming write)
-    }
-
-    fn take(&mut self) -> Vec<WalEvent> {
-        std::mem::take(&mut self.in_mem_wal.buf)
     }
 
     pub fn get_file_name(file_number: u64) -> String {
@@ -213,6 +209,7 @@ impl WalManager {
     }
 
     /// Returns a list of files to be dropped, i.e. all files with highest_lsn < truncate_from_lsn
+    /// List of files returned is sorted in ascending order of file number.
     pub fn get_files_to_truncate(&self, truncate_from_lsn: u64) -> Vec<WalFileInfo> {
         let last_truncate_idx = self
             .live_wal_files_tracker
@@ -270,6 +267,8 @@ impl WalManager {
         self.handle_complete_truncate(persist_and_truncate_result);
     }
 
+    /// Recover the flushed WALs from the file system. Start file number and begin_from_lsn are
+    /// both inclusive.
     fn recover_flushed_wals(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         start_file_number: u64,
@@ -322,6 +321,8 @@ impl WalManager {
         }))
     }
 
+    /// Recover the flushed WALs from the file system as a flat stream. Start file number and
+    /// begin_from_lsn are both inclusive.
     pub fn recover_flushed_wals_flat(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         start_file_number: u64,

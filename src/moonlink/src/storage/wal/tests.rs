@@ -4,6 +4,7 @@ use crate::storage::wal::WalManager;
 use crate::table_notify::TableEvent;
 use crate::FileSystemConfig;
 use futures::StreamExt;
+use tokio::fs;
 
 #[tokio::test]
 async fn test_wal_insert_persist_files() {
@@ -15,9 +16,9 @@ async fn test_wal_insert_persist_files() {
 
     // Check file exists and has content
     let wal_file_path = context.path().join("wal_0.json");
-    assert!(wal_file_path.exists());
+    assert!(fs::try_exists(&wal_file_path).await.unwrap());
 
-    let expected_wal_events = convert_to_wal_events_vector(expected_events);
+    let expected_wal_events = convert_to_wal_events_vector(&expected_events);
     check_wal_logs_equal(
         &["wal_0.json"],
         wal.get_file_system_accessor(),
@@ -37,8 +38,7 @@ async fn test_wal_empty_persist() {
     wal.persist_and_truncate(None).await.unwrap();
 
     // No file should be created for empty WAL
-    let wal_file_path = context.path().join("wal_0.json");
-    assert!(!wal_file_path.exists());
+    assert!(local_dir_is_empty(&context.path()).await);
 }
 
 #[tokio::test]
@@ -49,65 +49,35 @@ async fn test_wal_file_numbering_sequence() {
     });
 
     let row = test_row(1, "Alice", 30);
+    let mut events = Vec::new();
 
-    // First persist
-    let event1 = TableEvent::Append {
-        row: row.clone(),
-        xact_id: None,
-        lsn: 100,
-        is_copied: false,
-    };
-    wal.push(&event1);
-    wal.persist_and_truncate(None).await.unwrap();
+    // First loop: push and persist events
+    for i in 0..3 {
+        let event = TableEvent::Append {
+            row: row.clone(),
+            xact_id: None,
+            lsn: 100 + i,
+            is_copied: false,
+        };
+        wal.push(&event);
+        wal.persist_and_truncate(None).await.unwrap();
+        events.push(event);
+    }
 
-    // Second persist
-    let event2 = TableEvent::Append {
-        row: row.clone(),
-        xact_id: None,
-        lsn: 101,
-        is_copied: false,
-    };
-    wal.push(&event2);
-    wal.persist_and_truncate(None).await.unwrap();
-
-    // Third persist
-    let event3 = TableEvent::Append {
-        row: row.clone(),
-        xact_id: None,
-        lsn: 102,
-        is_copied: false,
-    };
-    wal.push(&event3);
-    wal.persist_and_truncate(None).await.unwrap();
-
-    // Verify files exist
-    assert!(context.path().join("wal_0.json").exists());
-    assert!(context.path().join("wal_1.json").exists());
-    assert!(context.path().join("wal_2.json").exists());
-
-    // Use the new helper infrastructure to verify file contents
-    let expected_wal_events_0 = convert_to_wal_events_vector(vec![event1]);
-    let expected_wal_events_1 = convert_to_wal_events_vector(vec![event2]);
-    let expected_wal_events_2 = convert_to_wal_events_vector(vec![event3]);
-
-    check_wal_logs_equal(
-        &["wal_0.json"],
-        wal.get_file_system_accessor(),
-        expected_wal_events_0,
-    )
-    .await;
-    check_wal_logs_equal(
-        &["wal_1.json"],
-        wal.get_file_system_accessor(),
-        expected_wal_events_1,
-    )
-    .await;
-    check_wal_logs_equal(
-        &["wal_2.json"],
-        wal.get_file_system_accessor(),
-        expected_wal_events_2,
-    )
-    .await;
+    // Second loop: check file existence and contents
+    for i in 0..3 {
+        let file_name = format!("wal_{i}.json");
+        assert!(fs::try_exists(&context.path().join(&file_name))
+            .await
+            .unwrap());
+        let expected_wal_events = convert_to_wal_events_vector(&events[i..=i]);
+        check_wal_logs_equal(
+            &[&file_name],
+            wal.get_file_system_accessor(),
+            expected_wal_events,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -120,6 +90,7 @@ async fn test_wal_truncation_deletes_files() {
     let row = test_row(1, "Alice", 30);
 
     // Create multiple WAL files with known events
+    let mut events = Vec::new();
     for i in 0..5 {
         let event = TableEvent::Append {
             row: row.clone(),
@@ -129,26 +100,29 @@ async fn test_wal_truncation_deletes_files() {
         };
         wal.push(&event);
         wal.persist_and_truncate(None).await.unwrap();
+        events.push(event);
     }
 
     // Truncate from LSN 102 (should delete files 0, 1 - files with LSN < 102)
     wal.persist_and_truncate(Some(102)).await.unwrap();
 
     // Verify files 0, 1 are deleted
-    assert!(!context.path().join("wal_0.json").exists());
-    assert!(!context.path().join("wal_1.json").exists());
+    assert!(!fs::try_exists(&context.path().join("wal_0.json"))
+        .await
+        .unwrap());
+    assert!(!fs::try_exists(&context.path().join("wal_1.json"))
+        .await
+        .unwrap());
 
     // Verify files 2, 3, 4 still exist and contain correct content
     for i in 2..5 {
-        assert!(context.path().join(format!("wal_{i}.json")).exists());
+        assert!(
+            fs::try_exists(&context.path().join(format!("wal_{i}.json")))
+                .await
+                .unwrap()
+        );
 
-        let expected_event = TableEvent::Append {
-            row: row.clone(),
-            xact_id: None,
-            lsn: 100 + i,
-            is_copied: false,
-        };
-        let expected_events = convert_to_wal_events_vector(vec![expected_event]);
+        let expected_events = convert_to_wal_events_vector(&events[i..=i]);
         check_wal_logs_equal(
             &[&format!("wal_{i}.json")],
             wal.get_file_system_accessor(),
@@ -189,7 +163,7 @@ async fn test_wal_truncation_deletes_all_files() {
 
     // now truncate should delete all files
     wal.persist_and_truncate(Some(200)).await.unwrap(); // Higher than any LSN
-    assert!(!context.path().join("wal_0.json").exists());
+    assert!(local_dir_is_empty(&context.path()).await);
 }
 
 #[tokio::test]
@@ -227,7 +201,7 @@ async fn test_wal_persist_and_truncate() {
     wal.persist_and_truncate(Some(102)).await.unwrap();
 
     // File should be created but then deleted due to truncation
-    assert!(!context.path().join("wal_0.json").exists());
+    assert!(local_dir_is_empty(&context.path()).await);
 }
 
 #[tokio::test]
@@ -238,8 +212,8 @@ async fn test_wal_recovery_basic() {
     // Persist the events first
     wal.persist_and_truncate(None).await.unwrap();
 
-    // Verify file contents using helper infrastructure
-    let expected_wal_events = convert_to_wal_events_vector(expected_events);
+    // Verify file contents
+    let expected_wal_events = convert_to_wal_events_vector(&expected_events);
     check_wal_logs_equal(
         &["wal_0.json"],
         wal.get_file_system_accessor(),
@@ -342,34 +316,7 @@ async fn test_wal_recovery_mixed_event_types() {
             Err(e) => panic!("Recovery failed: {e:?}"),
         }
     }
-
-    // Verify recovered events match original events by creating them again
-    let expected_recovered_events = vec![
-        TableEvent::Append {
-            row: row1.clone(),
-            xact_id: Some(1),
-            lsn: 100,
-            is_copied: false,
-        },
-        TableEvent::Append {
-            row: row2.clone(),
-            xact_id: Some(1),
-            lsn: 101,
-            is_copied: true,
-        },
-        TableEvent::Delete {
-            row: row1,
-            lsn: 102,
-            xact_id: Some(1),
-        },
-        TableEvent::Commit {
-            lsn: 103,
-            xact_id: Some(1),
-        },
-        TableEvent::StreamAbort { xact_id: 1 },
-        TableEvent::StreamFlush { xact_id: 2 },
-    ];
-    assert_ingestion_events_vectors_equal(&recovered_events, &expected_recovered_events);
+    assert_ingestion_events_vectors_equal(&recovered_events, &events);
 }
 
 #[tokio::test]
@@ -386,13 +333,16 @@ async fn test_wal_multiple_persist_truncate_recovery() {
     // Multiple cycles of persist and truncate
     for cycle in 0..outer_iterations {
         // Add events for this cycle
+        let mut expected_events = Vec::new();
         for i in 0..inner_iterations {
-            wal.push(&TableEvent::Append {
+            let event = TableEvent::Append {
                 row: row.clone(),
                 xact_id: None,
-                lsn: cycle * 10 + i,
+                lsn: (cycle * 10) + i,
                 is_copied: false,
-            })
+            };
+            wal.push(&event);
+            expected_events.push(event);
         }
 
         // the last snapshot file contains (cycle * 10) + 0, (cycle * 10) + 1, (cycle * 10) + 2 with a file number of (cycle)
@@ -402,20 +352,14 @@ async fn test_wal_multiple_persist_truncate_recovery() {
                 .await
                 .unwrap();
             for i in 0..(cycle - 1) {
-                assert!(!context.path().join(format!("wal_{i}.json")).exists());
+                assert!(
+                    !fs::try_exists(&context.path().join(format!("wal_{i}.json")))
+                        .await
+                        .unwrap()
+                );
             }
         } else {
             wal.persist_and_truncate(None).await.unwrap();
-        }
-
-        let mut expected_events = Vec::new();
-        for i in 0..inner_iterations {
-            expected_events.push(TableEvent::Append {
-                row: row.clone(),
-                xact_id: None,
-                lsn: (cycle * 10) + i,
-                is_copied: false,
-            });
         }
         let last_snapshot_file_number = cycle;
         let recovered_events = get_table_events_vector_recovery(
