@@ -52,7 +52,7 @@ pub struct WalEvent {
 }
 
 impl WalEvent {
-    pub fn new(table_event: &TableEvent, last_highest_lsn: u64) -> Self {
+    fn new(table_event: &TableEvent, last_highest_lsn: u64) -> Self {
         // Try to get LSN from the table event, fallback to last_highest_lsn for events without LSN
         let lsn = table_event
             .get_lsn_for_ingest_event()
@@ -84,7 +84,7 @@ impl WalEvent {
         Self { lsn, event }
     }
 
-    pub fn into_table_event(self) -> TableEvent {
+    fn into_table_event(self) -> TableEvent {
         match self.event {
             WalEventEnum::Append {
                 row,
