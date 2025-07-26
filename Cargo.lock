@@ -2729,6 +2729,7 @@ dependencies = [
  "nix 0.27.1",
  "parquet",
  "roaring",
+ "serde",
  "serial_test",
  "tempfile",
  "thiserror 2.0.12",

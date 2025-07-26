@@ -3,6 +3,7 @@ pub mod file_utils;
 mod logging;
 pub mod mooncake_table_id;
 mod recovery_utils;
+pub mod table_config;
 
 use arrow_schema::Schema;
 pub use error::{Error, Result};
@@ -14,6 +15,8 @@ use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
 use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use crate::table_config::TableCreationConfig;
 
 pub struct MoonlinkBackend<
     D: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
@@ -85,6 +88,7 @@ where
         table_id: T,
         src_table_name: String,
         src_uri: String,
+        _mooncake_table_config: TableCreationConfig,
     ) -> Result<()> {
         let mooncake_table_id = MooncakeTableId {
             database_id: database_id.clone(),
