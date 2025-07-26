@@ -22,20 +22,17 @@ impl WalManager {
         last_iceberg_snapshot_lsn: Option<u64>,
     ) -> Result<()> {
         // handle the persist side
-        let wal_to_persist = std::mem::take(&mut self.in_mem_wal.buf);
-        let file_info_to_persist = self.get_to_persist_wal_file_info();
-
-        let persisted_wal_file = if wal_to_persist.is_empty() {
-            None
-        } else {
+        let mut persisted_wal_file = None;
+        let to_persist_wal_info = self.take_for_next_file();
+        if let Some((wal_to_persist, file_info_to_persist)) = to_persist_wal_info {
             WalManager::persist(
                 self.file_system_accessor.clone(),
                 &wal_to_persist,
                 &file_info_to_persist,
             )
             .await?;
-            Some(file_info_to_persist)
-        };
+            persisted_wal_file = Some(file_info_to_persist);
+        }
 
         let mut highest_deleted_file = None;
 
@@ -53,6 +50,7 @@ impl WalManager {
         let persist_and_truncate_result = PersistAndTruncateResult {
             file_persisted: persisted_wal_file,
             highest_deleted_file,
+            associated_iceberg_snapshot_lsn: last_iceberg_snapshot_lsn,
         };
 
         self.handle_completed_persist_and_truncate(&persist_and_truncate_result);
@@ -69,20 +67,14 @@ pub async fn extract_file_contents(
 }
 
 pub fn convert_to_wal_events_vector(table_events: &[TableEvent]) -> Vec<WalEvent> {
-    let mut highest_lsn = 0;
     table_events
         .iter()
-        .map(|event| {
-            if let Some(event_lsn) = event.get_lsn_for_ingest_event() {
-                highest_lsn = std::cmp::max(highest_lsn, event_lsn);
-            }
-            WalEvent::new(event, highest_lsn)
-        })
+        .map(WalEvent::from_table_event)
         .collect()
 }
 
 pub async fn get_wal_logs_from_files(
-    file_paths: &[&str],
+    file_paths: &[String],
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
 ) -> Vec<WalEvent> {
     let mut wal_events = Vec::new();
@@ -91,15 +83,6 @@ pub async fn get_wal_logs_from_files(
         wal_events.extend(events);
     }
     wal_events
-}
-
-pub async fn check_wal_logs_equal(
-    file_paths: &[&str],
-    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
-    expected_events: Vec<WalEvent>,
-) {
-    let wal_events = get_wal_logs_from_files(file_paths, file_system_accessor.clone()).await;
-    assert_eq!(wal_events, expected_events);
 }
 
 /// Helper function to compare two ingestion events by their key properties - this exists because
@@ -196,15 +179,10 @@ pub fn assert_ingestion_events_vectors_equal(actual: &[TableEvent], expected: &[
 pub async fn get_table_events_vector_recovery(
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
     start_file_name: u64,
-    begin_from_lsn: u64,
 ) -> Vec<TableEvent> {
     // Recover events using flat stream
     let mut recovered_events = Vec::new();
-    let mut stream = WalManager::recover_flushed_wals_flat(
-        file_system_accessor,
-        start_file_name,
-        begin_from_lsn,
-    );
+    let mut stream = WalManager::recover_flushed_wals_flat(file_system_accessor, start_file_name);
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => recovered_events.push(event),
@@ -233,6 +211,13 @@ pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEve
         wal.push(&event);
         expected_events.push(event);
     }
+    // commit the main transaction
+    let commit_event = TableEvent::Commit {
+        lsn: 100 + 5,
+        xact_id: None,
+    };
+    wal.push(&commit_event);
+    expected_events.push(commit_event);
     (wal, expected_events)
 }
 
@@ -240,4 +225,127 @@ pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEve
 pub async fn local_dir_is_empty(path: &std::path::Path) -> bool {
     let mut entries = fs::read_dir(path).await.unwrap();
     entries.next_entry().await.unwrap().is_none()
+}
+
+pub fn add_new_example_commit_event(
+    lsn: u64,
+    xact_id: Option<u32>,
+    wal: &mut WalManager,
+    expected_events: &mut Vec<TableEvent>,
+) {
+    let event = TableEvent::Commit { lsn, xact_id };
+    wal.push(&event);
+    expected_events.push(event);
+}
+
+pub fn add_new_example_append_event(
+    lsn: u64,
+    xact_id: Option<u32>,
+    wal: &mut WalManager,
+    expected_events: &mut Vec<TableEvent>,
+) {
+    let event = TableEvent::Append {
+        row: test_row(1, "Alice", 30),
+        lsn,
+        xact_id,
+        is_copied: false,
+    };
+    wal.push(&event);
+    expected_events.push(event);
+}
+
+pub fn add_new_example_delete_event(
+    lsn: u64,
+    xact_id: Option<u32>,
+    wal: &mut WalManager,
+    expected_events: &mut Vec<TableEvent>,
+) {
+    let event = TableEvent::Delete {
+        row: test_row(1, "Alice", 30),
+        lsn,
+        xact_id,
+    };
+    wal.push(&event);
+    expected_events.push(event);
+}
+
+pub fn add_new_example_stream_abort_event(
+    xact_id: u32,
+    wal: &mut WalManager,
+    expected_events: &mut Vec<TableEvent>,
+) {
+    let event = TableEvent::StreamAbort { xact_id };
+    wal.push(&event);
+    expected_events.push(event);
+}
+
+pub fn add_new_example_stream_flush_event(
+    xact_id: u32,
+    wal: &mut WalManager,
+    expected_events: &mut Vec<TableEvent>,
+) {
+    let event = TableEvent::StreamFlush { xact_id };
+    wal.push(&event);
+    expected_events.push(event);
+}
+
+pub async fn wal_file_exists(
+    context: &TestContext,
+    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    file_number: u64,
+) -> bool {
+    file_system_accessor
+        .object_exists(
+            context
+                .path()
+                .join(format!("wal_{file_number}.json"))
+                .to_str()
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[macro_export]
+macro_rules! assert_wal_file_exists {
+    ($context:expr, $file_system_accessor:expr, $file_number:expr) => {
+        assert!(
+            $crate::storage::wal::test_utils::wal_file_exists(
+                $context,
+                $file_system_accessor,
+                $file_number
+            )
+            .await,
+            "File {} should exist",
+            $file_number
+        );
+    };
+}
+
+#[macro_export]
+macro_rules! assert_wal_file_does_not_exist {
+    ($context:expr, $file_system_accessor:expr, $file_number:expr) => {
+        assert!(
+            !$crate::storage::wal::test_utils::wal_file_exists(
+                $context,
+                $file_system_accessor,
+                $file_number
+            )
+            .await,
+            "File {} should not exist",
+            $file_number
+        );
+    };
+}
+
+#[macro_export]
+macro_rules! assert_wal_logs_equal {
+    ($file_paths:expr, $file_system_accessor:expr, $expected_events:expr) => {
+        let wal_events = $crate::storage::wal::test_utils::get_wal_logs_from_files(
+            $file_paths,
+            $file_system_accessor.clone(),
+        )
+        .await;
+        assert_eq!(wal_events, $expected_events);
+    };
 }
