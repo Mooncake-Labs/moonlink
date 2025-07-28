@@ -67,10 +67,7 @@ pub async fn extract_file_contents(
 }
 
 pub fn convert_to_wal_events_vector(table_events: &[TableEvent]) -> Vec<WalEvent> {
-    table_events
-        .iter()
-        .map(WalEvent::from_table_event)
-        .collect()
+    table_events.iter().map(WalEvent::new).collect()
 }
 
 pub async fn get_wal_logs_from_files(

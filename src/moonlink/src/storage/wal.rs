@@ -47,7 +47,7 @@ pub struct WalFileInfo {
 }
 
 impl WalEvent {
-    pub fn from_table_event(table_event: &TableEvent) -> Self {
+    pub fn new(table_event: &TableEvent) -> Self {
         match table_event {
             TableEvent::Append {
                 row,
@@ -267,7 +267,7 @@ impl WalManager {
 
     fn push(&mut self, table_event: &TableEvent) {
         // add to in_mem_buf
-        let wal_event = WalEvent::from_table_event(table_event);
+        let wal_event = WalEvent::new(table_event);
         self.in_mem_buf.push(wal_event);
 
         // Update highest_lsn if this event has a higher LSN
@@ -428,6 +428,8 @@ impl WalManager {
         });
     }
 
+    /// This cleans up any files that no longer need to be tracked, and also any xacts that no longer need to
+    /// be tracked as a result.
     fn handle_complete_truncate(&mut self, persist_and_truncate_result: &PersistAndTruncateResult) {
         if let Some(highest_deleted_file) = &persist_and_truncate_result.highest_deleted_file {
             self.live_wal_files_tracker.retain(|wal_file_info| {
@@ -441,8 +443,10 @@ impl WalManager {
         }
     }
 
-    /// For now, we handle the persist and truncate results together.
+    /// Should be called after a persist and truncate operation has completed. Updates
+    /// tracked files and transactions.
     pub fn handle_completed_persist_and_truncate(
+        // For now, we handle the persist and truncate results together.
         &mut self,
         persist_and_truncate_result: &PersistAndTruncateResult,
     ) {
