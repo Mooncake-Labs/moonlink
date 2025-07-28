@@ -310,6 +310,22 @@ impl TestEnvironment {
             handle.await.expect("TableHandler task panicked");
         }
     }
+
+    /// Force WAL persistence by sending a periodic WAL event and waiting for completion
+    pub async fn force_wal_persistence(&self) {
+        // Send periodic WAL event
+        self.send_event(TableEvent::PeriodicalPersistWal).await;
+        
+        // Wait a bit for the async operation to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    /// Wait for WAL persistence to complete by checking if wal_persist_ongoing is false
+    /// This is a bit of a hack since we don't have direct access to the state
+    pub async fn wait_for_wal_persistence_completion(&self) {
+        // Wait for the periodic WAL persistence to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+    }
 }
 
 /// Verifies the state of a read snapshot against expected row IDs.

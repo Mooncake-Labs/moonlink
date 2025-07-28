@@ -3,7 +3,9 @@ use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::DataCompactionResult;
 use crate::storage::mooncake_table::MaintenanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
+use crate::storage::wal::WalManager;
 use crate::table_notify::TableEvent;
+use crate::FileSystemConfig;
 use crate::Result;
 use tokio::sync::{broadcast, watch};
 use tracing::error;
@@ -118,6 +120,11 @@ pub(crate) struct TableHandlerState {
     pub(crate) table_maintenance_process_status: MaintenanceProcessStatus,
     /// Notify when data compaction completes.
     pub(crate) table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
+
+    // ================================================
+    // Write-ahead log (WAL)
+    // ================================================
+    pub(crate) wal_persist_ongoing: bool,
 }
 
 impl TableHandlerState {
@@ -144,6 +151,7 @@ impl TableHandlerState {
             table_maintenance_completion_tx,
             // Initial copy fields.
             initial_copy_buffered_events: Vec::new(),
+            wal_persist_ongoing: false,
         }
     }
 

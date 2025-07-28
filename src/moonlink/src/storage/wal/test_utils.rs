@@ -9,11 +9,6 @@ use std::sync::Arc;
 use tokio::fs;
 
 impl WalManager {
-    /// Get the file system accessor for testing purposes
-    pub fn get_file_system_accessor(&self) -> Arc<dyn BaseFileSystemAccess> {
-        self.file_system_accessor.clone()
-    }
-
     /// Mock function for how this gets called in table handler. We retrieve some data from the wal,
     /// asynchronously update the file system,
     /// and then call handle_completed_persist_and_truncate to update the wal.

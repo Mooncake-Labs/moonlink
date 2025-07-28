@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// There're a few LSN concepts used in the table handler:
 /// - commit LSN: LSN for a streaming or a non-streaming LSN
 /// - flush LSN: LSN for a flush operation
@@ -9,10 +11,15 @@
 /// - persisted table LSN: the largest LSN where all updates have been persisted into iceberg
 ///   Suppose we have two tables, table-A has persisted all updated into iceberg; with table-B taking new updates. persisted table LSN for table-A grows with table-B.
 use crate::event_sync::EventSyncSender;
+use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::MaintenanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
+use crate::storage::wal::PersistAndTruncateResult;
+use crate::storage::wal::WalEvent;
+use crate::storage::wal::WalFileInfo;
+use crate::storage::wal::WalManager;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_notify::TableEvent;
 use crate::Error;
@@ -56,13 +63,20 @@ impl TableHandler {
         // Spawn the task to notify periodical events.
         let event_sender_for_periodical_snapshot = event_sender.clone();
         let event_sender_for_periodical_force_snapshot = event_sender.clone();
+        let event_sender_for_periodical_wal = event_sender.clone();
         let periodic_event_handle = tokio::spawn(async move {
             let mut periodic_snapshot_interval = tokio::time::interval(Duration::from_millis(500));
             let mut periodic_force_snapshot_interval =
                 tokio::time::interval(Duration::from_secs(300));
+            let mut periodic_wal_interval = tokio::time::interval(Duration::from_millis(500));
 
             loop {
                 tokio::select! {
+                    _ = periodic_wal_interval.tick() => {
+                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistWal).await.is_err() {
+                            return;
+                        }
+                    }
                     // Sending to channel fails only happens when eventloop exits, directly exit timer events.
                     _ = periodic_snapshot_interval.tick() => {
                         if event_sender_for_periodical_snapshot.send(TableEvent::PeriodicalMooncakeTableSnapshot(uuid::Uuid::new_v4())).await.is_err() {
@@ -477,6 +491,25 @@ impl TableHandler {
                         }
                         TableEvent::EvictedDataFilesToDelete { evicted_data_files } => {
                             start_task_to_delete_evicted(evicted_data_files);
+                        }
+                        TableEvent::PeriodicalPersistWal => {
+                            if !table_handler_state.wal_persist_ongoing {
+                                table_handler_state.wal_persist_ongoing = true;
+                                table.persist_and_truncate_wal();
+                            }
+                        }
+                        TableEvent::PeriodicalPersistWalResult { result } => {
+                            match result {
+                                Ok(result) => {
+                                    table_handler_state.wal_persist_ongoing = false;
+                                    if let Some(highest_lsn) = table.handle_completed_persist_and_truncate(&result) {
+                                        event_sync_sender.wal_flush_lsn_tx.send(highest_lsn).unwrap();
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "failed to persist wal");
+                                }
+                            }
                         }
                         // ==============================
                         // Replication events

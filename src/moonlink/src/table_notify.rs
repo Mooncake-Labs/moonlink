@@ -6,6 +6,7 @@ use crate::storage::mooncake_table::FileIndiceMergeResult;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::IcebergSnapshotResult;
 
+use crate::storage::wal::PersistAndTruncateResult;
 use crate::NonEvictableHandle;
 use crate::Result;
 
@@ -144,6 +145,16 @@ pub enum TableEvent {
     EvictedDataFilesToDelete {
         /// Evicted data files by object storage cache.
         evicted_data_files: Vec<String>,
+    },
+
+    // ================================================
+    // WAL events
+    // ================================================
+    /// Periodically persist in-memory WAL.
+    PeriodicalPersistWal,
+    /// Periodic persist wal completes.
+    PeriodicalPersistWalResult {
+        result: Result<PersistAndTruncateResult>,
     },
 }
 

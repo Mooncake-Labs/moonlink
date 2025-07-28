@@ -31,6 +31,7 @@ pub struct TableResources {
     pub table_status_reader: TableStatusReader,
     pub commit_lsn_tx: watch::Sender<u64>,
     pub flush_lsn_rx: watch::Receiver<u64>,
+    pub wal_flush_lsn_rx: watch::Receiver<u64>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -102,6 +103,7 @@ pub async fn build_table_components(
     )
     .await;
     let flush_lsn_rx = event_sync_receiver.flush_lsn_rx.clone();
+    let wal_flush_lsn_rx = event_sync_receiver.wal_flush_lsn_rx.clone();
     let table_event_manager =
         TableEventManager::new(table_handler.get_event_sender(), event_sync_receiver);
     let event_sender = table_handler.get_event_sender();
@@ -113,6 +115,7 @@ pub async fn build_table_components(
         table_event_manager,
         commit_lsn_tx,
         flush_lsn_rx,
+        wal_flush_lsn_rx,
     };
     let moonlink_table_config = MoonlinkTableConfig {
         mooncake_table_config,
