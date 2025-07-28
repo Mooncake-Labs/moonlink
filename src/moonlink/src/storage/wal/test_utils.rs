@@ -50,7 +50,7 @@ impl WalManager {
         let persist_and_truncate_result = PersistAndTruncateResult {
             file_persisted: persisted_wal_file,
             highest_deleted_file,
-            associated_iceberg_snapshot_lsn: last_iceberg_snapshot_lsn,
+            iceberg_snapshot_lsn: last_iceberg_snapshot_lsn,
         };
 
         self.handle_completed_persist_and_truncate(&persist_and_truncate_result);

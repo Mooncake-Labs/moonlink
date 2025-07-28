@@ -38,7 +38,9 @@ pub enum WalEvent {
 pub struct PersistAndTruncateResult {
     file_persisted: Option<WalFileInfo>,
     highest_deleted_file: Option<WalFileInfo>,
-    associated_iceberg_snapshot_lsn: Option<u64>,
+    /// The LSN of the last seen iceberg snapshot which was used to
+    /// determine how the WAL was truncated.
+    iceberg_snapshot_lsn: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,9 +100,7 @@ impl WalEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum TransactionState {
-    // xact_ids are u32, so we can use u64 so we can have a
-    // larger number to represent the main transaction
+enum WalTransactionState {
     Commit {
         start_file: u64,
         completion_lsn: u64,
@@ -114,20 +114,20 @@ enum TransactionState {
     },
 }
 
-impl TransactionState {
+impl WalTransactionState {
     fn get_start_file(&self) -> u64 {
         match self {
-            TransactionState::Open { start_file } => *start_file,
-            TransactionState::Commit { start_file, .. } => *start_file,
-            TransactionState::Abort { start_file, .. } => *start_file,
+            WalTransactionState::Open { start_file } => *start_file,
+            WalTransactionState::Commit { start_file, .. } => *start_file,
+            WalTransactionState::Abort { start_file, .. } => *start_file,
         }
     }
 
     fn get_completion_lsn(&self) -> Option<u64> {
         match self {
-            TransactionState::Open { .. } => None,
-            TransactionState::Commit { completion_lsn, .. } => Some(*completion_lsn),
-            TransactionState::Abort { completion_lsn, .. } => Some(*completion_lsn),
+            WalTransactionState::Open { .. } => None,
+            WalTransactionState::Commit { completion_lsn, .. } => Some(*completion_lsn),
+            WalTransactionState::Abort { completion_lsn, .. } => Some(*completion_lsn),
         }
     }
 
@@ -165,12 +165,12 @@ pub struct WalManager {
     curr_file_number: u64,
     /// Tracks any transactions that may not have been flushed to an iceberg snapshot yet,
     /// and therefore need to live in the WAL.
-    active_transactions: HashMap<u32, TransactionState>,
+    active_transactions: HashMap<u32, WalTransactionState>,
     /// Similar to active_transactions, but for the main transaction.
     /// Tracks the commits and aborts of the main transaction. Note that
     /// the events from the main transaction may also be spread across multiple files.
     /// This is in ascending order of completion LSN.
-    main_transaction_tracker: Vec<TransactionState>,
+    main_transaction_tracker: Vec<WalTransactionState>,
 
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
 }
@@ -200,18 +200,18 @@ impl WalManager {
 
     fn get_updated_xact_state(
         table_event: &TableEvent,
-        xact_state: TransactionState,
+        xact_state: WalTransactionState,
         highest_seen_lsn: u64,
-    ) -> TransactionState {
+    ) -> WalTransactionState {
         match table_event {
-            TableEvent::Append { .. } | TableEvent::Delete { .. } => TransactionState::Open {
+            TableEvent::Append { .. } | TableEvent::Delete { .. } => WalTransactionState::Open {
                 start_file: xact_state.get_start_file(),
             },
-            TableEvent::Commit { lsn, .. } => TransactionState::Commit {
+            TableEvent::Commit { lsn, .. } => WalTransactionState::Commit {
                 start_file: xact_state.get_start_file(),
                 completion_lsn: *lsn,
             },
-            TableEvent::StreamAbort { .. } => TransactionState::Abort {
+            TableEvent::StreamAbort { .. } => WalTransactionState::Abort {
                 start_file: xact_state.get_start_file(),
                 completion_lsn: highest_seen_lsn,
             },
@@ -238,7 +238,7 @@ impl WalManager {
             let old_state =
                 self.active_transactions
                     .remove(&xact_id)
-                    .unwrap_or(TransactionState::Open {
+                    .unwrap_or(WalTransactionState::Open {
                         start_file: self.curr_file_number,
                     });
 
@@ -251,7 +251,7 @@ impl WalManager {
             let old_state = if self.main_transaction_tracker.is_empty()
                 || self.main_transaction_tracker.last().unwrap().is_closed()
             {
-                TransactionState::Open {
+                WalTransactionState::Open {
                     start_file: self.curr_file_number,
                 }
             } else {
@@ -304,7 +304,7 @@ impl WalManager {
             .active_transactions
             .values()
             .filter(|state| !state.is_captured_in_iceberg_snapshot(truncate_from_lsn))
-            .collect::<Vec<&TransactionState>>();
+            .collect::<Vec<&WalTransactionState>>();
 
         let mut files_to_keep = xacts_still_incomplete_after_truncate
             .iter()
@@ -417,15 +417,13 @@ impl WalManager {
     }
 
     /// Remove all xacts that are captured in the iceberg snapshot.
-    fn cleanup_xacts(&mut self, associated_iceberg_snapshot_lsn: u64) {
+    fn cleanup_xacts(&mut self, iceberg_snapshot_lsn: u64) {
         // remove all xacts that are captured in the iceberg snapshot
-        self.active_transactions.retain(|_, state| {
-            !state.is_captured_in_iceberg_snapshot(associated_iceberg_snapshot_lsn)
-        });
+        self.active_transactions
+            .retain(|_, state| !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn));
         // remove all main xacts that are captured in the iceberg snapshot
-        self.main_transaction_tracker.retain(|state| {
-            !state.is_captured_in_iceberg_snapshot(associated_iceberg_snapshot_lsn)
-        });
+        self.main_transaction_tracker
+            .retain(|state| !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn));
     }
 
     /// This cleans up any files that no longer need to be tracked, and also any xacts that no longer need to
@@ -436,10 +434,8 @@ impl WalManager {
                 wal_file_info.file_number > highest_deleted_file.file_number
             });
         }
-        if let Some(associated_iceberg_snapshot_lsn) =
-            persist_and_truncate_result.associated_iceberg_snapshot_lsn
-        {
-            self.cleanup_xacts(associated_iceberg_snapshot_lsn);
+        if let Some(iceberg_snapshot_lsn) = persist_and_truncate_result.iceberg_snapshot_lsn {
+            self.cleanup_xacts(iceberg_snapshot_lsn);
         }
     }
 
