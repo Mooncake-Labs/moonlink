@@ -1431,6 +1431,7 @@ impl MooncakeTable {
 
     /// Spawns a background task to persist and truncate WAL if needed.
     /// Returns true if there was a task spawned, false otherwise.
+    #[must_use]
     pub(crate) fn persist_and_truncate_wal(&mut self) -> bool {
         let latest_iceberg_snapshot_lsn = self.get_iceberg_snapshot_lsn();
         let files_to_truncate =
