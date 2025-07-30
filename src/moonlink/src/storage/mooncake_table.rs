@@ -51,7 +51,7 @@ use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 use crate::storage::wal::{PersistAndTruncateResult, WalManager};
 use crate::table_notify::TableEvent;
-use crate::{FileSystemConfig, NonEvictableHandle};
+use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
@@ -680,10 +680,12 @@ impl MooncakeTable {
 
         let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
         let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
-        
-        let wal_manager_file_config = FileSystemConfig::FileSystem {
-            root_directory: PathBuf::from(table_metadata.path.clone()).join(table_metadata.table_id.to_string()).join("wal").to_str().unwrap().to_string(),
-        };
+
+        // TODO(Paul): Support object storage for WAL
+        let wal_manager_file_config = WalManager::default_wal_file_system_config(
+            table_metadata.table_id,
+            &table_metadata.path,
+        );
         let wal_manager = WalManager::new(wal_manager_file_config);
 
         Ok(Self {
@@ -887,6 +889,16 @@ impl MooncakeTable {
     #[allow(dead_code)]
     pub(crate) fn get_wal_persisted_metadata(&self) -> Option<WalPersistenceMetadata> {
         self.last_wal_persisted_metadata.clone()
+    }
+
+    #[cfg(test)]
+    pub fn get_table_id(&self) -> u32 {
+        self.metadata.table_id
+    }
+
+    #[cfg(test)]
+    pub fn get_wal_manager(&self) -> &WalManager {
+        &self.wal_manager
     }
 
     pub(crate) fn get_state_for_reader(
@@ -1339,31 +1351,46 @@ impl MooncakeTable {
             .unwrap();
     }
 
-    pub(crate) fn persist_and_truncate_wal(&mut self) {
+    pub(crate) fn persist_and_update_wal(&mut self) -> bool {
         let latest_iceberg_snapshot_lsn = self.get_iceberg_snapshot_lsn();
-        let files_to_truncate = if let Some(latest_iceberg_snapshot_lsn) = latest_iceberg_snapshot_lsn {
-            self.wal_manager.get_files_to_truncate(latest_iceberg_snapshot_lsn)
-        } else {
-            vec![]
-        };
+        let files_to_truncate =
+            if let Some(latest_iceberg_snapshot_lsn) = latest_iceberg_snapshot_lsn {
+                self.wal_manager
+                    .get_files_to_truncate(latest_iceberg_snapshot_lsn)
+            } else {
+                vec![]
+            };
         let file_to_persist = self.wal_manager.take_for_next_file();
 
-        let event_sender_clone = self.table_notify.as_ref().unwrap().clone();
-        let file_system_accessor = self.wal_manager.get_file_system_accessor();
-
-        tokio::spawn(async move {
-        WalManager::wal_persist_truncate_async(
-            files_to_truncate,
-            file_to_persist,
-            file_system_accessor,
-            event_sender_clone,
-                latest_iceberg_snapshot_lsn,
-            ).await;
-        });
+        if !files_to_truncate.is_empty() || file_to_persist.is_some() {
+            let event_sender_clone = self.table_notify.as_ref().unwrap().clone();
+            let file_system_accessor = self.wal_manager.get_file_system_accessor();
+            tokio::spawn(async move {
+                WalManager::wal_persist_truncate_async(
+                    files_to_truncate,
+                    file_to_persist,
+                    file_system_accessor,
+                    event_sender_clone,
+                    latest_iceberg_snapshot_lsn,
+                )
+                .await;
+            });
+            true
+        } else {
+            false
+        }
     }
 
-    pub(crate) fn handle_completed_persist_and_truncate(&mut self, result: &PersistAndTruncateResult) -> Option<u64> {
-        self.wal_manager.handle_completed_persist_and_truncate(&result)
+    pub(crate) fn handle_completed_persist_and_truncate(
+        &mut self,
+        result: &PersistAndTruncateResult,
+    ) -> Option<u64> {
+        self.wal_manager
+            .handle_completed_persist_and_truncate(result)
+    }
+
+    pub fn push_wal_event(&mut self, event: &TableEvent) {
+        self.wal_manager.push(event);
     }
 }
 

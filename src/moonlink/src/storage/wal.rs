@@ -7,9 +7,9 @@ use crate::table_notify::TableEvent;
 use crate::Result;
 use futures::stream::{self, Stream};
 use futures::{future, StreamExt};
-use more_asserts::assert_ge;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -32,6 +32,9 @@ pub enum WalEvent {
         xact_id: Option<u32>,
     },
     StreamAbort {
+        xact_id: u32,
+    },
+    StreamFlush {
         xact_id: u32,
     },
 }
@@ -88,6 +91,11 @@ impl WalEvent {
                 xact_id: *xact_id,
             },
             TableEvent::StreamAbort { xact_id } => WalEvent::StreamAbort { xact_id: *xact_id },
+            TableEvent::CommitFlush { lsn, xact_id } => WalEvent::Commit {
+                lsn: *lsn,
+                xact_id: *xact_id,
+            },
+            TableEvent::StreamFlush { xact_id } => WalEvent::StreamFlush { xact_id: *xact_id },
             _ => unimplemented!(
                 "TableEvent variant not supported for WAL: {:?}",
                 table_event
@@ -111,6 +119,7 @@ impl WalEvent {
             WalEvent::Delete { row, lsn, xact_id } => TableEvent::Delete { row, lsn, xact_id },
             WalEvent::Commit { lsn, xact_id } => TableEvent::Commit { lsn, xact_id },
             WalEvent::StreamAbort { xact_id } => TableEvent::StreamAbort { xact_id },
+            WalEvent::StreamFlush { xact_id } => TableEvent::StreamFlush { xact_id },
         }
     }
 }
@@ -192,11 +201,21 @@ pub struct WalManager {
 }
 
 impl WalManager {
-    pub fn default_wal_file_system() -> FileSystemConfig {
+    pub fn default_wal_file_system_config(table_id: u32, base_path: &Path) -> FileSystemConfig {
         // TODO(Paul): Support object storage
         FileSystemConfig::FileSystem {
-            root_directory: "/tmp/moonlink_wal".to_string(),
+            root_directory: base_path
+                .join(table_id.to_string())
+                .join("wal")
+                .to_str()
+                .unwrap()
+                .to_string(),
         }
+    }
+
+    pub fn new_with_local_path(table_id: u32, base_path: &Path) -> Self {
+        let config = WalManager::default_wal_file_system_config(table_id, base_path);
+        Self::new(config)
     }
 
     pub fn new(config: FileSystemConfig) -> Self {
@@ -232,13 +251,17 @@ impl WalManager {
         highest_seen_lsn: u64,
     ) -> WalTransactionState {
         match table_event {
-            TableEvent::Append { .. } | TableEvent::Delete { .. } => WalTransactionState::Open {
+            TableEvent::Append { .. }
+            | TableEvent::Delete { .. }
+            | TableEvent::StreamFlush { .. } => WalTransactionState::Open {
                 start_file: xact_state.get_start_file(),
             },
-            TableEvent::Commit { lsn, .. } => WalTransactionState::Commit {
-                start_file: xact_state.get_start_file(),
-                completion_lsn: *lsn,
-            },
+            TableEvent::Commit { lsn, .. } | TableEvent::CommitFlush { lsn, .. } => {
+                WalTransactionState::Commit {
+                    start_file: xact_state.get_start_file(),
+                    completion_lsn: *lsn,
+                }
+            }
             TableEvent::StreamAbort { .. } => WalTransactionState::Abort {
                 start_file: xact_state.get_start_file(),
                 completion_lsn: highest_seen_lsn,
@@ -293,15 +316,14 @@ impl WalManager {
         };
     }
 
-    fn push(&mut self, table_event: &TableEvent) {
+    pub fn push(&mut self, table_event: &TableEvent) {
         // add to in_mem_buf
         let wal_event = WalEvent::new(table_event);
         self.in_mem_buf.push(wal_event);
 
         // Update highest_lsn if this event has a higher LSN
         if let Some(lsn) = table_event.get_lsn_for_ingest_event() {
-            assert_ge!(lsn, self.highest_seen_lsn);
-            self.highest_seen_lsn = lsn;
+            self.highest_seen_lsn = self.highest_seen_lsn.max(lsn);
         }
 
         // update transaction tracking
@@ -467,7 +489,7 @@ impl WalManager {
         });
 
         table_notify
-            .send(TableEvent::PeriodicalPersistWalResult {
+            .send(TableEvent::PeriodicalPersistTruncateWalResult {
                 result: persist_and_truncate_result,
             })
             .await
@@ -521,7 +543,10 @@ impl WalManager {
         self.handle_complete_persistence(persist_and_truncate_result);
         self.handle_complete_truncate(persist_and_truncate_result);
 
-        return persist_and_truncate_result.highest_deleted_file.as_ref().map(|wal_file_info| wal_file_info.highest_lsn)
+        persist_and_truncate_result
+            .file_persisted
+            .as_ref()
+            .map(|wal_file_info| wal_file_info.highest_lsn)
     }
 
     // ------------------------------
@@ -588,4 +613,4 @@ impl WalManager {
 mod tests;
 
 #[cfg(test)]
-mod test_utils;
+pub mod test_utils;

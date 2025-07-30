@@ -1,22 +1,33 @@
 use crate::event_sync::create_table_event_syncer;
 use crate::row::{IdentityProp, MoonlinkRow, RowValue};
+use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::wal::test_utils::{
+    assert_wal_events_contains, assert_wal_events_does_not_contain,
+};
+use crate::storage::wal::WalManager;
 use crate::storage::IcebergTableConfig;
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
-use crate::{FileSystemConfig, IcebergTableManager, MooncakeTableConfig, TableEventManager};
+use crate::{
+    FileSystemAccessor, FileSystemConfig, IcebergTableManager, MooncakeTableConfig,
+    TableEventManager,
+};
 use crate::{ObjectStorageCache, Result};
 
 use arrow_array::RecordBatch;
+use futures::StreamExt;
 use iceberg::io::FileIOBuilder;
 use iceberg::io::FileRead;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::{mpsc, watch};
+use tracing::debug;
 
 /// Creates a `MoonlinkRow` for testing purposes.
 pub fn create_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
@@ -46,7 +57,10 @@ pub struct TestEnvironment {
     replication_tx: watch::Sender<u64>,
     last_commit_tx: watch::Sender<u64>,
     snapshot_lsn_tx: watch::Sender<u64>,
+    wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    wal_filesystem_path: String,
     pub(crate) force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
+    pub(crate) wal_flush_lsn_rx: watch::Receiver<u64>,
     pub(crate) table_event_manager: TableEventManager,
     pub(crate) temp_dir: TempDir,
     pub(crate) object_storage_cache: ObjectStorageCache,
@@ -87,6 +101,16 @@ impl TestEnvironment {
         let force_snapshot_completion_rx = table_event_sync_receiver
             .force_snapshot_completion_rx
             .clone();
+        let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
+
+        // TODO(Paul): Change this default when we support object storage for WAL
+        let default_wal_filesystem_config = WalManager::default_wal_file_system_config(
+            mooncake_table.get_table_id(),
+            temp_dir.path(),
+        );
+        let wal_filesystem_path = default_wal_filesystem_config.get_root_path();
+        let wal_filesystem_accessor =
+            Arc::new(FileSystemAccessor::new(default_wal_filesystem_config));
 
         let handler = TableHandler::new(
             mooncake_table,
@@ -108,7 +132,10 @@ impl TestEnvironment {
             replication_tx,
             last_commit_tx,
             snapshot_lsn_tx,
+            wal_filesystem_accessor,
+            wal_filesystem_path,
             force_snapshot_completion_rx,
+            wal_flush_lsn_rx,
             table_event_manager,
             temp_dir,
             object_storage_cache,
@@ -181,38 +208,62 @@ impl TestEnvironment {
 
     // --- Operation Helpers ---
 
-    pub async fn append_row(&self, id: i32, name: &str, age: i32, lsn: u64, xact_id: Option<u32>) {
+    pub async fn append_row(
+        &self,
+        id: i32,
+        name: &str,
+        age: i32,
+        lsn: u64,
+        xact_id: Option<u32>,
+    ) -> TableEvent {
+        debug!(
+            "append_row: id: {}, name: {}, age: {}, lsn: {}, xact_id: {:?}",
+            id, name, age, lsn, xact_id
+        );
         let row = create_row(id, name, age);
-        self.send_event(TableEvent::Append {
+        let event = TableEvent::Append {
             is_copied: false,
             row,
             lsn,
             xact_id,
-        })
-        .await;
+        };
+        self.send_event(event.clone()).await;
+        event
     }
 
-    pub async fn delete_row(&self, id: i32, name: &str, age: i32, lsn: u64, xact_id: Option<u32>) {
+    pub async fn delete_row(
+        &self,
+        id: i32,
+        name: &str,
+        age: i32,
+        lsn: u64,
+        xact_id: Option<u32>,
+    ) -> TableEvent {
         let row = create_row(id, name, age);
-        self.send_event(TableEvent::Delete { row, lsn, xact_id })
-            .await;
+        let event = TableEvent::Delete { row, lsn, xact_id };
+        self.send_event(event.clone()).await;
+        event
     }
 
-    pub async fn commit(&self, lsn: u64) {
-        self.send_event(TableEvent::Commit { lsn, xact_id: None })
-            .await;
+    pub async fn commit(&self, lsn: u64) -> TableEvent {
+        let event = TableEvent::Commit { lsn, xact_id: None };
+        self.send_event(event.clone()).await;
+        event
     }
 
-    pub async fn stream_commit(&self, lsn: u64, xact_id: u32) {
-        self.send_event(TableEvent::Commit {
+    pub async fn stream_commit(&self, lsn: u64, xact_id: u32) -> TableEvent {
+        let event = TableEvent::Commit {
             lsn,
             xact_id: Some(xact_id),
-        })
-        .await;
+        };
+        self.send_event(event.clone()).await;
+        event
     }
 
-    pub async fn stream_abort(&self, xact_id: u32) {
-        self.send_event(TableEvent::StreamAbort { xact_id }).await;
+    pub async fn stream_abort(&self, xact_id: u32) -> TableEvent {
+        let event = TableEvent::StreamAbort { xact_id };
+        self.send_event(event.clone()).await;
+        event
     }
 
     /// Force an index merge operation, and block wait its completion.
@@ -312,19 +363,78 @@ impl TestEnvironment {
     }
 
     /// Force WAL persistence by sending a periodic WAL event and waiting for completion
-    pub async fn force_wal_persistence(&self) {
-        // Send periodic WAL event
-        self.send_event(TableEvent::PeriodicalPersistWal).await;
-        
-        // Wait a bit for the async operation to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    /// Note that this assumes that this is being called after an event with an updated LSN
+    /// has just been sent, if not it will wait indefinitely.
+    pub async fn force_wal_persistence(&mut self, expected_lsn: u64) {
+        self.send_event(TableEvent::PeriodicalPersistTruncateWal)
+            .await;
+
+        loop {
+            if *self.wal_flush_lsn_rx.borrow() >= expected_lsn {
+                break;
+            }
+            self.wal_flush_lsn_rx.changed().await.unwrap();
+        }
     }
 
-    /// Wait for WAL persistence to complete by checking if wal_persist_ongoing is false
-    /// This is a bit of a hack since we don't have direct access to the state
-    pub async fn wait_for_wal_persistence_completion(&self) {
-        // Wait for the periodic WAL persistence to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+    // TODO(Paul): Rework these when implementing object storage WAL
+    pub async fn get_lowest_wal_file_number(&self) -> Option<u64> {
+        let mut files = tokio::fs::read_dir(PathBuf::from(&self.wal_filesystem_path))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Failed to read wal filesystem path: {}",
+                    self.wal_filesystem_path
+                )
+            });
+        let mut lowest = u64::MAX;
+
+        while let Some(file) = files.next_entry().await.unwrap() {
+            debug!("file: {:?}", file);
+            let path = file.path();
+            let file_name = path.file_name()?.to_str()?;
+            if let Some(num_str) = file_name.strip_prefix("wal_")?.strip_suffix(".json") {
+                if let Ok(num) = num_str.parse::<u64>() {
+                    lowest = lowest.min(num);
+                }
+            }
+        }
+        (lowest != u64::MAX).then_some(lowest)
+    }
+
+    // Recover wal events locally by reading from the wal filesystem and finding the lowest file number
+    // TODO(Paul): Rework these when implementing object storage WAL
+    pub async fn get_wal_events(&self) -> Vec<TableEvent> {
+        let start_file_num = self.get_lowest_wal_file_number().await.unwrap();
+
+        let wal_events_stream = WalManager::recover_flushed_wals_flat(
+            self.wal_filesystem_accessor.clone(),
+            start_file_num,
+        );
+        let wal_events_vec = wal_events_stream
+            .collect::<Vec<Result<TableEvent>>>()
+            .await
+            .into_iter()
+            .map(|event| match event {
+                // panic if there are any errors
+                Ok(event) => event,
+                Err(e) => {
+                    panic!("Error recovering wal events: {e:?}");
+                }
+            })
+            .collect::<Vec<TableEvent>>();
+        wal_events_vec
+    }
+
+    pub async fn check_wal_events(
+        &self,
+        should_contain_table_events: &[TableEvent],
+        should_not_contain_table_events: &[TableEvent],
+    ) {
+        let wal_events = self.get_wal_events().await;
+
+        assert_wal_events_contains(&wal_events, should_contain_table_events);
+        assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
     }
 }
 

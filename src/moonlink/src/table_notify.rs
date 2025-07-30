@@ -150,10 +150,10 @@ pub enum TableEvent {
     // ================================================
     // WAL events
     // ================================================
-    /// Periodically persist in-memory WAL.
-    PeriodicalPersistWal,
-    /// Periodic persist wal completes.
-    PeriodicalPersistWalResult {
+    /// Periodically persist in-memory WAL and truncate WAL files.
+    PeriodicalPersistTruncateWal,
+    /// Periodic persist and truncate wal completes.
+    PeriodicalPersistTruncateWalResult {
         result: Result<PersistAndTruncateResult>,
     },
 }

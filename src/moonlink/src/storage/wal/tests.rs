@@ -1,49 +1,54 @@
+use std::path::PathBuf;
+
 use crate::storage::mooncake_table::test_utils::TestContext;
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::test_utils::*;
 use crate::storage::wal::WalManager;
-use crate::FileSystemConfig;
 use crate::{assert_wal_file_does_not_exist, assert_wal_file_exists, assert_wal_logs_equal};
-use tokio::fs;
 
 #[tokio::test]
 async fn test_wal_insert_persist_files() {
     let context = TestContext::new("wal_persist");
-    let (mut wal, expected_events) = create_test_wal(&context).await;
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let (mut wal, expected_events) = create_test_wal(file_system_config).await;
 
     // Persist and verify file number
     wal.persist_and_truncate(None).await.unwrap();
 
     // Check file exists and has content
-    assert_wal_file_exists!(&context, wal.get_file_system_accessor(), 0);
+    assert_wal_file_exists!(wal.get_file_system_accessor(), 0);
 
     let expected_wal_events = convert_to_wal_events_vector(&expected_events);
-    assert_wal_logs_equal!(
-        &[String::from("wal_0.json")],
-        wal.get_file_system_accessor(),
-        expected_wal_events
-    );
+    assert_wal_logs_equal!(&[0], wal.get_file_system_accessor(), expected_wal_events);
 }
 
 #[tokio::test]
 async fn test_wal_empty_persist() {
     let context = TestContext::new("wal_empty_persist");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config.clone());
 
     // Persist without any events
     wal.persist_and_truncate(None).await.unwrap();
 
     // No file should be created for empty WAL
-    assert!(local_dir_is_empty(&context.path()).await);
+    assert!(local_dir_is_empty(&PathBuf::from(&file_system_config.get_root_path())).await);
 }
 
 #[tokio::test]
 async fn test_wal_file_numbering_sequence() {
     let context = TestContext::new("wal_file_numbering");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config.clone());
 
     let mut events = Vec::new();
 
@@ -56,22 +61,19 @@ async fn test_wal_file_numbering_sequence() {
     // Second loop: check file existence and contents
     for i in 0..3 {
         let expected_wal_events = convert_to_wal_events_vector(&events[i as usize..=(i as usize)]);
-        assert_wal_file_exists!(&context, wal.get_file_system_accessor(), i);
-        let file_name = format!("wal_{i}.json");
-        assert_wal_logs_equal!(
-            &[file_name],
-            wal.get_file_system_accessor(),
-            expected_wal_events
-        );
+        assert_wal_file_exists!(wal.get_file_system_accessor(), i);
+        assert_wal_logs_equal!(&[i], wal.get_file_system_accessor(), expected_wal_events);
     }
 }
 
 #[tokio::test]
 async fn test_wal_truncation_deletes_files() {
     let context = TestContext::new("wal_truncation");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     // first commit in files 0, 1, 2, complete_lsn is 101
     let mut events = Vec::new();
@@ -94,36 +96,26 @@ async fn test_wal_truncation_deletes_files() {
 
     // Verify files 0, 1, 2 are deleted
     for i in 0..3 {
-        assert!(
-            !fs::try_exists(&context.path().join(format!("wal_{i}.json")))
-                .await
-                .unwrap()
-        );
+        assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), i);
     }
 
     // Verify files 3, 4 still exist and contain correct content
     for i in 3..5 {
-        assert!(
-            fs::try_exists(&context.path().join(format!("wal_{i}.json")))
-                .await
-                .unwrap()
-        );
+        assert_wal_file_exists!(wal.get_file_system_accessor(), i);
 
         let expected_events = convert_to_wal_events_vector(&events[i as usize..=(i as usize)]);
-        assert_wal_logs_equal!(
-            &[format!("wal_{i}.json")],
-            wal.get_file_system_accessor(),
-            expected_events
-        );
+        assert_wal_logs_equal!(&[i], wal.get_file_system_accessor(), expected_events);
     }
 }
 
 #[tokio::test]
 async fn test_wal_truncation_with_no_files() {
     let context = TestContext::new("wal_truncation_no_files");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     // Test truncation with no files - should not panic or error
     wal.persist_and_truncate(Some(100)).await.unwrap();
@@ -132,9 +124,11 @@ async fn test_wal_truncation_with_no_files() {
 #[tokio::test]
 async fn test_wal_truncation_deletes_all_files() {
     let context = TestContext::new("wal_truncation_delete_all");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config.clone());
     let mut events = Vec::new();
 
     // Test truncation that should delete all files
@@ -145,7 +139,7 @@ async fn test_wal_truncation_deletes_all_files() {
 
     // now truncate should delete all files
     wal.persist_and_truncate(Some(200)).await.unwrap(); // Higher than any LSN
-    assert!(local_dir_is_empty(&context.path()).await);
+    assert!(local_dir_is_empty(&PathBuf::from(&file_system_config.get_root_path())).await);
 }
 
 // ------------------------------------------------------------
@@ -155,9 +149,11 @@ async fn test_wal_truncation_deletes_all_files() {
 #[tokio::test]
 async fn test_wal_truncate_incomplete_main_xact() {
     let context = TestContext::new("wal_persist_truncate");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     let mut events = Vec::new();
     add_new_example_append_event(100, None, &mut wal, &mut events);
@@ -170,19 +166,17 @@ async fn test_wal_truncate_incomplete_main_xact() {
     wal.persist_and_truncate(Some(100)).await.unwrap();
 
     let expected_events = convert_to_wal_events_vector(&events);
-    assert_wal_logs_equal!(
-        &[String::from("wal_0.json")],
-        wal.get_file_system_accessor(),
-        expected_events
-    );
+    assert_wal_logs_equal!(&[0], wal.get_file_system_accessor(), expected_events);
 }
 
 #[tokio::test]
 async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
     let context = TestContext::new("wal_persist_truncate");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     let mut events = Vec::new();
     add_new_example_append_event(100, None, &mut wal, &mut events);
@@ -205,25 +199,23 @@ async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
     wal.persist_and_truncate(Some(106)).await.unwrap();
 
     // verify the first and second file are deleted
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 0);
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 1);
-    assert_wal_file_exists!(&context, wal.get_file_system_accessor(), 2);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 1);
+    assert_wal_file_exists!(wal.get_file_system_accessor(), 2);
 
     let expected_events = convert_to_wal_events_vector(&events[6..]);
-    assert_wal_logs_equal!(
-        &[String::from("wal_2.json")],
-        wal.get_file_system_accessor(),
-        expected_events
-    );
+    assert_wal_logs_equal!(&[2], wal.get_file_system_accessor(), expected_events);
 }
 
 #[tokio::test]
 async fn test_wal_truncate_main_and_streaming_xact_interleave() {
     // Testing case: main xact and streaming xact are interleaving and streaming xact prevents file cleanup
     let context = TestContext::new("wal_truncate_main_and_streaming_xact_interleave");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     let mut events = Vec::new();
 
@@ -248,28 +240,22 @@ async fn test_wal_truncate_main_and_streaming_xact_interleave() {
     wal.persist_and_truncate(Some(101)).await.unwrap();
 
     // we should only have file 1, 2 and 3
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 0);
-    assert_wal_file_exists!(&context, wal.get_file_system_accessor(), 1);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
+    assert_wal_file_exists!(wal.get_file_system_accessor(), 1);
 
     let expected_events = convert_to_wal_events_vector(&events[1..]);
-    assert_wal_logs_equal!(
-        &[
-            String::from("wal_1.json"),
-            String::from("wal_2.json"),
-            String::from("wal_3.json"),
-        ],
-        wal.get_file_system_accessor(),
-        expected_events
-    );
+    assert_wal_logs_equal!(&[1, 2, 3], wal.get_file_system_accessor(), expected_events);
 }
 
 #[tokio::test]
 async fn test_wal_multiple_interleaved_truncations() {
     // multiple truncations should behave
     let context = TestContext::new("wal_multiple_interleaved_truncations");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     let mut events = Vec::new();
 
@@ -306,27 +292,26 @@ async fn test_wal_multiple_interleaved_truncations() {
     // main: 100 -> 101, 102 -> 103
 
     // we should only  have file 2 and 3
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 0);
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 1);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 1);
 
-    assert_wal_file_exists!(&context, wal.get_file_system_accessor(), 2);
-    assert_wal_file_exists!(&context, wal.get_file_system_accessor(), 3);
+    assert_wal_file_exists!(wal.get_file_system_accessor(), 2);
+    assert_wal_file_exists!(wal.get_file_system_accessor(), 3);
 
     // truncate up to the main xact
-    let file_names = (2..4)
-        .map(|i| format!("wal_{i}.json"))
-        .collect::<Vec<String>>();
     let expected_events = convert_to_wal_events_vector(&events[6..]);
-    assert_wal_logs_equal!(&file_names, wal.get_file_system_accessor(), expected_events);
+    assert_wal_logs_equal!(&[2, 3], wal.get_file_system_accessor(), expected_events);
 }
 
 #[tokio::test]
 async fn test_wal_stream_abort() {
     // Testing case: streaming xact is not finished and prevents file cleanup
     let context = TestContext::new("wal_stream_abort");
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let mut wal = WalManager::new(file_system_config);
 
     let mut events = Vec::new();
 
@@ -348,24 +333,24 @@ async fn test_wal_stream_abort() {
     wal.persist_and_truncate(Some(101)).await.unwrap();
 
     // we should only  have file 2 (abort should 'complete' transaction 1)
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 0);
-    assert_wal_file_does_not_exist!(&context, wal.get_file_system_accessor(), 1);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
+    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 1);
 
-    assert_wal_file_exists!(&context, wal.get_file_system_accessor(), 2);
+    assert_wal_file_exists!(wal.get_file_system_accessor(), 2);
 
     // truncate up to the main xact
     let expected_events = convert_to_wal_events_vector(&events[5..]);
-    assert_wal_logs_equal!(
-        &[String::from("wal_2.json")],
-        wal.get_file_system_accessor(),
-        expected_events
-    );
+    assert_wal_logs_equal!(&[2], wal.get_file_system_accessor(), expected_events);
 }
 
 #[tokio::test]
 async fn test_wal_recovery_basic() {
     let context = TestContext::new("wal_recovery_basic");
-    let (mut wal, expected_events) = create_test_wal(&context).await;
+    let file_system_config = WalManager::default_wal_file_system_config(
+        WAL_TEST_TABLE_ID,
+        &context.path().to_path_buf(),
+    );
+    let (mut wal, expected_events) = create_test_wal(file_system_config).await;
 
     // Persist the events first
     wal.persist_and_truncate(None).await.unwrap();

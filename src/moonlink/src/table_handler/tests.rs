@@ -1652,6 +1652,112 @@ async fn test_discard_duplicate_writes() {
     env.verify_snapshot(40, &[30, 40]).await;
 }
 
+/// --- Test for WAL events ---
+#[tokio::test]
+async fn test_wal_persists_events() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    let mut expected_events = Vec::new();
+
+    // we can't be sure of these events to be persisted because they will go into the iceberg snapshot
+    env.append_row(1, "John", 30, 1, None).await;
+    env.flush_table(1).await;
+
+    // this event will definitely be persisted in the WAL because it's not yet in the iceberg snapshot
+    expected_events.push(env.append_row(2, "Jane", 20, 0, Some(100)).await);
+
+    // take snapshot
+    let force_snapshot_completion_rx = env.table_event_manager.initiate_snapshot(1).await;
+    TableEventManager::synchronize_force_snapshot_request(
+        force_snapshot_completion_rx,
+        /*requested_lsn=*/ 1,
+    )
+    .await
+    .unwrap();
+
+    env.force_wal_persistence(1).await;
+
+    env.check_wal_events(&expected_events, &[]).await;
+}
+
+#[tokio::test]
+async fn test_wal_truncates_events_after_snapshot() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    let mut expected_events = Vec::new();
+    let mut not_expected_events = Vec::new();
+
+    // these events should not be persisted because they will go into the iceberg snapshot and be truncated
+    not_expected_events.push(env.append_row(1, "John", 30, 1, None).await);
+    env.flush_table(1).await;
+
+    // take snapshot
+    let force_snapshot_completion_rx = env.table_event_manager.initiate_snapshot(1).await;
+    TableEventManager::synchronize_force_snapshot_request(
+        force_snapshot_completion_rx,
+        /*requested_lsn=*/ 1,
+    )
+    .await
+    .unwrap();
+    env.force_wal_persistence(1).await;
+
+    // any vents after this should be in the WAL because iceberg snapshot cannot capture the uncommitted streaming xact
+    expected_events.push(env.append_row(2, "Jane", 20, 0, Some(100)).await);
+    expected_events.push(env.commit(2).await);
+
+    env.force_wal_persistence(2).await;
+
+    env.check_wal_events(&expected_events, &not_expected_events)
+        .await;
+}
+
+#[tokio::test]
+async fn test_wal_keeps_multiple_streaming_xacts() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    let mut expected_events = Vec::new();
+    let mut not_expected_events = Vec::new();
+
+    // these events should not be persisted because they will go into the iceberg snapshot
+    not_expected_events.push(env.append_row(1, "John", 30, 1, None).await);
+    env.flush_table(1).await;
+    not_expected_events.push(env.append_row(2, "Jane", 20, 0, Some(100)).await);
+    env.force_wal_persistence(1).await;
+
+    not_expected_events.push(env.stream_commit(2, 100).await);
+    env.force_wal_persistence(2).await;
+
+    // any events after this should be in the WAL because iceberg snapshot cannot capture the uncommitted streaming xact
+    expected_events.push(env.append_row(3, "Jim", 30, 0, Some(101)).await);
+    expected_events.push(env.append_row(4, "Jill", 40, 3, None).await);
+    env.flush_table(3).await;
+    env.force_wal_persistence(3).await;
+
+    expected_events.push(env.append_row(5, "Jack", 50, 0, Some(102)).await);
+    expected_events.push(env.append_row(6, "Jill", 60, 5, None).await);
+    env.flush_table(5).await;
+
+    // take snapshot
+    let force_snapshot_completion_rx = env.table_event_manager.initiate_snapshot(5).await;
+    TableEventManager::synchronize_force_snapshot_request(
+        force_snapshot_completion_rx,
+        /*requested_lsn=*/ 5,
+    )
+    .await
+    .unwrap();
+
+    // we do one more round of wal persistence to make sure our WAL is most up to date
+    expected_events.push(env.commit(7).await);
+    env.force_wal_persistence(7).await;
+
+    // we should be keeping all WAL after the flush at LSN 2 because we have a streaming xact that is not committed
+    env.check_wal_events(&expected_events, &not_expected_events)
+        .await;
+}
+
 /// ---- Util functions unit test ----
 #[test]
 fn test_get_persisted_table_lsn() {

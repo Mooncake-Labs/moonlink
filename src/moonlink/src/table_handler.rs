@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 /// There're a few LSN concepts used in the table handler:
 /// - commit LSN: LSN for a streaming or a non-streaming LSN
 /// - flush LSN: LSN for a flush operation
@@ -11,15 +9,10 @@ use std::sync::Arc;
 /// - persisted table LSN: the largest LSN where all updates have been persisted into iceberg
 ///   Suppose we have two tables, table-A has persisted all updated into iceberg; with table-B taking new updates. persisted table LSN for table-A grows with table-B.
 use crate::event_sync::EventSyncSender;
-use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::MaintenanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
-use crate::storage::wal::PersistAndTruncateResult;
-use crate::storage::wal::WalEvent;
-use crate::storage::wal::WalFileInfo;
-use crate::storage::wal::WalManager;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_notify::TableEvent;
 use crate::Error;
@@ -73,7 +66,7 @@ impl TableHandler {
             loop {
                 tokio::select! {
                     _ = periodic_wal_interval.tick() => {
-                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistWal).await.is_err() {
+                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistTruncateWal).await.is_err() {
                             return;
                         }
                     }
@@ -492,13 +485,14 @@ impl TableHandler {
                         TableEvent::EvictedDataFilesToDelete { evicted_data_files } => {
                             start_task_to_delete_evicted(evicted_data_files);
                         }
-                        TableEvent::PeriodicalPersistWal => {
+                        TableEvent::PeriodicalPersistTruncateWal => {
                             if !table_handler_state.wal_persist_ongoing {
                                 table_handler_state.wal_persist_ongoing = true;
-                                table.persist_and_truncate_wal();
+                                let ongoing_persist_truncate = table.persist_and_update_wal();
+                                table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
                             }
                         }
-                        TableEvent::PeriodicalPersistWalResult { result } => {
+                        TableEvent::PeriodicalPersistTruncateWalResult { result } => {
                             match result {
                                 Ok(result) => {
                                     table_handler_state.wal_persist_ongoing = false;
@@ -563,6 +557,8 @@ impl TableHandler {
             is_initial_copy_event,
             table_handler_state.special_table_state == SpecialTableState::InitialCopy
         );
+
+        table.push_wal_event(&event);
 
         match event {
             TableEvent::Append {

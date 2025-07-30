@@ -1,5 +1,5 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-use crate::storage::mooncake_table::test_utils::{test_row, TestContext};
+use crate::storage::mooncake_table::test_utils::test_row;
 use crate::storage::wal::{PersistAndTruncateResult, WalEvent, WalManager};
 use crate::table_notify::TableEvent;
 use crate::FileSystemConfig;
@@ -7,6 +7,8 @@ use crate::Result;
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::fs;
+
+pub(crate) const WAL_TEST_TABLE_ID: u32 = 1;
 
 impl WalManager {
     /// Mock function for how this gets called in table handler. We retrieve some data from the wal,
@@ -53,6 +55,11 @@ impl WalManager {
     }
 }
 
+// ================================================
+// Helper functions for WAL file manipulation
+// TODO(Paul): Rework these when implementing object storage WAL
+// ================================================
+
 pub async fn extract_file_contents(
     file_path: &str,
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -61,25 +68,56 @@ pub async fn extract_file_contents(
     serde_json::from_slice(&file_content).unwrap()
 }
 
-pub fn convert_to_wal_events_vector(table_events: &[TableEvent]) -> Vec<WalEvent> {
-    table_events.iter().map(WalEvent::new).collect()
+/// Helper to check if a directory is empty
+pub async fn local_dir_is_empty(path: &std::path::Path) -> bool {
+    // first check if the directory exists
+    if !fs::try_exists(path).await.unwrap() {
+        return true;
+    }
+    // then check if it's empty
+    let mut entries = fs::read_dir(path).await.unwrap();
+    entries.next_entry().await.unwrap().is_none()
 }
 
 pub async fn get_wal_logs_from_files(
-    file_paths: &[String],
+    file_ids: &[u64],
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
 ) -> Vec<WalEvent> {
+    let file_paths = file_ids
+        .iter()
+        .map(|id| WalManager::get_file_name(*id))
+        .collect::<Vec<String>>();
     let mut wal_events = Vec::new();
     for file_path in file_paths {
-        let events = extract_file_contents(file_path, file_system_accessor.clone()).await;
+        let events = extract_file_contents(&file_path, file_system_accessor.clone()).await;
         wal_events.extend(events);
     }
     wal_events
 }
 
+pub async fn wal_file_exists(
+    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    file_number: u64,
+) -> bool {
+    let file_name = WalManager::get_file_name(file_number);
+    file_system_accessor
+        .object_exists(&file_name)
+        .await
+        .unwrap()
+}
+
+// ================================================
+// Helper functions for testing
+// ================================================
+
+pub fn convert_to_wal_events_vector(table_events: &[TableEvent]) -> Vec<WalEvent> {
+    table_events.iter().map(WalEvent::new).collect()
+}
+
 /// Helper function to compare two ingestion events by their key properties - this exists because
 /// PartialEq is not implemented for TableEvent, because only a subset of the fields are relevant for comparison.
-pub fn assert_ingestion_events_equal(actual: &TableEvent, expected: &TableEvent) {
+/// Returns true if the events are equal, false otherwise.
+pub fn ingestion_events_equal(actual: &TableEvent, expected: &TableEvent) -> bool {
     match (actual, expected) {
         (
             TableEvent::Append {
@@ -87,72 +125,60 @@ pub fn assert_ingestion_events_equal(actual: &TableEvent, expected: &TableEvent)
                 lsn: lsn1,
                 xact_id: xact1,
                 is_copied: copied1,
-                ..
             },
             TableEvent::Append {
                 row: row2,
                 lsn: lsn2,
                 xact_id: xact2,
                 is_copied: copied2,
-                ..
             },
-        ) => {
-            assert_eq!(row1, row2, "Append events have different rows");
-            assert_eq!(lsn1, lsn2, "Append events have different LSNs");
-            assert_eq!(xact1, xact2, "Append events have different xact_ids");
-            assert_eq!(
-                copied1, copied2,
-                "Append events have different is_copied flags"
-            );
-        }
+        ) => row1 == row2 && lsn1 == lsn2 && xact1 == xact2 && copied1 == copied2,
         (
             TableEvent::Delete {
                 row: row1,
                 lsn: lsn1,
                 xact_id: xact1,
-                ..
             },
             TableEvent::Delete {
                 row: row2,
                 lsn: lsn2,
                 xact_id: xact2,
-                ..
             },
-        ) => {
-            assert_eq!(row1, row2, "Delete events have different rows");
-            assert_eq!(lsn1, lsn2, "Delete events have different LSNs");
-            assert_eq!(xact1, xact2, "Delete events have different xact_ids");
-        }
+        ) => row1 == row2 && lsn1 == lsn2 && xact1 == xact2,
         (
             TableEvent::Commit {
                 lsn: lsn1,
                 xact_id: xact1,
-                ..
             },
             TableEvent::Commit {
                 lsn: lsn2,
                 xact_id: xact2,
-                ..
             },
-        ) => {
-            assert_eq!(lsn1, lsn2, "Commit events have different LSNs");
-            assert_eq!(xact1, xact2, "Commit events have different xact_ids");
-        }
+        ) => lsn1 == lsn2 && xact1 == xact2,
         (
-            TableEvent::StreamAbort { xact_id: xact1, .. },
-            TableEvent::StreamAbort { xact_id: xact2, .. },
-        ) => {
-            assert_eq!(xact1, xact2, "StreamAbort events have different xact_ids");
-        }
+            TableEvent::StreamAbort { xact_id: xact1 },
+            TableEvent::StreamAbort { xact_id: xact2 },
+        ) => xact1 == xact2,
         (
-            TableEvent::StreamFlush { xact_id: xact1, .. },
-            TableEvent::StreamFlush { xact_id: xact2, .. },
-        ) => {
-            assert_eq!(xact1, xact2, "StreamFlush events have different xact_ids");
-        }
-        _ => {
-            panic!("Event types don't match: {actual:?} vs {expected:?}");
-        }
+            TableEvent::StreamFlush { xact_id: xact1 },
+            TableEvent::StreamFlush { xact_id: xact2 },
+        ) => xact1 == xact2,
+        _ => false,
+    }
+}
+
+/// Helper function to compare two ingestion events by their key properties - this exists because
+/// PartialEq is not implemented for TableEvent, because only a subset of the fields are relevant for comparison.
+pub fn assert_ingestion_events_equal(actual: &TableEvent, expected: &TableEvent) {
+    if !ingestion_events_equal(actual, expected) {
+        panic!("Events are not equal: {actual:?} vs {expected:?}");
+    }
+}
+
+/// Helper function to assert that two ingestion events are not equal by their key properties.
+pub fn assert_ingestion_events_not_equal(actual: &TableEvent, expected: &TableEvent) {
+    if ingestion_events_equal(actual, expected) {
+        panic!("Events should not be equal but they are: {actual:?} vs {expected:?}");
     }
 }
 
@@ -165,6 +191,34 @@ pub fn assert_ingestion_events_vectors_equal(actual: &[TableEvent], expected: &[
     );
     for (actual_event, expected_event) in actual.iter().zip(expected.iter()) {
         assert_ingestion_events_equal(actual_event, expected_event);
+    }
+}
+
+pub fn assert_wal_events_contains(from_wal_events: &[TableEvent], expected_events: &[TableEvent]) {
+    for expected_event in expected_events {
+        let mut found = false;
+        for event in from_wal_events {
+            if ingestion_events_equal(event, expected_event) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "Event {expected_event:?} not found in from_wal_events {from_wal_events:?}"
+        );
+    }
+}
+
+pub fn assert_wal_events_does_not_contain(
+    from_wal_events: &[TableEvent],
+    not_expected_events: &[TableEvent],
+) {
+    // just a naive double loop for now
+    for event in from_wal_events {
+        for not_expected_event in not_expected_events {
+            assert_ingestion_events_not_equal(event, not_expected_event);
+        }
     }
 }
 
@@ -184,11 +238,11 @@ pub async fn get_table_events_vector_recovery(
     recovered_events
 }
 
-// Helper function to create a WAL with some test data
-pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEvent>) {
-    let mut wal = WalManager::new(FileSystemConfig::FileSystem {
-        root_directory: context.path().to_str().unwrap().to_string(),
-    });
+/// Helper function to create a WAL with some test data
+pub async fn create_test_wal(
+    file_system_config: FileSystemConfig,
+) -> (WalManager, Vec<TableEvent>) {
+    let mut wal = WalManager::new(file_system_config);
     let mut expected_events = Vec::new();
     let row = test_row(1, "Alice", 30);
 
@@ -211,12 +265,6 @@ pub async fn create_test_wal(context: &TestContext) -> (WalManager, Vec<TableEve
     wal.push(&commit_event);
     expected_events.push(commit_event);
     (wal, expected_events)
-}
-
-// Helper to check if a directory is empty
-pub async fn local_dir_is_empty(path: &std::path::Path) -> bool {
-    let mut entries = fs::read_dir(path).await.unwrap();
-    entries.next_entry().await.unwrap().is_none()
 }
 
 pub fn add_new_example_commit_event(
@@ -281,33 +329,12 @@ pub fn add_new_example_stream_flush_event(
     expected_events.push(event);
 }
 
-pub async fn wal_file_exists(
-    context: &TestContext,
-    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
-    file_number: u64,
-) -> bool {
-    file_system_accessor
-        .object_exists(
-            context
-                .path()
-                .join(format!("wal_{file_number}.json"))
-                .to_str()
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-
 #[macro_export]
 macro_rules! assert_wal_file_exists {
-    ($context:expr, $file_system_accessor:expr, $file_number:expr) => {
+    ($file_system_accessor:expr, $file_number:expr) => {
         assert!(
-            $crate::storage::wal::test_utils::wal_file_exists(
-                $context,
-                $file_system_accessor,
-                $file_number
-            )
-            .await,
+            $crate::storage::wal::test_utils::wal_file_exists($file_system_accessor, $file_number)
+                .await,
             "File {} should exist",
             $file_number
         );
@@ -316,14 +343,10 @@ macro_rules! assert_wal_file_exists {
 
 #[macro_export]
 macro_rules! assert_wal_file_does_not_exist {
-    ($context:expr, $file_system_accessor:expr, $file_number:expr) => {
+    ($file_system_accessor:expr, $file_number:expr) => {
         assert!(
-            !$crate::storage::wal::test_utils::wal_file_exists(
-                $context,
-                $file_system_accessor,
-                $file_number
-            )
-            .await,
+            !$crate::storage::wal::test_utils::wal_file_exists($file_system_accessor, $file_number)
+                .await,
             "File {} should not exist",
             $file_number
         );
@@ -332,9 +355,9 @@ macro_rules! assert_wal_file_does_not_exist {
 
 #[macro_export]
 macro_rules! assert_wal_logs_equal {
-    ($file_paths:expr, $file_system_accessor:expr, $expected_events:expr) => {
+    ($file_ids:expr, $file_system_accessor:expr, $expected_events:expr) => {
         let wal_events = $crate::storage::wal::test_utils::get_wal_logs_from_files(
-            $file_paths,
+            $file_ids,
             $file_system_accessor.clone(),
         )
         .await;
