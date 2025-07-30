@@ -1,5 +1,6 @@
 use super::*;
 use crate::row::{IdentityProp, RowValue};
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::puffin_utils;
@@ -7,7 +8,7 @@ use crate::storage::mooncake_table::snapshot::PuffinDeletionBlobAtRead;
 use crate::storage::mooncake_table::snapshot_read_output::DataFileForRead;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
-use crate::FileSystemConfig;
+use crate::StorageConfig;
 use arrow::array::Int32Array;
 use futures::future::join_all;
 use iceberg::io::FileIOBuilder;
@@ -46,10 +47,11 @@ pub fn test_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
 /// Test util function to get iceberg table config for testing purpose.
 pub fn test_iceberg_table_config(context: &TestContext, table_name: &str) -> IcebergTableConfig {
     let root_directory = context.path().to_str().unwrap().to_string();
+    let storage_config = StorageConfig::FileSystem { root_directory };
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),
-        filesystem_config: FileSystemConfig::FileSystem { root_directory },
+        accessor_config: AccessorConfig::new_with_storage_config(storage_config),
     }
 }
 

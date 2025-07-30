@@ -1,13 +1,13 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::base_unbuffered_stream_writer::BaseUnbufferedStreamWriter;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
-use crate::storage::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 
 /// Util function to test stream writer.
 pub(crate) async fn test_unbuffered_stream_writer_impl(
     mut writer: Box<dyn BaseUnbufferedStreamWriter>,
     dst_filename: String,
-    filesystem_config: FileSystemConfig,
+    accessor_config: AccessorConfig,
 ) {
     const FILE_SIZE: usize = 10;
     const CONTENT: &str = "helloworld";
@@ -23,7 +23,7 @@ pub(crate) async fn test_unbuffered_stream_writer_impl(
     writer.finalize().await.unwrap();
 
     // Verify content.
-    let filesystem_accessor = FileSystemAccessor::new(filesystem_config);
+    let filesystem_accessor = FileSystemAccessor::new(accessor_config);
     let actual_content = filesystem_accessor
         .read_object_as_string(&dst_filename)
         .await

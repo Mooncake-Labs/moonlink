@@ -8,7 +8,7 @@ use crate::pg_replicate::postgres_source::{
 use crate::pg_replicate::table_init::build_table_components;
 use crate::Result;
 use moonlink::{
-    FileSystemConfig, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
+    AccessorConfig, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
     TableStatusReader,
 };
 use std::io::{Error, ErrorKind};
@@ -288,7 +288,7 @@ impl ReplicationConnection {
         schema: &TableSchema,
         mooncake_table_id: &T,
         table_id: u32,
-        iceberg_filesystem_config: Option<FileSystemConfig>,
+        iceberg_accessor_config: Option<AccessorConfig>,
         is_recovery: bool,
     ) -> Result<MoonlinkTableConfig> {
         let src_table_id = schema.src_table_id;
@@ -302,7 +302,7 @@ impl ReplicationConnection {
             self.table_temp_files_directory.clone(),
             &self.replication_state,
             self.object_storage_cache.clone(),
-            iceberg_filesystem_config,
+            iceberg_accessor_config,
         )
         .await?;
 
@@ -426,7 +426,7 @@ impl ReplicationConnection {
         table_name: &str,
         mooncake_table_id: &T,
         table_id: u32,
-        iceberg_filesystem_config: Option<FileSystemConfig>,
+        iceberg_accessor_config: Option<AccessorConfig>,
         is_recovery: bool,
     ) -> Result<(SrcTableId, MoonlinkTableConfig)> {
         debug!(table_name, "adding table");
@@ -442,7 +442,7 @@ impl ReplicationConnection {
                 &table_schema,
                 mooncake_table_id,
                 table_id,
-                iceberg_filesystem_config,
+                iceberg_accessor_config,
                 is_recovery,
             )
             .await?;

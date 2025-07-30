@@ -32,7 +32,7 @@ impl TableStatusReader {
         Self {
             database_id,
             table_id,
-            iceberg_warehouse_location: iceberg_table_config.filesystem_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
             table_snapshot,
         }
     }
@@ -107,7 +107,7 @@ mod tests {
         let expected_table_state = TableStatus {
             database_id: FAKE_DATABASE_ID,
             table_id: FAKE_TABLE_ID,
-            iceberg_warehouse_location: iceberg_table_config.filesystem_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
             commit_lsn: 0,
             flush_lsn: None,
         };
@@ -136,7 +136,7 @@ mod tests {
         let expected_table_state = TableStatus {
             database_id: FAKE_DATABASE_ID,
             table_id: FAKE_TABLE_ID,
-            iceberg_warehouse_location: iceberg_table_config.filesystem_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
             commit_lsn: 0,
             flush_lsn: None,
         };
@@ -169,7 +169,7 @@ mod tests {
         let expected_table_state = TableStatus {
             database_id: FAKE_DATABASE_ID,
             table_id: FAKE_TABLE_ID,
-            iceberg_warehouse_location: iceberg_table_config.filesystem_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
             commit_lsn: 10,
             flush_lsn: None,
         };
@@ -203,7 +203,7 @@ mod tests {
         let expected_table_state = TableStatus {
             database_id: FAKE_DATABASE_ID,
             table_id: FAKE_TABLE_ID,
-            iceberg_warehouse_location: iceberg_table_config.filesystem_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
             commit_lsn: 10,
             flush_lsn: Some(10),
         };

@@ -38,6 +38,7 @@ impl SnapshotTableState {
     ///
     /// Util function to decide whether and what to compact data files.
     /// To simplify states (aka, avoid data compaction already in iceberg with those not), only merge those already persisted.
+    #[allow(clippy::mutable_key_type)]
     pub(super) fn get_payload_to_compact(
         &self,
         data_compaction_option: &MaintenanceOption,
@@ -46,7 +47,7 @@ impl SnapshotTableState {
             return DataCompactionMaintenanceStatus::Unknown;
         }
 
-        let data_compaction_file_num_threshold = match data_compaction_option {
+        let min_data_compaction_file_num_threshold = match data_compaction_option {
             MaintenanceOption::Skip => usize::MAX,
             MaintenanceOption::ForceRegular => 2,
             MaintenanceOption::ForceFull => 2,
@@ -54,9 +55,26 @@ impl SnapshotTableState {
                 self.mooncake_table_metadata
                     .config
                     .data_compaction_config
-                    .data_file_to_compact as usize
+                    .min_data_file_to_compact as usize
             }
         };
+        let max_data_compaction_file_num_threshold = match data_compaction_option {
+            MaintenanceOption::Skip => usize::MAX,
+            MaintenanceOption::ForceRegular => {
+                self.mooncake_table_metadata
+                    .config
+                    .data_compaction_config
+                    .max_data_file_to_compact as usize
+            }
+            MaintenanceOption::ForceFull => usize::MAX,
+            MaintenanceOption::BestEffort => {
+                self.mooncake_table_metadata
+                    .config
+                    .data_compaction_config
+                    .max_data_file_to_compact as usize
+            }
+        };
+
         let default_final_file_size = self
             .mooncake_table_metadata
             .config
@@ -71,13 +89,13 @@ impl SnapshotTableState {
 
         // Fast-path: not enough data files to trigger compaction.
         let all_disk_files = &self.current_snapshot.disk_files;
-        if all_disk_files.len() < data_compaction_file_num_threshold {
+        if all_disk_files.len() < min_data_compaction_file_num_threshold {
             return DataCompactionMaintenanceStatus::Nothing;
         }
 
         // To simplify state management, only compact data files which have been persisted into iceberg table.
         let unpersisted_data_files = self.unpersisted_records.get_unpersisted_data_files_set();
-        let mut tentative_data_files_to_compact = vec![];
+        let mut tentative_data_files_to_compact = HashSet::new();
 
         // Number of data files rejected to merge due to unpersistence.
         let mut reject_by_unpersistence = 0;
@@ -89,6 +107,11 @@ impl SnapshotTableState {
                 && disk_file_entry.batch_deletion_vector.is_empty()
             {
                 continue;
+            }
+
+            // Break early if tentative data files to compact already reaches upper limit.
+            if tentative_data_files_to_compact.len() >= max_data_compaction_file_num_threshold {
+                break;
             }
 
             // Doesn't compact those unpersisted files.
@@ -106,14 +129,14 @@ impl SnapshotTableState {
                 filepath: cur_data_file.file_path().to_string(),
                 deletion_vector: disk_file_entry.puffin_deletion_blob.clone(),
             };
-            tentative_data_files_to_compact.push(single_file_to_compact);
+            assert!(tentative_data_files_to_compact.insert(single_file_to_compact));
         }
 
-        if tentative_data_files_to_compact.len() < data_compaction_file_num_threshold {
+        if tentative_data_files_to_compact.len() < min_data_compaction_file_num_threshold {
             // There're two possibilities here:
             // 1. If due to unpersistence, data compaction should wait until persistence completion.
             if tentative_data_files_to_compact.len() + reject_by_unpersistence
-                >= data_compaction_file_num_threshold
+                >= min_data_compaction_file_num_threshold
             {
                 return DataCompactionMaintenanceStatus::Unknown;
             }
@@ -124,7 +147,7 @@ impl SnapshotTableState {
         }
 
         // Calculate related file indices to compact.
-        let mut file_indices_to_compact = vec![];
+        let mut file_indices_to_compact = HashSet::new();
         let file_ids_to_compact = tentative_data_files_to_compact
             .iter()
             .map(|single_file_to_compact| single_file_to_compact.file_id.file_id)
@@ -132,20 +155,68 @@ impl SnapshotTableState {
         for cur_file_index in self.current_snapshot.indices.file_indices.iter() {
             for cur_file in cur_file_index.files.iter() {
                 if file_ids_to_compact.contains(&cur_file.file_id()) {
-                    file_indices_to_compact.push(cur_file_index.clone());
+                    assert!(file_indices_to_compact.insert(cur_file_index.clone()));
                     break;
                 }
             }
+        }
+
+        // Skip data files to compact if their corresponding file indices haven't been persisted.
+        let mut file_indices_to_remove = vec![];
+        let unpersisted_file_indices = self.unpersisted_records.get_unpersisted_file_indices_set();
+        for cur_file_index in file_indices_to_compact.iter() {
+            if unpersisted_file_indices.contains(cur_file_index) {
+                file_indices_to_remove.push(cur_file_index.clone());
+            }
+        }
+        for cur_file_index in file_indices_to_remove.iter() {
+            for cur_data_file in cur_file_index.files.iter() {
+                let table_unique_file_id = self.get_table_unique_file_id(cur_data_file.file_id());
+                assert!(tentative_data_files_to_compact.remove(&table_unique_file_id));
+                reject_by_unpersistence += 1;
+            }
+            assert!(file_indices_to_compact.remove(cur_file_index));
+        }
+
+        // Check again whether need to compact.
+        if tentative_data_files_to_compact.len() < min_data_compaction_file_num_threshold {
+            return DataCompactionMaintenanceStatus::Unknown;
         }
 
         let payload = DataCompactionPayload {
             uuid: uuid::Uuid::new_v4(),
             object_storage_cache: self.object_storage_cache.clone(),
             filesystem_accessor: self.filesystem_accessor.clone(),
-            disk_files: tentative_data_files_to_compact,
-            file_indices: file_indices_to_compact,
+            disk_files: tentative_data_files_to_compact
+                .into_iter()
+                .collect::<Vec<_>>(),
+            file_indices: file_indices_to_compact.into_iter().collect::<Vec<_>>(),
         };
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            Self::validate_compaction_payload(&payload);
+        }
         DataCompactionMaintenanceStatus::Payload(payload)
+    }
+
+    /// Util function to validate the consistency of data compaction payload.
+    #[cfg(any(test, debug_assertions))]
+    fn validate_compaction_payload(payload: &DataCompactionPayload) {
+        // Data files to compact.
+        let data_files = payload
+            .disk_files
+            .iter()
+            .map(|f| f.file_id.file_id)
+            .collect::<HashSet<_>>();
+
+        // Data files indicated by file indices.
+        let mut data_files_by_file_indices = HashSet::new();
+        for cur_file_index in payload.file_indices.iter() {
+            data_files_by_file_indices.extend(cur_file_index.files.iter().map(|f| f.file_id()));
+        }
+
+        assert_eq!(data_files, data_files_by_file_indices);
     }
 
     /// Util function to decide whether and what to merge index.
@@ -158,7 +229,12 @@ impl SnapshotTableState {
         if *index_merge_option == MaintenanceOption::Skip {
             return IndexMergeMaintenanceStatus::Unknown;
         }
-        let index_merge_file_num_threshold = match index_merge_option {
+        let max_index_merge_file_num_threshold = self
+            .mooncake_table_metadata
+            .config
+            .file_index_config
+            .max_file_indices_to_merge as usize;
+        let min_index_merge_file_num_threshold = match index_merge_option {
             MaintenanceOption::Skip => usize::MAX,
             MaintenanceOption::ForceRegular => 2,
             MaintenanceOption::ForceFull => 2,
@@ -166,7 +242,7 @@ impl SnapshotTableState {
                 self.mooncake_table_metadata
                     .config
                     .file_index_config
-                    .file_indices_to_merge as usize
+                    .min_file_indices_to_merge as usize
             }
         };
         let default_final_file_size = self
@@ -184,12 +260,13 @@ impl SnapshotTableState {
         // Fast-path: not enough file indices to trigger index merge.
         let mut file_indices_to_merge = HashSet::new();
         let all_file_indices = &self.current_snapshot.indices.file_indices;
-        if all_file_indices.len() < index_merge_file_num_threshold {
+        if all_file_indices.len() < min_index_merge_file_num_threshold {
             return IndexMergeMaintenanceStatus::Nothing;
         }
 
         // To simplify state management, only compact data files which have been persisted into iceberg table.
         let unpersisted_file_indices = self.unpersisted_records.get_unpersisted_file_indices_set();
+
         // Number of index blocks rejected to merge due to unpersistence.
         let mut reject_by_unpersistence = 0;
         for cur_file_index in all_file_indices.iter() {
@@ -207,17 +284,22 @@ impl SnapshotTableState {
         }
 
         // To avoid too many small IO operations, only attempt an index merge when accumulated small indices exceeds the threshold.
-        if file_indices_to_merge.len() >= index_merge_file_num_threshold {
+        if file_indices_to_merge.len() >= min_index_merge_file_num_threshold {
             let payload = FileIndiceMergePayload {
                 uuid: uuid::Uuid::new_v4(),
-                file_indices: file_indices_to_merge,
+                file_indices: file_indices_to_merge
+                    .into_iter()
+                    .take(max_index_merge_file_num_threshold)
+                    .collect::<HashSet<_>>(),
             };
             return IndexMergeMaintenanceStatus::Payload(payload);
         }
 
         // There're two possibilities here:
         // 1. If due to unpersistence, index merge should wait until persistence completion.
-        if file_indices_to_merge.len() + reject_by_unpersistence >= index_merge_file_num_threshold {
+        if file_indices_to_merge.len() + reject_by_unpersistence
+            >= min_index_merge_file_num_threshold
+        {
             return IndexMergeMaintenanceStatus::Unknown;
         }
 

@@ -50,13 +50,14 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 use crate::storage::wal::{PersistAndTruncateResult, WalManager};
-use crate::table_notify::TableEvent;
+use crate::table_notify::{EvictedFiles, TableEvent};
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
+use serde::{Deserialize, Serialize};
 pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -75,7 +76,7 @@ use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 /// [https://github.com/postgres/postgres/blob/d5b9b2d40262f57f58322ad49f8928fd4a492adb/src/include/access/transam.h#L31]
 pub(crate) const INITIAL_COPY_XACT_ID: u32 = 0;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct IcebergPersistenceConfig {
     /// Number of new data files to trigger an iceberg snapshot.
     pub new_data_file_count: usize,
@@ -94,8 +95,10 @@ impl IcebergPersistenceConfig {
     pub(crate) const DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT: usize = 1;
     #[cfg(not(debug_assertions))]
     pub(crate) const DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG: usize = 1000;
+}
 
-    pub fn default() -> Self {
+impl Default for IcebergPersistenceConfig {
+    fn default() -> Self {
         Self {
             new_data_file_count: Self::DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT,
             new_committed_deletion_log: Self::DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG,
@@ -149,7 +152,7 @@ impl MooncakeTableConfig {
     pub(crate) const DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE: usize = 1024 * 1024 * 128; // 128MiB
 
     /// Default local directory to hold temporary files for union read.
-    pub(crate) const DEFAULT_TEMP_FILE_DIRECTORY: &str = "/tmp/moonlink_temp_file";
+    pub const DEFAULT_TEMP_FILE_DIRECTORY: &str = "/tmp/moonlink_temp_file";
 
     pub fn new(temp_files_directory: String) -> Self {
         Self {
@@ -162,6 +165,10 @@ impl MooncakeTableConfig {
             file_index_config: FileIndexMergeConfig::default(),
             temp_files_directory,
         }
+    }
+    pub fn validate(&self) {
+        self.file_index_config.validate();
+        self.data_compaction_config.validate();
     }
     pub fn batch_size(&self) -> usize {
         self.batch_size
@@ -192,6 +199,7 @@ pub struct TableMetadata {
     /// function to get lookup key from row
     pub(crate) identity: IdentityProp,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlterTableRequest {
     pub(crate) new_columns: Vec<arrow_schema::FieldRef>,
@@ -335,14 +343,82 @@ impl IcebergPersistedRecords {
     pub fn get_file_indices_to_reflect_persistence(&self) -> (HashSet<FileId>, Vec<FileIndex>) {
         let mut persisted_file_indices = vec![];
         persisted_file_indices.extend(self.import_result.new_file_indices.iter().cloned());
+        persisted_file_indices.extend(
+            self.index_merge_result
+                .new_file_indices_imported
+                .iter()
+                .cloned(),
+        );
+        persisted_file_indices.extend(
+            self.data_compaction_result
+                .new_file_indices_imported
+                .iter()
+                .cloned(),
+        );
 
-        let index_blocks_to_delete = self
-            .import_result
-            .new_data_files
-            .iter()
-            .map(|f| f.file_id())
-            .collect::<HashSet<_>>();
+        let mut index_blocks_to_delete = HashSet::new();
+        for cur_file_index in self.import_result.new_file_indices.iter() {
+            index_blocks_to_delete.extend(cur_file_index.files.iter().map(|f| f.file_id()));
+        }
+        for cur_file_index in self.index_merge_result.new_file_indices_imported.iter() {
+            index_blocks_to_delete.extend(cur_file_index.files.iter().map(|f| f.file_id()));
+        }
+        for cur_file_index in self.data_compaction_result.new_file_indices_imported.iter() {
+            index_blocks_to_delete.extend(cur_file_index.files.iter().map(|f| f.file_id()));
+        }
+
         (index_blocks_to_delete, persisted_file_indices)
+    }
+
+    /// Util function to validate all data files referenced by file indices are remote files.
+    fn validate_file_indices_remote(&self, file_index: &FileIndex, warehouse_uri: &str) {
+        for cur_index_block in file_index.index_blocks.iter() {
+            assert!(cur_index_block
+                .index_file
+                .file_path()
+                .starts_with(warehouse_uri));
+        }
+    }
+
+    /// Validate all imported data files, file indices and index blocks point to remote files.
+    pub fn validate_imported_files_remote(&self, warehouse_uri: &str) {
+        #[cfg(any(test, debug_assertions))]
+        {
+            let import_result = &self.import_result;
+
+            // Validate persisted data files point to remote.
+            for cur_data_file in import_result.new_data_files.iter() {
+                assert!(cur_data_file.file_path().starts_with(warehouse_uri));
+            }
+
+            // Validate persisted file indices and index blocks point to remote.
+            for cur_file_index in import_result.new_file_indices.iter() {
+                self.validate_file_indices_remote(cur_file_index, warehouse_uri);
+            }
+        }
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            let index_merge_results = &self.index_merge_result;
+            for cur_file_index in index_merge_results.new_file_indices_imported.iter() {
+                self.validate_file_indices_remote(cur_file_index, warehouse_uri);
+            }
+        }
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            let data_compaction_results = &self.data_compaction_result;
+
+            // Validate persisted data files point to remote.
+            for cur_data_file in data_compaction_results.new_data_files_imported.iter() {
+                assert!(cur_data_file.file_path().starts_with(warehouse_uri));
+            }
+
+            // Validate persisted file indices and index blocks point to remote.
+            for cur_file_index in data_compaction_results.new_file_indices_imported.iter() {
+                self.validate_file_indices_remote(cur_file_index, warehouse_uri);
+            }
+        }
     }
 }
 
@@ -670,6 +746,7 @@ impl MooncakeTable {
         object_storage_cache: ObjectStorageCache,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
+        table_metadata.config.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
         let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
         let last_iceberg_snapshot_lsn = current_snapshot.data_file_flush_lsn;
@@ -682,10 +759,8 @@ impl MooncakeTable {
         let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
 
         // TODO(Paul): Support object storage for WAL
-        let wal_manager_file_config = WalManager::default_wal_file_system_config(
-            table_metadata.table_id,
-            &table_metadata.path,
-        );
+        let wal_manager_file_config =
+            WalManager::default_wal_storage_config(table_metadata.table_id, &table_metadata.path);
         let wal_manager = WalManager::new(wal_manager_file_config);
 
         Ok(Self {
@@ -698,6 +773,7 @@ impl MooncakeTable {
             metadata: table_metadata.clone(),
             snapshot: Arc::new(RwLock::new(
                 SnapshotTableState::new(
+                    table_manager.get_warehouse_location(),
                     table_metadata.clone(),
                     object_storage_cache,
                     filesystem_accessor,
@@ -1345,7 +1421,9 @@ impl MooncakeTable {
                 iceberg_snapshot_payload: snapshot_result.iceberg_snapshot_payload,
                 data_compaction_payload: snapshot_result.data_compaction_payload,
                 file_indice_merge_payload: snapshot_result.file_indices_merge_payload,
-                evicted_data_files_to_delete: snapshot_result.evicted_data_files_to_delete,
+                evicted_files_to_delete: EvictedFiles {
+                    files: snapshot_result.evicted_data_files_to_delete,
+                },
             })
             .await
             .unwrap();

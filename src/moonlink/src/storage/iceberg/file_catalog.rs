@@ -1,7 +1,7 @@
 use super::puffin_writer_proxy::append_puffin_metadata_and_rewrite;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
 use crate::storage::iceberg::moonlink_catalog::{PuffinWrite, SchemaUpdate};
 use crate::storage::iceberg::puffin_writer_proxy::{
@@ -10,6 +10,7 @@ use crate::storage::iceberg::puffin_writer_proxy::{
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 
 use futures::future::join_all;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 /// This module contains the file-based catalog implementation, which relies on version hint file to decide current version snapshot.
 /// Dispite a few limitation (i.e. atomic rename for local filesystem), it's not a problem for moonlink, which guarantees at most one writer at the same time (for nows).
@@ -40,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::vec;
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use iceberg::io::FileIO;
@@ -71,6 +73,8 @@ pub struct FileCatalog {
     warehouse_location: String,
     /// Used to overwrite iceberg metadata at table creation.
     iceberg_schema: IcebergSchema,
+    /// Used for atomic write to commit transaction.
+    etag: Mutex<RefCell<Option<String>>>,
     /// Used to record puffin blob metadata in one transaction, and cleaned up after transaction commits.
     ///
     /// Maps from "puffin filepath" to "puffin blob metadata".
@@ -83,14 +87,18 @@ pub struct FileCatalog {
 
 impl FileCatalog {
     /// Create a file catalog, which gets initialized lazily.
-    pub fn new(config: FileSystemConfig, iceberg_schema: IcebergSchema) -> IcebergResult<Self> {
-        let file_io = iceberg_io_utils::create_file_io(&config)?;
-        let warehouse_location = config.get_root_path();
+    pub fn new(
+        accessor_config: AccessorConfig,
+        iceberg_schema: IcebergSchema,
+    ) -> IcebergResult<Self> {
+        let file_io = iceberg_io_utils::create_file_io(&accessor_config)?;
+        let warehouse_location = accessor_config.get_root_path();
         Ok(Self {
-            filesystem_accessor: Arc::new(FileSystemAccessor::new(config)),
+            filesystem_accessor: create_filesystem_accessor(accessor_config),
             file_io,
             warehouse_location,
             iceberg_schema,
+            etag: Mutex::new(RefCell::new(None)),
             puffin_blobs_to_add: HashMap::new(),
             puffin_blobs_to_remove: HashSet::new(),
             data_files_to_remove: HashSet::new(),
@@ -109,6 +117,7 @@ impl FileCatalog {
             filesystem_accessor,
             file_io,
             iceberg_schema,
+            etag: Mutex::new(RefCell::new(None)),
             warehouse_location: String::new(),
             puffin_blobs_to_add: HashMap::new(),
             puffin_blobs_to_remove: HashSet::new(),
@@ -145,21 +154,12 @@ impl FileCatalog {
             METADATA_DIRECTORY,
             VERSION_HINT_FILENAME,
         );
-        let version_str = self
-            .filesystem_accessor
-            .read_object_as_string(&version_hint_filepath)
-            .await
-            .map_err(|e| {
-                IcebergError::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("Failed to read version hint file on load table: {e}"),
-                )
-                .with_retryable(true)
-            })?;
-        let version = version_str
-            .trim()
-            .parse::<u32>()
-            .map_err(|e| IcebergError::new(iceberg::ErrorKind::DataInvalid, e.to_string()))?;
+
+        // Load and assign etag.
+        self.load_version_hint_etag(&version_hint_filepath).await?;
+
+        // Read version hint file.
+        let version = self.load_current_version(&version_hint_filepath).await?;
 
         // Read and parse table metadata.
         let metadata_filepath = format!(
@@ -169,19 +169,7 @@ impl FileCatalog {
             METADATA_DIRECTORY,
             version,
         );
-        let metadata_bytes = self
-            .filesystem_accessor
-            .read_object(&metadata_filepath)
-            .await
-            .map_err(|e| {
-                IcebergError::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("Failed to read table metadata file on load table: {e}"),
-                )
-                .with_retryable(true)
-            })?;
-        let metadata = serde_json::from_slice::<TableMetadata>(&metadata_bytes)
-            .map_err(|e| IcebergError::new(iceberg::ErrorKind::DataInvalid, e.to_string()))?;
+        let metadata = self.load_table_metadata(&metadata_filepath).await?;
 
         Ok((metadata_filepath, metadata))
     }
@@ -245,6 +233,62 @@ impl FileCatalog {
         metadata_builder = metadata_builder.add_current_schema(self.iceberg_schema.clone())?;
         let new_table_metadata = metadata_builder.build()?;
         Ok(new_table_metadata.metadata)
+    }
+
+    /// Load and assign etag, which is used to commit transaction.
+    async fn load_version_hint_etag(&self, version_hint_filepath: &str) -> IcebergResult<()> {
+        let version_hint_metadata = self.filesystem_accessor.stats_object(version_hint_filepath).await
+            .map_err(|e| {
+                IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Failed to stats version hint file {version_hint_filepath} on load table: {e}"),
+                )
+                .with_retryable(true)
+            })?;
+        let etag = version_hint_metadata.etag().map(|etag| etag.to_string());
+        {
+            let guard = self.etag.lock().await;
+            *guard.borrow_mut() = etag;
+        }
+        Ok(())
+    }
+
+    /// Read current version from version hint filepath.
+    async fn load_current_version(&self, version_hint_filepath: &str) -> IcebergResult<u32> {
+        let version_str = self
+            .filesystem_accessor
+            .read_object_as_string(version_hint_filepath)
+            .await
+            .map_err(|e| {
+                IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Failed to read version hint file {version_hint_filepath} on load table: {e}"),
+                )
+                .with_retryable(true)
+            })?;
+        let version = version_str
+            .trim()
+            .parse::<u32>()
+            .map_err(|e| IcebergError::new(iceberg::ErrorKind::DataInvalid, e.to_string()))?;
+        Ok(version)
+    }
+
+    /// Load iceberg table metadata.
+    async fn load_table_metadata(&self, metadata_filepath: &str) -> IcebergResult<TableMetadata> {
+        let metadata_bytes = self
+            .filesystem_accessor
+            .read_object(metadata_filepath)
+            .await
+            .map_err(|e| {
+                IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Failed to read table metadata file on load table: {e}"),
+                )
+                .with_retryable(true)
+            })?;
+        let metadata = serde_json::from_slice::<TableMetadata>(&metadata_bytes)
+            .map_err(|e| IcebergError::new(iceberg::ErrorKind::DataInvalid, e.to_string()))?;
+        Ok(metadata)
     }
 }
 
@@ -640,8 +684,18 @@ impl Catalog for FileCatalog {
 
         // Write version hint file.
         let version_hint_path = format!("{metadata_directory}/version-hint.text");
-        self.filesystem_accessor
-            .write_object(&version_hint_path, format!("{version}").as_bytes().to_vec())
+        let etag = {
+            let guard = self.etag.lock().await;
+            let etag = guard.borrow().as_ref().cloned();
+            etag
+        };
+        let object_metadata = self
+            .filesystem_accessor
+            .conditional_write_object(
+                &version_hint_path,
+                format!("{version}").as_bytes().to_vec(),
+                etag,
+            )
             .await
             .map_err(|e| {
                 IcebergError::new(
@@ -652,6 +706,10 @@ impl Catalog for FileCatalog {
                 )
                 .with_retryable(true)
             })?;
+        {
+            let guard = self.etag.lock().await;
+            *guard.borrow_mut() = object_metadata.etag().map(|etag| etag.to_string());
+        }
 
         Table::builder()
             .identifier(commit.identifier().clone())

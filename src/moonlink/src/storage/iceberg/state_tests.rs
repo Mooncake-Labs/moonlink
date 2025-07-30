@@ -36,6 +36,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::row::MoonlinkRow;
 use crate::row::RowValue;
+use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::iceberg::table_manager::TableManager;
 use crate::storage::iceberg::test_utils::*;
@@ -283,7 +284,7 @@ async fn check_prev_and_new_data_files(
 // Validate cases where no new iceberg snapshot created.
 async fn validate_no_snapshot(
     iceberg_table_manager: &mut IcebergTableManager,
-    filesystem_accessor: &FileSystemAccessor,
+    filesystem_accessor: &dyn BaseFileSystemAccess,
 ) {
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -296,10 +297,7 @@ async fn validate_no_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager
-            .config
-            .filesystem_config
-            .get_root_path(),
+        &iceberg_table_manager.config.accessor_config.get_root_path(),
         filesystem_accessor,
     )
     .await;
@@ -308,7 +306,7 @@ async fn validate_no_snapshot(
 // Validate only old snapshot, but not newly created ones.
 async fn validate_only_initial_snapshot(
     iceberg_table_manager: &mut IcebergTableManager,
-    filesystem_accessor: &FileSystemAccessor,
+    filesystem_accessor: &dyn BaseFileSystemAccess,
 ) {
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -321,10 +319,7 @@ async fn validate_only_initial_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager
-            .config
-            .filesystem_config
-            .get_root_path(),
+        &iceberg_table_manager.config.accessor_config.get_root_path(),
         filesystem_accessor,
     )
     .await;
@@ -333,7 +328,7 @@ async fn validate_only_initial_snapshot(
 // Validate new snapshot with new data files created, but no deletion vector.
 async fn validate_only_new_data_files_in_snapshot(
     iceberg_table_manager: &mut IcebergTableManager,
-    filesystem_accessor: &FileSystemAccessor,
+    filesystem_accessor: &dyn BaseFileSystemAccess,
 ) {
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -346,10 +341,7 @@ async fn validate_only_new_data_files_in_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager
-            .config
-            .filesystem_config
-            .get_root_path(),
+        &iceberg_table_manager.config.accessor_config.get_root_path(),
         filesystem_accessor,
     )
     .await;
@@ -358,7 +350,7 @@ async fn validate_only_new_data_files_in_snapshot(
 // Validate new snapshot with new deletion vector created, but no data files.
 async fn validate_only_new_deletion_vectors_in_snapshot(
     iceberg_table_manager: &mut IcebergTableManager,
-    filesystem_accessor: &FileSystemAccessor,
+    filesystem_accessor: &dyn BaseFileSystemAccess,
 ) {
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -371,10 +363,7 @@ async fn validate_only_new_deletion_vectors_in_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager
-            .config
-            .filesystem_config
-            .get_root_path(),
+        &iceberg_table_manager.config.accessor_config.get_root_path(),
         filesystem_accessor,
     )
     .await;
@@ -383,7 +372,7 @@ async fn validate_only_new_deletion_vectors_in_snapshot(
 // Validate new snapshot with both new data files and deletion vector created.
 async fn validate_new_data_files_and_deletion_vectors_in_snapshot(
     iceberg_table_manager: &mut IcebergTableManager,
-    filesystem_accessor: &FileSystemAccessor,
+    filesystem_accessor: &dyn BaseFileSystemAccess,
     expected_next_file_id: u32,
     expected_prev_files_deleted: Vec<bool>,
     expected_flush_lsn: u64,
@@ -404,10 +393,7 @@ async fn validate_new_data_files_and_deletion_vectors_in_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager
-            .config
-            .filesystem_config
-            .get_root_path(),
+        &iceberg_table_manager.config.accessor_config.get_root_path(),
         filesystem_accessor,
     )
     .await;

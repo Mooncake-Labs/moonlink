@@ -5,6 +5,6 @@ use crate::storage::iceberg::file_catalog_test_utils::*;
 
 /// Create a S3 catalog, which communicates with local minio server.
 pub(crate) fn create_test_s3_catalog(warehouse_uri: &str) -> FileCatalog {
-    let filesystem_config = create_s3_filesystem_config(warehouse_uri);
-    FileCatalog::new(filesystem_config, get_test_schema()).unwrap()
+    let storage_config = create_s3_storage_config(warehouse_uri);
+    FileCatalog::new(storage_config, get_test_schema()).unwrap()
 }

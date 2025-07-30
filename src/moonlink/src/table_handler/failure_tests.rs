@@ -34,6 +34,10 @@ async fn test_iceberg_snapshot_failure_mock_test() {
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
+    mock_table_manager
         .expect_load_snapshot_from_table()
         .times(1)
         .returning(move || {
@@ -98,6 +102,10 @@ async fn test_iceberg_drop_table_failure_mock_test() {
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
+    mock_table_manager
         .expect_load_snapshot_from_table()
         .times(1)
         .returning(move || {
@@ -153,6 +161,10 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
     let mut mock_table_manager = MockTableManager::new();
+    mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
     mock_table_manager
         .expect_load_snapshot_from_table()
         .once()
@@ -241,6 +253,10 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
+    mock_table_manager
         .expect_load_snapshot_from_table()
         .once()
         .returning(move || {
@@ -327,6 +343,10 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
     let mut mock_table_manager = MockTableManager::new();
+    mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
     mock_table_manager
         .expect_load_snapshot_from_table()
         .once()

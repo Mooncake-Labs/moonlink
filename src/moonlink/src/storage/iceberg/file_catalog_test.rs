@@ -1,4 +1,4 @@
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 #[cfg(feature = "storage-gcs")]
 use crate::storage::filesystem::gcs::gcs_test_utils;
 #[cfg(feature = "storage-gcs")]
@@ -7,6 +7,7 @@ use crate::storage::filesystem::gcs::test_guard::TestGuard as GcsTestGuard;
 use crate::storage::filesystem::s3::s3_test_utils;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::test_guard::TestGuard as S3TestGuard;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::storage::iceberg::catalog_test_utils;
 use crate::storage::iceberg::file_catalog::FileCatalog;
 use crate::storage::iceberg::file_catalog::NAMESPACE_INDICATOR_OBJECT_NAME;
@@ -59,10 +60,11 @@ async fn test_local_iceberg_table_creation() {
 
     let temp_dir = TempDir::new().unwrap();
     let warehouse_path = temp_dir.path().to_str().unwrap();
+    let storage_config = StorageConfig::FileSystem {
+        root_directory: warehouse_path.to_string(),
+    };
     let catalog = FileCatalog::new(
-        FileSystemConfig::FileSystem {
-            root_directory: warehouse_path.to_string(),
-        },
+        AccessorConfig::new_with_storage_config(storage_config),
         get_test_schema(),
     )
     .unwrap();

@@ -2,8 +2,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
 use moonlink::{
-    FileSystemAccessor, FileSystemConfig, IcebergTableConfig, MooncakeTable, MooncakeTableConfig,
-    ObjectStorageCache,
+    AccessorConfig, FileSystemAccessor, IcebergTableConfig, MooncakeTable, MooncakeTableConfig,
+    ObjectStorageCache, StorageConfig,
 };
 use pprof::criterion::{Output, PProfProfiler};
 use std::collections::HashMap;
@@ -55,9 +55,11 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    filesystem_config: FileSystemConfig::FileSystem {
-                        root_directory: temp_warehouse_uri.clone(),
-                    },
+                    accessor_config: AccessorConfig::new_with_storage_config(
+                        StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                        },
+                    ),
                     ..Default::default()
                 };
                 let table_config =
@@ -71,9 +73,11 @@ fn bench_write(c: &mut Criterion) {
                     iceberg_table_config,
                     table_config,
                     ObjectStorageCache::default_for_bench(),
-                    Arc::new(FileSystemAccessor::new(FileSystemConfig::FileSystem {
-                        root_directory: temp_warehouse_uri.clone(),
-                    })),
+                    Arc::new(FileSystemAccessor::new(
+                        AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                        }),
+                    )),
                 )
                 .await
                 .unwrap();
@@ -95,9 +99,11 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    filesystem_config: FileSystemConfig::FileSystem {
-                        root_directory: temp_warehouse_uri.clone(),
-                    },
+                    accessor_config: AccessorConfig::new_with_storage_config(
+                        StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                        },
+                    ),
                     ..Default::default()
                 };
                 let table_config =
@@ -111,9 +117,11 @@ fn bench_write(c: &mut Criterion) {
                     iceberg_table_config,
                     table_config,
                     ObjectStorageCache::default_for_bench(),
-                    Arc::new(FileSystemAccessor::new(FileSystemConfig::FileSystem {
-                        root_directory: temp_warehouse_uri.clone(),
-                    })),
+                    Arc::new(FileSystemAccessor::new(
+                        AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                        }),
+                    )),
                 )
                 .await
                 .unwrap();
@@ -138,9 +146,11 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    filesystem_config: FileSystemConfig::FileSystem {
-                        root_directory: temp_warehouse_uri.clone(),
-                    },
+                    accessor_config: AccessorConfig::new_with_storage_config(
+                        StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                        },
+                    ),
                     ..Default::default()
                 };
                 let table_config =
@@ -155,9 +165,11 @@ fn bench_write(c: &mut Criterion) {
                         iceberg_table_config,
                         table_config,
                         ObjectStorageCache::default_for_bench(),
-                        Arc::new(FileSystemAccessor::new(FileSystemConfig::FileSystem {
-                            root_directory: temp_warehouse_uri.clone(),
-                        })),
+                        Arc::new(FileSystemAccessor::new(
+                            AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
+                                root_directory: temp_warehouse_uri.clone(),
+                            }),
+                        )),
                     ))
                     .unwrap();
                 rt.block_on(async {

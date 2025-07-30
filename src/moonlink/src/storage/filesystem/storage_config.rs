@@ -1,10 +1,11 @@
 #[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
 use crate::MoonlinkSecretType;
 use crate::MoonlinkTableSecret;
+use serde::{Deserialize, Serialize};
 
-/// FileSystemConfig contains configuration for multiple storage backends.
-#[derive(Clone, PartialEq)]
-pub enum FileSystemConfig {
+/// StorageConfig contains configuration for multiple storage backends.
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
+pub enum StorageConfig {
     #[cfg(feature = "storage-fs")]
     FileSystem { root_directory: String },
     #[cfg(feature = "storage-s3")]
@@ -33,17 +34,17 @@ pub enum FileSystemConfig {
     },
 }
 
-impl std::fmt::Debug for FileSystemConfig {
+impl std::fmt::Debug for StorageConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             #[cfg(feature = "storage-fs")]
-            FileSystemConfig::FileSystem { root_directory } => f
+            StorageConfig::FileSystem { root_directory } => f
                 .debug_struct("FileSystem")
                 .field("root_directory", root_directory)
                 .finish(),
 
             #[cfg(feature = "storage-s3")]
-            FileSystemConfig::S3 {
+            StorageConfig::S3 {
                 region,
                 bucket,
                 endpoint,
@@ -59,7 +60,7 @@ impl std::fmt::Debug for FileSystemConfig {
                 .finish(),
 
             #[cfg(feature = "storage-gcs")]
-            FileSystemConfig::Gcs {
+            StorageConfig::Gcs {
                 project,
                 region,
                 bucket,
@@ -81,16 +82,16 @@ impl std::fmt::Debug for FileSystemConfig {
     }
 }
 
-impl FileSystemConfig {
+impl StorageConfig {
     /// Get root path for the given filesystem config.
     pub fn get_root_path(&self) -> String {
         match &self {
             #[cfg(feature = "storage-fs")]
-            FileSystemConfig::FileSystem { root_directory } => root_directory.to_string(),
+            StorageConfig::FileSystem { root_directory } => root_directory.to_string(),
             #[cfg(feature = "storage-gcs")]
-            FileSystemConfig::Gcs { bucket, .. } => format!("gs://{bucket}"),
+            StorageConfig::Gcs { bucket, .. } => format!("gs://{bucket}"),
             #[cfg(feature = "storage-s3")]
-            FileSystemConfig::S3 { bucket, .. } => format!("s3://{bucket}"),
+            StorageConfig::S3 { bucket, .. } => format!("s3://{bucket}"),
         }
     }
 
@@ -98,9 +99,9 @@ impl FileSystemConfig {
     pub fn extract_security_metadata_entry(&self) -> Option<MoonlinkTableSecret> {
         match &self {
             #[cfg(feature = "storage-fs")]
-            FileSystemConfig::FileSystem { .. } => None,
+            StorageConfig::FileSystem { .. } => None,
             #[cfg(feature = "storage-gcs")]
-            FileSystemConfig::Gcs {
+            StorageConfig::Gcs {
                 project,
                 region,
                 access_key_id,
@@ -116,7 +117,7 @@ impl FileSystemConfig {
                 region: Some(region.to_string()),
             }),
             #[cfg(feature = "storage-s3")]
-            FileSystemConfig::S3 {
+            StorageConfig::S3 {
                 access_key_id,
                 secret_access_key,
                 region,

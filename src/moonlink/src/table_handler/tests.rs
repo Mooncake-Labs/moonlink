@@ -1478,11 +1478,13 @@ async fn test_full_maintenance_with_sufficient_data_files() {
     // Setup mooncake config, which won't trigger any data compaction or index merge, if not full table maintaince.
     let mooncake_table_config = MooncakeTableConfig {
         data_compaction_config: DataCompactionConfig {
-            data_file_to_compact: u32::MAX,
+            min_data_file_to_compact: 2,
+            max_data_file_to_compact: u32::MAX,
             data_file_final_size: u64::MAX,
         },
         file_index_config: FileIndexMergeConfig {
-            file_indices_to_merge: u32::MAX,
+            min_file_indices_to_merge: u32::MAX,
+            max_file_indices_to_merge: u32::MAX,
             index_block_final_size: u64::MAX,
         },
         ..Default::default()
@@ -1575,6 +1577,10 @@ async fn test_discard_duplicate_writes() {
     let mut mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
     mock_mooncake_snapshot.data_file_flush_lsn = Some(10);
     let mut mock_table_manager = MockTableManager::new();
+    mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
     mock_table_manager
         .expect_load_snapshot_from_table()
         .times(1)

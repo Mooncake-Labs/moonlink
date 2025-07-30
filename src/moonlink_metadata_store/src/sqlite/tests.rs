@@ -1,6 +1,6 @@
 use crate::base_metadata_store::MetadataStoreTrait;
 use crate::sqlite::sqlite_metadata_store::SqliteMetadataStore;
-use moonlink::{FileSystemConfig, IcebergTableConfig, MoonlinkTableConfig};
+use moonlink::{AccessorConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig};
 
 use tempfile::{tempdir, TempDir};
 
@@ -14,11 +14,11 @@ const TABLE_ID: u32 = 0;
 const TABLE_NAME: &str = "table";
 
 /// Create a filesystem config for test.
-fn get_filesystem_config() -> FileSystemConfig {
+fn get_storage_config() -> StorageConfig {
     #[allow(unreachable_code)]
     #[cfg(feature = "storage-gcs")]
     {
-        return FileSystemConfig::Gcs {
+        return StorageConfig::Gcs {
             project: "project".to_string(),
             region: "region".to_string(),
             bucket: "bucket".to_string(),
@@ -32,7 +32,7 @@ fn get_filesystem_config() -> FileSystemConfig {
     #[allow(unreachable_code)]
     #[cfg(feature = "storage-s3")]
     {
-        return FileSystemConfig::S3 {
+        return StorageConfig::S3 {
             access_key_id: "access_key_id".to_string(),
             secret_access_key: "secret_access_key".to_string(),
             region: "region".to_string(),
@@ -44,7 +44,7 @@ fn get_filesystem_config() -> FileSystemConfig {
     #[allow(unreachable_code)]
     #[cfg(feature = "storage-fs")]
     {
-        return FileSystemConfig::FileSystem {
+        return StorageConfig::FileSystem {
             root_directory: "/tmp/test_warehouse_uri".to_string(),
         };
     }
@@ -55,13 +55,17 @@ fn get_filesystem_config() -> FileSystemConfig {
     }
 }
 
+fn get_accessor_config() -> AccessorConfig {
+    AccessorConfig::new_with_storage_config(get_storage_config())
+}
+
 /// Create a moonlink table config for test.
 pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
     MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
             table_name: "table".to_string(),
-            filesystem_config: get_filesystem_config(),
+            accessor_config: get_accessor_config(),
         },
         ..Default::default()
     }

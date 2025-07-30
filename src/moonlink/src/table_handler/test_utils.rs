@@ -1,6 +1,7 @@
 use crate::event_sync::create_table_event_syncer;
 use crate::row::{IdentityProp, MoonlinkRow, RowValue};
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
@@ -13,8 +14,7 @@ use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
 use crate::{
-    FileSystemAccessor, FileSystemConfig, IcebergTableManager, MooncakeTableConfig,
-    TableEventManager,
+    FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
 };
 use crate::{ObjectStorageCache, Result};
 
@@ -40,12 +40,13 @@ pub fn create_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
 
 /// Get iceberg table manager config.
 pub fn get_iceberg_manager_config(table_name: String, warehouse_uri: String) -> IcebergTableConfig {
+    let storage_config = StorageConfig::FileSystem {
+        root_directory: warehouse_uri,
+    };
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name,
-        filesystem_config: FileSystemConfig::FileSystem {
-            root_directory: warehouse_uri,
-        },
+        accessor_config: AccessorConfig::new_with_storage_config(storage_config),
     }
 }
 
@@ -104,13 +105,12 @@ impl TestEnvironment {
         let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
 
         // TODO(Paul): Change this default when we support object storage for WAL
-        let default_wal_filesystem_config = WalManager::default_wal_file_system_config(
-            mooncake_table.get_table_id(),
-            temp_dir.path(),
-        );
+        let default_wal_filesystem_config =
+            WalManager::default_wal_storage_config(mooncake_table.get_table_id(), temp_dir.path());
         let wal_filesystem_path = default_wal_filesystem_config.get_root_path();
-        let wal_filesystem_accessor =
-            Arc::new(FileSystemAccessor::new(default_wal_filesystem_config));
+        let wal_accessor_config =
+            AccessorConfig::new_with_storage_config(default_wal_filesystem_config);
+        let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(wal_accessor_config));
 
         let handler = TableHandler::new(
             mooncake_table,

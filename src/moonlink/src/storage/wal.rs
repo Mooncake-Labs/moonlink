@@ -1,8 +1,9 @@
 pub mod wal_persistence_metadata;
 use crate::row::MoonlinkRow;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::table_notify::TableEvent;
 use crate::Result;
 use futures::stream::{self, Stream};
@@ -201,9 +202,9 @@ pub struct WalManager {
 }
 
 impl WalManager {
-    pub fn default_wal_file_system_config(table_id: u32, base_path: &Path) -> FileSystemConfig {
+    pub fn default_wal_storage_config(table_id: u32, base_path: &Path) -> StorageConfig {
         // TODO(Paul): Support object storage
-        FileSystemConfig::FileSystem {
+        StorageConfig::FileSystem {
             root_directory: base_path
                 .join(table_id.to_string())
                 .join("wal")
@@ -214,12 +215,13 @@ impl WalManager {
     }
 
     pub fn new_with_local_path(table_id: u32, base_path: &Path) -> Self {
-        let config = WalManager::default_wal_file_system_config(table_id, base_path);
+        let config = WalManager::default_wal_storage_config(table_id, base_path);
         Self::new(config)
     }
 
-    pub fn new(config: FileSystemConfig) -> Self {
+    pub fn new(config: StorageConfig) -> Self {
         // TODO(Paul): Add a more robust constructor when implementing recovery
+        let accessor_config = AccessorConfig::new_with_storage_config(config);
         Self {
             in_mem_buf: Vec::new(),
             highest_seen_lsn: 0,
@@ -228,7 +230,7 @@ impl WalManager {
             active_transactions: HashMap::new(),
             main_transaction_tracker: Vec::new(),
             // TODO(Paul): Implement object storage
-            file_system_accessor: Arc::new(FileSystemAccessor::new(config)),
+            file_system_accessor: create_filesystem_accessor(accessor_config),
         }
     }
 

@@ -15,6 +15,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::recovery_utils::BackendAttributes;
+
 pub struct MoonlinkBackend<
     D: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
     T: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
@@ -52,8 +54,16 @@ where
             temp_files_dir.to_str().unwrap().to_string(),
             file_utils::create_default_object_storage_cache(read_cache_files_dir),
         );
-        recovery_utils::recover_all_tables(&*metadata_store_accessor, &mut replication_manager)
-            .await?;
+
+        let backend_attributes = BackendAttributes {
+            temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
+        };
+        recovery_utils::recover_all_tables(
+            backend_attributes,
+            &*metadata_store_accessor,
+            &mut replication_manager,
+        )
+        .await?;
 
         Ok(Self {
             replication_manager: RwLock::new(replication_manager),
@@ -104,7 +114,7 @@ where
                     database_id,
                     table_id,
                     &src_table_name,
-                    /*override_iceberg_filesystem_config=*/ None,
+                    /*override_iceberg_storage_config=*/ None,
                     /*is_recovery=*/ false,
                 )
                 .await?;

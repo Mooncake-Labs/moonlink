@@ -45,7 +45,8 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 
 use crate::row::{MoonlinkRow, RowValue};
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::table_accessor_test_utils::*;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
@@ -184,10 +185,11 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
     let identity_property = mooncake_table_metadata.identity.clone();
 
+    let storage_config = StorageConfig::FileSystem {
+        root_directory: warehouse_uri.clone(),
+    };
     let iceberg_table_config = IcebergTableConfig {
-        filesystem_config: FileSystemConfig::FileSystem {
-            root_directory: warehouse_uri.clone(),
-        },
+        accessor_config: AccessorConfig::new_with_storage_config(storage_config),
         ..Default::default()
     };
     let schema = create_test_arrow_schema();
@@ -201,7 +203,8 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
         // Trigger index merge as long as there're two index block files.
         file_index_config: FileIndexMergeConfig {
             index_block_final_size: u64::MAX,
-            file_indices_to_merge: 2,
+            min_file_indices_to_merge: 2,
+            max_file_indices_to_merge: u32::MAX,
         },
         ..Default::default()
     };

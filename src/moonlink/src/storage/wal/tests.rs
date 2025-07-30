@@ -9,11 +9,9 @@ use crate::{assert_wal_file_does_not_exist, assert_wal_file_exists, assert_wal_l
 #[tokio::test]
 async fn test_wal_insert_persist_files() {
     let context = TestContext::new("wal_persist");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let (mut wal, expected_events) = create_test_wal(file_system_config).await;
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let (mut wal, expected_events) = create_test_wal(storage_config).await;
 
     // Persist and verify file number
     wal.persist_and_truncate(None).await.unwrap();
@@ -28,27 +26,23 @@ async fn test_wal_insert_persist_files() {
 #[tokio::test]
 async fn test_wal_empty_persist() {
     let context = TestContext::new("wal_empty_persist");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config.clone());
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config.clone());
 
     // Persist without any events
     wal.persist_and_truncate(None).await.unwrap();
 
     // No file should be created for empty WAL
-    assert!(local_dir_is_empty(&PathBuf::from(&file_system_config.get_root_path())).await);
+    assert!(local_dir_is_empty(&PathBuf::from(&storage_config.get_root_path())).await);
 }
 
 #[tokio::test]
 async fn test_wal_file_numbering_sequence() {
     let context = TestContext::new("wal_file_numbering");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config.clone());
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config.clone());
 
     let mut events = Vec::new();
 
@@ -69,11 +63,9 @@ async fn test_wal_file_numbering_sequence() {
 #[tokio::test]
 async fn test_wal_truncation_deletes_files() {
     let context = TestContext::new("wal_truncation");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     // first commit in files 0, 1, 2, complete_lsn is 101
     let mut events = Vec::new();
@@ -111,11 +103,9 @@ async fn test_wal_truncation_deletes_files() {
 #[tokio::test]
 async fn test_wal_truncation_with_no_files() {
     let context = TestContext::new("wal_truncation_no_files");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     // Test truncation with no files - should not panic or error
     wal.persist_and_truncate(Some(100)).await.unwrap();
@@ -124,11 +114,9 @@ async fn test_wal_truncation_with_no_files() {
 #[tokio::test]
 async fn test_wal_truncation_deletes_all_files() {
     let context = TestContext::new("wal_truncation_delete_all");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config.clone());
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config.clone());
     let mut events = Vec::new();
 
     // Test truncation that should delete all files
@@ -139,7 +127,7 @@ async fn test_wal_truncation_deletes_all_files() {
 
     // now truncate should delete all files
     wal.persist_and_truncate(Some(200)).await.unwrap(); // Higher than any LSN
-    assert!(local_dir_is_empty(&PathBuf::from(&file_system_config.get_root_path())).await);
+    assert!(local_dir_is_empty(&PathBuf::from(&storage_config.get_root_path())).await);
 }
 
 // ------------------------------------------------------------
@@ -149,11 +137,9 @@ async fn test_wal_truncation_deletes_all_files() {
 #[tokio::test]
 async fn test_wal_truncate_incomplete_main_xact() {
     let context = TestContext::new("wal_persist_truncate");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     let mut events = Vec::new();
     add_new_example_append_event(100, None, &mut wal, &mut events);
@@ -172,11 +158,9 @@ async fn test_wal_truncate_incomplete_main_xact() {
 #[tokio::test]
 async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
     let context = TestContext::new("wal_persist_truncate");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     let mut events = Vec::new();
     add_new_example_append_event(100, None, &mut wal, &mut events);
@@ -211,11 +195,9 @@ async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
 async fn test_wal_truncate_main_and_streaming_xact_interleave() {
     // Testing case: main xact and streaming xact are interleaving and streaming xact prevents file cleanup
     let context = TestContext::new("wal_truncate_main_and_streaming_xact_interleave");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     let mut events = Vec::new();
 
@@ -251,11 +233,9 @@ async fn test_wal_truncate_main_and_streaming_xact_interleave() {
 async fn test_wal_multiple_interleaved_truncations() {
     // multiple truncations should behave
     let context = TestContext::new("wal_multiple_interleaved_truncations");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     let mut events = Vec::new();
 
@@ -307,11 +287,9 @@ async fn test_wal_multiple_interleaved_truncations() {
 async fn test_wal_stream_abort() {
     // Testing case: streaming xact is not finished and prevents file cleanup
     let context = TestContext::new("wal_stream_abort");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let mut wal = WalManager::new(file_system_config);
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(storage_config);
 
     let mut events = Vec::new();
 
@@ -346,11 +324,9 @@ async fn test_wal_stream_abort() {
 #[tokio::test]
 async fn test_wal_recovery_basic() {
     let context = TestContext::new("wal_recovery_basic");
-    let file_system_config = WalManager::default_wal_file_system_config(
-        WAL_TEST_TABLE_ID,
-        &context.path().to_path_buf(),
-    );
-    let (mut wal, expected_events) = create_test_wal(file_system_config).await;
+    let storage_config =
+        WalManager::default_wal_storage_config(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let (mut wal, expected_events) = create_test_wal(storage_config).await;
 
     // Persist the events first
     wal.persist_and_truncate(None).await.unwrap();

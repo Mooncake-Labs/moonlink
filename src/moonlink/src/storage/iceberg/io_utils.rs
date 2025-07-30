@@ -1,5 +1,6 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::storage::iceberg::parquet_utils;
 
 use std::path::Path;
@@ -79,12 +80,12 @@ pub(crate) async fn upload_index_file(
 }
 
 /// Create iceberg [`FileIO`].
-pub(crate) fn create_file_io(config: &FileSystemConfig) -> IcebergResult<FileIO> {
-    match config {
+pub(crate) fn create_file_io(accessor_config: &AccessorConfig) -> IcebergResult<FileIO> {
+    match &accessor_config.storage_config {
         #[cfg(feature = "storage-fs")]
-        FileSystemConfig::FileSystem { .. } => FileIOBuilder::new_fs_io().build(),
+        StorageConfig::FileSystem { .. } => FileIOBuilder::new_fs_io().build(),
         #[cfg(feature = "storage-gcs")]
-        FileSystemConfig::Gcs {
+        StorageConfig::Gcs {
             project,
             region,
             endpoint,
@@ -113,7 +114,7 @@ pub(crate) fn create_file_io(config: &FileSystemConfig) -> IcebergResult<FileIO>
             file_io_builder.build()
         }
         #[cfg(feature = "storage-s3")]
-        FileSystemConfig::S3 {
+        StorageConfig::S3 {
             access_key_id,
             secret_access_key,
             region,

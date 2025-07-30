@@ -1,12 +1,12 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 
 use rand::Rng;
 use tokio::io::AsyncWriteExt;
 
 /// Test util function to generate random string with the requested size.
-fn create_random_string(size: usize) -> String {
+pub(crate) fn create_random_string(size: usize) -> String {
     const ALLOWED_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::rng();
     let random_string: String = (0..size)
@@ -37,11 +37,11 @@ pub(crate) async fn create_local_file(filepath: &str, file_size: usize) -> Strin
 /// Test util function to create a remote file with random content of given [`file_size`], and write it to the destination file (indicated by absolute path).
 pub(crate) async fn create_remote_file(
     filepath: &str,
-    filesystem_config: FileSystemConfig,
+    accessor_config: AccessorConfig,
     file_size: usize,
 ) -> String {
     let content = create_random_string(file_size);
-    let accessor = FileSystemAccessor::new(filesystem_config);
+    let accessor = FileSystemAccessor::new(accessor_config);
     accessor
         .write_object(filepath, content.as_bytes().to_vec())
         .await

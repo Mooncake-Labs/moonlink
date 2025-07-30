@@ -1,7 +1,7 @@
 use crate::pg_replicate::table::SrcTableId;
 use crate::ReplicationConnection;
 use crate::Result;
-use moonlink::FileSystemConfig;
+use moonlink::AccessorConfig;
 use moonlink::TableStatusReader;
 use moonlink::{MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager};
 use std::collections::HashMap;
@@ -62,7 +62,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         database_id: u32,
         table_id: u32,
         table_name: &str,
-        filesystem_config: Option<FileSystemConfig>,
+        accessor_config: Option<AccessorConfig>,
         is_recovery: bool,
     ) -> Result<MoonlinkTableConfig> {
         debug!(%src_uri, table_name, "adding table through manager");
@@ -90,7 +90,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
                 table_name,
                 &mooncake_table_id,
                 table_id,
-                filesystem_config,
+                accessor_config,
                 is_recovery,
             )
             .await?;

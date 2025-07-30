@@ -566,6 +566,10 @@ async fn test_snapshot_store_failure() {
 
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
+    mock_table_manager
         .expect_load_snapshot_from_table()
         .times(1)
         .returning(move || {

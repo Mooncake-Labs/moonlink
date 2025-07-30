@@ -4,10 +4,10 @@ use crate::pg_replicate::util::postgres_schema_to_moonlink_schema;
 use crate::{Error, Result};
 use moonlink::event_sync::create_table_event_syncer;
 use moonlink::{
-    EventSyncReceiver, EventSyncSender, FileSystemAccessor, FileSystemConfig, IcebergTableConfig,
+    AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor, IcebergTableConfig,
     MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
-    MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, TableEvent, TableEventManager,
-    TableHandler, TableStatusReader,
+    MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig, TableEvent,
+    TableEventManager, TableHandler, TableStatusReader,
 };
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -60,20 +60,21 @@ pub async fn build_table_components(
     table_temp_files_directory: String,
     replication_state: &ReplicationState,
     object_storage_cache: ObjectStorageCache,
-    iceberg_filesystem_config: Option<FileSystemConfig>,
+    iceberg_accessor_config: Option<AccessorConfig>,
 ) -> Result<(TableResources, MoonlinkTableConfig)> {
     let write_cache_path = PathBuf::from(base_path).join(&mooncake_table_id);
     recreate_directory(&write_cache_path).await?;
     let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(table_schema);
-    let iceberg_filesystem_config =
-        iceberg_filesystem_config.unwrap_or(FileSystemConfig::FileSystem {
+    let iceberg_accessor_config = iceberg_accessor_config.unwrap_or(
+        AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
             root_directory: base_path.to_string(),
-        });
+        }),
+    );
 
     let iceberg_table_config = IcebergTableConfig {
         namespace: vec![DEFAULT_ICEBERG_NAMESPACE.to_string()],
         table_name: mooncake_table_id,
-        filesystem_config: iceberg_filesystem_config.clone(),
+        accessor_config: iceberg_accessor_config.clone(),
     };
     let mooncake_table_config = MooncakeTableConfig::new(table_temp_files_directory);
     let table = MooncakeTable::new(
@@ -85,7 +86,7 @@ pub async fn build_table_components(
         iceberg_table_config.clone(),
         mooncake_table_config.clone(),
         object_storage_cache,
-        Arc::new(FileSystemAccessor::new(iceberg_filesystem_config)),
+        Arc::new(FileSystemAccessor::new(iceberg_accessor_config)),
     )
     .await?;
 

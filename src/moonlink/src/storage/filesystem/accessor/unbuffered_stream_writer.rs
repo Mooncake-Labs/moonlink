@@ -59,8 +59,9 @@ impl BaseUnbufferedStreamWriter for UnbufferedStreamWriter {
 mod tests {
     use super::*;
     use crate::storage::filesystem::accessor::operator_utils;
+    use crate::storage::filesystem::accessor_config::AccessorConfig;
     use crate::storage::filesystem::test_utils::writer_test_utils::*;
-    use crate::storage::FileSystemConfig;
+    use crate::storage::StorageConfig;
 
     #[tokio::test]
     async fn test_unbuffered_stream_writer() {
@@ -69,12 +70,13 @@ mod tests {
         let dst_filename = "dst".to_string();
 
         // Create an operator.
-        let filesystem_config = FileSystemConfig::FileSystem { root_directory };
-        let operator = operator_utils::create_opendal_operator(&filesystem_config).unwrap();
+        let storage_config = StorageConfig::FileSystem { root_directory };
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
+        let operator = operator_utils::create_opendal_operator(&accessor_config).unwrap();
 
         // Create writer and append in blocks.
         let writer =
             Box::new(UnbufferedStreamWriter::new(operator.clone(), dst_filename.clone()).unwrap());
-        test_unbuffered_stream_writer_impl(writer, dst_filename, filesystem_config).await;
+        test_unbuffered_stream_writer_impl(writer, dst_filename, accessor_config).await;
     }
 }

@@ -189,27 +189,22 @@ impl FileIndex {
 /// In-memory structure for one file index blob in the puffin file, which contains multiple `FileIndex` structs.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct FileIndexBlob {
-    /// A blob contains multiple file indexes.
-    pub(crate) file_indices: Vec<FileIndex>,
+    /// A blob contains multiple one file index.
+    pub(crate) file_index: FileIndex,
 }
 
 impl FileIndexBlob {
     pub fn new(
-        file_indices: Vec<&MooncakeFileIndex>,
+        file_index: &MooncakeFileIndex,
         local_index_file_to_remote: &HashMap<String, String>,
         local_data_file_to_remote: &HashMap<String, String>,
     ) -> Self {
         Self {
-            file_indices: file_indices
-                .into_iter()
-                .map(|file_index| {
-                    FileIndex::new(
-                        file_index,
-                        local_index_file_to_remote,
-                        local_data_file_to_remote,
-                    )
-                })
-                .collect(),
+            file_index: FileIndex::new(
+                file_index,
+                local_index_file_to_remote,
+                local_data_file_to_remote,
+            ),
         }
     }
 
@@ -222,11 +217,7 @@ impl FileIndexBlob {
             )
         })?;
         let mut properties = HashMap::new();
-        let total_num_rows: u32 = self
-            .file_indices
-            .iter()
-            .map(|mooncake_file_index| mooncake_file_index.num_rows)
-            .sum();
+        let total_num_rows: u32 = self.file_index.num_rows;
         properties.insert(
             MOONCAKE_HASH_INDEX_V1_CARDINALITY.to_string(),
             total_num_rows.to_string(),
@@ -343,7 +334,7 @@ mod tests {
             remote_data_filepath.clone(),
         )]);
         let file_index_blob = FileIndexBlob::new(
-            vec![&original_mooncake_file_index],
+            &original_mooncake_file_index,
             &local_index_file_to_remote,
             &local_data_file_to_remote,
         );
@@ -351,8 +342,7 @@ mod tests {
 
         // Deserialization.
         let mut deserialized_file_index_blob = FileIndexBlob::from_blob(blob).unwrap();
-        assert_eq!(deserialized_file_index_blob.file_indices.len(), 1);
-        let mut file_index = std::mem::take(&mut deserialized_file_index_blob.file_indices[0]);
+        let mut file_index = std::mem::take(&mut deserialized_file_index_blob.file_index);
 
         let data_file_to_id =
             HashMap::<String, FileId>::from([(remote_data_filepath.clone(), FileId(0))]);

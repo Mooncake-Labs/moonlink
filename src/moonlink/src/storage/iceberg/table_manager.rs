@@ -36,6 +36,9 @@ pub struct PersistenceResult {
 #[async_trait]
 #[cfg_attr(test, automock)]
 pub trait TableManager: Send {
+    /// Return iceberg warehouse location.
+    fn get_warehouse_location(&self) -> String;
+
     /// Write a new snapshot to iceberg table.
     /// It could be called for multiple times to write and commit multiple snapshots.
     ///

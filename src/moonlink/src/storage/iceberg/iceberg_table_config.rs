@@ -1,4 +1,4 @@
-use crate::FileSystemConfig;
+use crate::{storage::filesystem::accessor_config::AccessorConfig, StorageConfig};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct IcebergTableConfig {
@@ -6,8 +6,8 @@ pub struct IcebergTableConfig {
     pub namespace: Vec<String>,
     /// Iceberg table name.
     pub table_name: String,
-    // Filesystem config.
-    pub filesystem_config: FileSystemConfig,
+    // Accessor config.
+    pub accessor_config: AccessorConfig,
 }
 
 impl IcebergTableConfig {
@@ -18,12 +18,13 @@ impl IcebergTableConfig {
 
 impl Default for IcebergTableConfig {
     fn default() -> Self {
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: Self::DEFAULT_WAREHOUSE_URI.to_string(),
+        };
         Self {
             namespace: vec![Self::DEFAULT_NAMESPACE.to_string()],
             table_name: Self::DEFAULT_TABLE.to_string(),
-            filesystem_config: FileSystemConfig::FileSystem {
-                root_directory: Self::DEFAULT_WAREHOUSE_URI.to_string(),
-            },
+            accessor_config: AccessorConfig::new_with_storage_config(storage_config),
         }
     }
 }

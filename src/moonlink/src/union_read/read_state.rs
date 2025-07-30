@@ -5,7 +5,7 @@
 
 use super::table_metadata::TableMetadata;
 use crate::storage::PuffinDeletionBlobAtRead;
-use crate::table_notify::TableEvent;
+use crate::table_notify::{ReadCompleteCacheHandle, TableEvent};
 use crate::NonEvictableHandle;
 
 use bincode::config;
@@ -36,7 +36,11 @@ impl Drop for ReadState {
         if let Some(table_notify) = self.table_notify.clone() {
             tokio::spawn(async move {
                 table_notify
-                    .send(TableEvent::ReadRequestCompletion { cache_handles })
+                    .send(TableEvent::ReadRequestCompletion {
+                        read_complete_handles: ReadCompleteCacheHandle {
+                            handles: cache_handles,
+                        },
+                    })
                     .await
                     .unwrap();
             });

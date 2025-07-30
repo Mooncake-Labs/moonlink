@@ -3,6 +3,7 @@ use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCa
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::storage::PuffinDeletionBlobAtRead;
+use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
 use crate::{NonEvictableHandle, ReadState};
 
@@ -89,8 +90,10 @@ impl ReadOutput {
                         self.table_notifier
                             .as_mut()
                             .unwrap()
-                            .send(TableEvent::EvictedDataFilesToDelete {
-                                evicted_data_files: files_to_delete,
+                            .send(TableEvent::EvictedFilesToDelete {
+                                evicted_files: EvictedFiles {
+                                    files: files_to_delete,
+                                },
                             })
                             .await
                             .unwrap();

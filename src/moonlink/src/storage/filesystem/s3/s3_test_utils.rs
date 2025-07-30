@@ -1,7 +1,9 @@
-use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::storage::filesystem::test_utils::object_storage_test_utils::*;
+use crate::storage::filesystem::{
+    accessor::base_filesystem_accessor::BaseFileSystemAccess, accessor_config::AccessorConfig,
+};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,15 +30,16 @@ pub(crate) static S3_TEST_SECRET_ACCESS_KEY: &str = "minioadmin";
 pub(crate) static S3_TEST_ENDPOINT: &str = "http://s3.local:9000";
 
 /// Create a S3 catalog config.
-pub(crate) fn create_s3_filesystem_config(warehouse_uri: &str) -> FileSystemConfig {
+pub(crate) fn create_s3_storage_config(warehouse_uri: &str) -> AccessorConfig {
     let bucket = get_bucket_from_warehouse_uri(warehouse_uri);
-    FileSystemConfig::S3 {
+    let storage_config = StorageConfig::S3 {
         access_key_id: S3_TEST_ACCESS_KEY_ID.to_string(),
         secret_access_key: S3_TEST_SECRET_ACCESS_KEY.to_string(),
         region: "auto".to_string(), // minio doesn't care about region.
         bucket: bucket.to_string(),
         endpoint: Some(S3_TEST_ENDPOINT.to_string()),
-    }
+    };
+    AccessorConfig::new_with_storage_config(storage_config)
 }
 
 pub(crate) fn get_test_s3_bucket_and_warehouse() -> (String, String) {
@@ -72,7 +75,7 @@ async fn create_test_s3_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
 }
 
 async fn delete_s3_bucket_objects(bucket: &str) -> IcebergResult<()> {
-    let config = create_s3_filesystem_config(&format!("s3://{bucket}"));
+    let config = create_s3_storage_config(&format!("s3://{bucket}"));
     let accessor = FileSystemAccessor::new(config);
     accessor.remove_directory("/").await.map_err(|e| {
         IcebergError::new(

@@ -16,18 +16,22 @@ pub use crate::event_sync::EventSyncReceiver;
 pub use cache::object_storage::cache_config::ObjectStorageCacheConfig;
 pub(crate) use cache::object_storage::cache_handle::NonEvictableHandle;
 pub use cache::object_storage::object_storage_cache::ObjectStorageCache;
+pub use compaction::compaction_config::DataCompactionConfig;
 pub use filesystem::accessor::filesystem_accessor::FileSystemAccessor;
-pub use filesystem::filesystem_config::FileSystemConfig;
+pub use filesystem::accessor_config::AccessorConfig;
+pub use filesystem::storage_config::StorageConfig;
 pub use iceberg::iceberg_table_config::IcebergTableConfig;
 pub use iceberg::iceberg_table_manager::IcebergTableManager;
 pub use iceberg::table_event_manager::TableEventManager;
 pub use iceberg::table_manager::TableManager;
+pub use index::index_merge_config::FileIndexMergeConfig;
 pub use mooncake_table::table_config::TableConfig as MoonlinkTableConfig;
 pub use mooncake_table::table_secret::{
     SecretEntry as MoonlinkTableSecret, SecretType as MoonlinkSecretType,
 };
 pub use mooncake_table::table_status::TableStatus;
 pub use mooncake_table::table_status_reader::TableStatusReader;
+pub use mooncake_table::IcebergPersistenceConfig;
 pub use mooncake_table::SnapshotReadOutput;
 pub use mooncake_table::{MooncakeTable, MooncakeTableConfig};
 pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};

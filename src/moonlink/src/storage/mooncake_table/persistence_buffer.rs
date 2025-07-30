@@ -88,15 +88,25 @@ impl UnpersistedRecords {
 
     /// Get unpersisted data files as hash set for lookup.
     pub(crate) fn get_unpersisted_data_files_set(&self) -> HashSet<MooncakeDataFileRef> {
-        self.new_data_files.iter().cloned().collect::<HashSet<_>>()
+        let expected_len = self.new_data_files.len() + self.compacted_data_files_to_add.len();
+        let mut unpersisted_data_files = HashSet::new();
+        unpersisted_data_files.extend(self.new_data_files.iter().cloned());
+        unpersisted_data_files.extend(self.compacted_data_files_to_add.iter().cloned());
+        assert_eq!(expected_len, unpersisted_data_files.len());
+        unpersisted_data_files
     }
     /// Get unpersisted file indices as hash set for lookup.
     #[allow(clippy::mutable_key_type)]
     pub(crate) fn get_unpersisted_file_indices_set(&self) -> HashSet<GlobalIndex> {
-        self.new_file_indices
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>()
+        let expected_len = self.new_file_indices.len()
+            + self.merged_file_indices_to_add.len()
+            + self.compacted_data_files_to_add.len();
+        let mut unpersisted_file_indices = HashSet::new();
+        unpersisted_file_indices.extend(self.new_file_indices.iter().cloned());
+        unpersisted_file_indices.extend(self.merged_file_indices_to_add.iter().cloned());
+        unpersisted_file_indices.extend(self.compacted_file_indices_to_add.iter().cloned());
+        assert_eq!(expected_len, unpersisted_file_indices.len());
+        unpersisted_file_indices
     }
 
     /// ==================================
@@ -202,6 +212,7 @@ impl UnpersistedRecords {
 
     fn prune_persisted_compacted_data(&mut self, task: &SnapshotTask) {
         let persisted_compaction_res = &task.iceberg_persisted_records.data_compaction_result;
+
         ma::assert_ge!(
             self.compacted_data_files_to_add.len(),
             persisted_compaction_res.new_data_files_imported.len()

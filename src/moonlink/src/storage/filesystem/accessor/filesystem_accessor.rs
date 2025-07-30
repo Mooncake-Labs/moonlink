@@ -3,6 +3,8 @@ use async_trait::async_trait;
 #[cfg(feature = "storage-gcs")]
 use futures::TryStreamExt;
 use futures::{Stream, StreamExt};
+use opendal::options::WriteOptions;
+use opendal::Metadata;
 use opendal::Operator;
 #[cfg(test)]
 use tempfile::TempDir;
@@ -17,7 +19,7 @@ use crate::storage::filesystem::accessor::base_unbuffered_stream_writer::BaseUnb
 use crate::storage::filesystem::accessor::metadata::ObjectMetadata;
 use crate::storage::filesystem::accessor::operator_utils;
 use crate::storage::filesystem::accessor::unbuffered_stream_writer::UnbufferedStreamWriter;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::Result;
 
 use std::pin::Pin;
@@ -27,13 +29,14 @@ const IO_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 /// Max number of ongoing parallel sub IO operations for one single upload and download operation.
 const MAX_SUB_IO_OPERATION: usize = 8;
 
+// TODO(hjiang): Add stats cache for exists, get file size, etc invocation.
 pub struct FileSystemAccessor {
     /// Root path.
     root_path: String,
     /// Operator to manager all IO operations.
     operator: OnceCell<Operator>,
-    /// Filesystem configuration.
-    config: FileSystemConfig,
+    /// Accessor configuration.
+    config: AccessorConfig,
 }
 
 impl std::fmt::Debug for FileSystemAccessor {
@@ -46,7 +49,7 @@ impl std::fmt::Debug for FileSystemAccessor {
 }
 
 impl FileSystemAccessor {
-    pub fn new(config: FileSystemConfig) -> Self {
+    pub fn new(config: AccessorConfig) -> Self {
         Self {
             root_path: config.get_root_path(),
             operator: OnceCell::new(),
@@ -55,11 +58,14 @@ impl FileSystemAccessor {
     }
 
     #[cfg(test)]
-    pub fn default_for_test(temp_dir: &TempDir) -> std::sync::Arc<Self> {
-        let config = FileSystemConfig::FileSystem {
+    pub fn default_for_test(temp_dir: &TempDir) -> std::sync::Arc<dyn BaseFileSystemAccess> {
+        use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
+
+        let storage_config = crate::StorageConfig::FileSystem {
             root_directory: temp_dir.path().to_str().unwrap().to_string(),
         };
-        std::sync::Arc::new(FileSystemAccessor::new(config))
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+        create_filesystem_accessor(accessor_config)
     }
 
     /// Sanitize given path.
@@ -199,15 +205,12 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         }
     }
 
-    async fn get_object_size(&self, object: &str) -> Result<u64> {
-        let operator = self.get_operator().await?;
-        let sanitized = self.sanitize_path(object);
-        let meta = operator
-            .stat(sanitized)
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let file_size = meta.content_length();
-        Ok(file_size)
+    async fn stats_object(&self, object: &str) -> Result<opendal::Metadata> {
+        let sanitized_object = self.sanitize_path(object);
+        match self.get_operator().await?.stat(sanitized_object).await {
+            Ok(metadata) => Ok(metadata),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn read_object(&self, object: &str) -> Result<Vec<u8>> {
@@ -261,13 +264,41 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(Box::pin(stream))
     }
 
-    async fn write_object(&self, object: &str, content: Vec<u8>) -> Result<()> {
+    async fn write_object(&self, object: &str, content: Vec<u8>) -> Result<Metadata> {
         let sanitized_object = self.sanitize_path(object);
         let operator = self.get_operator().await?;
         let expected_len = content.len();
         let metadata = operator.write(sanitized_object, content).await?;
         assert_eq!(metadata.content_length(), expected_len as u64);
-        Ok(())
+        Ok(metadata)
+    }
+
+    async fn conditional_write_object(
+        &self,
+        object: &str,
+        content: Vec<u8>,
+        etag: Option<String>,
+    ) -> Result<opendal::Metadata> {
+        let sanitized_object = self.sanitize_path(object);
+        let operator = self.get_operator().await?;
+        let expected_len = content.len();
+
+        // Conditional write is not supported for all storage backends, if not supported, fallback to [`write_object`].
+        if !operator.info().full_capability().write_with_if_match {
+            return self.write_object(object, content).await;
+        }
+
+        let mut write_option = WriteOptions::default();
+        if let Some(etag) = etag {
+            write_option.if_match = Some(etag);
+        } else {
+            write_option.if_not_exists = true;
+        }
+        let metadata = operator
+            .write_options(sanitized_object, content, write_option)
+            .await?;
+        assert_eq!(metadata.content_length(), expected_len as u64);
+        Ok(metadata)
     }
 
     async fn create_unbuffered_stream_writer(
@@ -344,7 +375,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
 
     async fn copy_from_remote_to_local(&self, src: &str, dst: &str) -> Result<ObjectMetadata> {
         let sanitized_src = self.sanitize_path(src).to_string();
-        let file_size = self.get_object_size(&sanitized_src).await?;
+        let file_size = self.stats_object(&sanitized_src).await?.content_length();
 
         // For small objects, no need to parallelize IO operation and pre-allocate buffer.
         if file_size <= IO_BLOCK_SIZE as u64 {
@@ -403,10 +434,85 @@ impl BaseFileSystemAccess for FileSystemAccessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::filesystem::{
-        accessor::test_utils::*, test_utils::writer_test_utils::test_unbuffered_stream_writer_impl,
-    };
+    use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
+    use crate::storage::filesystem::accessor::test_utils::*;
+    use crate::storage::filesystem::storage_config::StorageConfig;
+    use crate::storage::filesystem::test_utils::writer_test_utils::test_unbuffered_stream_writer_impl;
     use rstest::rstest;
+
+    #[tokio::test]
+    async fn test_stats_object() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: root_directory.clone(),
+        };
+        let filesystem_accessor = create_filesystem_accessor(
+            AccessorConfig::new_with_storage_config(storage_config.clone()),
+        );
+
+        const DST_FILENAME: &str = "target";
+        const TARGET_FILESIZE: usize = 10;
+
+        // Write object.
+        let random_content = create_random_string(TARGET_FILESIZE);
+        filesystem_accessor
+            .write_object(DST_FILENAME, random_content.as_bytes().to_vec())
+            .await
+            .unwrap();
+
+        // Stats object.
+        let metadata = filesystem_accessor
+            .stats_object(DST_FILENAME)
+            .await
+            .unwrap();
+        assert_eq!(metadata.content_length(), TARGET_FILESIZE as u64);
+    }
+
+    // Local filesystem doesn't support conditional write, which should behave the same as [`write_object`].
+    #[tokio::test]
+    async fn test_conditional_write() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: root_directory.clone(),
+        };
+        let filesystem_accessor = create_filesystem_accessor(
+            AccessorConfig::new_with_storage_config(storage_config.clone()),
+        );
+
+        const DST_FILENAME: &str = "target";
+        const TARGET_FILESIZE: usize = 10;
+        const ETAG: &str = "etag";
+
+        // Write object conditionally, with destination file doesn't exist.
+        let random_content = create_random_string(TARGET_FILESIZE);
+        filesystem_accessor
+            .conditional_write_object(
+                DST_FILENAME,
+                random_content.as_bytes().to_vec(),
+                /*etag=*/ None,
+            )
+            .await
+            .unwrap();
+        // Read object and check.
+        let actual_content = filesystem_accessor.read_object(DST_FILENAME).await.unwrap();
+        assert_eq!(actual_content, random_content.as_bytes().to_vec());
+
+        // Write object conditionally, with destination file already exists; for local filesystem the semantics is overwrite without check.
+        let random_content = create_random_string(TARGET_FILESIZE);
+        filesystem_accessor
+            .conditional_write_object(
+                DST_FILENAME,
+                random_content.as_bytes().to_vec(),
+                /*etag=*/ Some(ETAG.to_string()),
+            )
+            .await
+            .unwrap();
+        // Read object and check.
+        let actual_content = filesystem_accessor.read_object(DST_FILENAME).await.unwrap();
+        assert_eq!(actual_content, random_content.as_bytes().to_vec());
+    }
 
     #[tokio::test]
     #[rstest]
@@ -415,15 +521,16 @@ mod tests {
     async fn test_stream_read(#[case] file_size: usize) {
         let temp_dir = tempfile::tempdir().unwrap();
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
-        let filesystem_config = FileSystemConfig::FileSystem {
+        let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
         };
-        let filesystem_accessor = FileSystemAccessor::new(filesystem_config.clone());
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
+        let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
 
         // Prepare src file.
         let remote_filepath = format!("{}/remote", &root_directory);
         let expected_content =
-            create_remote_file(&remote_filepath, filesystem_config.clone(), file_size).await;
+            create_remote_file(&remote_filepath, accessor_config, file_size).await;
 
         // Stream read from destination path.
         let mut actual_content = vec![];
@@ -449,9 +556,11 @@ mod tests {
     async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
         let temp_dir = tempfile::tempdir().unwrap();
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
-        let filesystem_accessor = FileSystemAccessor::new(FileSystemConfig::FileSystem {
+        let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
-        });
+        };
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
+        let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
 
         // Prepare src file.
         let src_filepath = format!("{}/src", &root_directory);
@@ -480,15 +589,15 @@ mod tests {
     async fn test_copy_from_remote_to_local(#[case] file_size: usize) {
         let temp_dir = tempfile::tempdir().unwrap();
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
-        let filesystem_config = FileSystemConfig::FileSystem {
+        let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
         };
-        let filesystem_accessor = FileSystemAccessor::new(filesystem_config.clone());
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
+        let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
 
         // Prepare src file.
         let src_filepath = format!("{}/src", &root_directory);
-        let expected_content =
-            create_remote_file(&src_filepath, filesystem_config.clone(), file_size).await;
+        let expected_content = create_remote_file(&src_filepath, accessor_config, file_size).await;
 
         // Copy from src to dst.
         let dst_filepath = format!("{}/dst", &root_directory);
@@ -509,10 +618,11 @@ mod tests {
     async fn test_unbuffered_stream_write() {
         let temp_dir = tempfile::tempdir().unwrap();
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
-        let filesystem_config = FileSystemConfig::FileSystem {
+        let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
         };
-        let filesystem_accessor = FileSystemAccessor::new(filesystem_config.clone());
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
+        let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
 
         let dst_filename = "dst".to_string();
         let dst_filepath = format!("{}/{}", &root_directory, dst_filename);
@@ -520,6 +630,6 @@ mod tests {
             .create_unbuffered_stream_writer(&dst_filepath)
             .await
             .unwrap();
-        test_unbuffered_stream_writer_impl(writer, dst_filename, filesystem_config).await;
+        test_unbuffered_stream_writer_impl(writer, dst_filename, accessor_config).await;
     }
 }

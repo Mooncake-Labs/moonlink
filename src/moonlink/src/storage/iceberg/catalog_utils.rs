@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::file_catalog::FileCatalog;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
 
@@ -12,13 +12,10 @@ use iceberg::Result as IcebergResult;
 /// It's worth noting catalog and warehouse uri are not 1-1 mapping; for example, rest catalog could handle warehouse.
 /// Here we simply deduce catalog type from warehouse because both filesystem and object storage catalog are only able to handle certain scheme.
 pub fn create_catalog(
-    filesystem_config: FileSystemConfig,
+    accessor_config: AccessorConfig,
     iceberg_schema: IcebergSchema,
 ) -> IcebergResult<Box<dyn MoonlinkCatalog>> {
-    Ok(Box::new(FileCatalog::new(
-        filesystem_config,
-        iceberg_schema,
-    )?))
+    Ok(Box::new(FileCatalog::new(accessor_config, iceberg_schema)?))
 }
 
 /// Test util function to create catalog with provided filesystem accessor.

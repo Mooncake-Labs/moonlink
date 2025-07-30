@@ -4,16 +4,18 @@ use iceberg::spec::{NestedField, Schema};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::storage::iceberg::file_catalog::FileCatalog;
 
 /// Test util to create file catalog.
 pub(crate) fn create_test_file_catalog(tmp_dir: &TempDir, iceberg_schema: Schema) -> FileCatalog {
     let warehouse_path = tmp_dir.path().to_str().unwrap();
+    let storage_config = StorageConfig::FileSystem {
+        root_directory: warehouse_path.to_string(),
+    };
     FileCatalog::new(
-        FileSystemConfig::FileSystem {
-            root_directory: warehouse_path.to_string(),
-        },
+        AccessorConfig::new_with_storage_config(storage_config),
         iceberg_schema,
     )
     .unwrap()

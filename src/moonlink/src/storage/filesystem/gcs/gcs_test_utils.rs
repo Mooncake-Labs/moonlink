@@ -1,5 +1,6 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-use crate::storage::filesystem::filesystem_config::FileSystemConfig;
+use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::storage::filesystem::test_utils::object_storage_test_utils::*;
 use crate::FileSystemAccessor;
 
@@ -16,9 +17,9 @@ pub(crate) static GCS_TEST_WAREHOUSE_URI_PREFIX: &str = "gs://test-gcs-warehouse
 pub(crate) static GCS_TEST_ENDPOINT: &str = "http://gcs.local:4443";
 pub(crate) static GCS_TEST_PROJECT: &str = "fake-project";
 
-pub(crate) fn create_gcs_filesystem_config(warehouse_uri: &str) -> FileSystemConfig {
+pub(crate) fn create_gcs_storage_config(warehouse_uri: &str) -> AccessorConfig {
     let bucket = get_bucket_from_warehouse_uri(warehouse_uri);
-    FileSystemConfig::Gcs {
+    let storage_config = StorageConfig::Gcs {
         bucket: bucket.to_string(),
         endpoint: Some(GCS_TEST_ENDPOINT.to_string()),
         disable_auth: true,
@@ -26,7 +27,8 @@ pub(crate) fn create_gcs_filesystem_config(warehouse_uri: &str) -> FileSystemCon
         region: "".to_string(),
         access_key_id: "".to_string(),
         secret_access_key: "".to_string(),
-    }
+    };
+    AccessorConfig::new_with_storage_config(storage_config)
 }
 
 pub(crate) fn get_test_gcs_bucket_and_warehouse() -> (String, String) {
@@ -55,8 +57,8 @@ async fn create_gcs_bucket_impl(bucket: Arc<String>) -> IcebergResult<()> {
 }
 
 async fn delete_gcs_bucket_objects(bucket: &str) -> IcebergResult<()> {
-    let config = create_gcs_filesystem_config(&format!("gs://{bucket}"));
-    let accessor = FileSystemAccessor::new(config);
+    let accessor_config = create_gcs_storage_config(&format!("gs://{bucket}"));
+    let accessor = FileSystemAccessor::new(accessor_config);
     accessor.remove_directory("/").await.map_err(|e| {
         IcebergError::new(
             iceberg::ErrorKind::Unexpected,

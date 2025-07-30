@@ -91,7 +91,8 @@ fn extract_value_from_row(row: MoonlinkRow) -> RecordBatch {
 fn get_data_compaction_config() -> DataCompactionConfig {
     // Perform compaction as long as there're two data files.
     DataCompactionConfig {
-        data_file_to_compact: 2,
+        min_data_file_to_compact: 2,
+        max_data_file_to_compact: u32::MAX,
         data_file_final_size: 1000000,
     }
 }
@@ -347,7 +348,7 @@ async fn test_compaction_1_1_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -413,7 +414,7 @@ async fn test_compaction_1_1_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -502,7 +503,7 @@ async fn test_compaction_1_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -591,7 +592,7 @@ async fn test_compaction_1_2_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -694,7 +695,7 @@ async fn test_compaction_2_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -786,7 +787,7 @@ async fn test_compaction_2_2_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -893,7 +894,7 @@ async fn test_compaction_2_3_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -972,7 +973,7 @@ async fn test_compaction_2_3_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -1079,7 +1080,7 @@ async fn test_compaction_3_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -1177,7 +1178,7 @@ async fn test_compaction_3_3_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .filesystem_config
+            .accessor_config
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )

@@ -1,7 +1,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use criterion::{criterion_group, criterion_main, Criterion};
 use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
-use moonlink::{FileSystemAccessor, FileSystemConfig};
+use moonlink::{AccessorConfig, FileSystemAccessor, StorageConfig};
 use moonlink::{IcebergTableConfig, ObjectStorageCache};
 use moonlink::{MooncakeTable, MooncakeTableConfig};
 use pprof::criterion::{Output, PProfProfiler};
@@ -54,9 +54,11 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
     let iceberg_table_config = IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),
-        filesystem_config: moonlink::FileSystemConfig::FileSystem {
-            root_directory: warehouse_location.clone(),
-        },
+        accessor_config: AccessorConfig::new_with_storage_config(
+            moonlink::StorageConfig::FileSystem {
+                root_directory: warehouse_location.clone(),
+            },
+        ),
     };
     let rt = Runtime::new().unwrap();
     let table_config = MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
@@ -70,9 +72,11 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
             iceberg_table_config,
             table_config,
             ObjectStorageCache::default_for_bench(),
-            Arc::new(FileSystemAccessor::new(FileSystemConfig::FileSystem {
-                root_directory: warehouse_location.clone(),
-            })),
+            Arc::new(FileSystemAccessor::new(
+                AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
+                    root_directory: warehouse_location.clone(),
+                }),
+            )),
         ))
         .unwrap();
 

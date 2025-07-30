@@ -6,6 +6,12 @@ use moonlink_metadata_store::base_metadata_store::{MetadataStoreTrait, TableMeta
 use std::collections::HashSet;
 use std::hash::Hash;
 
+/// Backend related attributes used for recovery.
+pub(crate) struct BackendAttributes {
+    // Temporary files directory.
+    pub(crate) temp_files_dir: String,
+}
+
 /// Recovery the given table.
 async fn recover_table<D, T>(
     metadata_entry: TableMetadataEntry,
@@ -26,12 +32,12 @@ where
             metadata_entry.database_id,
             metadata_entry.table_id,
             &metadata_entry.src_table_name,
-            /*iceberg_filesystem_config=*/
+            /*iceberg_storage_config=*/
             Some(
                 metadata_entry
                     .moonlink_table_config
                     .iceberg_table_config
-                    .filesystem_config,
+                    .accessor_config,
             ),
             /*is_recovery=*/ true,
         )
@@ -43,6 +49,7 @@ where
 ///
 /// TODO(hjiang): Parallelize all IO operations.
 pub(super) async fn recover_all_tables<D, T>(
+    backend_attributes: BackendAttributes,
     metadata_store_accessor: &dyn MetadataStoreTrait,
     replication_manager: &mut ReplicationManager<MooncakeTableId<D, T>>,
 ) -> Result<()>
@@ -65,7 +72,13 @@ where
         .await?;
 
     // Perform recovery on all managed tables.
-    for cur_metadata_entry in table_metadata_entries.into_iter() {
+    for mut cur_metadata_entry in table_metadata_entries.into_iter() {
+        // Update certain attributes, which are not persisted before crash.
+        cur_metadata_entry
+            .moonlink_table_config
+            .mooncake_table_config
+            .temp_files_directory = backend_attributes.temp_files_dir.clone();
+        // Recover current table.
         unique_uris.insert(cur_metadata_entry.src_table_uri.clone());
         recover_table(cur_metadata_entry, replication_manager).await?;
     }

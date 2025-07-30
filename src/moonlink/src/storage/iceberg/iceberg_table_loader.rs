@@ -24,12 +24,6 @@ use iceberg::spec::{DataFileFormat, ManifestEntry};
 use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
 
-/// Results for recovering file indices from iceberg table.
-struct FileIndicesRecoveryResult {
-    /// All file indices recovered from iceberg table.
-    file_indices: Vec<MooncakeFileIndex>,
-}
-
 impl IcebergTableManager {
     /// Validate schema consistency at load operation.
     fn validate_schema_consistency_at_load(&self) {
@@ -45,47 +39,37 @@ impl IcebergTableManager {
     }
 
     /// Load index file into table manager from the current manifest entry.
-    async fn load_file_indices_from_manifest_entry(
+    async fn load_file_index_from_manifest_entry(
         &mut self,
         entry: &ManifestEntry,
         file_io: &FileIO,
         next_file_id: &mut u64,
-    ) -> IcebergResult<FileIndicesRecoveryResult> {
+    ) -> IcebergResult<Option<MooncakeFileIndex>> {
         if !utils::is_file_index(entry) {
-            return Ok(FileIndicesRecoveryResult {
-                file_indices: Vec::new(),
-            });
+            return Ok(None);
         }
 
         // Load mooncake file indices from iceberg file index blobs.
         let file_index_blob =
             FileIndexBlob::load_from_index_blob(file_io.clone(), entry.data_file()).await?;
-        let new_file_indices_count = file_index_blob.file_indices.len();
-        let expected_file_indices_count =
-            self.persisted_file_indices.len() + new_file_indices_count;
-        self.persisted_file_indices
-            .reserve(expected_file_indices_count);
-        let mut file_indices = Vec::with_capacity(new_file_indices_count);
-        for mut cur_iceberg_file_indice in file_index_blob.file_indices.into_iter() {
-            let table_id = TableId(self.mooncake_table_metadata.table_id);
-            let cur_mooncake_file_indice = cur_iceberg_file_indice
-                .as_mooncake_file_index(
-                    &self.remote_data_file_to_file_id,
-                    self.object_storage_cache.clone(),
-                    self.filesystem_accessor.as_ref(),
-                    table_id,
-                    next_file_id,
-                )
-                .await?;
-            file_indices.push(cur_mooncake_file_indice.clone());
+        let mut cur_iceberg_file_index = file_index_blob.file_index;
+        let table_id = TableId(self.mooncake_table_metadata.table_id);
+        let mooncake_file_index = cur_iceberg_file_index
+            .as_mooncake_file_index(
+                &self.remote_data_file_to_file_id,
+                self.object_storage_cache.clone(),
+                self.filesystem_accessor.as_ref(),
+                table_id,
+                next_file_id,
+            )
+            .await?;
 
-            self.persisted_file_indices.insert(
-                cur_mooncake_file_indice,
-                entry.data_file().file_path().to_string(),
-            );
-        }
+        self.persisted_file_indices.insert(
+            mooncake_file_index.clone(),
+            entry.data_file().file_path().to_string(),
+        );
 
-        Ok(FileIndicesRecoveryResult { file_indices })
+        Ok(Some(mooncake_file_index))
     }
 
     /// Load data file into table manager from the current manifest entry.
@@ -322,14 +306,16 @@ impl IcebergTableManager {
 
             for entry in manifest_entries.iter() {
                 // Load file indices.
-                let recovered_file_indices = self
-                    .load_file_indices_from_manifest_entry(
+                let recovered_file_index = self
+                    .load_file_index_from_manifest_entry(
                         entry.as_ref(),
                         &file_io,
                         &mut next_file_id,
                     )
                     .await?;
-                loaded_file_indices.extend(recovered_file_indices.file_indices);
+                if let Some(recovered_file_index) = recovered_file_index {
+                    loaded_file_indices.push(recovered_file_index);
+                }
 
                 // Load deletion vector puffin.
                 self.load_deletion_vector_from_manifest_entry(
