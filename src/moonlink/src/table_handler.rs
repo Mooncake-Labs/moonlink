@@ -66,12 +66,12 @@ impl TableHandler {
 
             loop {
                 tokio::select! {
+                    // Sending to channel fails only happens when eventloop exits, directly exit timer events.
                     _ = periodic_wal_interval.tick() => {
                         if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistTruncateWal).await.is_err() {
                             return;
                         }
                     }
-                    // Sending to channel fails only happens when eventloop exits, directly exit timer events.
                     _ = periodic_snapshot_interval.tick() => {
                         if event_sender_for_periodical_snapshot.send(TableEvent::PeriodicalMooncakeTableSnapshot(uuid::Uuid::new_v4())).await.is_err() {
                            return;
