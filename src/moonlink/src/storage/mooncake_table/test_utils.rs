@@ -69,6 +69,7 @@ pub async fn test_table(
     let iceberg_table_config = test_iceberg_table_config(context, table_name);
     let mut table_config = test_mooncake_table_config(context);
     table_config.batch_size = 2;
+    let wal_config = WalConfig::default_wal_config_local(1, &context.path());
     MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),
@@ -77,6 +78,7 @@ pub async fn test_table(
         identity,
         iceberg_table_config.clone(),
         table_config,
+        wal_config,
         ObjectStorageCache::default_for_test(&context.temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )

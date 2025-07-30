@@ -5,11 +5,13 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::MooncakeTableConfig;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::wal::WalManager;
 use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
 use crate::storage::PersistenceResult;
 use crate::ObjectStorageCache;
 use crate::TableEventManager;
+use crate::WalConfig;
 
 use iceberg::{Error as IcebergError, ErrorKind};
 use tempfile::tempdir;
@@ -61,11 +63,15 @@ async fn test_iceberg_snapshot_failure_mock_test() {
             })
         });
 
+    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
     )
     .await
     .unwrap();
@@ -129,11 +135,15 @@ async fn test_iceberg_drop_table_failure_mock_test() {
             })
         });
 
+    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
     )
     .await
     .unwrap();
@@ -202,11 +212,15 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
             })
         });
 
+    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
     )
     .await
     .unwrap();
@@ -293,11 +307,15 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
             })
         });
 
+    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
     )
     .await
     .unwrap();
@@ -384,11 +402,15 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
             })
         });
 
+    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
     )
     .await
     .unwrap();

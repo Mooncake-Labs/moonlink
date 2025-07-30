@@ -2,7 +2,7 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::mooncake_table::test_utils::test_row;
 use crate::storage::wal::{PersistAndTruncateResult, WalEvent, WalManager};
 use crate::table_notify::TableEvent;
-use crate::{Result, StorageConfig};
+use crate::{Result, WalConfig};
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::fs;
@@ -238,8 +238,8 @@ pub async fn get_table_events_vector_recovery(
 }
 
 /// Helper function to create a WAL with some test data
-pub async fn create_test_wal(storage_config: StorageConfig) -> (WalManager, Vec<TableEvent>) {
-    let mut wal = WalManager::new(storage_config);
+pub async fn create_test_wal(wal_config: WalConfig) -> (WalManager, Vec<TableEvent>) {
+    let mut wal = WalManager::new(&wal_config);
     let mut expected_events = Vec::new();
     let row = test_row(1, "Alice", 30);
 
@@ -312,16 +312,6 @@ pub fn add_new_example_stream_abort_event(
     expected_events: &mut Vec<TableEvent>,
 ) {
     let event = TableEvent::StreamAbort { xact_id };
-    wal.push(&event);
-    expected_events.push(event);
-}
-
-pub fn add_new_example_stream_flush_event(
-    xact_id: u32,
-    wal: &mut WalManager,
-    expected_events: &mut Vec<TableEvent>,
-) {
-    let event = TableEvent::StreamFlush { xact_id };
     wal.push(&event);
     expected_events.push(event);
 }

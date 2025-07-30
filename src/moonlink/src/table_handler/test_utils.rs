@@ -15,6 +15,7 @@ use crate::table_handler::{TableEvent, TableHandler};
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
+    WalConfig,
 };
 use crate::{ObjectStorageCache, Result};
 
@@ -105,12 +106,12 @@ impl TestEnvironment {
         let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
 
         // TODO(Paul): Change this default when we support object storage for WAL
-        let default_wal_filesystem_config =
-            WalManager::default_wal_storage_config(mooncake_table.get_table_id(), temp_dir.path());
-        let wal_filesystem_path = default_wal_filesystem_config.get_root_path();
-        let wal_accessor_config =
-            AccessorConfig::new_with_storage_config(default_wal_filesystem_config);
-        let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(wal_accessor_config));
+        let default_wal_config =
+            WalConfig::default_wal_config_local(mooncake_table.get_table_id(), temp_dir.path());
+        let wal_filesystem_path = default_wal_config.get_accessor_config().get_root_path();
+        let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
+            default_wal_config.get_accessor_config(),
+        ));
 
         let handler = TableHandler::new(
             mooncake_table,
@@ -148,6 +149,7 @@ impl TestEnvironment {
         let table_name = "table_name";
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
+        let wal_config = WalConfig::default_wal_config_local(1, temp_dir.path());
         let mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),
@@ -156,6 +158,7 @@ impl TestEnvironment {
             IdentityProp::Keys(vec![0]),
             iceberg_table_config.clone(),
             mooncake_table_config,
+            wal_config,
             ObjectStorageCache::default_for_test(&temp_dir),
             create_test_filesystem_accessor(&iceberg_table_config),
         )

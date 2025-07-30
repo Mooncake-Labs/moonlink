@@ -15,6 +15,29 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+pub const DEFAULT_WAL_FOLDER: &str = "wal";
+
+#[derive(Debug, Clone)]
+pub struct WalConfig {
+    accessor_config: AccessorConfig,
+}
+
+impl WalConfig {
+    pub fn default_wal_config_local(table_id: u32, base_path: &Path) -> WalConfig {
+        let wal_storage_config = StorageConfig::FileSystem {
+            root_directory: base_path
+                .join(DEFAULT_WAL_FOLDER)
+                .join(table_id.to_string())
+                .to_str()
+                .unwrap()
+                .to_string(),
+        };
+        Self {
+            accessor_config: AccessorConfig::new_with_storage_config(wal_storage_config),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub enum WalEvent {
     Append {
@@ -202,26 +225,9 @@ pub struct WalManager {
 }
 
 impl WalManager {
-    pub fn default_wal_storage_config(table_id: u32, base_path: &Path) -> StorageConfig {
-        // TODO(Paul): Support object storage
-        StorageConfig::FileSystem {
-            root_directory: base_path
-                .join(table_id.to_string())
-                .join("wal")
-                .to_str()
-                .unwrap()
-                .to_string(),
-        }
-    }
-
-    pub fn new_with_local_path(table_id: u32, base_path: &Path) -> Self {
-        let config = WalManager::default_wal_storage_config(table_id, base_path);
-        Self::new(config)
-    }
-
-    pub fn new(config: StorageConfig) -> Self {
+    pub fn new(config: &WalConfig) -> Self {
         // TODO(Paul): Add a more robust constructor when implementing recovery
-        let accessor_config = AccessorConfig::new_with_storage_config(config);
+        let accessor_config = config.accessor_config.clone();
         Self {
             in_mem_buf: Vec::new(),
             highest_seen_lsn: 0,
@@ -238,7 +244,6 @@ impl WalManager {
         format!("wal_{file_number}.json")
     }
 
-    /// Get the file system accessor for testing purposes
     pub fn get_file_system_accessor(&self) -> Arc<dyn BaseFileSystemAccess> {
         self.file_system_accessor.clone()
     }
@@ -419,6 +424,7 @@ impl WalManager {
     // ------------------------------
     /// Delete a list of wal files from the file system.
     /// Should be called asynchronously using the results from get_files_to_truncate.
+    /// TODO(Paul): This should be moved to the file system level.
     pub async fn delete_files(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_file_numbers: &[WalFileInfo],
@@ -554,10 +560,9 @@ impl WalManager {
     // ------------------------------
     // Drop WAL files
     // ------------------------------
+    /// Drops all WAL files by removing the entire WAL directory for this table.
     pub async fn drop_wal(&mut self) -> Result<()> {
-        let file_system_accessor = self.file_system_accessor.clone();
-        let wal_file_numbers = self.live_wal_files_tracker.clone();
-        WalManager::delete_files(file_system_accessor, &wal_file_numbers).await?;
+        self.file_system_accessor.remove_directory("").await?;
         Ok(())
     }
 
@@ -567,6 +572,7 @@ impl WalManager {
 
     /// Recover the flushed WALs from the file system. Start file number and begin_from_lsn are
     /// both inclusive.
+    #[allow(dead_code)]
     fn recover_flushed_wals(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         start_file_number: u64,
@@ -608,6 +614,7 @@ impl WalManager {
 
     /// Recover the flushed WALs from the file system as a flat stream. Start file number and
     /// begin_from_lsn are both inclusive.
+    #[allow(dead_code)]
     pub fn recover_flushed_wals_flat(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         start_file_number: u64,
@@ -618,6 +625,13 @@ impl WalManager {
                 Err(e) => stream::iter(vec![Err(e)]),
             })
             .boxed()
+    }
+}
+
+#[cfg(test)]
+impl WalConfig {
+    pub fn get_accessor_config(&self) -> AccessorConfig {
+        self.accessor_config.clone()
     }
 }
 

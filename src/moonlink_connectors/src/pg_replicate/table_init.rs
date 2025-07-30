@@ -7,7 +7,7 @@ use moonlink::{
     AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor, IcebergTableConfig,
     MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
     MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig, TableEvent,
-    TableEventManager, TableHandler, TableStatusReader,
+    TableEventManager, TableHandler, TableStatusReader, WalConfig,
 };
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,7 @@ pub async fn build_table_components(
         }),
     );
 
+    let wal_config = WalConfig::default_wal_config_local(table_id, &PathBuf::from(base_path));
     let iceberg_table_config = IcebergTableConfig {
         namespace: vec![DEFAULT_ICEBERG_NAMESPACE.to_string()],
         table_name: mooncake_table_id,
@@ -85,6 +86,7 @@ pub async fn build_table_components(
         identity,
         iceberg_table_config.clone(),
         mooncake_table_config.clone(),
+        wal_config,
         object_storage_cache,
         Arc::new(FileSystemAccessor::new(iceberg_accessor_config)),
     )

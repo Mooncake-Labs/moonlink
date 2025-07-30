@@ -9,7 +9,6 @@ pub(crate) mod mooncake_table;
 pub(crate) mod parquet_utils;
 pub(crate) mod path_utils;
 pub(crate) mod storage_utils;
-#[allow(dead_code)]
 pub(crate) mod wal;
 
 pub use crate::event_sync::EventSyncReceiver;
@@ -35,6 +34,7 @@ pub use mooncake_table::IcebergPersistenceConfig;
 pub use mooncake_table::SnapshotReadOutput;
 pub use mooncake_table::{MooncakeTable, MooncakeTableConfig};
 pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
+pub use wal::WalConfig;
 
 #[cfg(test)]
 pub(crate) use iceberg::puffin_utils::*;

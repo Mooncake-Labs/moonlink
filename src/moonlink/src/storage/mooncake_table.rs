@@ -49,7 +49,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
 };
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
-use crate::storage::wal::{PersistAndTruncateResult, WalManager};
+use crate::storage::wal::{PersistAndTruncateResult, WalConfig, WalManager};
 use crate::table_notify::{EvictedFiles, TableEvent};
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -714,8 +714,9 @@ impl MooncakeTable {
         identity: IdentityProp,
         iceberg_table_config: IcebergTableConfig,
         table_config: MooncakeTableConfig,
+        wal_config: WalConfig,
         object_storage_cache: ObjectStorageCache,
-        filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
         let metadata = Arc::new(TableMetadata {
             name,
@@ -728,14 +729,17 @@ impl MooncakeTable {
         let iceberg_table_manager = Box::new(IcebergTableManager::new(
             metadata.clone(),
             object_storage_cache.clone(),
-            filesystem_accessor.clone(),
+            table_filesystem_accessor.clone(),
             iceberg_table_config,
         )?);
+
+        let wal_manager = WalManager::new(&wal_config);
         Self::new_with_table_manager(
             metadata,
             iceberg_table_manager,
             object_storage_cache,
-            filesystem_accessor,
+            table_filesystem_accessor,
+            wal_manager,
         )
         .await
     }
@@ -744,7 +748,8 @@ impl MooncakeTable {
         table_metadata: Arc<TableMetadata>,
         mut table_manager: Box<dyn TableManager>,
         object_storage_cache: ObjectStorageCache,
-        filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        wal_manager: WalManager,
     ) -> Result<Self> {
         table_metadata.config.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
@@ -757,11 +762,6 @@ impl MooncakeTable {
 
         let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
         let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
-
-        // TODO(Paul): Support object storage for WAL
-        let wal_manager_file_config =
-            WalManager::default_wal_storage_config(table_metadata.table_id, &table_metadata.path);
-        let wal_manager = WalManager::new(wal_manager_file_config);
 
         Ok(Self {
             mem_slice: MemSlice::new(
@@ -776,7 +776,7 @@ impl MooncakeTable {
                     table_manager.get_warehouse_location(),
                     table_metadata.clone(),
                     object_storage_cache,
-                    filesystem_accessor,
+                    table_filesystem_accessor,
                     current_snapshot,
                     Arc::clone(&non_streaming_batch_id_counter),
                 )
@@ -1549,10 +1549,6 @@ mod mooncake_tests {
 impl MooncakeTable {
     pub fn get_table_id(&self) -> u32 {
         self.metadata.table_id
-    }
-
-    pub fn get_wal_manager(&self) -> &WalManager {
-        &self.wal_manager
     }
 
     pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {

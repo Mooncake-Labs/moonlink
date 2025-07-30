@@ -23,6 +23,7 @@ use crate::storage::TableManager;
 use crate::table_handler::table_handler_state::TableHandlerState;
 use crate::ObjectStorageCache;
 use crate::TableEventManager;
+use crate::WalConfig;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1605,11 +1606,15 @@ async fn test_discard_duplicate_writes() {
             })
         });
 
+    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
     )
     .await
     .unwrap();
