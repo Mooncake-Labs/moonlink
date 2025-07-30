@@ -15,6 +15,7 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::MooncakeTableConfig;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::wal::WalManager;
 use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
 use crate::storage::PersistenceResult;
@@ -1762,6 +1763,35 @@ async fn test_wal_keeps_multiple_streaming_xacts() {
     // we should be keeping all WAL after the flush at LSN 2 because we have a streaming xact that is not committed
     env.check_wal_events(&expected_events, &not_expected_events)
         .await;
+}
+
+#[tokio::test]
+async fn test_wal_drop_table_removes_files() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    // append a row
+    env.append_row(1, "John", 30, 1, None).await;
+    env.flush_table(1).await;
+
+    env.force_wal_persistence(1).await;
+
+    // drop the table
+    env.drop_table().await.unwrap();
+
+    // check that the WAL files are deleted
+    // we at most have 2 files for 2 events, we check 0 and 1
+    let wal_filesystem_accessor = env.wal_filesystem_accessor.clone();
+    let file_names = [0, 1]
+        .iter()
+        .map(|i| WalManager::get_file_name(*i))
+        .collect::<Vec<String>>();
+    for file_name in file_names {
+        assert!(!wal_filesystem_accessor
+            .object_exists(&file_name)
+            .await
+            .unwrap());
+    }
 }
 
 /// ---- Util functions unit test ----

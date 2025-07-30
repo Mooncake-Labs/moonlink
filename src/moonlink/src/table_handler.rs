@@ -149,13 +149,19 @@ impl TableHandler {
                 return;
             }
 
-            // Step-3: delete the mooncake table.
+            // Step-3: delete the WAL files.
+            if let Err(e) = table.drop_wal().await {
+                let _ = event_sync_sender.drop_table_completion_tx.send(Err(e));
+                return;
+            }
+
+            // Step-4: delete the mooncake table.
             if let Err(e) = table.drop_mooncake_table().await {
                 let _ = event_sync_sender.drop_table_completion_tx.send(Err(e));
                 return;
             }
 
-            // Step-4: send back completion notification.
+            // Step-5: send back completion notification.
             let _ = event_sync_sender.drop_table_completion_tx.send(Ok(()));
         };
 
@@ -504,8 +510,14 @@ impl TableHandler {
                             match result {
                                 Ok(result) => {
                                     table_handler_state.wal_persist_ongoing = false;
-                                    if let Some(highest_lsn) = table.handle_completed_persistence_and_truncate(&result) {
+                                    if let Some(highest_lsn) = table.handle_completed_persistence_and_truncate_wal(&result) {
                                         event_sync_sender.wal_flush_lsn_tx.send(highest_lsn).unwrap();
+                                    }
+
+                                    // Check whether need to drop table.
+                                    if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
+                                        drop_table(&mut table, event_sync_sender).await;
+                                        return;
                                     }
                                 }
                                 Err(e) => {

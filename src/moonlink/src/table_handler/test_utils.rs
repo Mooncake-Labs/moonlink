@@ -58,7 +58,7 @@ pub struct TestEnvironment {
     replication_tx: watch::Sender<u64>,
     last_commit_tx: watch::Sender<u64>,
     snapshot_lsn_tx: watch::Sender<u64>,
-    wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    pub(crate) wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     wal_filesystem_path: String,
     pub(crate) force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
     pub(crate) wal_flush_lsn_rx: watch::Receiver<u64>,

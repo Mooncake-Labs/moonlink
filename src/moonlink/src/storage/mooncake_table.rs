@@ -967,16 +967,6 @@ impl MooncakeTable {
         self.last_wal_persisted_metadata.clone()
     }
 
-    #[cfg(test)]
-    pub fn get_table_id(&self) -> u32 {
-        self.metadata.table_id
-    }
-
-    #[cfg(test)]
-    pub fn get_wal_manager(&self) -> &WalManager {
-        &self.wal_manager
-    }
-
     pub(crate) fn get_state_for_reader(
         &self,
     ) -> (Arc<RwLock<SnapshotTableState>>, watch::Receiver<u64>) {
@@ -1236,11 +1226,6 @@ impl MooncakeTable {
         self.table_snapshot_watch_sender.send(lsn).unwrap();
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {
-        self.table_snapshot_watch_sender.clone()
-    }
-
     /// Persist an iceberg snapshot.
     async fn persist_iceberg_snapshot_impl(
         mut iceberg_table_manager: Box<dyn TableManager>,
@@ -1464,12 +1449,19 @@ impl MooncakeTable {
 
     /// Handles the result of a persist and truncate operation.
     /// Returns the highest LSN that has been persisted into WAL.
-    pub(crate) fn handle_completed_persistence_and_truncate(
+    pub(crate) fn handle_completed_persistence_and_truncate_wal(
         &mut self,
         result: &PersistAndTruncateResult,
     ) -> Option<u64> {
         self.wal_manager
             .handle_completed_persistence_and_truncate(result)
+    }
+
+    /// Drop the WAL files. Note that at the moment this drops WAL files in the mooncake table's local filesystem
+    /// and so behaves the same as MooncakeTable.drop_table(),
+    /// but in the future this is needed to support object storage
+    pub(crate) async fn drop_wal(&mut self) -> Result<()> {
+        self.wal_manager.drop_wal().await
     }
 
     pub fn push_wal_event(&mut self, event: &TableEvent) {
@@ -1550,6 +1542,21 @@ mod mooncake_tests {
             /*persistence_lsn=*/ Some(1),
             &res_copy,
         );
+    }
+}
+
+#[cfg(test)]
+impl MooncakeTable {
+    pub fn get_table_id(&self) -> u32 {
+        self.metadata.table_id
+    }
+
+    pub fn get_wal_manager(&self) -> &WalManager {
+        &self.wal_manager
+    }
+
+    pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {
+        self.table_snapshot_watch_sender.clone()
     }
 }
 

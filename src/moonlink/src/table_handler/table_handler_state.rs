@@ -322,6 +322,9 @@ impl TableHandlerState {
         if self.iceberg_snapshot_ongoing {
             return false;
         }
+        if self.wal_persist_ongoing {
+            return false;
+        }
         if self.table_maintenance_process_status != MaintenanceProcessStatus::Unrequested {
             return false;
         }

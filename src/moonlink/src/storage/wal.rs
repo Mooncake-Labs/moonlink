@@ -552,6 +552,16 @@ impl WalManager {
     }
 
     // ------------------------------
+    // Drop WAL files
+    // ------------------------------
+    pub async fn drop_wal(&mut self) -> Result<()> {
+        let file_system_accessor = self.file_system_accessor.clone();
+        let wal_file_numbers = self.live_wal_files_tracker.clone();
+        WalManager::delete_files(file_system_accessor, &wal_file_numbers).await?;
+        Ok(())
+    }
+
+    // ------------------------------
     // Recovery
     // ------------------------------
 
