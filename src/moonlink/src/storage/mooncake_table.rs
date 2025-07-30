@@ -1351,7 +1351,9 @@ impl MooncakeTable {
             .unwrap();
     }
 
-    pub(crate) fn persist_and_update_wal(&mut self) -> bool {
+    /// Spawns a background task to persist and truncate WAL if needed.
+    /// Returns true if there was a task spawned, false otherwise.
+    pub(crate) fn persist_and_truncate_wal(&mut self) -> bool {
         let latest_iceberg_snapshot_lsn = self.get_iceberg_snapshot_lsn();
         let files_to_truncate =
             if let Some(latest_iceberg_snapshot_lsn) = latest_iceberg_snapshot_lsn {
@@ -1360,7 +1362,7 @@ impl MooncakeTable {
             } else {
                 vec![]
             };
-        let file_to_persist = self.wal_manager.take_for_next_file();
+        let file_to_persist = self.wal_manager.extract_next_persistent_file();
 
         if !files_to_truncate.is_empty() || file_to_persist.is_some() {
             let event_sender_clone = self.table_notify.as_ref().unwrap().clone();
@@ -1381,12 +1383,14 @@ impl MooncakeTable {
         }
     }
 
-    pub(crate) fn handle_completed_persist_and_truncate(
+    /// Handles the result of a persist and truncate operation.
+    /// Returns the highest LSN that has been persisted into WAL.
+    pub(crate) fn handle_completed_persistence_and_truncate(
         &mut self,
         result: &PersistAndTruncateResult,
     ) -> Option<u64> {
         self.wal_manager
-            .handle_completed_persist_and_truncate(result)
+            .handle_completed_persistence_and_truncate(result)
     }
 
     pub fn push_wal_event(&mut self, event: &TableEvent) {

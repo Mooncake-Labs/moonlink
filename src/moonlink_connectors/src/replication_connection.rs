@@ -37,6 +37,7 @@ pub enum Command {
         event_sender: mpsc::Sender<TableEvent>,
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
+        wal_flush_lsn_rx: watch::Receiver<u64>,
     },
     DropTable {
         src_table_id: SrcTableId,
@@ -324,6 +325,7 @@ impl ReplicationConnection {
                 event_sender: table_resources.event_sender,
                 commit_lsn_tx: table_resources.commit_lsn_tx,
                 flush_lsn_rx: table_resources.flush_lsn_rx,
+                wal_flush_lsn_rx: table_resources.wal_flush_lsn_rx,
             })
             .await
         {
@@ -538,6 +540,8 @@ async fn run_event_loop(
 
     let mut status_interval = tokio::time::interval(Duration::from_secs(10));
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
+    // TODO(Paul): Currently unused. In preparation for acknowledging latest WAL flush LSN to replication sink.
+    let mut _wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -560,14 +564,16 @@ async fn run_event_loop(
                 }
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
-                Command::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx } => {
+                Command::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
                     sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+                    _wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
                     stream.as_mut().add_table_schema(schema);
                 }
                 Command::DropTable { src_table_id } => {
                     sink.drop_table(src_table_id);
                     flush_lsn_rxs.remove(&src_table_id);
+                    _wal_flush_lsn_rxs.remove(&src_table_id);
                     stream.as_mut().remove_table_schema(src_table_id);
                 }
                 Command::Shutdown => {

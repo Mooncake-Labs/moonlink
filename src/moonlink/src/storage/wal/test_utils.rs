@@ -20,7 +20,7 @@ impl WalManager {
     ) -> Result<()> {
         // handle the persist side
         let mut persisted_wal_file = None;
-        let to_persist_wal_info = self.take_for_next_file();
+        let to_persist_wal_info = self.extract_next_persistent_file();
         if let Some((wal_to_persist, file_info_to_persist)) = to_persist_wal_info {
             WalManager::persist(
                 self.file_system_accessor.clone(),
@@ -50,7 +50,7 @@ impl WalManager {
             iceberg_snapshot_lsn: last_iceberg_snapshot_lsn,
         };
 
-        self.handle_completed_persist_and_truncate(&persist_and_truncate_result);
+        self.handle_completed_persistence_and_truncate(&persist_and_truncate_result);
         Ok(())
     }
 }

@@ -395,9 +395,9 @@ impl WalManager {
     // Preparing for persistence
     // ------------------------------
 
-    /// Take all events currently in the in_mem_buf and prepare the metadata for the next file.
-    /// Resets the in_mem_buf and increments the curr_file_number.
-    pub fn take_for_next_file(&mut self) -> Option<(Vec<WalEvent>, WalFileInfo)> {
+    /// Takes all events from the in-memory buffer and prepare metadata for the next WAL file.
+    /// Resets the in-mem_buf and increments the curr_file_number.
+    pub fn extract_next_persistent_file(&mut self) -> Option<(Vec<WalEvent>, WalFileInfo)> {
         let events_to_persist = std::mem::take(&mut self.in_mem_buf);
 
         if events_to_persist.is_empty() {
@@ -534,8 +534,8 @@ impl WalManager {
     }
 
     /// Should be called after a persist and truncate operation has completed. Updates
-    /// tracked files and transactions.
-    pub fn handle_completed_persist_and_truncate(
+    /// tracked files and transactions. Returns the highest LSN that has been persisted into WAL.
+    pub fn handle_completed_persistence_and_truncate(
         // For now, we handle the persist and truncate results together.
         &mut self,
         persist_and_truncate_result: &PersistAndTruncateResult,

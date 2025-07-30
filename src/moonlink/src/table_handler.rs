@@ -488,7 +488,7 @@ impl TableHandler {
                         TableEvent::PeriodicalPersistTruncateWal => {
                             if !table_handler_state.wal_persist_ongoing {
                                 table_handler_state.wal_persist_ongoing = true;
-                                let ongoing_persist_truncate = table.persist_and_update_wal();
+                                let ongoing_persist_truncate = table.persist_and_truncate_wal();
                                 table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
                             }
                         }
@@ -496,7 +496,7 @@ impl TableHandler {
                             match result {
                                 Ok(result) => {
                                     table_handler_state.wal_persist_ongoing = false;
-                                    if let Some(highest_lsn) = table.handle_completed_persist_and_truncate(&result) {
+                                    if let Some(highest_lsn) = table.handle_completed_persistence_and_truncate(&result) {
                                         event_sync_sender.wal_flush_lsn_tx.send(highest_lsn).unwrap();
                                     }
                                 }

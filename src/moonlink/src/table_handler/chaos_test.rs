@@ -474,6 +474,8 @@ struct TestEnvironment {
     event_replay_rx: mpsc::UnboundedReceiver<TableEvent>,
     last_commit_lsn_tx: watch::Sender<u64>,
     replication_lsn_tx: watch::Sender<u64>,
+    // Currently unused but have to be kept so that the receiver is not dropped
+    _wal_flush_lsn_rx: watch::Receiver<u64>,
 }
 
 impl TestEnvironment {
@@ -520,6 +522,7 @@ impl TestEnvironment {
             Some(event_replay_tx),
         )
         .await;
+        let _wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
         let table_event_manager =
             TableEventManager::new(table_handler.get_event_sender(), table_event_sync_receiver);
         let event_sender = table_handler.get_event_sender();
@@ -536,6 +539,7 @@ impl TestEnvironment {
             event_replay_rx,
             replication_lsn_tx,
             last_commit_lsn_tx,
+            _wal_flush_lsn_rx,
         }
     }
 }
