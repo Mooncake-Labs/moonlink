@@ -1,6 +1,6 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::test_row;
-use crate::storage::wal::{PersistAndTruncateResult, WalEvent, WalManager};
+use crate::storage::wal::{WalEvent, WalManager, WalPersistAndTruncateResult};
 use crate::table_notify::TableEvent;
 use crate::{Result, WalConfig};
 use futures::StreamExt;
@@ -46,7 +46,7 @@ impl WalManager {
             };
         }
 
-        let persist_and_truncate_result = PersistAndTruncateResult {
+        let persist_and_truncate_result = WalPersistAndTruncateResult {
             file_persisted: persisted_wal_file,
             highest_deleted_file,
             iceberg_snapshot_lsn: last_iceberg_snapshot_lsn,
@@ -109,7 +109,7 @@ pub async fn wal_file_exists(
 }
 
 // ================================================
-// Helper functions for testing
+// End of WAL file manipulation helpers
 // ================================================
 
 pub fn convert_to_wal_events_vector(table_events: &[TableEvent]) -> Vec<WalEvent> {

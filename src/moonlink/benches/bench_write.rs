@@ -64,6 +64,7 @@ fn bench_write(c: &mut Criterion) {
                 };
                 let table_config =
                     MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+                // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
                 let wal_config = WalConfig::default_wal_config_local("1", temp_dir.path());
                 let mut table = MooncakeTable::new(
                     schema.clone(),
@@ -110,6 +111,7 @@ fn bench_write(c: &mut Criterion) {
                 };
                 let table_config =
                     MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+                // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
                 let wal_config = WalConfig::default_wal_config_local("1", temp_dir.path());
                 let mut table = MooncakeTable::new(
                     schema.clone(),
@@ -159,6 +161,7 @@ fn bench_write(c: &mut Criterion) {
                 };
                 let table_config =
                     MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+                // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
                 let wal_config = WalConfig::default_wal_config_local("1", temp_dir.path());
                 let mut table = rt
                     .block_on(MooncakeTable::new(

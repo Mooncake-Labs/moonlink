@@ -48,7 +48,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
 use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
-use crate::storage::wal::{PersistAndTruncateResult, WalConfig, WalManager};
+use crate::storage::wal::{WalConfig, WalManager, WalPersistAndTruncateResult};
 use crate::table_notify::{EvictedFiles, TableEvent};
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -1326,7 +1326,7 @@ impl MooncakeTable {
     /// Returns the highest LSN that has been persisted into WAL.
     pub(crate) fn handle_completed_persistence_and_truncate_wal(
         &mut self,
-        result: &PersistAndTruncateResult,
+        result: &WalPersistAndTruncateResult,
     ) -> Option<u64> {
         self.wal_manager
             .handle_completed_persistence_and_truncate(result)

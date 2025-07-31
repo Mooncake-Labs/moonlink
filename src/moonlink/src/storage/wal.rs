@@ -68,7 +68,7 @@ pub enum WalEvent {
 }
 
 #[derive(Debug, Clone)]
-pub struct PersistAndTruncateResult {
+pub struct WalPersistAndTruncateResult {
     file_persisted: Option<WalFileInfo>,
     highest_deleted_file: Option<WalFileInfo>,
     /// The LSN of the last seen iceberg snapshot which was used to
@@ -76,7 +76,7 @@ pub struct PersistAndTruncateResult {
     iceberg_snapshot_lsn: Option<u64>,
 }
 
-impl PersistAndTruncateResult {
+impl WalPersistAndTruncateResult {
     pub fn new(
         file_persisted: Option<WalFileInfo>,
         highest_deleted_file: Option<WalFileInfo>,
@@ -494,7 +494,7 @@ impl WalManager {
 
         // Create result and notify
         let persist_and_truncate_result = result.map(|_| {
-            PersistAndTruncateResult::new(
+            WalPersistAndTruncateResult::new(
                 file_to_persist.map(|(_, wal_file_info)| wal_file_info),
                 files_to_delete.last().cloned(),
                 iceberg_snapshot_lsn,
@@ -514,7 +514,7 @@ impl WalManager {
     // ------------------------------
     fn handle_complete_persistence(
         &mut self,
-        persist_and_truncate_result: &PersistAndTruncateResult,
+        persist_and_truncate_result: &WalPersistAndTruncateResult,
     ) {
         if let Some(file_persisted) = &persist_and_truncate_result.file_persisted {
             assert_eq!(file_persisted.file_number, self.curr_file_number - 1);
@@ -535,7 +535,10 @@ impl WalManager {
 
     /// This cleans up any files that no longer need to be tracked, and also any xacts that no longer need to
     /// be tracked as a result.
-    fn handle_complete_truncate(&mut self, persist_and_truncate_result: &PersistAndTruncateResult) {
+    fn handle_complete_truncate(
+        &mut self,
+        persist_and_truncate_result: &WalPersistAndTruncateResult,
+    ) {
         if let Some(highest_deleted_file) = &persist_and_truncate_result.highest_deleted_file {
             self.live_wal_files_tracker.retain(|wal_file_info| {
                 wal_file_info.file_number > highest_deleted_file.file_number
@@ -551,7 +554,7 @@ impl WalManager {
     pub fn handle_completed_persistence_and_truncate(
         // For now, we handle the persist and truncate results together.
         &mut self,
-        persist_and_truncate_result: &PersistAndTruncateResult,
+        persist_and_truncate_result: &WalPersistAndTruncateResult,
     ) -> Option<u64> {
         self.handle_complete_persistence(persist_and_truncate_result);
         self.handle_complete_truncate(persist_and_truncate_result);
