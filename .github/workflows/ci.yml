@@ -92,7 +92,7 @@ jobs:
       - name: Run GCS feature tests
         timeout-minutes: 5
         run: |
-          cargo test -p moonlink --features=storage-gcs
+          cargo test --lib --features=storage-gcs
 
   # ──────────────────────── 3 · S3 feature test ────────────────────────────
   s3_test:
@@ -111,7 +111,6 @@ jobs:
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
             minio/minio:latest server /data
-      
       # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
       - name: Add s3.local to /etc/hosts
         run: |
@@ -134,7 +133,7 @@ jobs:
       - name: Run S3 feature tests
         timeout-minutes: 5
         run: |
-          cargo test -p moonlink --features=storage-s3
+          cargo test --lib --features=storage-s3
 
   # ───────────────────────── 4 · TEST & COVERAGE ────────────────────────────
   coverage:
