@@ -112,7 +112,6 @@ impl ReadOutput {
             // Fields used for read state cleanup after query completion.
             self.associated_files,
             cache_handles,
-            self.table_notifier,
         ))
     }
 }

@@ -32,13 +32,7 @@ where
             metadata_entry.database_id,
             metadata_entry.table_id,
             &metadata_entry.src_table_name,
-            /*iceberg_storage_config=*/
-            Some(
-                metadata_entry
-                    .moonlink_table_config
-                    .iceberg_table_config
-                    .accessor_config,
-            ),
+            metadata_entry.moonlink_table_config,
             /*is_recovery=*/ true,
         )
         .await?;

@@ -52,11 +52,24 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
-  # ──────────────────────── 2 · GCS feature test ────────────────────────────
+  # ──────────────────────── 2 · GCS test (feature, chaos) ─────────────────
   gcs_test:
-    name: Unit tests with GCS feature enabled
+    name: GCS tests (feature, chaos)
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        type: [feature, chaos]
+        include:
+          - type: feature
+            name: GCS feature test
+            timeout-minutes: 5
+            cmd: |
+              cargo test --lib --features=storage-gcs
+          - type: chaos
+            name: GCS chaos test
+            timeout-minutes: 10
+            cmd: |
+              RUST_BACKTRACE=1 cargo test test_gcs_chaos --features=chaos-test,storage-gcs -p moonlink -- --nocapture
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +82,7 @@ jobs:
             -e STORAGE_DIR=/data \
             fsouza/fake-gcs-server:latest \
             -scheme http -port 4443
-      
+
       # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
       - name: Add gcs.local to /etc/hosts
         run: |
@@ -89,16 +102,30 @@ jobs:
           done
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
-      - name: Run GCS feature tests
-        timeout-minutes: 5
+      - name: Run ${{ matrix.name }}
+        timeout-minutes: ${{ matrix.timeout-minutes }}
         run: |
-          cargo test -p moonlink --features=storage-gcs
+          ${{ matrix.cmd }}
 
-  # ──────────────────────── 3 · S3 feature test ────────────────────────────
+  # ──────────────────────── 3 · S3 test (feature, chaos) ───────────────────
   s3_test:
-    name: Unit tests with S3 feature enabled
+    name: S3 tests (feature, chaos)
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        type: [feature, chaos]
+        include:
+          - type: feature
+            name: S3 feature test
+            timeout-minutes: 5
+            cmd: |
+              cargo test --lib --features=storage-s3
+          - type: chaos
+            name: S3 chaos test
+            timeout-minutes: 10
+            cmd: |
+              cargo test storage::filesystem::accessor -p moonlink --features=chaos-test
+              RUST_BACKTRACE=1 cargo test test_s3_chaos --features=chaos-test,storage-s3 -p moonlink -- --nocapture
     steps:
       - uses: actions/checkout@v4
 
@@ -111,7 +138,7 @@ jobs:
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
             minio/minio:latest server /data
-      
+
       # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
       - name: Add s3.local to /etc/hosts
         run: |
@@ -131,10 +158,10 @@ jobs:
           done
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
-      - name: Run S3 feature tests
-        timeout-minutes: 5
+      - name: Run ${{ matrix.name }}
+        timeout-minutes: ${{ matrix.timeout-minutes }}
         run: |
-          cargo test -p moonlink --features=storage-s3
+          ${{ matrix.cmd }}
 
   # ───────────────────────── 4 · TEST & COVERAGE ────────────────────────────
   coverage:
@@ -202,86 +229,3 @@ jobs:
         timeout-minutes: 10
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test --features=chaos-test -p moonlink -- --nocapture
-
-  # ──────────────────────── 5 · S3 Chaos test ────────────────────────────
-  s3_chaos_test:
-    name: S3 chaos test
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # ─────────────────────── Start Fake S3 Server ──────────────────────────
-      - name: Start Fake S3 Server
-        run: |
-          docker run -d \
-            --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-      
-      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
-      - name: Add s3.local to /etc/hosts
-        run: |
-          echo "127.0.0.1 s3.local" | sudo tee -a /etc/hosts
-
-      # ───────────────────── Wait for Fake S3 to be ready ───────────────────
-      - name: Wait for Fake S3
-        timeout-minutes: 5
-        run: |
-          for i in {1..10}; do
-            if curl -sf http://minio:9000/minio/health/ready; then
-              echo "Fake S3 is ready!"
-              break
-            fi
-            echo "Waiting for Fake GCS..."
-            sleep 2
-          done
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          cargo test storage::filesystem::accessor -p moonlink --features=chaos-test
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_s3_test --features=chaos-test,storage-s3 -p moonlink -- --nocapture
-
-  # ──────────────────────── 6 · GCS Chaos test ────────────────────────────
-  gcs_chaos_test:
-    name: GCS chaos test
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # ─────────────────────── Start Fake GCS Server ──────────────────────────
-      - name: Start Fake GCS Server
-        run: |
-          docker run -d \
-            --name fake-gcs \
-            -p 4443:4443 \
-            -e STORAGE_DIR=/data \
-            fsouza/fake-gcs-server:latest \
-            -scheme http -port 4443
-      
-      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
-      - name: Add gcs.local to /etc/hosts
-        run: |
-          echo "127.0.0.1 gcs.local" | sudo tee -a /etc/hosts
-
-      # ───────────────────── Wait for Fake GCS to be ready ───────────────────
-      - name: Wait for Fake GCS ready
-        timeout-minutes: 5
-        run: |
-          for i in {1..10}; do
-            if curl -sf http://gcs.local:4443/storage/v1/b; then
-              echo "Fake GCS is ready!"
-              break
-            fi
-            echo "Waiting for Fake GCS..."
-            sleep 2
-          done
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_gcs_test --features=chaos-test,storage-gcs -p moonlink -- --nocapture

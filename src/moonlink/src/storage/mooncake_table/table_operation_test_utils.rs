@@ -415,14 +415,9 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
 /// ===================================
 ///
 /// Test util function to drop read states, and apply the synchronized response to mooncake table.
-pub(crate) async fn drop_read_states(
-    read_states: Vec<Arc<ReadState>>,
-    table: &mut MooncakeTable,
-    receiver: &mut Receiver<TableEvent>,
-) {
+pub(crate) async fn drop_read_states(read_states: Vec<Arc<ReadState>>) {
     for cur_read_state in read_states.into_iter() {
         drop(cur_read_state);
-        sync_read_request_for_test(table, receiver).await;
     }
 }
 
@@ -432,33 +427,15 @@ pub(crate) async fn drop_read_states_and_create_mooncake_snapshot(
     read_states: Vec<Arc<ReadState>>,
     table: &mut MooncakeTable,
     receiver: &mut Receiver<TableEvent>,
-) -> Vec<String> {
-    drop_read_states(read_states, table, receiver).await;
-    let (_, _, _, _, files_to_delete) = create_mooncake_snapshot_for_test(table, receiver).await;
-    files_to_delete
+) {
+    drop_read_states(read_states).await;
+    let (_, _, _, _, _) = create_mooncake_snapshot_for_test(table, receiver).await;
 }
 
 /// Perform a read request for the given table.
 pub(crate) async fn perform_read_request_for_test(table: &mut MooncakeTable) -> SnapshotReadOutput {
     let mut guard = table.snapshot.write().await;
     guard.request_read().await.unwrap()
-}
-
-/// Block wait read request to finish, and set the result to the snapshot buffer.
-/// Precondition: there's ongoing read request.
-pub(crate) async fn sync_read_request_for_test(
-    table: &mut MooncakeTable,
-    receiver: &mut Receiver<TableEvent>,
-) {
-    let notification = receiver.recv().await.unwrap();
-    if let TableEvent::ReadRequestCompletion {
-        read_complete_handles,
-    } = notification
-    {
-        table.set_read_request_res(read_complete_handles.handles);
-    } else {
-        panic!("Receive other notifications other than read request")
-    }
 }
 
 pub(crate) async fn alter_table_and_persist_to_iceberg(

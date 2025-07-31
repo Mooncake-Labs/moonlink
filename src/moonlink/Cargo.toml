@@ -71,7 +71,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-bitstream-io = { workspace = true }
 tracing = "0.1"
-typed-builder = "0.20"
+typed-builder = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 

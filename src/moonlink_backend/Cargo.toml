@@ -5,7 +5,13 @@ edition = { workspace = true }
 license = { workspace = true }
 
 [features]
+default = ["storage-fs"]
+
 profiling = []
+
+storage-s3 = ["moonlink/storage-s3"]
+storage-gcs = ["moonlink/storage-gcs"]
+storage-fs = ["moonlink/storage-fs"]
 
 [dependencies]
 arrow-array = { workspace = true }
@@ -17,6 +23,8 @@ moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 more-asserts = { workspace = true }
 nix = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }

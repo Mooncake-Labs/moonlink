@@ -454,9 +454,6 @@ pub struct SnapshotTask {
     /// --- States related to WAL operation ---
     new_wal_persistence_metadata: Option<WalPersistenceMetadata>,
 
-    /// --- States related to read operation ---
-    read_cache_handles: Vec<NonEvictableHandle>,
-
     /// --- States related to file indices merge operation ---
     /// These persisted items will be reflected to mooncake snapshot in the next invocation of periodic mooncake snapshot operation.
     index_merge_result: FileIndiceMergeResult,
@@ -489,8 +486,6 @@ impl SnapshotTask {
             committed_deletion_logs: HashSet::new(),
             // WAL related fields.
             new_wal_persistence_metadata: None,
-            // Read request related fields.
-            read_cache_handles: Vec::new(),
             // Index merge related fields.
             index_merge_result: FileIndiceMergeResult::default(),
             // Data compaction related fields.
@@ -514,9 +509,6 @@ impl SnapshotTask {
             return false;
         }
         if !self.new_streaming_xact.is_empty() {
-            return false;
-        }
-        if !self.read_cache_handles.is_empty() {
             return false;
         }
         if !self.index_merge_result.is_empty() {
@@ -934,13 +926,6 @@ impl MooncakeTable {
         wal_persistence_meatdata: WalPersistenceMetadata,
     ) {
         self.next_snapshot_task.new_wal_persistence_metadata = Some(wal_persistence_meatdata);
-    }
-
-    /// Set read request completion result, which will be sync-ed to mooncake table snapshot in the next periodic snapshot iteration.
-    pub(crate) fn set_read_request_res(&mut self, cache_handles: Vec<NonEvictableHandle>) {
-        self.next_snapshot_task
-            .read_cache_handles
-            .extend(cache_handles);
     }
 
     /// Set file indices merge result, which will be sync-ed to mooncake and iceberg snapshot in the next periodic snapshot iteration.

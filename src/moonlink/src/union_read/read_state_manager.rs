@@ -32,7 +32,6 @@ impl ReadStateManager {
                 /*position_deletes=*/ Vec::new(),
                 /*associated_files=*/ Vec::new(),
                 /*cache_handles=*/ Vec::new(),
-                /*table_notify=*/ None,
             ))),
             table_snapshot,
             table_snapshot_watch_receiver,

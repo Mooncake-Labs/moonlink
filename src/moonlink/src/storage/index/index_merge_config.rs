@@ -54,3 +54,19 @@ impl Default for FileIndexMergeConfig {
         }
     }
 }
+
+impl FileIndexMergeConfig {
+    /// Return a default config, with index merge enabled.
+    pub fn enabled() -> Self {
+        Self::default()
+    }
+
+    /// Return a default config, with index merge disabled.
+    pub fn disabled() -> Self {
+        Self {
+            min_file_indices_to_merge: u32::MAX,
+            max_file_indices_to_merge: u32::MAX,
+            index_block_final_size: u64::MAX,
+        }
+    }
+}

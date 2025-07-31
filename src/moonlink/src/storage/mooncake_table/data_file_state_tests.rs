@@ -1,4 +1,3 @@
-use itertools::Itertools;
 use rstest::rstest;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -612,7 +611,6 @@ async fn test_4_read_and_read_over_4(
 
     // State input: drop read state and still referenced.
     drop(read_state_1);
-    sync_read_request_for_test(&mut table, &mut table_notify).await;
     // Create a mooncake snapshot to reflect read request completion result.
     let (_, _, _, _, files_to_delete) =
         create_mooncake_snapshot_for_test(&mut table, &mut table_notify).await;
@@ -724,7 +722,6 @@ async fn test_3_read_and_read_over_and_pinned_3_without_local_filesystem_optimiz
     let snapshot_read_output_2 = perform_read_request_for_test(&mut table).await;
     let read_state_2 = snapshot_read_output_2.take_as_read_state().await;
     drop(read_state_2);
-    sync_read_request_for_test(&mut table, &mut table_notify).await;
 
     // Create a mooncake snapshot to reflect read request completion result.
     let (_, _, _, _, files_to_delete) =
@@ -767,7 +764,6 @@ async fn test_3_read_and_read_over_and_pinned_3_with_local_filesystem_optimizati
     let snapshot_read_output_2 = perform_read_request_for_test(&mut table).await;
     let read_state_2 = snapshot_read_output_2.take_as_read_state().await;
     drop(read_state_2);
-    sync_read_request_for_test(&mut table, &mut table_notify).await;
     // Create a mooncake snapshot to reflect read request completion result.
     let (_, _, _, _, files_to_delete) =
         create_mooncake_snapshot_for_test(&mut table, &mut table_notify).await;
@@ -805,7 +801,6 @@ async fn test_3_read_and_read_over_and_unpinned_1_without_local_optimization(
 
     // State input: use over & unpinned.
     drop(read_state);
-    sync_read_request_for_test(&mut table, &mut table_notify).await;
     // Create a mooncake snapshot to reflect read request completion result.
     let (_, _, _, _, files_to_delete) =
         create_mooncake_snapshot_for_test(&mut table, &mut table_notify).await;
@@ -840,7 +835,6 @@ async fn test_3_read_and_read_over_and_unpinned_1_with_local_optimization(
 
     // State input: use over & unpinned.
     drop(read_state);
-    sync_read_request_for_test(&mut table, &mut table_notify).await;
     // Create a mooncake snapshot to reflect read request completion result.
     let (_, _, _, _, files_to_delete) =
         create_mooncake_snapshot_for_test(&mut table, &mut table_notify).await;
@@ -1119,13 +1113,12 @@ async fn test_2_read_and_unpinned_2_without_local_optimization(#[case] use_batch
     check_file_pinned(&cache, FAKE_FILE_ID.file_id).await;
 
     // Drop all read states and check reference count; cache only manages fake file here.
-    let files_to_delete = drop_read_states_and_create_mooncake_snapshot(
+    drop_read_states_and_create_mooncake_snapshot(
         vec![read_state_1, read_state_2],
         &mut table,
         &mut table_notify,
     )
     .await;
-    assert!(files_to_delete.is_empty());
 
     // Validate end state.
     check_file_not_pinned(&cache, data_file_id).await;
@@ -1171,13 +1164,12 @@ async fn test_2_read_and_unpinned_2_with_local_optimization(#[case] use_batch_wr
     check_file_pinned(&cache, FAKE_FILE_ID.file_id).await;
 
     // Drop all read states and check reference count; cache only manages fake file here.
-    let files_to_delete = drop_read_states_and_create_mooncake_snapshot(
+    drop_read_states_and_create_mooncake_snapshot(
         vec![read_state_1, read_state_2],
         &mut table,
         &mut table_notify,
     )
     .await;
-    assert!(files_to_delete.is_empty());
 
     // Validate end state.
     check_file_not_pinned(&cache, data_file_id).await;
@@ -1387,19 +1379,8 @@ async fn test_3_compact_3_5_without_local_filesystem_optimization() {
     }
 
     // Drop all read states and check reference count and evicted files to delete.
-    let mut actual_files_to_delete = drop_read_states_and_create_mooncake_snapshot(
-        vec![read_state],
-        &mut table,
-        &mut table_notify,
-    )
-    .await;
-    actual_files_to_delete.sort();
-    let expected_files_to_delete = old_compacted_data_files
-        .iter()
-        .map(|f| f.file_path().clone())
-        .sorted()
-        .collect::<Vec<_>>();
-    assert_eq!(actual_files_to_delete, expected_files_to_delete);
+    drop_read_states_and_create_mooncake_snapshot(vec![read_state], &mut table, &mut table_notify)
+        .await;
 
     // Check cache status.
     assert_eq!(
@@ -1505,19 +1486,8 @@ async fn test_3_compact_3_5_with_local_filesystem_optimization() {
     }
 
     // Drop all read states and check reference count and evicted files to delete.
-    let mut actual_files_to_delete = drop_read_states_and_create_mooncake_snapshot(
-        vec![read_state],
-        &mut table,
-        &mut table_notify,
-    )
-    .await;
-    actual_files_to_delete.sort();
-    let expected_files_to_delete = old_compacted_data_files
-        .iter()
-        .map(|f| f.file_path().clone())
-        .sorted()
-        .collect::<Vec<_>>();
-    assert_eq!(actual_files_to_delete, expected_files_to_delete);
+    drop_read_states_and_create_mooncake_snapshot(vec![read_state], &mut table, &mut table_notify)
+        .await;
 
     // Check cache status.
     assert_eq!(
@@ -1595,14 +1565,8 @@ async fn test_3_compact_1_5_without_local_filesystem_optimization() {
     assert_eq!(evicted_files_to_delete, old_compacted_index_block_files);
 
     // Drop read state, so old data files are unreferenced any more.
-    let mut files_to_delete = drop_read_states_and_create_mooncake_snapshot(
-        vec![read_state],
-        &mut table,
-        &mut table_notify,
-    )
-    .await;
-    files_to_delete.sort();
-    assert_eq!(files_to_delete, old_compacted_data_files);
+    drop_read_states_and_create_mooncake_snapshot(vec![read_state], &mut table, &mut table_notify)
+        .await;
 
     // Check data file has been recorded in mooncake table.
     let (new_compacted_data_file_size, new_compacted_data_file_id) =
@@ -1654,11 +1618,6 @@ async fn test_3_compact_1_5_with_local_filesystem_optimization() {
     // Get old compacted files before compaction.
     let disk_files = get_disk_files_for_table(&table).await;
     assert_eq!(disk_files.len(), 2);
-    let old_compacted_data_files = disk_files
-        .keys()
-        .map(|f| f.file_path().clone())
-        .sorted()
-        .collect::<Vec<_>>();
 
     let old_compacted_index_block_files = get_index_block_filepaths(&table).await;
     let old_compacted_index_block_file_ids = get_index_block_file_ids(&table).await;
@@ -1686,14 +1645,8 @@ async fn test_3_compact_1_5_with_local_filesystem_optimization() {
     assert!(evicted_files_to_delete.is_empty());
 
     // Drop read state, so old data files are unreferenced any more.
-    let mut files_to_delete = drop_read_states_and_create_mooncake_snapshot(
-        vec![read_state],
-        &mut table,
-        &mut table_notify,
-    )
-    .await;
-    files_to_delete.sort();
-    assert_eq!(files_to_delete, old_compacted_data_files);
+    drop_read_states_and_create_mooncake_snapshot(vec![read_state], &mut table, &mut table_notify)
+        .await;
 
     // Check data file has been recorded in mooncake table.
     let (new_compacted_data_file_size, new_compacted_data_file_id) =

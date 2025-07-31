@@ -14,6 +14,7 @@ pub enum StorageConfig {
         secret_access_key: String,
         region: String,
         bucket: String,
+        #[serde(default)]
         endpoint: Option<String>,
     },
     #[cfg(feature = "storage-gcs")]
@@ -28,8 +29,10 @@ pub enum StorageConfig {
         access_key_id: String,
         secret_access_key: String,
         /// Used for fake GCS server.
+        #[serde(default)]
         endpoint: Option<String>,
         /// Used for fake GCS server.
+        #[serde(default)]
         disable_auth: bool,
     },
 }
@@ -132,5 +135,40 @@ impl StorageConfig {
                 region: Some(region.clone()),
             }),
         }
+    }
+}
+
+#[cfg(all(test, feature = "storage-gcs"))]
+mod tests {
+    use crate::StorageConfig;
+
+    /// Testing scenario: deserialize storage config with partial GCS field populated.
+    #[test]
+    fn test_deserialize_storage_config_with_only_necessary() {
+        let json = r#"
+        {
+            "Gcs": {
+                "project": "test-project",
+                "region": "us-west1",
+                "bucket": "test-bucket",
+                "access_key_id": "fake-access-key",
+                "secret_access_key": "fake-secret-key"
+            }
+        }
+        "#;
+
+        let parsed_config: StorageConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed_config,
+            StorageConfig::Gcs {
+                project: "test-project".to_string(),
+                region: "us-west1".to_string(),
+                bucket: "test-bucket".to_string(),
+                access_key_id: "fake-access-key".to_string(),
+                secret_access_key: "fake-secret-key".to_string(),
+                endpoint: None,
+                disable_auth: false,
+            }
+        );
     }
 }

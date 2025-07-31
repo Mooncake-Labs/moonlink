@@ -7,7 +7,6 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::IcebergSnapshotResult;
 
 use crate::storage::wal::PersistAndTruncateResult;
-use crate::NonEvictableHandle;
 use crate::Result;
 
 /// Table maintenance status.
@@ -49,20 +48,6 @@ impl std::fmt::Debug for EvictedFiles {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EvictedFiles")
             .field("evicted files count", &self.files.len())
-            .finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct ReadCompleteCacheHandle {
-    /// Cache handles which get pinned before query.
-    pub handles: Vec<NonEvictableHandle>,
-}
-
-impl std::fmt::Debug for ReadCompleteCacheHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReadCompleteCacheHandle")
-            .field("cache handle count", &self.handles.len())
             .finish()
     }
 }
@@ -168,11 +153,6 @@ pub enum TableEvent {
     DataCompactionResult {
         /// Result for data compaction.
         data_compaction_result: Result<DataCompactionResult>,
-    },
-    /// Read request completion.
-    ReadRequestCompletion {
-        /// Cache handles, which are pinned before query.
-        read_complete_handles: ReadCompleteCacheHandle,
     },
     /// Evicted files to delete.
     EvictedFilesToDelete {

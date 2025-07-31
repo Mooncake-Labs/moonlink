@@ -7,6 +7,7 @@ use crate::storage::iceberg::deletion_vector::{
 use crate::storage::iceberg::iceberg_table_manager::*;
 use crate::storage::iceberg::index::FileIndexBlob;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
+use crate::storage::iceberg::moonlink_catalog::PuffinBlobType;
 use crate::storage::iceberg::puffin_utils;
 use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
 use crate::storage::iceberg::schema_utils;
@@ -114,7 +115,11 @@ impl IcebergTableManager {
         puffin_writer.add(blob, CompressionCodec::None).await?;
 
         self.catalog
-            .record_puffin_metadata_and_close(puffin_filepath.clone(), puffin_writer)
+            .record_puffin_metadata_and_close(
+                puffin_filepath.clone(),
+                puffin_writer,
+                PuffinBlobType::DeletionVector,
+            )
             .await?;
 
         // Import the puffin file in object storage cache.
@@ -377,7 +382,11 @@ impl IcebergTableManager {
                 .add(puffin_blob, iceberg::puffin::CompressionCodec::None)
                 .await?;
             self.catalog
-                .record_puffin_metadata_and_close(puffin_filepath, puffin_writer)
+                .record_puffin_metadata_and_close(
+                    puffin_filepath,
+                    puffin_writer,
+                    PuffinBlobType::FileIndex,
+                )
                 .await?;
         }
 
@@ -423,7 +432,7 @@ impl IcebergTableManager {
             .collect::<Vec<_>>();
 
         // Process file indices to remove.
-        self.catalog.set_puffin_files_to_remove(
+        self.catalog.set_index_puffin_files_to_remove(
             file_indices_to_remove
                 .iter()
                 .map(|cur_index| self.persisted_file_indices.remove(cur_index).unwrap())

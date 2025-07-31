@@ -6,23 +6,6 @@ use crate::storage::mooncake_table::SnapshotTask;
 use crate::storage::storage_utils::TableId;
 
 impl SnapshotTableState {
-    /// Unreference pinned cache handles used in read operations.
-    /// Return evicted data files to delete.
-    pub(super) async fn unreference_read_cache_handles(
-        &mut self,
-        task: &mut SnapshotTask,
-    ) -> Vec<String> {
-        // Aggregate evicted data files to delete.
-        let mut evicted_files_to_delete = vec![];
-
-        for cur_cache_handle in task.read_cache_handles.iter_mut() {
-            let cur_evicted_files = cur_cache_handle.unreference().await;
-            evicted_files_to_delete.extend(cur_evicted_files);
-        }
-
-        evicted_files_to_delete
-    }
-
     /// Unreference all pinned data files.
     /// Return all evicted files to evict
     pub(crate) async fn unreference_and_delete_all_cache_handles(&mut self) -> Vec<String> {

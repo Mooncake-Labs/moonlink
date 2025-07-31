@@ -15,7 +15,6 @@ use crate::storage::filesystem::gcs::test_guard::TestGuard as GcsTestGuard;
 use crate::storage::filesystem::s3::s3_test_utils::*;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::test_guard::TestGuard as S3TestGuard;
-use crate::storage::mooncake_table::table_operation_test_utils::sync_read_request_for_test;
 use crate::storage::mooncake_table::{table_creation_test_utils::*, TableMetadata};
 use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
@@ -581,7 +580,7 @@ async fn validate_persisted_iceberg_table(
     snapshot_lsn: u64,
     expected_ids: Vec<i32>,
 ) {
-    let (event_sender, mut event_receiver) = mpsc::channel(100);
+    let (event_sender, _event_receiver) = mpsc::channel(100);
     let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
     let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
     replication_lsn_tx.send(snapshot_lsn).unwrap();
@@ -607,11 +606,6 @@ async fn validate_persisted_iceberg_table(
         /*expected_ids=*/ &expected_ids,
     )
     .await;
-
-    // Drop read state manager, to release all read states and mark all reads as done.
-    drop(read_state_manager);
-    // Block wait until all read completion notification sent over.
-    sync_read_request_for_test(&mut table, &mut event_receiver).await;
 }
 
 async fn chaos_test_impl(mut env: TestEnvironment) {
@@ -692,7 +686,7 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         // If anything bad happens in the eventloop, drop table would fail.
-        event_sender.send(TableEvent::DropTable).await.unwrap();
+        table_event_manager.drop_table().await.unwrap();
     });
 
     // Await the task directly and handle its result.

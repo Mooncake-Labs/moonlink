@@ -28,6 +28,8 @@ pub enum Error {
     TokioWatchRecvError {
         source: tokio::sync::watch::error::RecvError,
     },
+    #[error("JSON serialization/deserialization error: {source}")]
+    Json { source: Arc<serde_json::Error> },
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -75,5 +77,13 @@ impl From<std::io::Error> for Error {
 impl From<tokio::sync::watch::error::RecvError> for Error {
     fn from(source: tokio::sync::watch::error::RecvError) -> Self {
         Error::TokioWatchRecvError { source }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(source: serde_json::Error) -> Self {
+        Error::Json {
+            source: Arc::new(source),
+        }
     }
 }

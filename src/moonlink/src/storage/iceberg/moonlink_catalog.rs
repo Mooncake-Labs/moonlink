@@ -7,6 +7,11 @@ use iceberg::{Catalog, Result as IcebergResult, TableIdent};
 
 use std::collections::HashSet;
 
+pub enum PuffinBlobType {
+    DeletionVector,
+    FileIndex,
+}
+
 /// TODO(hjiang): iceberg-rust currently doesn't support puffin write, to workaround and reduce code change,
 /// we record puffin metadata ourselves and rewrite manifest file before transaction commits.
 #[async_trait]
@@ -16,13 +21,14 @@ pub trait PuffinWrite {
         &mut self,
         puffin_filepath: String,
         puffin_writer: PuffinWriter,
+        puffin_blob_type: PuffinBlobType,
     ) -> IcebergResult<()>;
 
     /// Set data files to remove, their corresponding deletion vectors will be removed alongside.
     fn set_data_files_to_remove(&mut self, data_files: HashSet<String>);
 
     /// Set puffin file to remove.
-    fn set_puffin_files_to_remove(&mut self, puffin_filepaths: HashSet<String>);
+    fn set_index_puffin_files_to_remove(&mut self, puffin_filepaths: HashSet<String>);
 
     /// After transaction commits, puffin metadata should be cleared for next puffin write.
     fn clear_puffin_metadata(&mut self);

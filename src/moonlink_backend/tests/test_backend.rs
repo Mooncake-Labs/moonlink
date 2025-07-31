@@ -204,6 +204,7 @@ mod tests {
                 TABLE_ID,
                 /*table_name=*/ "public.repl_test".to_string(),
                 SRC_URI.to_string(),
+                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();
@@ -311,6 +312,7 @@ mod tests {
                 TABLE_ID,
                 "public.recovery".to_string(),
                 SRC_URI.to_string(),
+                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();
@@ -374,5 +376,44 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(ids, HashSet::from([1, 2]));
+    }
+
+    /// Test scenario: perform a few requests on non-existent databases and tables, make sure error is correctly propagated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_on_non_existent_table() {
+        const NON_EXISTENT_TABLE_ID: u64 = TABLE_ID + 1;
+
+        let (mut guard, client) = TestGuard::new(Some("non_existent_table")).await;
+        guard.set_test_mode(TestGuardMode::Crash);
+
+        let database_id = guard.database_id;
+        let lsn = current_wal_lsn(&client).await;
+        let non_existent_database_id = database_id + 1;
+
+        // Scan table on non-existent database.
+        let backend = guard.backend();
+        let res = backend
+            .scan_table(non_existent_database_id, NON_EXISTENT_TABLE_ID, Some(lsn))
+            .await;
+        assert!(res.is_err());
+
+        // Scan table on non-existent table.
+        let res = backend
+            .scan_table(database_id, NON_EXISTENT_TABLE_ID, Some(lsn))
+            .await;
+        assert!(res.is_err());
+
+        // Read schema on non-existent database.
+        let res = backend
+            .get_table_schema(non_existent_database_id, NON_EXISTENT_TABLE_ID)
+            .await;
+        assert!(res.is_err());
+
+        // Read schema on non-existent table.
+        let res = backend
+            .get_table_schema(database_id, NON_EXISTENT_TABLE_ID)
+            .await;
+        assert!(res.is_err());
     }
 }

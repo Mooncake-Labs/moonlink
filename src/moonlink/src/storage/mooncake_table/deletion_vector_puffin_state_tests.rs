@@ -329,13 +329,8 @@ async fn test_2_read_without_local_optimization(#[case] use_batch_write: bool) {
     );
 
     // Drop all read states and check reference count.
-    let files_to_delete = drop_read_states_and_create_mooncake_snapshot(
-        vec![read_state],
-        &mut table,
-        &mut table_notify,
-    )
-    .await;
-    assert!(files_to_delete.is_empty());
+    drop_read_states_and_create_mooncake_snapshot(vec![read_state], &mut table, &mut table_notify)
+        .await;
     assert_pending_eviction_entries_size(&mut cache, /*expected_count=*/ 0).await;
     assert_evictable_cache_size(&mut cache, /*expected_count=*/ 1).await; // data file
     assert_non_evictable_cache_size(&mut cache, /*expected_count=*/ 2).await; // puffin file and index block.
@@ -388,13 +383,8 @@ async fn test_2_read_with_local_optimization(#[case] use_batch_write: bool) {
     );
 
     // Drop all read states and check reference count.
-    let files_to_delete = drop_read_states_and_create_mooncake_snapshot(
-        vec![read_state],
-        &mut table,
-        &mut table_notify,
-    )
-    .await;
-    assert!(files_to_delete.is_empty());
+    drop_read_states_and_create_mooncake_snapshot(vec![read_state], &mut table, &mut table_notify)
+        .await;
     assert_pending_eviction_entries_size(&mut cache, /*expected_count=*/ 0).await;
     assert_evictable_cache_size(&mut cache, /*expected_count=*/ 1).await; // data file
     assert_non_evictable_cache_size(&mut cache, /*expected_count=*/ 2).await; // puffin file and index block.

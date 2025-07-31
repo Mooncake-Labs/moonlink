@@ -442,12 +442,6 @@ impl SnapshotTableState {
         // All evicted data files by the object storage cache.
         let mut evicted_data_files_to_delete = vec![];
 
-        // Reflect read request result to mooncake snapshot.
-        let completed_read_evicted_files = self
-            .update_snapshot_by_read_request_results(&mut task)
-            .await;
-        evicted_data_files_to_delete.extend(completed_read_evicted_files);
-
         // Reflect iceberg snapshot to mooncake snapshot.
         let persistence_evicted_files = self.update_snapshot_by_iceberg_snapshot(&task).await;
         evicted_data_files_to_delete.extend(persistence_evicted_files);

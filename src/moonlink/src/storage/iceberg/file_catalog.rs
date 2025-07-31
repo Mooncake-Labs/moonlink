@@ -3,7 +3,7 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
-use crate::storage::iceberg::moonlink_catalog::{PuffinWrite, SchemaUpdate};
+use crate::storage::iceberg::moonlink_catalog::{PuffinBlobType, PuffinWrite, SchemaUpdate};
 use crate::storage::iceberg::puffin_writer_proxy::{
     get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
 };
@@ -78,7 +78,8 @@ pub struct FileCatalog {
     /// Used to record puffin blob metadata in one transaction, and cleaned up after transaction commits.
     ///
     /// Maps from "puffin filepath" to "puffin blob metadata".
-    puffin_blobs_to_add: HashMap<String, Vec<PuffinBlobMetadataProxy>>,
+    deletion_vector_blobs_to_add: HashMap<String, Vec<PuffinBlobMetadataProxy>>,
+    file_index_blobs_to_add: HashMap<String, Vec<PuffinBlobMetadataProxy>>,
     /// A vector of "puffin filepath"s.
     puffin_blobs_to_remove: HashSet<String>,
     /// A set of data files to remove, along with their corresponding deletion vectors and file indices.
@@ -99,7 +100,8 @@ impl FileCatalog {
             warehouse_location,
             iceberg_schema,
             etag: Mutex::new(RefCell::new(None)),
-            puffin_blobs_to_add: HashMap::new(),
+            deletion_vector_blobs_to_add: HashMap::new(),
+            file_index_blobs_to_add: HashMap::new(),
             puffin_blobs_to_remove: HashSet::new(),
             data_files_to_remove: HashSet::new(),
         })
@@ -119,7 +121,8 @@ impl FileCatalog {
             iceberg_schema,
             etag: Mutex::new(RefCell::new(None)),
             warehouse_location: String::new(),
-            puffin_blobs_to_add: HashMap::new(),
+            deletion_vector_blobs_to_add: HashMap::new(),
+            file_index_blobs_to_add: HashMap::new(),
             puffin_blobs_to_remove: HashSet::new(),
             data_files_to_remove: HashSet::new(),
         })
@@ -298,10 +301,17 @@ impl PuffinWrite for FileCatalog {
         &mut self,
         puffin_filepath: String,
         puffin_writer: PuffinWriter,
+        puffin_blob_type: PuffinBlobType,
     ) -> IcebergResult<()> {
         let puffin_metadata = get_puffin_metadata_and_close(puffin_writer).await?;
-        self.puffin_blobs_to_add
-            .insert(puffin_filepath, puffin_metadata);
+        match &puffin_blob_type {
+            PuffinBlobType::DeletionVector => self
+                .deletion_vector_blobs_to_add
+                .insert(puffin_filepath, puffin_metadata),
+            PuffinBlobType::FileIndex => self
+                .file_index_blobs_to_add
+                .insert(puffin_filepath, puffin_metadata),
+        };
         Ok(())
     }
 
@@ -310,13 +320,14 @@ impl PuffinWrite for FileCatalog {
         self.data_files_to_remove = data_files;
     }
 
-    fn set_puffin_files_to_remove(&mut self, puffin_filepaths: HashSet<String>) {
+    fn set_index_puffin_files_to_remove(&mut self, puffin_filepaths: HashSet<String>) {
         assert!(self.puffin_blobs_to_remove.is_empty());
         self.puffin_blobs_to_remove = puffin_filepaths;
     }
 
     fn clear_puffin_metadata(&mut self) {
-        self.puffin_blobs_to_add.clear();
+        self.deletion_vector_blobs_to_add.clear();
+        self.file_index_blobs_to_add.clear();
         self.puffin_blobs_to_remove.clear();
         self.data_files_to_remove.clear();
     }
@@ -676,8 +687,9 @@ impl Catalog for FileCatalog {
         append_puffin_metadata_and_rewrite(
             &metadata,
             &self.file_io,
+            &self.deletion_vector_blobs_to_add,
+            &self.file_index_blobs_to_add,
             &self.data_files_to_remove,
-            &self.puffin_blobs_to_add,
             &self.puffin_blobs_to_remove,
         )
         .await?;

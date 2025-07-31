@@ -1,4 +1,5 @@
 use arrow_array::Int64Array;
+use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
 
 use std::{collections::HashSet, fs::File};
 
-use moonlink::decode_read_state_for_testing;
+use moonlink::{decode_read_state_for_testing, AccessorConfig, StorageConfig};
 use moonlink_backend::file_utils::{recreate_directory, DEFAULT_MOONLINK_TEMP_FILE_PATH};
 use moonlink_backend::{MoonlinkBackend, ReadState};
 
@@ -46,6 +47,27 @@ impl TestGuard {
 
     pub fn backend(&self) -> &Arc<MoonlinkBackend<DatabaseId, TableId>> {
         &self.backend
+    }
+
+    pub fn get_serialized_table_config(&self) -> String {
+        let root_directory = self
+            .tmp
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let table_config = TableConfig {
+            mooncake_config: MooncakeConfig {
+                skip_index_merge: true,
+                skip_data_compaction: true,
+            },
+            iceberg_config: Some(AccessorConfig::new_with_storage_config(
+                StorageConfig::FileSystem { root_directory },
+            )),
+        };
+        serde_json::to_string(&table_config).unwrap()
     }
 
     #[allow(dead_code)]
@@ -236,6 +258,21 @@ fn apply_position_deletes_to_files(
     result
 }
 
+/// Util function to create a table creation config by directory.
+fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
+    let root_directory = tmp_dir.path().to_str().unwrap().to_string();
+    let table_config = TableConfig {
+        mooncake_config: MooncakeConfig {
+            skip_index_merge: true,
+            skip_data_compaction: true,
+        },
+        iceberg_config: Some(AccessorConfig::new_with_storage_config(
+            StorageConfig::FileSystem { root_directory },
+        )),
+    };
+    serde_json::to_string(&table_config).unwrap()
+}
+
 /// Spin up a backend + scratch TempDir + psql client, and guarantee
 /// a **fresh table** named `table_name` exists and is registered with
 /// Moonlink.
@@ -294,6 +331,7 @@ async fn setup_backend(
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                &get_serialized_table_config(&temp_dir),
             )
             .await
             .unwrap();
@@ -344,6 +382,7 @@ pub async fn smoke_create_and_insert(
             TABLE_ID,
             "public.test".to_string(),
             uri.to_string(),
+            &get_serialized_table_config(tmp_dir),
         )
         .await
         .unwrap();

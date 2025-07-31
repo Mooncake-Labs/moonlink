@@ -4,13 +4,12 @@
 //
 
 use super::table_metadata::TableMetadata;
-use crate::storage::PuffinDeletionBlobAtRead;
-use crate::table_notify::{ReadCompleteCacheHandle, TableEvent};
+use crate::storage::{io_utils, PuffinDeletionBlobAtRead};
 use crate::NonEvictableHandle;
 
 use bincode::config;
 use tracing::Instrument;
-use tracing::{info_span, warn};
+use tracing::{error, info_span, warn};
 
 const BINCODE_CONFIG: config::Configuration = config::standard();
 
@@ -23,8 +22,6 @@ pub struct ReadState {
     pub(crate) associated_files: Vec<String>,
     /// Cache handles for data files.
     cache_handles: Vec<NonEvictableHandle>,
-    // Invariant: [`table_notify`] cannot be `None` if there're involved data files.
-    table_notify: Option<tokio::sync::mpsc::Sender<TableEvent>>,
 }
 
 impl Drop for ReadState {
@@ -32,19 +29,19 @@ impl Drop for ReadState {
         // Notify query completion for object storage cache unreference.
         // Since we cannot rely on async function at `Drop` function, start a detech task immediately here.
         let cache_handles = std::mem::take(&mut self.cache_handles);
-
-        if let Some(table_notify) = self.table_notify.clone() {
-            tokio::spawn(async move {
-                table_notify
-                    .send(TableEvent::ReadRequestCompletion {
-                        read_complete_handles: ReadCompleteCacheHandle {
-                            handles: cache_handles,
-                        },
-                    })
-                    .await
-                    .unwrap();
-            });
-        }
+        tokio::spawn(async move {
+            let mut evicted_files_to_delete = vec![];
+            for mut cur_cache_handle in cache_handles.into_iter() {
+                let cur_evicted_files = cur_cache_handle.unreference().await;
+                evicted_files_to_delete.extend(cur_evicted_files);
+            }
+            if let Err(e) = io_utils::delete_local_files(&evicted_files_to_delete).await {
+                error!(
+                    "Failed to delete unreferenced cache files: {:?}: {:?}",
+                    evicted_files_to_delete, e
+                );
+            }
+        });
 
         // Delete temporarily data files.
         if self.associated_files.is_empty() {
@@ -77,17 +74,7 @@ impl ReadState {
         // Fields used for read state cleanup after query completion.
         associated_files: Vec<String>,
         mut cache_handles: Vec<NonEvictableHandle>, // Cache handles for data files.
-        table_notify: Option<tokio::sync::mpsc::Sender<TableEvent>>,
     ) -> Self {
-        // Check invariants.
-        if table_notify.is_none() {
-            assert!(data_files.is_empty());
-            assert!(puffin_cache_handles.is_empty());
-            assert!(deletion_vectors_at_read.is_empty());
-            assert!(associated_files.is_empty());
-            assert!(cache_handles.is_empty());
-        }
-
         deletion_vectors_at_read.sort_by(|dv_1, dv_2| {
             dv_1.data_file_index
                 .cmp(&dv_2.data_file_index)
@@ -114,7 +101,6 @@ impl ReadState {
             data,
             associated_files,
             cache_handles,
-            table_notify,
         }
     }
 }

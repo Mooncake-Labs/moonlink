@@ -26,6 +26,10 @@ pub enum Error {
 
     #[error("IO error: {source}")]
     Io { source: Arc<std::io::Error> },
+
+    // Requested database table not found.
+    #[error("Table {0} not found")]
+    TableNotFound(String),
 }
 
 pub type Result<T> = result::Result<T, Error>;

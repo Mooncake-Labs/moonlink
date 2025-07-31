@@ -49,3 +49,19 @@ impl Default for DataCompactionConfig {
         }
     }
 }
+
+impl DataCompactionConfig {
+    /// Return a default config, with data compaction enabled.
+    pub fn enabled() -> Self {
+        Self::default()
+    }
+
+    /// Return a default config, with data compaction disabled.
+    pub fn disabled() -> Self {
+        Self {
+            min_data_file_to_compact: u32::MAX,
+            max_data_file_to_compact: u32::MAX,
+            data_file_final_size: u64::MAX,
+        }
+    }
+}
