@@ -20,13 +20,11 @@ pub mod table_status_reader;
 mod transaction_stream;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
-use super::index::index_merge_config::FileIndexMergeConfig;
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
 use crate::error::Result;
 use crate::row::{IdentityProp, MoonlinkRow};
 use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
-use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::compaction::compactor::{CompactionBuilder, CompactionFileParams};
 pub(crate) use crate::storage::compaction::table_compaction::{
     DataCompactionPayload, DataCompactionResult,
@@ -47,6 +45,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
     IcebergSnapshotDataCompactionResult, IcebergSnapshotImportPayload,
     IcebergSnapshotIndexMergePayload, IcebergSnapshotPayload, IcebergSnapshotResult,
 };
+use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 use crate::storage::wal::{PersistAndTruncateResult, WalConfig, WalManager};
@@ -57,7 +56,6 @@ use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
-use serde::{Deserialize, Serialize};
 pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -75,114 +73,6 @@ use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 /// `0` is designated as `InvalidTransactionId` in the postgres implementation, so we can be sure this will never collide with a valid transaction id.
 /// [https://github.com/postgres/postgres/blob/d5b9b2d40262f57f58322ad49f8928fd4a492adb/src/include/access/transam.h#L31]
 pub(crate) const INITIAL_COPY_XACT_ID: u32 = 0;
-
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct IcebergPersistenceConfig {
-    /// Number of new data files to trigger an iceberg snapshot.
-    pub new_data_file_count: usize,
-    /// Number of unpersisted committed delete logs to trigger an iceberg snapshot.
-    pub new_committed_deletion_log: usize,
-}
-
-// TODO(hjiang): Add another threshold for merged file indices to trigger iceberg snapshot.
-impl IcebergPersistenceConfig {
-    #[cfg(debug_assertions)]
-    pub(crate) const DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT: usize = 1;
-    #[cfg(debug_assertions)]
-    pub(crate) const DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG: usize = 1000;
-
-    #[cfg(not(debug_assertions))]
-    pub(crate) const DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT: usize = 1;
-    #[cfg(not(debug_assertions))]
-    pub(crate) const DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG: usize = 1000;
-}
-
-impl Default for IcebergPersistenceConfig {
-    fn default() -> Self {
-        Self {
-            new_data_file_count: Self::DEFAULT_ICEBERG_NEW_DATA_FILE_COUNT,
-            new_committed_deletion_log: Self::DEFAULT_ICEBERG_SNAPSHOT_NEW_COMMITTED_DELETION_LOG,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MooncakeTableConfig {
-    /// Number of batch records which decides when to flush records from MemSlice to disk.
-    pub mem_slice_size: usize,
-    /// Number of new deletion records which decides whether to create a new mooncake table snapshot.
-    pub snapshot_deletion_record_count: usize,
-    /// Max number of rows in each record batch within MemSlice.
-    pub batch_size: usize,
-    /// Disk slice parquet file flush threshold.
-    pub disk_slice_parquet_file_size: usize,
-    /// Config for iceberg persistence config.
-    pub persistence_config: IcebergPersistenceConfig,
-    /// Config for data compaction.
-    pub data_compaction_config: DataCompactionConfig,
-    /// Config for index merge.
-    pub file_index_config: FileIndexMergeConfig,
-    /// Filesystem directory to store temporary files, used for union read.
-    pub temp_files_directory: String,
-}
-
-impl Default for MooncakeTableConfig {
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_TEMP_FILE_DIRECTORY.to_string())
-    }
-}
-
-impl MooncakeTableConfig {
-    #[cfg(debug_assertions)]
-    pub(crate) const DEFAULT_MEM_SLICE_SIZE: usize = MooncakeTableConfig::DEFAULT_BATCH_SIZE * 8;
-    #[cfg(debug_assertions)]
-    pub(super) const DEFAULT_SNAPSHOT_DELETION_RECORD_COUNT: usize = 1000;
-    #[cfg(debug_assertions)]
-    pub(crate) const DEFAULT_BATCH_SIZE: usize = 128;
-    #[cfg(debug_assertions)]
-    pub(crate) const DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE: usize = 1024 * 1024 * 2; // 2MiB
-
-    #[cfg(not(debug_assertions))]
-    pub(crate) const DEFAULT_MEM_SLICE_SIZE: usize = MooncakeTableConfig::DEFAULT_BATCH_SIZE * 32;
-    #[cfg(not(debug_assertions))]
-    pub(super) const DEFAULT_SNAPSHOT_DELETION_RECORD_COUNT: usize = 1000;
-    #[cfg(not(debug_assertions))]
-    pub(crate) const DEFAULT_BATCH_SIZE: usize = 4096;
-    #[cfg(not(debug_assertions))]
-    pub(crate) const DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE: usize = 1024 * 1024 * 128; // 128MiB
-
-    /// Default local directory to hold temporary files for union read.
-    pub const DEFAULT_TEMP_FILE_DIRECTORY: &str = "/tmp/moonlink_temp_file";
-
-    pub fn new(temp_files_directory: String) -> Self {
-        Self {
-            mem_slice_size: Self::DEFAULT_MEM_SLICE_SIZE,
-            snapshot_deletion_record_count: Self::DEFAULT_SNAPSHOT_DELETION_RECORD_COUNT,
-            batch_size: Self::DEFAULT_BATCH_SIZE,
-            disk_slice_parquet_file_size: Self::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
-            persistence_config: IcebergPersistenceConfig::default(),
-            data_compaction_config: DataCompactionConfig::default(),
-            file_index_config: FileIndexMergeConfig::default(),
-            temp_files_directory,
-        }
-    }
-    pub fn validate(&self) {
-        self.file_index_config.validate();
-        self.data_compaction_config.validate();
-    }
-    pub fn batch_size(&self) -> usize {
-        self.batch_size
-    }
-    pub fn iceberg_snapshot_new_data_file_count(&self) -> usize {
-        self.persistence_config.new_data_file_count
-    }
-    pub fn snapshot_deletion_record_count(&self) -> usize {
-        self.snapshot_deletion_record_count
-    }
-    pub fn iceberg_snapshot_new_committed_deletion_log(&self) -> usize {
-        self.persistence_config.new_committed_deletion_log
-    }
-}
 
 #[derive(Debug)]
 pub struct TableMetadata {

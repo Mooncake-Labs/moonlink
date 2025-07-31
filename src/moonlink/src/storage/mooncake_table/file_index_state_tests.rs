@@ -52,8 +52,8 @@ use crate::storage::mooncake_table::table_accessor_test_utils::*;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::test_utils_commons::*;
-use crate::storage::mooncake_table::IcebergPersistenceConfig;
 use crate::storage::mooncake_table::MooncakeTableConfig;
+use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::table_notify::TableEvent;
 use crate::{

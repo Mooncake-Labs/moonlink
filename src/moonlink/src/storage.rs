@@ -6,6 +6,7 @@ mod iceberg;
 pub(crate) mod index;
 pub(crate) mod io_utils;
 pub(crate) mod mooncake_table;
+pub mod mooncake_table_config;
 pub(crate) mod parquet_utils;
 pub(crate) mod path_utils;
 pub(crate) mod storage_utils;
@@ -30,10 +31,11 @@ pub use mooncake_table::table_secret::{
 };
 pub use mooncake_table::table_status::TableStatus;
 pub use mooncake_table::table_status_reader::TableStatusReader;
-pub use mooncake_table::IcebergPersistenceConfig;
+pub use mooncake_table::MooncakeTable;
 pub use mooncake_table::SnapshotReadOutput;
-pub use mooncake_table::{MooncakeTable, MooncakeTableConfig};
 pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
+pub use mooncake_table_config::IcebergPersistenceConfig;
+pub use mooncake_table_config::MooncakeTableConfig;
 pub use wal::WalConfig;
 
 #[cfg(test)]

@@ -13,8 +13,8 @@ use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 #[cfg(feature = "chaos-test")]
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::test_utils_commons::*;
-use crate::storage::mooncake_table::IcebergPersistenceConfig;
 use crate::storage::mooncake_table::{MooncakeTableConfig, TableMetadata as MooncakeTableMetadata};
+use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::table_notify::TableEvent;

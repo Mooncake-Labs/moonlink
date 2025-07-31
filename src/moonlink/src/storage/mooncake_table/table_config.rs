@@ -1,4 +1,5 @@
-use crate::{IcebergTableConfig, MooncakeTableConfig};
+use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
+use crate::storage::mooncake_table_config::MooncakeTableConfig;
 
 /// Configuration including everything related to a column storage table.
 

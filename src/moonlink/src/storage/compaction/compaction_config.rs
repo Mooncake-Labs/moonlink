@@ -6,10 +6,15 @@ use typed_builder::TypedBuilder;
 #[derive(Clone, Debug, PartialEq, TypedBuilder, Deserialize, Serialize)]
 pub struct DataCompactionConfig {
     /// Number of existing data files with deletion vector and under final size to trigger a compaction operation.
+    #[serde(default = "DataCompactionConfig::default_min_data_file_to_compact")]
     pub min_data_file_to_compact: u32,
+
     /// Max number of existing data files in one compaction operation.
+    #[serde(default = "DataCompactionConfig::default_max_data_file_to_compact")]
     pub max_data_file_to_compact: u32,
+
     /// Number of bytes for a block index to consider it finalized and won't be merged again.
+    #[serde(default = "DataCompactionConfig::default_data_file_final_size")]
     pub data_file_final_size: u64,
 }
 
@@ -34,6 +39,16 @@ impl DataCompactionConfig {
     pub const DEFAULT_MAX_DATA_FILE_TO_COMPACT: u32 = 32;
     #[cfg(all(not(test), not(debug_assertions)))]
     pub const DEFAULT_DATA_FILE_FINAL_SIZE: u64 = 1 << 29; // 512MiB
+
+    pub fn default_min_data_file_to_compact() -> u32 {
+        Self::DEFAULT_MIN_DATA_FILE_TO_COMPACT
+    }
+    pub fn default_max_data_file_to_compact() -> u32 {
+        Self::DEFAULT_MAX_DATA_FILE_TO_COMPACT
+    }
+    pub fn default_data_file_final_size() -> u64 {
+        Self::DEFAULT_DATA_FILE_FINAL_SIZE
+    }
 
     pub fn validate(&self) {
         ma::assert_le!(self.min_data_file_to_compact, self.max_data_file_to_compact);

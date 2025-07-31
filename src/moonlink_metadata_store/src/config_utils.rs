@@ -34,21 +34,34 @@ impl IcebergTableConfigForPersistence {
 
 /// Struct for mooncake table config.
 /// Notice it's a subset of [`MooncakeTableConfig`] since we want to keep things persisted minimum.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct MooncakeTableConfigForPersistence {
     /// Number of batch records which decides when to flush records from MemSlice to disk.
+    #[serde(default = "MooncakeTableConfig::default_mem_slice_size")]
     mem_slice_size: usize,
+
     /// Number of new deletion records which decides whether to create a new mooncake table snapshot.
+    #[serde(default = "MooncakeTableConfig::default_snapshot_deletion_record_count")]
     snapshot_deletion_record_count: usize,
+
     /// Max number of rows in each record batch within MemSlice.
+    #[serde(default = "MooncakeTableConfig::default_batch_size")]
     batch_size: usize,
+
     /// Disk slice parquet file flush threshold.
+    #[serde(default = "MooncakeTableConfig::default_disk_slice_parquet_file_size")]
     disk_slice_parquet_file_size: usize,
+
     /// Config for data compaction.
+    #[serde(default)]
     data_compaction_config: DataCompactionConfig,
+
     /// Config for index merge.
+    #[serde(default)]
     file_index_config: FileIndexMergeConfig,
+
     /// Config for iceberg persistence config.
+    #[serde(default)]
     persistence_config: IcebergPersistenceConfig,
 }
 
@@ -186,8 +199,8 @@ pub(crate) fn deserialze_moonlink_table_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use moonlink::{MooncakeTableConfig, MoonlinkTableConfig};
+    use serde_json::json;
 
     #[test]
     fn test_moonlink_table_config_serde() {
@@ -220,5 +233,50 @@ mod tests {
             table_name: "test_table".to_string(),
         };
         assert_eq!(config.get_bucket_name(), Some("my-bucket-name".to_string()));
+    }
+
+    // Testing scenario: serialized json config only contains partial fields, check whether json deserialization succeeds, and populates default value correctly.
+    #[test]
+    fn test_mooncake_persisted_config_serde() {
+        // Intentionally miss a few fields persisted config.
+        let json_input = json!({
+            "disk_slice_parquet_file_size": 22222,
+            "data_compaction_config": {
+                "min_data_file_to_compact": 10,
+                "data_file_final_size": 123456
+            },
+            "file_index_config": {
+                "min_file_indices_to_merge": 5,
+                "index_block_final_size": 654321
+            }
+        });
+
+        let actual_persisted_config: MooncakeTableConfigForPersistence =
+            serde_json::from_value(json_input).unwrap();
+        // Apart from assigned fields, all other fields should be assigned default value.
+        let expected_persisted_config = MooncakeTableConfigForPersistence {
+            // Mooncake table config.
+            mem_slice_size: MooncakeTableConfig::default_mem_slice_size(),
+            snapshot_deletion_record_count:
+                MooncakeTableConfig::default_snapshot_deletion_record_count(),
+            batch_size: MooncakeTableConfig::default_batch_size(),
+            disk_slice_parquet_file_size: 22222,
+            // Data compaction config.
+            data_compaction_config: DataCompactionConfig {
+                min_data_file_to_compact: 10,
+                max_data_file_to_compact: DataCompactionConfig::default_max_data_file_to_compact(),
+                data_file_final_size: 123456,
+            },
+            // Index merge config.
+            file_index_config: FileIndexMergeConfig {
+                min_file_indices_to_merge: 5,
+                max_file_indices_to_merge: FileIndexMergeConfig::default_max_file_indices_to_merge(
+                ),
+                index_block_final_size: 654321,
+            },
+            // Iceberg persistence config.
+            persistence_config: IcebergPersistenceConfig::default(),
+        };
+        assert_eq!(actual_persisted_config, expected_persisted_config);
     }
 }

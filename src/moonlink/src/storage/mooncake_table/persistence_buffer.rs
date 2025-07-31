@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndex;
 use crate::storage::mooncake_table::SnapshotTask;
+use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::storage_utils::MooncakeDataFileRef;
-use crate::MooncakeTableConfig;
 
 use more_asserts as ma;
 
