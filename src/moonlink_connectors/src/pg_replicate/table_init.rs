@@ -71,7 +71,8 @@ pub async fn build_table_components(
         }),
     );
 
-    let wal_config = WalConfig::default_wal_config_local(table_id, &PathBuf::from(base_path));
+    let wal_config =
+        WalConfig::default_wal_config_local(&mooncake_table_id, &PathBuf::from(base_path));
     let iceberg_table_config = IcebergTableConfig {
         namespace: vec![DEFAULT_ICEBERG_NAMESPACE.to_string()],
         table_name: mooncake_table_id,

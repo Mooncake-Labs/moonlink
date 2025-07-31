@@ -4,6 +4,7 @@ use crate::storage::iceberg::table_manager::MockTableManager;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::FileSystemAccessor;
 use iceberg::{Error as IcebergError, ErrorKind};
 use rstest::*;
@@ -500,7 +501,7 @@ async fn test_table_recovery() {
 
     // Recovery from iceberg snapshot and check mooncake table recovery.
     let iceberg_table_config = test_iceberg_table_config(&context, table_name);
-    let wal_config = WalConfig::default_wal_config_local(1, &context.path());
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
     let recovered_table = MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),
@@ -543,7 +544,7 @@ async fn test_snapshot_load_failure() {
             })
         });
 
-    let wal_config = WalConfig::default_wal_config_local(1, temp_dir.path());
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
     let wal_manager = WalManager::new(&wal_config);
 
     let table = MooncakeTable::new_with_table_manager(
@@ -599,7 +600,7 @@ async fn test_snapshot_store_failure() {
             })
         });
 
-    let wal_config = WalConfig::default_wal_config_local(1, temp_dir.path());
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
     let wal_manager = WalManager::new(&wal_config);
 
     let mut table = MooncakeTable::new_with_table_manager(

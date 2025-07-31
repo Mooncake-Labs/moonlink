@@ -37,6 +37,7 @@ use crate::storage::storage_utils;
 use crate::storage::storage_utils::create_data_file;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 use crate::storage::MooncakeTable;
 use crate::DataCompactionConfig;
@@ -241,7 +242,7 @@ async fn test_skip_iceberg_snapshot() {
     let identity_property = mooncake_table_metadata.identity.clone();
 
     let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
-    let wal_config = WalConfig::default_wal_config_local(1, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
     let schema = create_test_arrow_schema();
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -1302,7 +1303,7 @@ async fn test_small_batch_size_and_large_parquet_size() {
     let identity_property = mooncake_table_metadata.identity.clone();
 
     let iceberg_table_config = create_iceberg_table_config(warehouse_uri.clone());
-    let wal_config = WalConfig::default_wal_config_local(1, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
     let schema = create_test_arrow_schema();
     let mooncake_table_config = MooncakeTableConfig {
         batch_size: 1,
@@ -1396,7 +1397,7 @@ async fn test_multiple_table_ids_for_deletion_vector() {
     let identity_property = mooncake_table_metadata.identity.clone();
 
     let iceberg_table_config = get_iceberg_table_config(&temp_dir);
-    let wal_config = WalConfig::default_wal_config_local(1, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
     let schema = create_test_arrow_schema();
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -2408,7 +2409,7 @@ async fn test_persist_snapshot_property() {
     let identity_property = mooncake_table_metadata.identity.clone();
 
     let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
-    let wal_config = WalConfig::default_wal_config_local(1, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
     let schema = create_test_arrow_schema();
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),

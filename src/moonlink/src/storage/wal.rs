@@ -23,11 +23,15 @@ pub struct WalConfig {
 }
 
 impl WalConfig {
-    pub fn default_wal_config_local(table_id: u32, base_path: &Path) -> WalConfig {
+    /// Create a default WAL config for local storage. Should take in the mooncake table ID,
+    /// a unique identifier for a table in mooncake. Note that something like just postgres table ID
+    /// is not guaranteed to be unique, so we need to use the mooncake table ID which is unique
+    /// within moonlink.
+    pub fn default_wal_config_local(mooncake_table_id: &str, base_path: &Path) -> WalConfig {
         let wal_storage_config = StorageConfig::FileSystem {
             root_directory: base_path
                 .join(DEFAULT_WAL_FOLDER)
-                .join(table_id.to_string())
+                .join(mooncake_table_id)
                 .to_str()
                 .unwrap()
                 .to_string(),
@@ -444,7 +448,8 @@ impl WalManager {
     }
 
     /// Persist a series of wal events to the file system.
-    /// Should be called asynchronously using the results of take_for_next_file.
+    /// Should be called asynchronously using the most recent wal data extracted form the
+    /// in-memory buffer.
     pub async fn persist(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_to_persist: &Vec<WalEvent>,

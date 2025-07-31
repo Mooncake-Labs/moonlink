@@ -15,6 +15,7 @@ use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::test_utils_commons::*;
 use crate::storage::mooncake_table::IcebergPersistenceConfig;
 use crate::storage::mooncake_table::{MooncakeTableConfig, TableMetadata as MooncakeTableMetadata};
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::table_notify::TableEvent;
 use crate::ObjectStorageCache;
@@ -252,7 +253,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
         },
         ..Default::default()
     };
-    let wal_config = WalConfig::default_wal_config_local(1, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
 
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -309,7 +310,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
         },
         ..Default::default()
     };
-    let wal_config = WalConfig::default_wal_config_local(TEST_TABLE_ID.0, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
 
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -338,10 +339,8 @@ pub(crate) async fn create_mooncake_table(
     iceberg_table_config: IcebergTableConfig,
     object_storage_cache: ObjectStorageCache,
 ) -> MooncakeTable {
-    let wal_config = WalConfig::default_wal_config_local(
-        mooncake_table_metadata.table_id,
-        &mooncake_table_metadata.path,
-    );
+    let wal_config =
+        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &mooncake_table_metadata.path);
     let table = MooncakeTable::new(
         create_test_arrow_schema().as_ref().clone(),
         ICEBERG_TEST_TABLE.to_string(),
@@ -399,7 +398,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
         },
         ..Default::default()
     };
-    let wal_config = WalConfig::default_wal_config_local(TEST_TABLE_ID.0, &path);
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
 
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),

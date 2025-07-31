@@ -62,7 +62,8 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
     };
     let rt = Runtime::new().unwrap();
     let table_config = MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
-    let wal_config = WalConfig::default_wal_config_local(1, &base_path);
+    // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
+    let wal_config = WalConfig::default_wal_config_local("1", &base_path);
     let mut table = rt
         .block_on(MooncakeTable::new(
             schema,

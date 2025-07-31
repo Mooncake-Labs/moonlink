@@ -8,6 +8,7 @@ use crate::storage::mooncake_table::snapshot::PuffinDeletionBlobAtRead;
 use crate::storage::mooncake_table::snapshot_read_output::DataFileForRead;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::StorageConfig;
 use arrow::array::Int32Array;
 use futures::future::join_all;
@@ -69,7 +70,7 @@ pub async fn test_table(
     let iceberg_table_config = test_iceberg_table_config(context, table_name);
     let mut table_config = test_mooncake_table_config(context);
     table_config.batch_size = 2;
-    let wal_config = WalConfig::default_wal_config_local(1, &context.path());
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
     MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),

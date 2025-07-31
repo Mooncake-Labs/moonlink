@@ -13,7 +13,7 @@ pub struct EventSyncReceiver {
     pub force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
     /// Used to create notifier when force table maintenance operation completes.
     pub table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
-    /// Get notified when wal flush lsn advances. Will eventually replace flush_lsn_rx.
+    /// TODO(Paul): Get notified when wal flush lsn advances. Will eventually replace flush_lsn_rx.
     pub wal_flush_lsn_rx: watch::Receiver<u64>,
 }
 
@@ -31,7 +31,7 @@ pub struct EventSyncSender {
     pub force_snapshot_completion_tx: watch::Sender<Option<Result<u64>>>,
     /// Notifies when force table maintenance operation completes.
     pub table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
-    /// TODO(Paul): Notifies when wal flush lsn advances. Will eventually replace flush_lsn_rx.
+    /// TODO(Paul): Notifies when wal flush lsn advances. Will eventually replace flush_lsn_tx.
     pub wal_flush_lsn_tx: watch::Sender<u64>,
 }
 

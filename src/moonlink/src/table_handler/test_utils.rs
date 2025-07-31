@@ -5,6 +5,7 @@ use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::test_utils::{
     assert_wal_events_contains, assert_wal_events_does_not_contain,
 };
@@ -107,7 +108,7 @@ impl TestEnvironment {
 
         // TODO(Paul): Change this default when we support object storage for WAL
         let default_wal_config =
-            WalConfig::default_wal_config_local(mooncake_table.get_table_id(), temp_dir.path());
+            WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let wal_filesystem_path = default_wal_config.get_accessor_config().get_root_path();
         let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
             default_wal_config.get_accessor_config(),
@@ -149,7 +150,7 @@ impl TestEnvironment {
         let table_name = "table_name";
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
-        let wal_config = WalConfig::default_wal_config_local(1, temp_dir.path());
+        let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),

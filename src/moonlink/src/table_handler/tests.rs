@@ -15,6 +15,7 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::MooncakeTableConfig;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::WalManager;
 use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
@@ -1606,7 +1607,7 @@ async fn test_discard_duplicate_writes() {
             })
         });
 
-    let wal_config = WalConfig::default_wal_config_local(0, temp_dir.path());
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
     let wal_manager = WalManager::new(&wal_config);
 
     let mooncake_table = MooncakeTable::new_with_table_manager(

@@ -7,7 +7,10 @@ use futures::StreamExt;
 use std::sync::Arc;
 use tokio::fs;
 
-pub(crate) const WAL_TEST_TABLE_ID: u32 = 1;
+/// The ID used to test the WAL. Note that for now this could be decoupled from the
+/// tableID of the mooncake table that this may be embedded in during testing,
+/// as it is just for testing purposes to govern the WAL folder.
+pub const WAL_TEST_TABLE_ID: &str = "1";
 
 impl WalManager {
     /// Mock function for how this gets called in table handler. We retrieve some data from the wal,
