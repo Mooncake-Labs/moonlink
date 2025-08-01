@@ -77,7 +77,9 @@ impl FileSystemAccessor {
     /// Get IO operator from the catalog.
     async fn get_operator(&self) -> Result<&Operator> {
         self.operator
-            .get_or_try_init(|| async { operator_utils::create_opendal_operator(&self.config) })
+            .get_or_try_init(|| async {
+                operator_utils::create_opendal_operator(&self.config).await
+            })
             .await
     }
 

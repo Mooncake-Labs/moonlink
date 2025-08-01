@@ -43,6 +43,12 @@ pub type FileIndex = GlobalIndex; // key -> (file, row_offset)
 #[derive(Clone)]
 pub(crate) struct IndexPtr(Arc<MemIndex>);
 
+impl IndexPtr {
+    pub fn arc_ptr(&self) -> Arc<MemIndex> {
+        self.0.clone()
+    }
+}
+
 impl PartialEq for IndexPtr {
     fn eq(&self, other: &Self) -> bool {
         Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)

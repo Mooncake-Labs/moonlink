@@ -5,7 +5,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
 use more_asserts as ma;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct BatchDeletionVector {
     /// Boolean array tracking deletions (false = deleted, true = active)
     deletion_vector: Option<Vec<u8>>,
@@ -141,6 +141,32 @@ impl BatchDeletionVector {
         }
         deleted
     }
+
+    /// Get the number of rows which get deleted.
+    pub(crate) fn get_num_rows_deleted(&self) -> usize {
+        let Some(bitmap) = &self.deletion_vector else {
+            return 0;
+        };
+
+        let mut deleted = 0;
+        for (byte_idx, byte) in bitmap.iter().enumerate() {
+            // No deletion in the byte.
+            if *byte == 0xFF {
+                continue;
+            }
+
+            for bit_idx in 0..8 {
+                let row_idx = byte_idx * 8 + bit_idx;
+                if row_idx >= self.max_rows {
+                    break;
+                }
+                if byte & (1 << bit_idx) == 0 {
+                    deleted += 1;
+                }
+            }
+        }
+        deleted
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +191,8 @@ mod tests {
         assert!(!buffer.is_deleted(2));
         assert!(buffer.is_deleted(3));
         assert!(!buffer.is_deleted(4));
+        // Check number of deleted rows.
+        assert_eq!(buffer.get_num_rows_deleted(), 2);
 
         // Create a test batch
         let name_array = Arc::new(StringArray::from(vec!["A", "B", "C", "D", "E"])) as ArrayRef;
@@ -216,6 +244,8 @@ mod tests {
         let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 6);
         batch_deletion_vector.delete_row(0);
         batch_deletion_vector.delete_row(4);
+        // Check number of deleted rows.
+        assert_eq!(batch_deletion_vector.get_num_rows_deleted(), 2);
 
         // Create a test batch
         let name_array =
@@ -310,6 +340,8 @@ mod tests {
         assert_eq!(active_rows, vec![0, 2, 4, 5, 6, 7, 9]);
         let deleted_rows: Vec<u64> = buffer.collect_deleted_rows();
         assert_eq!(deleted_rows, vec![1, 3, 8]);
+        // Check number of deleted rows.
+        assert_eq!(buffer.get_num_rows_deleted(), 3);
     }
 
     #[test]
@@ -321,6 +353,8 @@ mod tests {
             dv2.delete_row(0);
             dv1.merge_with(&dv2);
             assert_eq!(dv1.collect_deleted_rows(), vec![0]);
+            // Check number of deleted rows.
+            assert_eq!(dv1.get_num_rows_deleted(), 1);
         }
 
         // rhs deletion vector is empty.
@@ -330,6 +364,8 @@ mod tests {
             let dv2 = BatchDeletionVector::new(10);
             dv1.merge_with(&dv2);
             assert_eq!(dv1.collect_deleted_rows(), vec![0]);
+            // Check number of deleted rows.
+            assert_eq!(dv1.get_num_rows_deleted(), 1);
         }
     }
 
@@ -348,5 +384,7 @@ mod tests {
         dv1.merge_with(&dv2);
         assert_eq!(dv1.collect_deleted_rows(), vec![0, 2, 6, 8]);
         assert!(!dv1.is_empty());
+        // Check number of deleted rows.
+        assert_eq!(dv1.get_num_rows_deleted(), 4);
     }
 }

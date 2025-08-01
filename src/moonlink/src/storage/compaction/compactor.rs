@@ -19,10 +19,10 @@ use crate::storage::iceberg::puffin_utils;
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
 use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
-use crate::storage::storage_utils::RecordLocation;
 use crate::storage::storage_utils::{
     get_random_file_name_in_dir, get_unique_file_id_for_flush, MooncakeDataFileRef,
 };
+use crate::storage::storage_utils::{FileId, RecordLocation};
 use crate::storage::{parquet_utils, storage_utils};
 use crate::{create_data_file, Result};
 
@@ -59,22 +59,17 @@ pub(crate) struct CompactionBuilder {
 }
 
 /// Result for data file compaction.
+#[derive(Clone, Debug)]
 struct DataFileCompactionResult {
     /// Mapping from record locations before compaction to record locations after compaction.
     data_file_remap: DataFileRemap,
     /// Cache evicted files to delete.
     evicted_files_to_delete: Vec<String>,
-    /// Mapping from record location to data file index (i.e. idx-th data file after compaction).
-    record_loc_to_data_file_index: HashMap<RecordLocation, u64>,
 }
 
 impl DataFileCompactionResult {
-    fn into_parts(self) -> (DataFileRemap, Vec<String>, HashMap<RecordLocation, u64>) {
-        (
-            self.data_file_remap,
-            self.evicted_files_to_delete,
-            self.record_loc_to_data_file_index,
-        )
+    fn into_parts(self) -> (DataFileRemap, Vec<String>) {
+        (self.data_file_remap, self.evicted_files_to_delete)
     }
 }
 
@@ -110,6 +105,14 @@ impl CompactionBuilder {
         let cur_file_idx = self.compacted_file_count
             - storage_utils::NUM_FILES_PER_FLUSH * unique_table_auto_incre_id_offset;
         get_unique_file_id_for_flush(cur_table_auto_incr_id, cur_file_idx)
+    }
+
+    /// Util function to get the index of file after compaction, by the given [`file_id`].
+    fn get_file_index_after_compaction(start_table_auto_incr_id: u64, file_id: FileId) -> usize {
+        let compacted_file_idx = (file_id.0
+            - storage_utils::NUM_FILES_PER_FLUSH * start_table_auto_incr_id)
+            % storage_utils::NUM_FILES_PER_FLUSH;
+        compacted_file_idx as usize
     }
 
     /// Util function to create a new data file.
@@ -191,6 +194,12 @@ impl CompactionBuilder {
 
         let file = tokio::fs::File::open(filepath).await?;
         let builder = ParquetRecordBatchStreamBuilder::new(file).await?;
+        let total_num_rows: usize = builder
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|cur_row_group| cur_row_group.num_rows() as usize)
+            .sum();
         let mut reader = builder.build().unwrap();
 
         let batch_deletion_vector =
@@ -199,6 +208,7 @@ impl CompactionBuilder {
             } else {
                 BatchDeletionVector::new(/*max_rows=*/ 0)
             };
+        let deleted_rows_num = batch_deletion_vector.get_num_rows_deleted();
 
         let get_filtered_record_batch = |record_batch: RecordBatch, start_row_idx: usize| {
             if batch_deletion_vector.is_empty() {
@@ -211,13 +221,13 @@ impl CompactionBuilder {
 
         let mut old_start_row_idx = 0;
         let mut old_to_new_remap = HashMap::new();
-        let mut record_loc_to_data_file_index_map = HashMap::new();
         while let Some(cur_record_batch) = reader.try_next().await? {
             // If all rows have been deleted for the old data file, do nothing.
             let cur_num_rows = cur_record_batch.num_rows();
             let filtered_record_batch =
                 get_filtered_record_batch(cur_record_batch, old_start_row_idx);
             if filtered_record_batch.num_rows() == 0 {
+                old_start_row_idx += cur_num_rows;
                 continue;
             }
 
@@ -230,8 +240,6 @@ impl CompactionBuilder {
 
             // Construct old data file to new one mapping on-the-fly.
             old_to_new_remap.reserve(old_to_new_remap.len() + cur_num_rows);
-            record_loc_to_data_file_index_map
-                .reserve(record_loc_to_data_file_index_map.len() + cur_num_rows);
 
             for old_row_idx in old_start_row_idx..(old_start_row_idx + cur_num_rows) {
                 if batch_deletion_vector.is_deleted(old_row_idx) {
@@ -244,8 +252,6 @@ impl CompactionBuilder {
                     self.cur_row_num,
                 );
                 // Precondition: data files are compacted before file indices, so [`self.compacted_file_count`] indicates the index of already compacted data files.
-                record_loc_to_data_file_index_map
-                    .insert(new_record_location.clone(), self.compacted_file_count);
                 let remapped_record_location = RemappedRecordLocation {
                     record_location: new_record_location,
                     new_data_file: self.cur_new_data_file.as_ref().unwrap().clone(),
@@ -274,10 +280,14 @@ impl CompactionBuilder {
             evicted_files_to_delete.extend(evicted_files);
         }
 
+        // Sanity check on compaction result.
+        let expected_compacted_num_rows = total_num_rows - deleted_rows_num;
+        let actual_compacted_num_rows = old_to_new_remap.len();
+        assert_eq!(expected_compacted_num_rows, actual_compacted_num_rows);
+
         let data_file_compaction_result = DataFileCompactionResult {
             data_file_remap: old_to_new_remap,
             evicted_files_to_delete,
-            record_loc_to_data_file_index: record_loc_to_data_file_index_map,
         };
 
         Ok(data_file_compaction_result)
@@ -287,7 +297,6 @@ impl CompactionBuilder {
     #[tracing::instrument(name = "compact_data_files", skip_all)]
     async fn compact_data_files(&mut self) -> Result<DataFileCompactionResult> {
         let mut old_to_new_remap = HashMap::new();
-        let mut record_loc_to_data_file_index_map = HashMap::new();
 
         let disk_files = std::mem::take(&mut self.compaction_payload.disk_files);
         let mut evicted_files_to_delete = vec![];
@@ -297,14 +306,11 @@ impl CompactionBuilder {
                 .await?;
             evicted_files_to_delete.extend(data_file_compaction_result.evicted_files_to_delete);
             old_to_new_remap.extend(data_file_compaction_result.data_file_remap);
-            record_loc_to_data_file_index_map
-                .extend(data_file_compaction_result.record_loc_to_data_file_index);
         }
 
         let data_file_compaction_result = DataFileCompactionResult {
             data_file_remap: old_to_new_remap,
             evicted_files_to_delete,
-            record_loc_to_data_file_index: record_loc_to_data_file_index_map,
         };
         Ok(data_file_compaction_result)
     }
@@ -327,7 +333,6 @@ impl CompactionBuilder {
         &mut self,
         old_file_indices: Vec<FileIndex>,
         old_to_new_remap: &HashMap<RecordLocation, RemappedRecordLocation>,
-        record_loc_to_data_file_index: &HashMap<RecordLocation, u64>,
     ) -> FileIndex {
         let get_remapped_record_location =
             |old_record_location: RecordLocation| -> Option<RecordLocation> {
@@ -336,8 +341,11 @@ impl CompactionBuilder {
                 }
                 None
             };
+
+        let start_table_auto_incr_id = self.file_params.table_auto_incr_ids.start as u64;
         let get_seg_idx = |new_record_location: RecordLocation| -> usize /*seg_idx*/ {
-            *record_loc_to_data_file_index.get(&new_record_location).unwrap() as usize
+            let file_id = new_record_location.get_file_id().unwrap();
+            Self::get_file_index_after_compaction(start_table_auto_incr_id, file_id)
         };
 
         let file_id_for_index_file = self.get_next_file_id();
@@ -379,12 +387,11 @@ impl CompactionBuilder {
             .cloned()
             .collect::<HashSet<_>>();
         let data_file_compaction_result = self.compact_data_files().await?;
-        let (old_record_loc_to_new_mapping, evicted_files_to_delete, record_loc_to_data_file_index) =
+        let (old_record_loc_to_new_mapping, evicted_files_to_delete) =
             data_file_compaction_result.into_parts();
 
         // All rows have been deleted.
         if old_record_loc_to_new_mapping.is_empty() {
-            assert!(record_loc_to_data_file_index.is_empty());
             return Ok(DataCompactionResult {
                 uuid: self.compaction_payload.uuid,
                 remapped_data_files: old_record_loc_to_new_mapping,
@@ -406,7 +413,6 @@ impl CompactionBuilder {
             .compact_file_indices(
                 self.compaction_payload.file_indices.clone(),
                 &old_record_loc_to_new_mapping,
-                &record_loc_to_data_file_index,
             )
             .await;
 

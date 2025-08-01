@@ -87,6 +87,9 @@ impl IcebergSnapshotWalInfo {
 
 #[derive(Debug, Clone)]
 pub struct WalPersistenceUpdateResult {
+    /// UUID for current persistence operation.
+    #[allow(dead_code)]
+    uuid: uuid::Uuid,
     file_persisted: Option<WalFileInfo>,
     /// Only None if there has not been an iceberg snapshot yet.
     iceberg_snapshot_wal_info: Option<IcebergSnapshotWalInfo>,
@@ -94,10 +97,12 @@ pub struct WalPersistenceUpdateResult {
 
 impl WalPersistenceUpdateResult {
     pub fn new(
+        uuid: uuid::Uuid,
         file_persisted: Option<WalFileInfo>,
         iceberg_snapshot_wal_info: Option<IcebergSnapshotWalInfo>,
     ) -> Self {
         Self {
+            uuid,
             file_persisted,
             iceberg_snapshot_wal_info,
         }
@@ -569,6 +574,7 @@ impl WalManager {
     ///
     /// iceberg snapshot info is None only if there has not been an iceberg snapshot yet.
     pub async fn wal_persist_truncate_async(
+        uuid: uuid::Uuid,
         files_to_delete: Vec<WalFileInfo>,
         file_to_persist: Option<(Vec<WalEvent>, WalFileInfo)>,
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -606,6 +612,7 @@ impl WalManager {
         // Create result and notify
         let persistence_update_result = result.map(|_| {
             WalPersistenceUpdateResult::new(
+                uuid,
                 file_to_persist.map(|(_, wal_file_info)| wal_file_info),
                 iceberg_snapshot_wal_info,
             )

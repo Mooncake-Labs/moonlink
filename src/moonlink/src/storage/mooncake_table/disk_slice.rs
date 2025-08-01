@@ -21,7 +21,7 @@ pub(crate) struct DiskFileAttrs {
     pub(crate) row_num: usize,
 }
 
-pub(crate) struct DiskSliceWriter {
+pub struct DiskSliceWriter {
     /// The schema of the DiskSlice.
     ///
     schema: Arc<Schema>,

@@ -68,7 +68,7 @@ impl TableHandler {
                 tokio::select! {
                     // Sending to channel fails only happens when eventloop exits, directly exit timer events.
                     _ = periodic_wal_interval.tick() => {
-                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistenceUpdateWal).await.is_err() {
+                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistenceUpdateWal(uuid::Uuid::new_v4())).await.is_err() {
                             return;
                         }
                     }
@@ -499,11 +499,11 @@ impl TableHandler {
                         TableEvent::EvictedFilesToDelete { evicted_files } => {
                             start_task_to_delete_evicted(evicted_files.files);
                         }
-                        TableEvent::PeriodicalPersistenceUpdateWal => {
+                        TableEvent::PeriodicalPersistenceUpdateWal(uuid) => {
                             if !table_handler_state.wal_persist_ongoing {
                                 table_handler_state.wal_persist_ongoing = true;
-                                let ongoing_persistence_update = table.do_wal_persistence_update();
-                                table_handler_state.wal_persist_ongoing = ongoing_persistence_update;
+                                let ongoing_persist_truncate = table.do_wal_persistence_update(uuid);
+                                table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
                             }
                         }
                         TableEvent::PeriodicalWalPersistenceUpdateResult { result } => {
@@ -546,7 +546,6 @@ impl TableHandler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn process_cdc_table_event(
         event: TableEvent,
         table: &mut MooncakeTable,
@@ -598,7 +597,7 @@ impl TableHandler {
                     Some(xact_id) => {
                         let res = table.append_in_stream_batch(row, xact_id);
                         if table.should_transaction_flush(xact_id) {
-                            if let Err(e) = table.flush_transaction_stream(xact_id).await {
+                            if let Err(e) = table.flush_stream(xact_id, None).await {
                                 error!(error = %e, "flush failed in append");
                             }
                         }
@@ -641,7 +640,7 @@ impl TableHandler {
                 .await;
             }
             TableEvent::StreamFlush { xact_id } => {
-                if let Err(e) = table.flush_transaction_stream(xact_id).await {
+                if let Err(e) = table.flush_stream(xact_id, None).await {
                     error!(error = %e, "stream flush failed");
                 }
             }

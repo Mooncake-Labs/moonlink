@@ -367,8 +367,10 @@ impl TestEnvironment {
     /// Note that this assumes that this is being called after an event with an updated LSN
     /// has just been sent, if not it will wait indefinitely.
     pub async fn force_wal_persistence(&mut self, expected_lsn: u64) {
-        self.send_event(TableEvent::PeriodicalPersistenceUpdateWal)
-            .await;
+        self.send_event(TableEvent::PeriodicalPersistenceUpdateWal(
+            uuid::Uuid::new_v4(),
+        ))
+        .await;
 
         loop {
             if *self.wal_flush_lsn_rx.borrow() >= expected_lsn {

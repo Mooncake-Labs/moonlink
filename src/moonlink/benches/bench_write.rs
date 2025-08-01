@@ -190,8 +190,7 @@ fn bench_write(c: &mut Criterion) {
                             1,
                         );
                     }
-                    let handle = table.flush_transaction_stream(1);
-                    handle.await.unwrap();
+                    table.flush_stream(1, None).await.unwrap();
                 });
                 table
             },
@@ -207,8 +206,7 @@ fn bench_write(c: &mut Criterion) {
                             )
                             .await;
                     }
-                    let handle = table.flush_transaction_stream(1);
-                    handle.await.unwrap();
+                    table.flush_stream(1, None).await.unwrap();
                     //let handle = table.create_snapshot();
                     //let _ = handle.unwrap().await.unwrap();
                 });

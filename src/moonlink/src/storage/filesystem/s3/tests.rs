@@ -191,7 +191,9 @@ async fn test_unbuffered_stream_writer() {
     let (bucket, warehouse_uri) = get_test_s3_bucket_and_warehouse();
     let _test_guard = TestGuard::new(bucket.clone()).await;
     let s3_storage_config = create_s3_storage_config(&warehouse_uri);
-    let operator = operator_utils::create_opendal_operator(&s3_storage_config).unwrap();
+    let operator = operator_utils::create_opendal_operator(&s3_storage_config)
+        .await
+        .unwrap();
 
     // Create writer and append in blocks.
     let writer =

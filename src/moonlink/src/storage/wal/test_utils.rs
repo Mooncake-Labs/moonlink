@@ -61,6 +61,7 @@ impl WalManager {
         }
 
         let wal_persistence_update = WalPersistenceUpdateResult {
+            uuid: uuid::Uuid::new_v4(),
             file_persisted: persisted_wal_file,
             iceberg_snapshot_wal_info,
         };

@@ -595,6 +595,101 @@ async fn test_data_file_compaction_6() {
     .await;
 }
 
+/// Case-7: one file with two record batches, first record batch completely deleted, and second record batch partially deleted.
+#[tokio::test]
+async fn test_data_file_compaction_7() {
+    // Create data file.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let object_storage_cache = ObjectStorageCache::default_for_test(&temp_dir);
+    let filesystem_accessor = FileSystemAccessor::default_for_test(&temp_dir);
+    let data_file = temp_dir.path().join("test-1.parquet");
+
+    let data_file = create_data_file(/*file_id=*/ 0, data_file.to_str().unwrap().to_string());
+    let record_batch_1 = test_utils::create_test_batch_1();
+    let record_batch_2 = test_utils::create_test_batch_2();
+    test_utils::dump_arrow_record_batches(vec![record_batch_1, record_batch_2], data_file.clone())
+        .await;
+
+    let file_index = test_utils::create_file_index_for_both_batches(
+        temp_dir.path().to_path_buf(),
+        data_file.clone(),
+        /*start_file_id=*/ 2,
+    )
+    .await;
+
+    // Create deletion vector puffin file.
+    let puffin_filepath = temp_dir.path().join("deletion-vector-1.bin");
+    let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 6);
+    // Deletion record for the first record batch.
+    batch_deletion_vector.delete_row(0);
+    batch_deletion_vector.delete_row(1);
+    batch_deletion_vector.delete_row(2);
+    // Deletion record for the second record batch.
+    batch_deletion_vector.delete_row(3);
+    batch_deletion_vector.delete_row(5);
+    // Dump deletion records to puffin blob.
+    let puffin_blob_ref = test_utils::dump_deletion_vector_puffin(
+        data_file.file_path().clone(),
+        puffin_filepath.to_str().unwrap().to_string(),
+        batch_deletion_vector,
+        object_storage_cache.clone(),
+        filesystem_accessor.as_ref(),
+        get_table_unique_table_id(/*file_id=*/ 2),
+    )
+    .await;
+
+    // Prepare compaction payload.
+    let payload = DataCompactionPayload {
+        uuid: uuid::Uuid::new_v4(),
+        object_storage_cache: ObjectStorageCache::default_for_test(&temp_dir),
+        filesystem_accessor: filesystem_accessor.clone(),
+        disk_files: vec![get_single_file_to_compact(
+            &data_file,
+            Some(puffin_blob_ref),
+        )],
+        file_indices: vec![file_index.clone()],
+    };
+    let table_auto_incr_id: u64 = 4;
+    let file_params = CompactionFileParams {
+        dir_path: std::path::PathBuf::from(temp_dir.path()),
+        table_auto_incr_ids: (table_auto_incr_id as u32)..(table_auto_incr_id as u32 + 1),
+        data_file_final_size: SINGLE_COMPACTED_DATA_FILE_SIZE,
+    };
+
+    // Perform compaction.
+    let builder = CompactionBuilder::new(payload, create_test_arrow_schema(), file_params);
+    let compaction_result = builder.build().await.unwrap();
+
+    // Check compaction results.
+    //
+    // Check remap results.
+    let compacted_file_id = FileId(get_unique_file_id_for_flush(
+        table_auto_incr_id,
+        /*file_idx=*/ 0,
+    ));
+    let expected_remap = test_utils::get_expected_remap_for_two_batches_in_one_file(
+        compacted_file_id,
+        /*deletion_vectors=*/ vec![0, 1, 2, 3, 5],
+    );
+    let actual_remap = get_record_location_mapping(&compaction_result.remapped_data_files);
+    assert_eq!(expected_remap, actual_remap);
+
+    // Check file indices compaction.
+    test_utils::check_file_indices_compaction(
+        compaction_result.new_file_indices.as_slice(),
+        /*expected_file_id=*/ Some(compacted_file_id),
+        /*old_row_indices=*/ vec![4],
+    )
+    .await;
+
+    // Check data file compaction.
+    test_utils::check_data_file_compaction(
+        compaction_result.new_data_files,
+        /*old_row_indices=*/ vec![4],
+    )
+    .await;
+}
+
 /// ============================
 /// Compact to multiple files
 /// ============================

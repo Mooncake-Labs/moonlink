@@ -706,3 +706,438 @@ async fn test_alter_table_with_operations() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_streaming_begin_flush_commit_end_flush() {
+    let context = TestContext::new("streaming_begin_flush_commit_end_flush");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_commit_end_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append a row to streaming mem slice
+    let row = test_row(1, "A", 20);
+    table.append_in_stream_batch(row, xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice)
+        .await
+        .unwrap();
+
+    // Wait to apply the flush to simulate an async flush that hasn't returned
+    // Commit the transaction while the flush is pending
+    // This will move the state from the stream state to the snapshot task
+    table
+        .commit_transaction_stream(xact_id, lsn + 1)
+        .await
+        .unwrap();
+
+    // Make sure the row is visible in snapshot before flush finishes
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1], Some(1));
+    }
+
+    // Apply the flush
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Make sure we can still read the row after flush
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1], Some(1));
+    }
+
+    // Make sure we can still read the row after snapshot
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1], Some(1));
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_begin_flush_commit_end_flush_multiple() {
+    let context = TestContext::new("streaming_begin_flush_commit_end_flush");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_commit_end_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append a row to streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice1)
+        .await
+        .unwrap();
+
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2, xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice2)
+        .await
+        .unwrap();
+
+    // Wait to apply the flush to simulate an async flush that hasn't returned
+    // Commit the transaction while the flush is pending
+    // This will move the state from the stream state to the snapshot task
+    table
+        .commit_transaction_stream(xact_id, lsn + 1)
+        .await
+        .unwrap();
+
+    // Make sure the rows are visible in snapshot before flush finishes
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    // Read the snapshot
+    // (Should use the in memory file)
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
+    }
+
+    // Apply the flush
+    table.apply_stream_flush_result(xact_id, disk_slice1);
+
+    // Make sure the stream state is still present since we have outstanding flush
+    assert!(table.transaction_stream_states.contains_key(&xact_id));
+
+    // Apply the second flush
+    table.apply_stream_flush_result(xact_id, disk_slice2);
+
+    // Assert the stream state is removed
+    assert!(!table.transaction_stream_states.contains_key(&xact_id));
+
+    // Make sure we can still read the rows after flush
+    // (Should still use the in memory file)
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
+    }
+
+    // Make sure we can still read the rows after snapshot
+    // (Should now read the rows from disk)
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            mut data_file_paths,
+            ..
+        } = snapshot.request_read().await.unwrap();
+        data_file_paths.sort_by_key(|data_file| data_file.get_file_path());
+        verify_file_contents(&data_file_paths[1].get_file_path(), &[1], Some(1));
+        verify_file_contents(&data_file_paths[2].get_file_path(), &[2], Some(1));
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_begin_flush_delete_commit_end_flush() {
+    let context = TestContext::new("streaming_begin_flush_commit_delete_end_flush");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_commit_delete_end_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append rows to streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2.clone(), xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice)
+        .await
+        .unwrap();
+
+    // Delete the row that is still flushing
+    table.delete_in_stream_batch(row2, xact_id).await;
+
+    // Finish the flush
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Commit the transaction
+    table
+        .commit_transaction_stream(xact_id, lsn + 1)
+        .await
+        .unwrap();
+
+    // Make sure we only have one row in the snapshot
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths,
+            puffin_cache_handles,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = snapshot.request_read().await.unwrap();
+        verify_files_and_deletions(
+            get_data_files_for_read(&data_file_paths).as_slice(),
+            get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_begin_flush_commit_delete_end_flush() {
+    let context = TestContext::new("streaming_begin_flush_commit_delete_end_flush");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_commit_delete_end_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append a row to streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2.clone(), xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice)
+        .await
+        .unwrap();
+
+    // Wait to apply the flush to simulate an async flush that hasn't returned
+    // Commit the transaction while the flush is pending
+    // This will move the state from the stream state to the snapshot task
+    table
+        .commit_transaction_stream(xact_id, lsn + 1)
+        .await
+        .unwrap();
+
+    // Make sure the rows are visible in snapshot before flush finishes
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
+    }
+
+    // Start a new transaction
+    let xact_id2 = 2;
+    let lsn2 = 2;
+
+    // Delete the row from the previous transaction (has not been flushed yet)
+    table.delete_in_stream_batch(row2, xact_id2).await;
+
+    // Commit the new transaction
+    table
+        .commit_transaction_stream(xact_id2, lsn2 + 1)
+        .await
+        .unwrap();
+
+    let mut disk_slice2 = table
+        .prepare_stream_disk_slice(xact_id2, Some(lsn2))
+        .unwrap();
+    table
+        .flush_stream_disk_slice(xact_id2, &mut disk_slice2)
+        .await
+        .unwrap();
+
+    // Apply the flush for both transactions
+    table.apply_stream_flush_result(xact_id, disk_slice);
+    table.apply_stream_flush_result(xact_id2, disk_slice2);
+
+    // Make sure we only have one row in the snapshot
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths,
+            puffin_cache_handles,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = snapshot.request_read().await.unwrap();
+        verify_files_and_deletions(
+            get_data_files_for_read(&data_file_paths).as_slice(),
+            get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_begin_flush_abort_end_flush() {
+    let context = TestContext::new("streaming_begin_flush_abort_end_flush");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_abort_end_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append a row to streaming mem slice
+    let row = test_row(1, "A", 20);
+    table.append_in_stream_batch(row, xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice)
+        .await
+        .unwrap();
+
+    // Wait to apply the flush to simulate an async flush that hasn't returned
+    // Abort the transaction while the flush is pending
+    // This will move the state from the stream state to the snapshot task
+    table.abort_in_stream_batch(xact_id);
+
+    // Apply the flush
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Make sure we can't read the row after flush
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        assert_eq!(data_file_paths.len(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_begin_flush_abort_end_flush_multiple() {
+    let context = TestContext::new("streaming_begin_flush_abort_end_flush_multiple");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_abort_end_flush_multiple",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append a row to streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2, xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice1)
+        .await
+        .unwrap();
+
+    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice2)
+        .await
+        .unwrap();
+
+    // Wait to apply the flush to simulate an async flush that hasn't returned
+    // Abort the transaction while the flush is pending
+    // This will move the state from the stream state to the snapshot task
+    table.abort_in_stream_batch(xact_id);
+
+    // Apply the first flush
+    table.apply_stream_flush_result(xact_id, disk_slice1);
+
+    // Make sure the stream state is still present since we have outstanding flush
+    assert!(table.transaction_stream_states.contains_key(&xact_id));
+
+    // Apply the second flush
+    table.apply_stream_flush_result(xact_id, disk_slice2);
+
+    // Assert the stream state is removed
+    assert!(!table.transaction_stream_states.contains_key(&xact_id));
+
+    // Make sure we can't read the row after flush
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        assert_eq!(data_file_paths.len(), 0);
+    }
+}

@@ -85,17 +85,11 @@ fn create_timeout_layer(timeout_config: &TimeoutConfig) -> TimeoutLayer {
 }
 
 /// Util function to create opendal operator from filesystem config.
-pub(crate) fn create_opendal_operator(accessor_config: &AccessorConfig) -> Result<Operator> {
-    let mut op = match accessor_config.storage_config {
-        #[cfg(feature = "storage-fs")]
-        StorageConfig::FileSystem { .. } => {
-            create_opendal_operator_impl(&accessor_config.storage_config)?
-        }
-        #[cfg(feature = "storage-gcs")]
-        StorageConfig::Gcs { .. } => create_opendal_operator_impl(&accessor_config.storage_config)?,
-        #[cfg(feature = "storage-s3")]
-        StorageConfig::S3 { .. } => create_opendal_operator_impl(&accessor_config.storage_config)?,
-    };
+pub(crate) async fn create_opendal_operator(accessor_config: &AccessorConfig) -> Result<Operator> {
+    let storage_config = accessor_config.storage_config.clone();
+    // Operator creation might involve synchronous blocking IO operation, schedule to dedicated tokio executors.
+    let mut op = tokio::task::spawn_blocking(move || create_opendal_operator_impl(&storage_config))
+        .await??;
 
     // Apply chaos layer.
     if let Some(chaos_config) = &accessor_config.chaos_config {

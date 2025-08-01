@@ -72,7 +72,9 @@ mod tests {
         // Create an operator.
         let storage_config = StorageConfig::FileSystem { root_directory };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
-        let operator = operator_utils::create_opendal_operator(&accessor_config).unwrap();
+        let operator = operator_utils::create_opendal_operator(&accessor_config)
+            .await
+            .unwrap();
 
         // Create writer and append in blocks.
         let writer =

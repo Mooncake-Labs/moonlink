@@ -598,6 +598,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitstream-io"
+version = "4.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b348c85aeb6d0bb7dee47de5506b587d9c6c17856d1314eb4695ad751edc7231"
+dependencies = [
+ "core2",
+]
+
+[[package]]
 name = "bitvec"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2677,6 +2686,7 @@ dependencies = [
  "backon",
  "base64 0.22.1",
  "bincode",
+ "bitstream-io",
  "chrono",
  "crc32fast",
  "criterion",
@@ -5753,7 +5763,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
