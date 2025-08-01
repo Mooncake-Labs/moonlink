@@ -3,6 +3,7 @@ members = [
     "src/moonlink",
     "src/moonlink_backend",
     "src/moonlink_connectors",
+    "src/moonlink_datafusion",
     "src/moonlink_metadata_store",
     "src/moonlink_rpc",
     "src/moonlink_service",
@@ -31,6 +32,9 @@ chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 console-subscriber = "0.2"
 crc32fast = "1"
+dashmap = "6"
+datafusion = "49"
+datafusion-cli = "49"
 fastbloom = "0.12.0"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15.3"
@@ -61,8 +65,10 @@ serial_test = "3.0"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.47", default-features = false, features = [
+  "fs",
   "io-util",
   "macros",
+  "net",
   "rt-multi-thread",
   "signal",
   "sync",
