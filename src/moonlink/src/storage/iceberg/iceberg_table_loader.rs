@@ -14,7 +14,7 @@ use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::storage_utils::{create_data_file, FileId, TableId, TableUniqueFileId};
-use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 
 use std::collections::{HashMap, HashSet};
 use std::vec;
@@ -177,7 +177,7 @@ impl IcebergTableManager {
         &self,
         persisted_file_indices: Vec<MooncakeFileIndex>,
         flush_lsn: Option<u64>,
-        wal_metadata: Option<WalPersistenceMetadata>,
+        wal_metadata: IcebergWalMetadata,
     ) -> MooncakeSnapshot {
         let mut mooncake_snapshot = MooncakeSnapshot::new(self.mooncake_table_metadata.clone());
 

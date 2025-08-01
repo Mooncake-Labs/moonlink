@@ -68,7 +68,7 @@ impl TableHandler {
                 tokio::select! {
                     // Sending to channel fails only happens when eventloop exits, directly exit timer events.
                     _ = periodic_wal_interval.tick() => {
-                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistTruncateWal).await.is_err() {
+                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistenceUpdateWal).await.is_err() {
                             return;
                         }
                     }
@@ -499,18 +499,18 @@ impl TableHandler {
                         TableEvent::EvictedFilesToDelete { evicted_files } => {
                             start_task_to_delete_evicted(evicted_files.files);
                         }
-                        TableEvent::PeriodicalPersistTruncateWal => {
+                        TableEvent::PeriodicalPersistenceUpdateWal => {
                             if !table_handler_state.wal_persist_ongoing {
                                 table_handler_state.wal_persist_ongoing = true;
-                                let ongoing_persist_truncate = table.persist_and_truncate_wal();
-                                table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
+                                let ongoing_persistence_update = table.do_wal_persistence_update();
+                                table_handler_state.wal_persist_ongoing = ongoing_persistence_update;
                             }
                         }
-                        TableEvent::PeriodicalPersistTruncateWalResult { result } => {
+                        TableEvent::PeriodicalWalPersistenceUpdateResult { result } => {
                             match result {
                                 Ok(result) => {
                                     table_handler_state.wal_persist_ongoing = false;
-                                    if let Some(highest_lsn) = table.handle_completed_persistence_and_truncate_wal(&result) {
+                                    if let Some(highest_lsn) = table.handle_completed_wal_persistence_update(&result) {
                                         event_sync_sender.wal_flush_lsn_tx.send(highest_lsn).unwrap();
                                     }
 

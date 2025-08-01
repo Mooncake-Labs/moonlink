@@ -12,6 +12,7 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use crate::{IcebergTableConfig, ObjectStorageCache};
 
 use std::collections::HashMap;
@@ -198,11 +199,12 @@ impl TableManager for IcebergTableManager {
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
+        wal_persistence_metadata: IcebergWalMetadata,
     ) -> IcebergResult<PersistenceResult> {
         // Persist data files, deletion vectors, and file indices.
         let new_table_schema = std::mem::take(&mut snapshot_payload.new_table_schema);
         let persistence_result = self
-            .sync_snapshot_impl(snapshot_payload, file_params)
+            .sync_snapshot_impl(snapshot_payload, file_params, wal_persistence_metadata)
             .await?;
 
         // Perform schema evolution if necessary.

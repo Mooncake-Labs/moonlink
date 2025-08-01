@@ -1,6 +1,9 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::test_row;
-use crate::storage::wal::{WalEvent, WalManager, WalPersistAndTruncateResult};
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
+use crate::storage::wal::{
+    IcebergSnapshotWalInfo, WalEvent, WalManager, WalPersistenceUpdateResult,
+};
 use crate::table_notify::TableEvent;
 use crate::{Result, WalConfig};
 use futures::StreamExt;
@@ -15,14 +18,38 @@ pub const WAL_TEST_TABLE_ID: &str = "1";
 impl WalManager {
     /// Mock function for how this gets called in table handler. We retrieve some data from the wal,
     /// asynchronously update the file system,
-    /// and then call handle_completed_persist_and_truncate to update the wal.
-    pub async fn persist_and_truncate(
+    /// and then call handle_completed_wal_persistence_update to update the wal.
+    pub async fn do_wal_persistence_update_for_test(
         &mut self,
         last_iceberg_snapshot_lsn: Option<u64>,
     ) -> Result<()> {
+        let iceberg_snapshot_wal_info =
+            if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
+                let lowest_file_to_keep = self.get_lowest_file_to_keep(last_iceberg_snapshot_lsn);
+
+                Some(IcebergSnapshotWalInfo::new(
+                    lowest_file_to_keep,
+                    last_iceberg_snapshot_lsn,
+                ))
+            } else {
+                None
+            };
+
+        // handle the truncate side
+        if let Some(iceberg_snapshot_wal_info) = &iceberg_snapshot_wal_info {
+            let wal_persistence_metadata = IcebergWalMetadata {
+                earliest_wal_file_num: iceberg_snapshot_wal_info.iceberg_snapshot_wal_file_num,
+            };
+            let files_to_truncate = self.get_files_to_truncate(wal_persistence_metadata);
+            if !files_to_truncate.is_empty() {
+                WalManager::delete_files(self.file_system_accessor.clone(), &files_to_truncate)
+                    .await?;
+            };
+        }
+
         // handle the persist side
         let mut persisted_wal_file = None;
-        let to_persist_wal_info = self.extract_next_persistent_file();
+        let to_persist_wal_info = self.extract_next_persistence_file();
         if let Some((wal_to_persist, file_info_to_persist)) = to_persist_wal_info {
             WalManager::persist(
                 self.file_system_accessor.clone(),
@@ -33,26 +60,12 @@ impl WalManager {
             persisted_wal_file = Some(file_info_to_persist);
         }
 
-        let mut highest_deleted_file = None;
-
-        if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
-            let files_to_truncate = self.get_files_to_truncate(last_iceberg_snapshot_lsn);
-            highest_deleted_file = if files_to_truncate.is_empty() {
-                None
-            } else {
-                WalManager::delete_files(self.file_system_accessor.clone(), &files_to_truncate)
-                    .await?;
-                files_to_truncate.last().cloned()
-            };
-        }
-
-        let persist_and_truncate_result = WalPersistAndTruncateResult {
+        let wal_persistence_update = WalPersistenceUpdateResult {
             file_persisted: persisted_wal_file,
-            highest_deleted_file,
-            iceberg_snapshot_lsn: last_iceberg_snapshot_lsn,
+            iceberg_snapshot_wal_info,
         };
 
-        self.handle_completed_persistence_and_truncate(&persist_and_truncate_result);
+        self.handle_complete_wal_persistence_update(&wal_persistence_update);
         Ok(())
     }
 }

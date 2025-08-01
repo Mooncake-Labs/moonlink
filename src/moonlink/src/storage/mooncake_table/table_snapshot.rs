@@ -6,7 +6,7 @@ use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
-use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use crate::storage::TableManager;
 
 use std::collections::{HashMap, HashSet};
@@ -131,8 +131,6 @@ pub struct IcebergSnapshotPayload {
     pub(crate) uuid: uuid::Uuid,
     /// Flush LSN.
     pub(crate) flush_lsn: u64,
-    /// WAL persistence metadata.
-    pub(crate) wal_persistence_metadata: Option<WalPersistenceMetadata>,
     /// Committed deletion logs included in the current iceberg snapshot persistence operation, which is used to prune after persistence completion.
     pub(crate) committed_deletion_logs: HashSet<(FileId, usize /*row idx*/)>,
     /// New mooncake table schema.
@@ -150,7 +148,6 @@ impl std::fmt::Debug for IcebergSnapshotPayload {
         f.debug_struct("IcebergSnapshotPayload")
             .field("uuid", &self.uuid)
             .field("flush_lsn", &self.flush_lsn)
-            .field("wal_persistence_metadata", &self.wal_persistence_metadata)
             .field(
                 "committed deletion logs count",
                 &self.committed_deletion_logs.len(),
@@ -311,7 +308,7 @@ pub struct IcebergSnapshotResult {
     /// Iceberg flush LSN.
     pub(crate) flush_lsn: u64,
     /// Iceberg WAL persistence.
-    pub(crate) wal_persisted_metadata: Option<WalPersistenceMetadata>,
+    pub(crate) wal_persisted_metadata: IcebergWalMetadata,
     /// Mooncake schema sync-ed to iceberg.
     pub(crate) new_table_schema: Option<Arc<MooncakeTableMetadata>>,
     /// Committed deletion logs included in the current iceberg snapshot persistence operation, which is used to prune after persistence completion.

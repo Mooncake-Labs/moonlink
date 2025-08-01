@@ -506,11 +506,6 @@ impl SnapshotTableState {
             self.current_snapshot.data_file_flush_lsn = Some(new_flush_lsn);
         }
 
-        // Assert and update WAL persisted LSN.
-        if let Some(wal_persistence_metadata) = task.new_wal_persistence_metadata {
-            self.current_snapshot.wal_persistence_metadata = Some(wal_persistence_metadata);
-        }
-
         if task.new_commit_lsn != 0 {
             self.current_snapshot.snapshot_version = task.new_commit_lsn;
         }
@@ -560,11 +555,8 @@ impl SnapshotTableState {
                 || flush_by_new_files_or_maintainence
                 || force_empty_iceberg_payload
             {
-                iceberg_snapshot_payload = Some(self.get_iceberg_snapshot_payload(
-                    flush_lsn,
-                    self.current_snapshot.wal_persistence_metadata.clone(),
-                    committed_deletion_logs,
-                ));
+                iceberg_snapshot_payload =
+                    Some(self.get_iceberg_snapshot_payload(flush_lsn, committed_deletion_logs));
             }
         }
 

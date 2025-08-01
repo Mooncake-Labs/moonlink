@@ -3,7 +3,7 @@ use iceberg::spec::TableMetadata;
 use crate::storage::iceberg::iceberg_table_manager::{
     MOONCAKE_TABLE_FLUSH_LSN, MOONCAKE_WAL_METADATA,
 };
-use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
 
@@ -14,7 +14,7 @@ pub(super) struct SnapshotProperty {
     /// Iceberg flush LSN.
     pub(super) flush_lsn: Option<u64>,
     /// WAL persisted metadata.
-    pub(super) wal_persisted_metadata: Option<WalPersistenceMetadata>,
+    pub(super) wal_persisted_metadata: IcebergWalMetadata,
 }
 
 /// Get moonlink customized snapshot
@@ -33,8 +33,6 @@ pub(super) fn get_snapshot_properties(
         flush_lsn = Some(lsn.parse().unwrap());
     }
 
-    // Extract WAL persisted metadata.
-    let mut wal_persisted_metadata: Option<WalPersistenceMetadata> = None;
     if let Some(wal) = snapshot_summary
         .additional_properties
         .get(MOONCAKE_WAL_METADATA)
@@ -45,11 +43,14 @@ pub(super) fn get_snapshot_properties(
                 format!("failed to parse WAL metadata {wal}: {e:?}"),
             )
         })?;
-        wal_persisted_metadata = Some(parsed_wal);
+        Ok(SnapshotProperty {
+            flush_lsn,
+            wal_persisted_metadata: parsed_wal,
+        })
+    } else {
+        Err(IcebergError::new(
+            iceberg::ErrorKind::DataInvalid,
+            "WAL metadata not found in snapshot summary.",
+        ))
     }
-
-    Ok(SnapshotProperty {
-        flush_lsn,
-        wal_persisted_metadata,
-    })
 }

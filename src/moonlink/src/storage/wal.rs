@@ -4,10 +4,12 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::filesystem::storage_config::StorageConfig;
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use crate::table_notify::TableEvent;
 use crate::Result;
 use futures::stream::{self, Stream};
 use futures::{future, StreamExt};
+use more_asserts as ma;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -68,24 +70,36 @@ pub enum WalEvent {
 }
 
 #[derive(Debug, Clone)]
-pub struct WalPersistAndTruncateResult {
-    file_persisted: Option<WalFileInfo>,
-    highest_deleted_file: Option<WalFileInfo>,
-    /// The LSN of the last seen iceberg snapshot which was used to
-    /// determine how the WAL was truncated.
-    iceberg_snapshot_lsn: Option<u64>,
+/// Information about the last iceberg snapshot that is used to determine how the WAL was truncated.
+pub struct IcebergSnapshotWalInfo {
+    iceberg_snapshot_wal_file_num: u64,
+    iceberg_snapshot_lsn: u64,
 }
 
-impl WalPersistAndTruncateResult {
+impl IcebergSnapshotWalInfo {
+    pub fn new(iceberg_snapshot_wal_file_num: u64, iceberg_snapshot_lsn: u64) -> Self {
+        Self {
+            iceberg_snapshot_wal_file_num,
+            iceberg_snapshot_lsn,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WalPersistenceUpdateResult {
+    file_persisted: Option<WalFileInfo>,
+    /// Only None if there has not been an iceberg snapshot yet.
+    iceberg_snapshot_wal_info: Option<IcebergSnapshotWalInfo>,
+}
+
+impl WalPersistenceUpdateResult {
     pub fn new(
         file_persisted: Option<WalFileInfo>,
-        highest_deleted_file: Option<WalFileInfo>,
-        iceberg_snapshot_lsn: Option<u64>,
+        iceberg_snapshot_wal_info: Option<IcebergSnapshotWalInfo>,
     ) -> Self {
         Self {
             file_persisted,
-            highest_deleted_file,
-            iceberg_snapshot_lsn,
+            iceberg_snapshot_wal_info,
         }
     }
 }
@@ -157,10 +171,12 @@ enum WalTransactionState {
     Commit {
         start_file: u64,
         completion_lsn: u64,
+        file_end: u64,
     },
     Abort {
         start_file: u64,
         completion_lsn: u64,
+        file_end: u64,
     },
     Open {
         start_file: u64,
@@ -176,28 +192,76 @@ impl WalTransactionState {
         }
     }
 
-    fn get_completion_lsn(&self) -> Option<u64> {
+    fn get_completion_lsn_and_file(&self) -> Option<(u64, u64)> {
         match self {
             WalTransactionState::Open { .. } => None,
-            WalTransactionState::Commit { completion_lsn, .. } => Some(*completion_lsn),
-            WalTransactionState::Abort { completion_lsn, .. } => Some(*completion_lsn),
+            WalTransactionState::Commit {
+                completion_lsn,
+                file_end,
+                ..
+            } => Some((*completion_lsn, *file_end)),
+            WalTransactionState::Abort {
+                completion_lsn,
+                file_end,
+                ..
+            } => Some((*completion_lsn, *file_end)),
         }
     }
 
     fn is_closed(&self) -> bool {
-        self.get_completion_lsn().is_some()
+        self.get_completion_lsn_and_file().is_some()
     }
 
-    fn is_captured_in_iceberg_snapshot(&self, truncate_from_lsn: u64) -> bool {
-        let completion_lsn = self.get_completion_lsn();
+    /// Checks if a transaction is captured in the iceberg snapshot. Sometimes this may be called after we have calculated the lowest file to keep
+    /// for the snapshot, so we check for consistency that an xact capture in the iceberg snapshot has both its completion LSN <= iceberg snapshot lsn
+    /// and its completion file number < lowest_file_kept.
+    fn is_captured_in_iceberg_snapshot(
+        &self,
+        iceberg_snapshot_lsn: u64,
+        iceberg_snapshot_wal_file_num: Option<u64>,
+    ) -> bool {
+        let completion_lsn_and_file = self.get_completion_lsn_and_file();
+
         // the xact has a known completion lsn by the iceberg snapshot lsn,
         // so it is captured in the iceberg snapshot
-        if let Some(completion_lsn) = completion_lsn {
-            if completion_lsn <= truncate_from_lsn {
+        if let Some((completion_lsn, completion_file_number)) = completion_lsn_and_file {
+            // here we do the check for consistency
+            if let Some(iceberg_snapshot_wal_file_num) = iceberg_snapshot_wal_file_num {
+                self.check_completed_xact_consistent_with_iceberg_snapshot(
+                    completion_lsn,
+                    completion_file_number,
+                    iceberg_snapshot_lsn,
+                    iceberg_snapshot_wal_file_num,
+                );
+            }
+            if completion_lsn <= iceberg_snapshot_lsn {
                 return true;
             }
         }
         false
+    }
+
+    fn check_completed_xact_consistent_with_iceberg_snapshot(
+        &self,
+        completion_lsn: u64,
+        completion_file_number: u64,
+        iceberg_snapshot_lsn: u64,
+        lowest_file_kept: u64,
+    ) {
+        if completion_lsn > iceberg_snapshot_lsn {
+            // If the transaction completed after the iceberg snapshot LSN,
+            // its completion file HAS to be newer than or equal to the lowest file we're keeping
+            // to prevent data loss.
+            assert!(
+                completion_file_number >= lowest_file_kept,
+                "Transaction completed at LSN {completion_lsn} (after iceberg snapshot LSN {iceberg_snapshot_lsn}), \
+                but its completion file {completion_file_number} is older than lowest file to keep {lowest_file_kept}"
+            );
+        }
+        // Note that the reverse case is not always true.
+        // If the transaction completed before or at the iceberg snapshot LSN,
+        // its completion file may not be older than the lowest file we're keeping because we may have to
+        // keep that file around because of other transactions in those files not yet captured in the iceberg snapshot.
     }
 }
 
@@ -260,6 +324,7 @@ impl WalManager {
         table_event: &TableEvent,
         xact_state: WalTransactionState,
         highest_seen_lsn: u64,
+        curr_file_number: u64,
     ) -> WalTransactionState {
         match table_event {
             TableEvent::Append { .. }
@@ -271,11 +336,13 @@ impl WalManager {
                 WalTransactionState::Commit {
                     start_file: xact_state.get_start_file(),
                     completion_lsn: *lsn,
+                    file_end: curr_file_number,
                 }
             }
             TableEvent::StreamAbort { .. } => WalTransactionState::Abort {
                 start_file: xact_state.get_start_file(),
                 completion_lsn: highest_seen_lsn,
+                file_end: curr_file_number,
             },
             _ => unimplemented!(
                 "TableEvent variant not supported for WAL: {:?}",
@@ -304,8 +371,12 @@ impl WalManager {
                         start_file: self.curr_file_number,
                     });
 
-            let updated_state =
-                Self::get_updated_xact_state(table_event, old_state, self.highest_seen_lsn);
+            let updated_state = Self::get_updated_xact_state(
+                table_event,
+                old_state,
+                self.highest_seen_lsn,
+                self.curr_file_number,
+            );
             self.active_transactions.insert(xact_id, updated_state);
         } else {
             // Case: main transaction
@@ -319,8 +390,12 @@ impl WalManager {
             } else {
                 self.main_transaction_tracker.pop().unwrap()
             };
-            let updated_state =
-                Self::get_updated_xact_state(table_event, old_state, self.highest_seen_lsn);
+            let updated_state = Self::get_updated_xact_state(
+                table_event,
+                old_state,
+                self.highest_seen_lsn,
+                self.curr_file_number,
+            );
             // TODO(Paul): This could get very long and might have many commits in a single file. We can
             // coalesce all main xacts that share the same start_file and end_file into a single state.
             self.main_transaction_tracker.push(updated_state);
@@ -345,7 +420,8 @@ impl WalManager {
     // Preparing for truncation
     // ------------------------------
 
-    /// Returns a list of WAL files to be truncated, following an iceberg snapshot.
+    /// Returns the lowest file number that needs to be kept. Is called while preparing for an iceberg snapshot,
+    /// to be stored in the iceberg snapshot metadata.
     ///
     /// An event can only be dropped if the completion LSN of its transaction commit/abort is
     /// less than truncate_from_lsn. In this function, we represent this completion LSN of any event as
@@ -358,13 +434,12 @@ impl WalManager {
     /// A WAL file can only be dropped if all its events are captured in the iceberg snapshot,
     /// as per the criteria above.
     ///
-    /// List of files returned is sorted in ascending order of file number.
-    /// Should be called in preparation to asynchronously delete the files.
-    pub fn get_files_to_truncate(&self, truncate_from_lsn: u64) -> Vec<WalFileInfo> {
+    /// if no files need to be kept (all can be truncated), then it returns the next file number to be assigned.
+    pub fn get_lowest_file_to_keep(&self, truncate_from_lsn: u64) -> u64 {
         let xacts_still_incomplete_after_truncate = self
             .active_transactions
             .values()
-            .filter(|state| !state.is_captured_in_iceberg_snapshot(truncate_from_lsn))
+            .filter(|state| !state.is_captured_in_iceberg_snapshot(truncate_from_lsn, None))
             .collect::<Vec<&WalTransactionState>>();
 
         let mut files_to_keep = xacts_still_incomplete_after_truncate
@@ -378,7 +453,7 @@ impl WalManager {
         let main_xact_file_to_keep = self
             .main_transaction_tracker
             .iter()
-            .find(|state| !state.is_captured_in_iceberg_snapshot(truncate_from_lsn))
+            .find(|state| !state.is_captured_in_iceberg_snapshot(truncate_from_lsn, None))
             .map(|state| state.get_start_file());
 
         if let Some(file_to_keep) = main_xact_file_to_keep {
@@ -388,18 +463,38 @@ impl WalManager {
 
         // get the min of the files_to_keep and the main_xact_file_to_keep
         // if this is None, then we do not need to keep any files
-        let lowest_file_to_keep = files_to_keep.iter().min();
-
-        // get all file numbers less than the lowest file to keep as we can then delete them
-        if let Some(lowest_file) = lowest_file_to_keep {
-            self.live_wal_files_tracker
-                .iter()
-                .filter(|wal_file_info| wal_file_info.file_number < *lowest_file)
-                .cloned()
-                .collect()
+        let lowest_file_to_keep = files_to_keep.iter().min().copied();
+        if let Some(lowest_file_to_keep) = lowest_file_to_keep {
+            lowest_file_to_keep
         } else {
-            self.live_wal_files_tracker.clone()
+            self.curr_file_number
         }
+    }
+
+    /// Returns a list of WAL files to be truncated, following an iceberg snapshot where we already
+    ///  determine the lowest file number to be kept.
+    /// List of files returned is sorted in ascending order of file number.
+    /// Should be called in preparation to asynchronously delete the files.
+    pub fn get_files_to_truncate(
+        &self,
+        wal_persistence_metadata: IcebergWalMetadata,
+    ) -> Vec<WalFileInfo> {
+        // get all file numbers less than the lowest file to keep as we can then delete them
+        let lowest_file_to_keep = wal_persistence_metadata.earliest_wal_file_num;
+
+        if !self.live_wal_files_tracker.is_empty() {
+            ma::assert_ge!(
+                lowest_file_to_keep,
+                self.live_wal_files_tracker.first().unwrap().file_number,
+                "We must be keeping a file that is at least as old as the oldest live WAL file"
+            );
+        }
+
+        self.live_wal_files_tracker
+            .iter()
+            .filter(|wal_file_info| wal_file_info.file_number < lowest_file_to_keep)
+            .cloned()
+            .collect()
     }
 
     // ------------------------------
@@ -408,7 +503,10 @@ impl WalManager {
 
     /// Takes all events from the in-memory buffer and prepare metadata for the next WAL file.
     /// Resets the in-mem_buf and increments the curr_file_number.
-    pub fn extract_next_persistent_file(&mut self) -> Option<(Vec<WalEvent>, WalFileInfo)> {
+    ///
+    /// This function is called when we periodically persist the WAL, in preparation for a
+    /// flush in the background.
+    pub fn extract_next_persistence_file(&mut self) -> Option<(Vec<WalEvent>, WalFileInfo)> {
         let events_to_persist = std::mem::take(&mut self.in_mem_buf);
 
         if events_to_persist.is_empty() {
@@ -466,12 +564,16 @@ impl WalManager {
         Ok(())
     }
 
+    /// This function is called when we periodically persist the WAL.
+    /// It persists any new events in the WAL, and deletes any old WAL files following an iceberg snapshot.
+    ///
+    /// iceberg snapshot info is None only if there has not been an iceberg snapshot yet.
     pub async fn wal_persist_truncate_async(
         files_to_delete: Vec<WalFileInfo>,
         file_to_persist: Option<(Vec<WalEvent>, WalFileInfo)>,
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         table_notify: Sender<TableEvent>,
-        iceberg_snapshot_lsn: Option<u64>,
+        iceberg_snapshot_wal_info: Option<IcebergSnapshotWalInfo>,
     ) {
         // Execute WAL operations
         let result = async {
@@ -479,6 +581,15 @@ impl WalManager {
 
             // Delete old WAL files
             if !files_to_delete.is_empty() {
+                assert!(
+                    iceberg_snapshot_wal_info.is_some(),
+                    "iceberg_snapshot_wal_info must be set when deleting files, because it means that an iceberg snapshot has been taken"
+                );
+                assert!(
+                    files_to_delete.last().unwrap().file_number
+                        == iceberg_snapshot_wal_info.as_ref().unwrap().iceberg_snapshot_wal_file_num - 1,
+                    "the last file to delete must be lower than the lowest file to keep"
+                );
                 WalManager::delete_files(file_system_accessor, &files_to_delete).await?;
             }
 
@@ -493,17 +604,16 @@ impl WalManager {
         .await;
 
         // Create result and notify
-        let persist_and_truncate_result = result.map(|_| {
-            WalPersistAndTruncateResult::new(
+        let persistence_update_result = result.map(|_| {
+            WalPersistenceUpdateResult::new(
                 file_to_persist.map(|(_, wal_file_info)| wal_file_info),
-                files_to_delete.last().cloned(),
-                iceberg_snapshot_lsn,
+                iceberg_snapshot_wal_info,
             )
         });
 
         table_notify
-            .send(TableEvent::PeriodicalPersistTruncateWalResult {
-                result: persist_and_truncate_result,
+            .send(TableEvent::PeriodicalWalPersistenceUpdateResult {
+                result: persistence_update_result,
             })
             .await
             .unwrap();
@@ -512,54 +622,67 @@ impl WalManager {
     // ------------------------------
     // Handling completed persistence and truncation
     // ------------------------------
+    /// Handles the persistence side of a WAL persistence update.
     fn handle_complete_persistence(
         &mut self,
-        persist_and_truncate_result: &WalPersistAndTruncateResult,
+        persistence_update_result: &WalPersistenceUpdateResult,
     ) {
-        if let Some(file_persisted) = &persist_and_truncate_result.file_persisted {
+        if let Some(file_persisted) = &persistence_update_result.file_persisted {
             assert_eq!(file_persisted.file_number, self.curr_file_number - 1);
             // Add the persisted file to the live tracker
             self.live_wal_files_tracker.push(file_persisted.clone());
         }
     }
 
-    /// Remove all xacts that are captured in the iceberg snapshot.
-    fn cleanup_xacts(&mut self, iceberg_snapshot_lsn: u64) {
+    /// Remove all xacts that have been captured in the most recent iceberg snapshot.
+    fn cleanup_xacts(&mut self, iceberg_snapshot_lsn: u64, iceberg_snapshot_wal_file_num: u64) {
         // remove all xacts that are captured in the iceberg snapshot
-        self.active_transactions
-            .retain(|_, state| !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn));
+        self.active_transactions.retain(|_, state| {
+            !state.is_captured_in_iceberg_snapshot(
+                iceberg_snapshot_lsn,
+                Some(iceberg_snapshot_wal_file_num),
+            )
+        });
         // remove all main xacts that are captured in the iceberg snapshot
-        self.main_transaction_tracker
-            .retain(|state| !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn));
+        self.main_transaction_tracker.retain(|state| {
+            !state.is_captured_in_iceberg_snapshot(
+                iceberg_snapshot_lsn,
+                Some(iceberg_snapshot_wal_file_num),
+            )
+        });
     }
 
+    /// Handles the truncation side of a WAL persistence update.
     /// This cleans up any files that no longer need to be tracked, and also any xacts that no longer need to
     /// be tracked as a result.
-    fn handle_complete_truncate(
-        &mut self,
-        persist_and_truncate_result: &WalPersistAndTruncateResult,
-    ) {
-        if let Some(highest_deleted_file) = &persist_and_truncate_result.highest_deleted_file {
+    fn handle_complete_truncate(&mut self, persistence_update_result: &WalPersistenceUpdateResult) {
+        if let Some(iceberg_snapshot_wal_info) =
+            &persistence_update_result.iceberg_snapshot_wal_info
+        {
             self.live_wal_files_tracker.retain(|wal_file_info| {
-                wal_file_info.file_number > highest_deleted_file.file_number
+                wal_file_info.file_number >= iceberg_snapshot_wal_info.iceberg_snapshot_wal_file_num
             });
-        }
-        if let Some(iceberg_snapshot_lsn) = persist_and_truncate_result.iceberg_snapshot_lsn {
-            self.cleanup_xacts(iceberg_snapshot_lsn);
+
+            self.cleanup_xacts(
+                iceberg_snapshot_wal_info.iceberg_snapshot_lsn,
+                iceberg_snapshot_wal_info.iceberg_snapshot_wal_file_num,
+            );
         }
     }
 
-    /// Should be called after a persist and truncate operation has completed. Updates
+    /// Should be called after a WAL persistence update operation has completed. Updates
     /// tracked files and transactions. Returns the highest LSN that has been persisted into WAL.
-    pub fn handle_completed_persistence_and_truncate(
+    ///
+    /// For internal tracking, we do truncates before persistence.
+    pub fn handle_complete_wal_persistence_update(
         // For now, we handle the persist and truncate results together.
         &mut self,
-        persist_and_truncate_result: &WalPersistAndTruncateResult,
+        wal_persistence_update_result: &WalPersistenceUpdateResult,
     ) -> Option<u64> {
-        self.handle_complete_persistence(persist_and_truncate_result);
-        self.handle_complete_truncate(persist_and_truncate_result);
+        self.handle_complete_truncate(wal_persistence_update_result);
+        self.handle_complete_persistence(wal_persistence_update_result);
 
-        persist_and_truncate_result
+        wal_persistence_update_result
             .file_persisted
             .as_ref()
             .map(|wal_file_info| wal_file_info.highest_lsn)
