@@ -7,12 +7,16 @@ allow = [
     "Apache-2.0",
     "Unicode-3.0",
     "Zlib",
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
     "ISC",
+    "MPL-2.0",
     "CDLA-Permissive-2.0",
     # Moonlink permission.
+    "BSL-1.0",
     "LicenseRef-BSL-1.1",
+    "bzip2-1.0.6",
 ]
 
 [sources]
