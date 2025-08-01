@@ -3,6 +3,7 @@
     "service": "devcontainer",
     "workspaceFolder": "/workspaces/moonlink",
     "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {},
         "ghcr.io/robbert229/devcontainer-features/postgresql-client": {
             "version": "17"
         }

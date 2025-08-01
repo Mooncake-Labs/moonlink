@@ -1,0 +1,9 @@
+[package]
+name = "moonlink_datafusion"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+datafusion = { workspace = true }
+tokio = { workspace = true }

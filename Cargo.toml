@@ -3,6 +3,7 @@ members = [
     "src/moonlink",
     "src/moonlink_backend",
     "src/moonlink_connectors",
+    "src/moonlink_datafusion",
     "src/moonlink_metadata_store",
     "src/moonlink_rpc",
     "src/moonlink_service",
@@ -30,6 +31,7 @@ chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 console-subscriber = "0.2"
 crc32fast = "1"
+datafusion = "49"
 fastbloom = "0.12.0"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15.3"
