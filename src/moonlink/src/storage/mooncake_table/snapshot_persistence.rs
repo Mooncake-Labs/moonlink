@@ -10,7 +10,6 @@ use crate::storage::mooncake_table::{
 };
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
-use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 /// This file stores snapshot persistence related features.
 use crate::storage::SnapshotTableState;
 use std::collections::{HashMap, HashSet};
@@ -31,13 +30,11 @@ impl SnapshotTableState {
     pub(super) fn get_iceberg_snapshot_payload(
         &self,
         flush_lsn: u64,
-        wal_persistence_metadata: Option<WalPersistenceMetadata>,
         committed_deletion_to_persist: CommittedDeletionToPersist,
     ) -> IcebergSnapshotPayload {
         IcebergSnapshotPayload {
             uuid: uuid::Uuid::new_v4(),
             flush_lsn,
-            wal_persistence_metadata,
             new_table_schema: None,
             committed_deletion_logs: committed_deletion_to_persist.committed_deletion_logs,
             import_payload: IcebergSnapshotImportPayload {

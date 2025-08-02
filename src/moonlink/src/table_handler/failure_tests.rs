@@ -55,7 +55,7 @@ async fn test_iceberg_snapshot_failure_mock_test() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|_, _| {
+        .returning(|_, _, _| {
             Box::pin(async move {
                 Err(IcebergError::new(
                     ErrorKind::Unexpected,
@@ -191,7 +191,7 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|snapshot_payload: IcebergSnapshotPayload, _| {
+        .returning(|snapshot_payload: IcebergSnapshotPayload, _, _| {
             Box::pin(async move {
                 let mock_persistence_result = PersistenceResult {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
@@ -204,7 +204,7 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|_, _| {
+        .returning(|_, _, _| {
             Box::pin(async move {
                 Err(IcebergError::new(
                     ErrorKind::Unexpected,
@@ -286,7 +286,7 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|snapshot_payload: IcebergSnapshotPayload, _| {
+        .returning(|snapshot_payload: IcebergSnapshotPayload, _, _| {
             Box::pin(async move {
                 let mock_persistence_result = PersistenceResult {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
@@ -299,7 +299,7 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|_, _| {
+        .returning(|_, _, _| {
             Box::pin(async move {
                 Err(IcebergError::new(
                     ErrorKind::Unexpected,
@@ -381,7 +381,7 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|snapshot_payload: IcebergSnapshotPayload, _| {
+        .returning(|snapshot_payload: IcebergSnapshotPayload, _, _| {
             Box::pin(async move {
                 let mock_persistence_result = PersistenceResult {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
@@ -394,7 +394,7 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|_, _| {
+        .returning(|_, _, _| {
             Box::pin(async move {
                 Err(IcebergError::new(
                     ErrorKind::Unexpected,

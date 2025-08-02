@@ -6,7 +6,7 @@ use crate::storage::mooncake_table::FileIndiceMergeResult;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::IcebergSnapshotResult;
 
-use crate::storage::wal::WalPersistAndTruncateResult;
+use crate::storage::wal::WalPersistenceUpdateResult;
 use crate::Result;
 
 /// Table maintenance status.
@@ -165,10 +165,10 @@ pub enum TableEvent {
     /// ================================================
     ///
     /// Periodically persist in-memory WAL and truncate WAL files.
-    PeriodicalPersistTruncateWal(uuid::Uuid),
+    PeriodicalPersistenceUpdateWal(uuid::Uuid),
     /// Periodic persist and truncate wal completes.
-    PeriodicalPersistTruncateWalResult {
-        result: Result<WalPersistAndTruncateResult>,
+    PeriodicalWalPersistenceUpdateResult {
+        result: Result<WalPersistenceUpdateResult>,
     },
 }
 

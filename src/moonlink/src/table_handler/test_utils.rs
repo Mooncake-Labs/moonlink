@@ -367,7 +367,7 @@ impl TestEnvironment {
     /// Note that this assumes that this is being called after an event with an updated LSN
     /// has just been sent, if not it will wait indefinitely.
     pub async fn force_wal_persistence(&mut self, expected_lsn: u64) {
-        self.send_event(TableEvent::PeriodicalPersistTruncateWal(
+        self.send_event(TableEvent::PeriodicalPersistenceUpdateWal(
             uuid::Uuid::new_v4(),
         ))
         .await;
@@ -381,7 +381,8 @@ impl TestEnvironment {
     }
 
     // TODO(Paul): Rework these when implementing object storage WAL
-    pub async fn get_lowest_wal_file_number(&self) -> Option<u64> {
+    /// Infers the lowest file number by looking at all remaining files in the WAL directory.
+    pub async fn infer_lowest_wal_file_number(&self) -> Option<u64> {
         let mut files = tokio::fs::read_dir(PathBuf::from(&self.wal_filesystem_path))
             .await
             .unwrap_or_else(|_| {
@@ -407,9 +408,10 @@ impl TestEnvironment {
 
     // Recover wal events locally by reading from the wal filesystem and finding the lowest file number
     // TODO(Paul): Rework these when implementing object storage WAL
-    pub async fn get_wal_events(&self) -> Vec<TableEvent> {
-        let start_file_num = self.get_lowest_wal_file_number().await.unwrap();
-
+    pub async fn get_wal_events_with_start_file_number(
+        &self,
+        start_file_num: u64,
+    ) -> Vec<TableEvent> {
         let wal_events_stream = WalManager::recover_flushed_wals_flat(
             self.wal_filesystem_accessor.clone(),
             start_file_num,
@@ -429,12 +431,33 @@ impl TestEnvironment {
         wal_events_vec
     }
 
-    pub async fn check_wal_events(
+    pub async fn get_wal_events_inferring_lowest_file_number(&self) -> Vec<TableEvent> {
+        let lowest_file_number = self.infer_lowest_wal_file_number().await.unwrap();
+        self.get_wal_events_with_start_file_number(lowest_file_number)
+            .await
+    }
+
+    /// Infers the lowest file number by looking at all remaining files in the WAL directory.
+    pub async fn check_wal_events_inferring_lowest_file_number(
         &self,
         should_contain_table_events: &[TableEvent],
         should_not_contain_table_events: &[TableEvent],
     ) {
-        let wal_events = self.get_wal_events().await;
+        let wal_events = self.get_wal_events_inferring_lowest_file_number().await;
+
+        assert_wal_events_contains(&wal_events, should_contain_table_events);
+        assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
+    }
+
+    pub async fn check_wal_events(
+        &self,
+        start_file_number: u64,
+        should_contain_table_events: &[TableEvent],
+        should_not_contain_table_events: &[TableEvent],
+    ) {
+        let wal_events = self
+            .get_wal_events_with_start_file_number(start_file_number)
+            .await;
 
         assert_wal_events_contains(&wal_events, should_contain_table_events);
         assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);

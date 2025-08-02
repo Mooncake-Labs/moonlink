@@ -38,7 +38,7 @@ use crate::storage::storage_utils::create_data_file;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
-use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
+use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use crate::storage::MooncakeTable;
 use crate::DataCompactionConfig;
 use crate::FileSystemAccessor;
@@ -297,6 +297,9 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let cache_temp_dir = tempdir().unwrap();
     let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+    let wal_persistence_metadata = IcebergWalMetadata {
+        earliest_wal_file_num: 10,
+    };
 
     // ==============
     // Step 1
@@ -337,7 +340,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 0,
-        wal_persistence_metadata: None,
         new_table_schema: None,
         committed_deletion_logs: test_committed_deletion_logs_to_persist_1(data_file_1.clone()),
         import_payload: IcebergSnapshotImportPayload {
@@ -361,7 +363,11 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         table_auto_incr_ids: 1..2,
     };
     iceberg_table_manager
-        .sync_snapshot(iceberg_snapshot_payload, peristence_file_params)
+        .sync_snapshot(
+            iceberg_snapshot_payload,
+            peristence_file_params,
+            wal_persistence_metadata.clone(),
+        )
         .await
         .unwrap();
 
@@ -391,7 +397,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 1,
-        wal_persistence_metadata: None,
         new_table_schema: None,
         committed_deletion_logs: test_committed_deletion_logs_to_persist_2(data_file_2.clone()),
         import_payload: IcebergSnapshotImportPayload {
@@ -415,7 +420,11 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         table_auto_incr_ids: 3..4,
     };
     iceberg_table_manager
-        .sync_snapshot(iceberg_snapshot_payload, peristence_file_params)
+        .sync_snapshot(
+            iceberg_snapshot_payload,
+            peristence_file_params,
+            wal_persistence_metadata.clone(),
+        )
         .await
         .unwrap();
 
@@ -469,9 +478,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 2,
-        wal_persistence_metadata: Some(WalPersistenceMetadata {
-            persisted_file_num: 10,
-        }),
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload {
@@ -494,7 +500,11 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         table_auto_incr_ids: 4..5,
     };
     iceberg_table_manager
-        .sync_snapshot(iceberg_snapshot_payload, peristence_file_params)
+        .sync_snapshot(
+            iceberg_snapshot_payload,
+            peristence_file_params,
+            wal_persistence_metadata.clone(),
+        )
         .await
         .unwrap();
     assert_eq!(iceberg_table_manager.persisted_file_indices.len(), 1);
@@ -512,14 +522,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         .await
         .unwrap();
     assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 2);
-    assert_eq!(
-        snapshot
-            .wal_persistence_metadata
-            .as_ref()
-            .unwrap()
-            .persisted_file_num,
-        10
-    );
+    assert_eq!(snapshot.wal_persistence_metadata.earliest_wal_file_num, 10);
     assert!(snapshot.indices.in_memory_index.is_empty());
     assert_eq!(snapshot.indices.file_indices.len(), 1);
     validate_recovered_snapshot(
@@ -561,7 +564,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 3,
-        wal_persistence_metadata: None,
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload {
@@ -584,7 +586,11 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         table_auto_incr_ids: 6..7,
     };
     iceberg_table_manager
-        .sync_snapshot(iceberg_snapshot_payload, peristence_file_params)
+        .sync_snapshot(
+            iceberg_snapshot_payload,
+            peristence_file_params,
+            wal_persistence_metadata.clone(),
+        )
         .await
         .unwrap();
 
@@ -632,7 +638,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 4,
-        wal_persistence_metadata: None,
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload {
@@ -655,7 +660,11 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         table_auto_incr_ids: 7..8,
     };
     iceberg_table_manager
-        .sync_snapshot(iceberg_snapshot_payload, peristence_file_params)
+        .sync_snapshot(
+            iceberg_snapshot_payload,
+            peristence_file_params,
+            wal_persistence_metadata,
+        )
         .await
         .unwrap();
 
@@ -1219,7 +1228,6 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 0,
-        wal_persistence_metadata: None,
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload::default(),
@@ -1230,8 +1238,15 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
     let persistence_file_params = PersistenceFileParams {
         table_auto_incr_ids: 0..1,
     };
+    let wal_persistence_metadata = IcebergWalMetadata {
+        earliest_wal_file_num: 0,
+    };
     iceberg_table_manager_for_persistence
-        .sync_snapshot(iceberg_snapshot_payload, persistence_file_params)
+        .sync_snapshot(
+            iceberg_snapshot_payload,
+            persistence_file_params,
+            wal_persistence_metadata,
+        )
         .await
         .unwrap();
 
@@ -2393,61 +2408,4 @@ async fn test_schema_update_with_gcs() {
 
     // Common testing logic.
     test_schema_update_impl(iceberg_table_config.clone()).await;
-}
-
-/// ================================
-/// Test snapshot property persistence
-/// ================================
-///
-#[tokio::test]
-async fn test_persist_snapshot_property() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let path = temp_dir.path().to_path_buf();
-    let warehouse_uri = path.clone().to_str().unwrap().to_string();
-    let mooncake_table_metadata =
-        create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
-    let identity_property = mooncake_table_metadata.identity.clone();
-
-    let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
-    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
-    let schema = create_test_arrow_schema();
-    let mut table = MooncakeTable::new(
-        schema.as_ref().clone(),
-        "test_table".to_string(),
-        /*table_id=*/ 1,
-        path,
-        identity_property,
-        iceberg_table_config.clone(),
-        MooncakeTableConfig::default(),
-        wal_config,
-        ObjectStorageCache::default_for_test(&temp_dir),
-        create_test_filesystem_accessor(&iceberg_table_config),
-    )
-    .await
-    .unwrap();
-    let (notify_tx, mut notify_rx) = mpsc::channel(100);
-    table.register_table_notify(notify_tx).await;
-
-    // Persist data file to local filesystem, so iceberg snapshot should be created, if skip iceberg not specified.
-    let row = test_row_1();
-    table.append(row.clone()).unwrap();
-    table.commit(/*lsn=*/ 10);
-    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 10)
-        .await
-        .unwrap();
-
-    let wal_persistence_metadata = WalPersistenceMetadata {
-        persisted_file_num: 10,
-    };
-    table.update_wal_persistence_metadata(wal_persistence_metadata.clone());
-
-    // Create mooncake and iceberg snapshot.
-    create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
-
-    // Check persisted table properties.
-    assert_eq!(table.get_iceberg_snapshot_lsn().unwrap(), 10);
-    assert_eq!(
-        table.get_wal_persisted_metadata().unwrap(),
-        wal_persistence_metadata
-    );
 }
