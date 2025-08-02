@@ -1,19 +1,37 @@
 # Contributing
 
-## Dev Container
-The easiest way to start contributing is via our Dev Container. To open the project in vscode you will need the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers). For codespaces you will need to [create a new codespace](https://codespace.new/Mooncake-Labs/pg_mooncake).
+## Environment Setup
 
-With the extension installed you can run the following from the `Command Palette` to get started
-```
-> Dev Containers: Clone Repository in Container Volume...
-```
+The easiest way to start contributing is by using our **Dev Container**.
+You can choose between two approaches:
 
-In the subsequent popup paste the url to the repo and hit enter.
-```
-https://github.com/Mooncake-Labs/moonlink
-```
+### 1. Local VS Code (Recommend)
 
-This will create an isolated Workspace in vscode.
+**Prerequisites:**
+- [Docker](https://docs.docker.com/get-docker/) (or Podman)
+- [VS Code](https://code.visualstudio.com/)
+- [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+**Steps:**
+
+1. Clone the repository
+    ```bash
+    git clone https://github.com/Mooncake-Labs/moonlink.git
+    cd moonlink
+    ```
+2. Open in VS Code
+3. Inside VS Code, run the following from the `Command Palette` to get started
+    ```
+    > Dev Containers: Open Folder in Container
+    ```
+
+    This will create an isolated Workspace in vscode.
+
+### 2. GitHub Codespaces
+
+You just need to [create a new codespace](https://codespace.new/Mooncake-Labs/pg_mooncake).
+
+---
 
 ## Testing
 Moonlink is a standard Rust project, and tests can be run using `cargo test`. By default, this will run all tests that don't require optional features.
@@ -26,6 +44,8 @@ cargo test --features storage-gcs
 # Run tests with S3 support.
 cargo test --features storage-s3
 ```
+
+---
 
 ## Formatting
 Formatting and linting is configured properly in devcontainer via [precommit hooks](https://github.com/Mooncake-Labs/moonlink/blob/main/.pre-commit-config.yaml), which automatically triggers before you push a commit.
