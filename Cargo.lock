@@ -2067,7 +2067,7 @@ dependencies = [
  "rand 0.8.5",
  "reqsign",
  "reqwest",
- "roaring",
+ "roaring 0.10.12",
  "rust_decimal",
  "serde",
  "serde_bytes",
@@ -2724,7 +2724,7 @@ dependencies = [
  "pprof",
  "rand 0.9.1",
  "reqwest",
- "roaring",
+ "roaring 0.11.2",
  "rstest",
  "rstest_reuse",
  "serde",
@@ -2754,7 +2754,7 @@ dependencies = [
  "more-asserts",
  "nix 0.27.1",
  "parquet",
- "roaring",
+ "roaring 0.11.2",
  "serde",
  "serde_json",
  "serial_test",
@@ -4033,6 +4033,16 @@ name = "roaring"
 version = "0.10.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
+name = "roaring"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f08d6a905edb32d74a5d5737a0c9d7e950c312f3c46cb0ca0a2ca09ea11878a0"
 dependencies = [
  "bytemuck",
  "byteorder",
