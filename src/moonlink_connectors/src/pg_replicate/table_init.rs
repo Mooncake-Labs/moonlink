@@ -1,14 +1,16 @@
 use crate::pg_replicate::replication_state::ReplicationState;
-use crate::pg_replicate::table::TableSchema;
+use crate::pg_replicate::table::{SrcTableId, TableSchema};
 use crate::pg_replicate::util::postgres_schema_to_moonlink_schema;
 use crate::{Error, Result};
+use arrow_schema::Schema as ArrowSchema;
 use moonlink::event_sync::create_table_event_syncer;
 use moonlink::{
-    AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor, IcebergTableConfig,
-    MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
-    MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig, TableEvent,
-    TableEventManager, TableHandler, TableStatusReader, WalConfig,
+    row::IdentityProp, AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor,
+    IcebergTableConfig, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
+    MoonlinkTableConfig, MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig,
+    TableEvent, TableEventManager, TableHandler, TableStatusReader, WalConfig,
 };
+
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,9 +28,9 @@ pub struct TableResources {
     pub read_state_manager: ReadStateManager,
     pub table_event_manager: TableEventManager,
     pub table_status_reader: TableStatusReader,
-    pub commit_lsn_tx: watch::Sender<u64>,
-    pub flush_lsn_rx: watch::Receiver<u64>,
-    pub wal_flush_lsn_rx: watch::Receiver<u64>,
+    pub commit_lsn_tx: Option<watch::Sender<u64>>,
+    pub flush_lsn_rx: Option<watch::Receiver<u64>>,
+    pub wal_flush_lsn_rx: Option<watch::Receiver<u64>>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -51,7 +53,10 @@ async fn recreate_directory(dir: &PathBuf) -> Result<()> {
 pub async fn build_table_components(
     mooncake_table_id: String,
     table_id: u32,
-    table_schema: &TableSchema,
+    arrow_schema: ArrowSchema,
+    identity: IdentityProp,
+    table_name: String,
+    src_table_id: SrcTableId,
     base_path: &String,
     replication_state: &ReplicationState,
     object_storage_cache: ObjectStorageCache,
@@ -68,12 +73,11 @@ pub async fn build_table_components(
     )
     .await?;
 
-    let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(table_schema);
     let wal_config =
         WalConfig::default_wal_config_local(&mooncake_table_id, &PathBuf::from(base_path));
     let table = MooncakeTable::new(
         arrow_schema,
-        table_schema.table_name.to_string(),
+        table_name,
         table_id,
         write_cache_path,
         identity,
@@ -114,9 +118,9 @@ pub async fn build_table_components(
         read_state_manager,
         table_status_reader,
         table_event_manager,
-        commit_lsn_tx,
-        flush_lsn_rx,
-        wal_flush_lsn_rx,
+        commit_lsn_tx: Some(commit_lsn_tx),
+        flush_lsn_rx: Some(flush_lsn_rx),
+        wal_flush_lsn_rx: Some(wal_flush_lsn_rx),
     };
     Ok(table_resource)
 }
