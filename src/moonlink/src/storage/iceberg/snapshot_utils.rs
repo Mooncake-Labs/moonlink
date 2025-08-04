@@ -3,7 +3,7 @@ use iceberg::spec::TableMetadata;
 use crate::storage::iceberg::iceberg_table_manager::{
     MOONCAKE_TABLE_FLUSH_LSN, MOONCAKE_WAL_METADATA,
 };
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
+use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
 use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
 
@@ -14,7 +14,7 @@ pub(super) struct SnapshotProperty {
     /// Iceberg flush LSN.
     pub(super) flush_lsn: Option<u64>,
     /// WAL persisted metadata.
-    pub(super) wal_persisted_metadata: IcebergWalMetadata,
+    pub(super) corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
 }
 
 /// Get moonlink customized snapshot
@@ -45,7 +45,7 @@ pub(super) fn get_snapshot_properties(
         })?;
         Ok(SnapshotProperty {
             flush_lsn,
-            wal_persisted_metadata: parsed_wal,
+            corresponding_wal_metadata: parsed_wal,
         })
     } else {
         Err(IcebergError::new(

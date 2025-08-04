@@ -591,7 +591,7 @@ async fn test_snapshot_store_failure() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|_, _, _| {
+        .returning(|_, _| {
             Box::pin(async move {
                 Err(IcebergError::new(
                     ErrorKind::Unexpected,

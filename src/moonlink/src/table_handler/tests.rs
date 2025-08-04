@@ -1640,7 +1640,7 @@ async fn test_discard_duplicate_writes() {
     mock_table_manager
         .expect_sync_snapshot()
         .times(1)
-        .returning(|snapshot_payload: IcebergSnapshotPayload, _, _| {
+        .returning(|snapshot_payload: IcebergSnapshotPayload, _| {
             Box::pin(async move {
                 let mock_persistence_result = PersistenceResult {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
@@ -1750,6 +1750,9 @@ async fn test_wal_truncates_events_after_snapshot() {
     // these events should not be persisted because they will go into the iceberg snapshot and be truncated
     not_expected_events.push(env.append_row(1, "John", 30, 1, None).await);
     env.flush_table(1).await;
+    // flush these events first so that they are persisted in the WAL, and this file is subsequently dropped by
+    // the iceberg snapshot
+    env.force_wal_persistence(1).await;
 
     // take snapshot
     let force_snapshot_completion_rx = env.table_event_manager.initiate_snapshot(1).await;
@@ -1759,7 +1762,6 @@ async fn test_wal_truncates_events_after_snapshot() {
     )
     .await
     .unwrap();
-    env.force_wal_persistence(1).await;
 
     // any vents after this should be in the WAL because iceberg snapshot cannot capture the uncommitted streaming xact
     expected_events.push(env.append_row(2, "Jane", 20, 0, Some(100)).await);
@@ -1883,8 +1885,8 @@ async fn test_wal_iceberg_snapshot_metadata_retrieval() {
         .unwrap();
 
     // Retrieve the WAL persistence metadata from the latest snapshot
-    let wal_persistence_metadata = &snapshot.wal_persistence_metadata;
-    let highest_file_number = wal_persistence_metadata.earliest_wal_file_num;
+    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_snapshot_wal_metadata;
+    let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
     assert!(
         highest_file_number >= 2,
@@ -1936,8 +1938,8 @@ async fn test_wal_iceberg_snapshot_keeps_relevant_events() {
         .unwrap();
 
     // Retrieve the WAL persistence metadata from the latest snapshot
-    let wal_persistence_metadata = &snapshot.wal_persistence_metadata;
-    let highest_file_number = wal_persistence_metadata.earliest_wal_file_num;
+    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_snapshot_wal_metadata;
+    let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
     env.check_wal_events(highest_file_number, &expected_events, &not_expected_events)
         .await;
@@ -1993,8 +1995,8 @@ async fn test_wal_iceberg_snapshot_truncates_correctly() {
         .unwrap();
 
     // Retrieve the WAL persistence metadata from the latest snapshot
-    let wal_persistence_metadata = &snapshot.wal_persistence_metadata;
-    let highest_file_number = wal_persistence_metadata.earliest_wal_file_num;
+    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_snapshot_wal_metadata;
+    let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
     env.check_wal_events(highest_file_number, &expected_events, &not_expected_events)
         .await;

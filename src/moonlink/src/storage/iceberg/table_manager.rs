@@ -7,7 +7,6 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 
 use async_trait::async_trait;
 use iceberg::Result as IcebergResult;
@@ -52,7 +51,6 @@ pub trait TableManager: Send {
         &mut self,
         snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
-        snapshot_persistence_metadata: IcebergWalMetadata,
     ) -> IcebergResult<PersistenceResult>;
 
     /// Load the latest snapshot from iceberg table, and return next file id for the current mooncake table.

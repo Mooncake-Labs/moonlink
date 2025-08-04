@@ -1,6 +1,6 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::test_row;
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
+use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
 use crate::storage::wal::{
     IcebergSnapshotWalInfo, WalEvent, WalManager, WalPersistenceUpdateResult,
 };
@@ -37,10 +37,10 @@ impl WalManager {
 
         // handle the truncate side
         if let Some(iceberg_snapshot_wal_info) = &iceberg_snapshot_wal_info {
-            let wal_persistence_metadata = IcebergWalMetadata {
+            let corresponding_wal_metadata = IcebergCorrespondingWalMetadata {
                 earliest_wal_file_num: iceberg_snapshot_wal_info.iceberg_snapshot_wal_file_num,
             };
-            let files_to_truncate = self.get_files_to_truncate(wal_persistence_metadata);
+            let files_to_truncate = self.get_files_to_truncate(corresponding_wal_metadata);
             if !files_to_truncate.is_empty() {
                 WalManager::delete_files(self.file_system_accessor.clone(), &files_to_truncate)
                     .await?;

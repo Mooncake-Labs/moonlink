@@ -26,7 +26,6 @@ use crate::storage::storage_utils::{
     create_data_file, get_unique_file_id_for_flush, FileId, MooncakeDataFileRef, TableId,
     TableUniqueFileId,
 };
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use crate::storage::{io_utils, storage_utils};
 
 use std::collections::{HashMap, HashSet};
@@ -522,7 +521,6 @@ impl IcebergTableManager {
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
-        wal_persistence_metadata: IcebergWalMetadata,
     ) -> IcebergResult<PersistenceResult> {
         // Initialize iceberg table on access.
         self.initialize_iceberg_table_for_once().await?;
@@ -571,7 +569,7 @@ impl IcebergTableManager {
         )]);
         snapshot_properties.insert(
             MOONCAKE_WAL_METADATA.to_string(),
-            serde_json::to_string(&wal_persistence_metadata).unwrap(),
+            serde_json::to_string(&snapshot_payload.iceberg_corresponding_wal_metadata).unwrap(),
         );
 
         let mut txn = Transaction::new(self.iceberg_table.as_ref().unwrap());

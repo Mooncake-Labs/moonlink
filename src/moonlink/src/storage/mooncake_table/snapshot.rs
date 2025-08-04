@@ -577,8 +577,15 @@ impl SnapshotTableState {
                 || flush_by_new_files_or_maintainence
                 || force_empty_iceberg_payload
             {
-                iceberg_snapshot_payload =
-                    Some(self.get_iceberg_snapshot_payload(flush_lsn, committed_deletion_logs));
+                let iceberg_corresponding_wal_metadata = task
+                    .iceberg_corresponding_wal_metadata
+                    .clone()
+                    .expect("accompanying wal metadata should always be populated in a snapshot");
+                iceberg_snapshot_payload = Some(self.get_iceberg_snapshot_payload(
+                    flush_lsn,
+                    committed_deletion_logs,
+                    iceberg_corresponding_wal_metadata,
+                ));
             }
         }
 

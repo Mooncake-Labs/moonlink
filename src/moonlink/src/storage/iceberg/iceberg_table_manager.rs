@@ -11,7 +11,6 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
 use crate::{IcebergTableConfig, ObjectStorageCache};
 
 use std::collections::HashMap;
@@ -29,7 +28,7 @@ use uuid::Uuid;
 ///
 /// Key for iceberg snapshot property, to record flush lsn.
 pub(super) const MOONCAKE_TABLE_FLUSH_LSN: &str = "moonlink.table-flush-lsn";
-/// Key for iceberg snapshot property, to record WAL persistence metadata.
+/// Key for iceberg snapshot property, to record accompanying WAL metadata.
 pub(super) const MOONCAKE_WAL_METADATA: &str = "moonlink.wal-metadata";
 /// Used to represent uninitialized deletion vector.
 /// TODO(hjiang): Consider using `Option<>` to represent uninitialized, which is more rust-idiometic.
@@ -196,12 +195,11 @@ impl TableManager for IcebergTableManager {
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
-        wal_persistence_metadata: IcebergWalMetadata,
     ) -> IcebergResult<PersistenceResult> {
         // Persist data files, deletion vectors, and file indices.
         let new_table_schema = std::mem::take(&mut snapshot_payload.new_table_schema);
         let persistence_result = self
-            .sync_snapshot_impl(snapshot_payload, file_params, wal_persistence_metadata)
+            .sync_snapshot_impl(snapshot_payload, file_params)
             .await?;
 
         // Perform schema evolution if necessary.

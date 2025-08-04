@@ -439,6 +439,7 @@ impl TableHandler {
                                     // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
                                     let iceberg_flush_lsn = snapshot_res.flush_lsn;
                                     event_sync_sender.flush_lsn_tx.send(iceberg_flush_lsn).unwrap();
+                                    debug!("Iceberg snapshot result wal metadata: {:?}", snapshot_res.corresponding_wal_metadata);
                                     table.set_iceberg_snapshot_res(snapshot_res);
                                     table_handler_state.iceberg_snapshot_result_consumed = false;
 

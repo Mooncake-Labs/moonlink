@@ -1,10 +1,10 @@
-pub mod wal_persistence_metadata;
+pub mod iceberg_corresponding_wal_metadata;
 use crate::row::MoonlinkRow;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::filesystem::storage_config::StorageConfig;
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
+use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
 use crate::table_notify::TableEvent;
 use crate::Result;
 use futures::stream::{self, Stream};
@@ -482,10 +482,10 @@ impl WalManager {
     /// Should be called in preparation to asynchronously delete the files.
     pub fn get_files_to_truncate(
         &self,
-        wal_persistence_metadata: IcebergWalMetadata,
+        iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
     ) -> Vec<WalFileInfo> {
         // get all file numbers less than the lowest file to keep as we can then delete them
-        let lowest_file_to_keep = wal_persistence_metadata.earliest_wal_file_num;
+        let lowest_file_to_keep = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
         if !self.live_wal_files_tracker.is_empty() {
             ma::assert_ge!(

@@ -6,7 +6,7 @@ use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
-use crate::storage::wal::wal_persistence_metadata::IcebergWalMetadata;
+use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
 use crate::storage::TableManager;
 
 use std::collections::{HashMap, HashSet};
@@ -141,6 +141,8 @@ pub struct IcebergSnapshotPayload {
     pub(crate) index_merge_payload: IcebergSnapshotIndexMergePayload,
     /// Payload by data file compaction operations.
     pub(crate) data_compaction_payload: IcebergSnapshotDataCompactionPayload,
+    /// WAL persistence metadata.
+    pub(crate) iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
 }
 
 impl std::fmt::Debug for IcebergSnapshotPayload {
@@ -359,8 +361,8 @@ pub struct IcebergSnapshotResult {
     pub(crate) table_manager: Option<Box<dyn TableManager>>,
     /// Iceberg flush LSN.
     pub(crate) flush_lsn: u64,
-    /// Iceberg WAL persistence.
-    pub(crate) wal_persisted_metadata: IcebergWalMetadata,
+    /// WAL metadata corresponding to the iceberg snapshot.
+    pub(crate) corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
     /// Mooncake schema sync-ed to iceberg.
     pub(crate) new_table_schema: Option<Arc<MooncakeTableMetadata>>,
     /// Committed deletion logs included in the current iceberg snapshot persistence operation, which is used to prune after persistence completion.
@@ -379,7 +381,7 @@ impl Clone for IcebergSnapshotResult {
             uuid: self.uuid,
             table_manager: None,
             flush_lsn: self.flush_lsn,
-            wal_persisted_metadata: self.wal_persisted_metadata.clone(),
+            corresponding_wal_metadata: self.corresponding_wal_metadata.clone(),
             new_table_schema: self.new_table_schema.clone(),
             committed_deletion_logs: self.committed_deletion_logs.clone(),
             import_result: self.import_result.clone(),
