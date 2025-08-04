@@ -16,6 +16,13 @@ pub struct DataCompactionConfig {
     /// Number of bytes for a block index to consider it finalized and won't be merged again.
     #[serde(default = "DataCompactionConfig::default_data_file_final_size")]
     pub data_file_final_size: u64,
+
+    /// Percentage of rows deleted for a file to trigger a compaction.
+    /// The percentage value should be [0, 100].
+    /// - 0 means deletion is not considered for compaction.
+    /// - 100 means only compact when all rows deleted.
+    #[serde(default = "DataCompactionConfig::default_data_file_deletion_percentage")]
+    pub data_file_deletion_percentage: u32,
 }
 
 impl DataCompactionConfig {
@@ -25,6 +32,8 @@ impl DataCompactionConfig {
     pub const DEFAULT_MAX_DATA_FILE_TO_COMPACT: u32 = u32::MAX;
     #[cfg(test)]
     pub const DEFAULT_DATA_FILE_FINAL_SIZE: u64 = u64::MAX;
+    #[cfg(test)]
+    pub const DEFAULT_DATA_FILE_DELETION_PERCENTAGE: u32 = 0;
 
     #[cfg(all(not(test), debug_assertions))]
     pub const DEFAULT_MIN_DATA_FILE_TO_COMPACT: u32 = 4;
@@ -32,6 +41,8 @@ impl DataCompactionConfig {
     pub const DEFAULT_MAX_DATA_FILE_TO_COMPACT: u32 = 8;
     #[cfg(all(not(test), debug_assertions))]
     pub const DEFAULT_DATA_FILE_FINAL_SIZE: u64 = 1 << 10; // 1KiB
+    #[cfg(all(not(test), debug_assertions))]
+    pub const DEFAULT_DATA_FILE_DELETION_PERCENTAGE: u32 = 50;
 
     #[cfg(all(not(test), not(debug_assertions)))]
     pub const DEFAULT_MIN_DATA_FILE_TO_COMPACT: u32 = 16;
@@ -39,6 +50,8 @@ impl DataCompactionConfig {
     pub const DEFAULT_MAX_DATA_FILE_TO_COMPACT: u32 = 32;
     #[cfg(all(not(test), not(debug_assertions)))]
     pub const DEFAULT_DATA_FILE_FINAL_SIZE: u64 = 1 << 29; // 512MiB
+    #[cfg(all(not(test), not(debug_assertions)))]
+    pub const DEFAULT_DATA_FILE_DELETION_PERCENTAGE: u32 = 50;
 
     pub fn default_min_data_file_to_compact() -> u32 {
         Self::DEFAULT_MIN_DATA_FILE_TO_COMPACT
@@ -49,9 +62,14 @@ impl DataCompactionConfig {
     pub fn default_data_file_final_size() -> u64 {
         Self::DEFAULT_DATA_FILE_FINAL_SIZE
     }
+    pub fn default_data_file_deletion_percentage() -> u32 {
+        Self::DEFAULT_DATA_FILE_DELETION_PERCENTAGE
+    }
 
     pub fn validate(&self) {
         ma::assert_le!(self.min_data_file_to_compact, self.max_data_file_to_compact);
+        ma::assert_ge!(self.data_file_deletion_percentage, 0);
+        ma::assert_le!(self.data_file_deletion_percentage, 100);
     }
 }
 
@@ -61,6 +79,7 @@ impl Default for DataCompactionConfig {
             min_data_file_to_compact: Self::DEFAULT_MIN_DATA_FILE_TO_COMPACT,
             max_data_file_to_compact: Self::DEFAULT_MAX_DATA_FILE_TO_COMPACT,
             data_file_final_size: Self::DEFAULT_DATA_FILE_FINAL_SIZE,
+            data_file_deletion_percentage: Self::DEFAULT_DATA_FILE_DELETION_PERCENTAGE,
         }
     }
 }
@@ -77,6 +96,7 @@ impl DataCompactionConfig {
             min_data_file_to_compact: u32::MAX,
             max_data_file_to_compact: u32::MAX,
             data_file_final_size: u64::MAX,
+            data_file_deletion_percentage: 0,
         }
     }
 }

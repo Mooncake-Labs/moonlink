@@ -1469,6 +1469,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dd6caf6059519a65843af8fe2a3ae298b14b80179855aeb4adc2c1934ee619"
 
 [[package]]
+name = "function_name"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ab577a896d09940b5fe12ec5ae71f9d8211fff62c919c03a3750a9901e98a7"
+dependencies = [
+ "function_name-proc-macro",
+]
+
+[[package]]
+name = "function_name-proc-macro"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673464e1e314dd67a0fd9544abc99e8eb28d0c7e3b69b033bcff9b2d00b87333"
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2017,7 +2032,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.6.0"
-source = "git+https://github.com/apache/iceberg-rust.git?rev=b3ea8d1fca14ddc23154615862a62d3e3e56a769#b3ea8d1fca14ddc23154615862a62d3e3e56a769"
+source = "git+https://github.com/apache/iceberg-rust.git?rev=fb6fef31fb890e6014f2acdd743bde4021ba9787#fb6fef31fb890e6014f2acdd743bde4021ba9787"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -2691,6 +2706,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "fastbloom",
+ "function_name",
  "futures",
  "hashbrown 0.15.4",
  "hmac",
@@ -4014,9 +4030,9 @@ checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
 
 [[package]]
 name = "roaring"
-version = "0.10.12"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+checksum = "f08d6a905edb32d74a5d5737a0c9d7e950c312f3c46cb0ca0a2ca09ea11878a0"
 dependencies = [
  "bytemuck",
  "byteorder",

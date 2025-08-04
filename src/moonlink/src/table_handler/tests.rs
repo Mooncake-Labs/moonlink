@@ -143,6 +143,38 @@ async fn test_streaming_delete() {
     env.shutdown().await;
 }
 
+/// Testing scenario:
+/// operation-1: append and commit in non-streaming transaction
+/// operation-2: in a non-streaming transaction, delete rows committed in the above transaction
+/// operation-3: start and commit a streaming transaction
+#[tokio::test]
+async fn test_delete_committed_unflushed_follow_streaming() {
+    let mut env = TestEnvironment::default().await;
+
+    // operation-1: append and commit in non-streaming transaction
+    env.append_row(1, "User-1", 10, /*lsn=*/ 50, /*xact_id=*/ None)
+        .await;
+    env.append_row(2, "User-2", 20, /*lsn=*/ 100, /*xact_id=*/ None)
+        .await;
+    env.commit(/*lsn=*/ 150).await;
+
+    // operation-2: in a non-streaming transaction, delete rows committed in the above transaction
+    env.delete_row(1, "User-1", 20, /*lsn=*/ 200, /*xact_id=*/ None)
+        .await;
+    env.commit(/*lsn=*/ 250).await;
+
+    // start and commit a streaming transaction
+    let xact_id = 0;
+    env.append_row(10, "User-3", 25, /*lsn=*/ 300, Some(xact_id))
+        .await;
+    env.stream_commit(350, xact_id).await;
+
+    env.set_readable_lsn(350);
+    env.verify_snapshot(350, &[2, 10]).await;
+
+    env.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_streaming_abort() {
     let mut env = TestEnvironment::default().await;
@@ -319,7 +351,6 @@ async fn test_streaming_transaction_periodic_flush() {
     env.stream_commit(commit_lsn, xact_id).await;
 
     // --- Phase 6: Verify ALL data (before and after periodic flush) is visible after commit ---
-
     env.set_table_commit_lsn(commit_lsn);
     env.set_replication_lsn(final_read_lsn_target + 5);
 
@@ -1496,6 +1527,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
             min_data_file_to_compact: 2,
             max_data_file_to_compact: u32::MAX,
             data_file_final_size: u64::MAX,
+            data_file_deletion_percentage: 0,
         },
         file_index_config: FileIndexMergeConfig {
             min_file_indices_to_merge: u32::MAX,
@@ -2011,4 +2043,25 @@ fn test_get_persisted_table_lsn() {
             table_handler_state.get_persisted_table_lsn(iceberg_snapshot_lsn, replication_lsn);
         assert_eq!(persisted_table_lsn, 2);
     }
+}
+
+/// Testing scenario: append and commit in non-streaming transaction, its content should be flushed in the followup streaming transaction flush.
+#[tokio::test]
+async fn test_commit_streaming_transaction_flush_non_streaming_writes() {
+    let mut env = TestEnvironment::default().await;
+
+    // Append and commit in non-streaming transaction.
+    env.append_row(1, "User-1", 20, /*lsn=*/ 50, None).await;
+    env.commit(/*lsn=*/ 100).await;
+
+    // Append and commit in streaming transaction.
+    let xact_id = 0;
+    env.append_row(10, "User-2", 25, /*lsn=*/ 50, Some(xact_id))
+        .await;
+    env.stream_commit(101, xact_id).await;
+
+    env.set_readable_lsn(101);
+    env.verify_snapshot(101, &[1, 10]).await;
+
+    env.shutdown().await;
 }

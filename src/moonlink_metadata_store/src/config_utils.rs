@@ -266,6 +266,8 @@ mod tests {
                 min_data_file_to_compact: 10,
                 max_data_file_to_compact: DataCompactionConfig::default_max_data_file_to_compact(),
                 data_file_final_size: 123456,
+                data_file_deletion_percentage:
+                    DataCompactionConfig::default_data_file_deletion_percentage(),
             },
             // Index merge config.
             file_index_config: FileIndexMergeConfig {

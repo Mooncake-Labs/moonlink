@@ -324,6 +324,7 @@ impl TableHandler {
                             if table_handler_state.has_pending_force_snapshot_request() && !table_handler_state.iceberg_snapshot_ongoing {
                                 if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
                                     table.flush(commit_lsn).await.unwrap();
+                                    table_handler_state.last_unflushed_commit_lsn = None;
                                     table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
                                     if let SpecialTableState::AlterTable { .. } = table_handler_state.special_table_state {
                                         table.force_empty_iceberg_payload();
@@ -679,6 +680,16 @@ impl TableHandler {
 
         match xact_id {
             Some(xact_id) => {
+                // Attempt to flush all preceding unflushed committed non-streaming writes.
+                if let Some(last_unflushed_commit_lsn) =
+                    table_handler_state.last_unflushed_commit_lsn
+                {
+                    if let Err(e) = table.flush(last_unflushed_commit_lsn).await {
+                        error!(error = %e, "flush non-streaming writes failed in LSN {lsn}");
+                    }
+                    table_handler_state.last_unflushed_commit_lsn = None;
+                }
+
                 // For streaming writers, whose commit LSN is only finalized at commit phase, delay decision whether to discard now.
                 // If commit LSN is no fresher than persistence LSN, it means already persisted, directly discard.
                 if let Some(initial_persistence_lsn) = table_handler_state.initial_persistence_lsn {
@@ -694,6 +705,7 @@ impl TableHandler {
             None => {
                 table.commit(lsn);
                 if table.should_flush() || should_force_snapshot || force_flush_requested {
+                    table_handler_state.last_unflushed_commit_lsn = None;
                     if let Err(e) = table.flush(lsn).await {
                         error!(error = %e, "flush failed in commit");
                     }

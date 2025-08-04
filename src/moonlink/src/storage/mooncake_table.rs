@@ -129,6 +129,8 @@ impl TableMetadata {
 pub(crate) struct DiskFileEntry {
     /// Cache handle. If assigned, it's pinned in object storage cache.
     pub(crate) cache_handle: Option<NonEvictableHandle>,
+    /// Number of rows.
+    pub(crate) num_rows: usize,
     /// File size.
     pub(crate) file_size: usize,
     /// In-memory deletion vector, used for new deletion records in-memory processing.

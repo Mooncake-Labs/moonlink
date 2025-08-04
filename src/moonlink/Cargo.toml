@@ -33,7 +33,7 @@ storage-gcs = [
 
 bench = []
 
-chaos-test = []
+chaos-test = ["function_name"]
 
 [dependencies]
 ahash = "0.8.11"
@@ -49,6 +49,7 @@ bitstream-io = { workspace = true }
 chrono = { workspace = true }
 crc32fast = { workspace = true }
 fastbloom = { workspace = true }
+function_name = { version = "0.3.0", optional = true }
 futures = { workspace = true }
 hashbrown = { workspace = true }
 hmac = { version = "0.12", optional = true }

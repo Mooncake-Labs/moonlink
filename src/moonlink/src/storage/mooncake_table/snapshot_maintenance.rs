@@ -47,44 +47,27 @@ impl SnapshotTableState {
             return DataCompactionMaintenanceStatus::Unknown;
         }
 
-        let min_data_compaction_file_num_threshold = match data_compaction_option {
-            MaintenanceOption::Skip => usize::MAX,
-            MaintenanceOption::ForceRegular => 2,
-            MaintenanceOption::ForceFull => 2,
-            MaintenanceOption::BestEffort => {
-                self.mooncake_table_metadata
-                    .config
-                    .data_compaction_config
-                    .min_data_file_to_compact as usize
-            }
-        };
-        let max_data_compaction_file_num_threshold = match data_compaction_option {
-            MaintenanceOption::Skip => usize::MAX,
-            MaintenanceOption::ForceRegular => {
-                self.mooncake_table_metadata
-                    .config
-                    .data_compaction_config
-                    .max_data_file_to_compact as usize
-            }
-            MaintenanceOption::ForceFull => usize::MAX,
-            MaintenanceOption::BestEffort => {
-                self.mooncake_table_metadata
-                    .config
-                    .data_compaction_config
-                    .max_data_file_to_compact as usize
-            }
-        };
-
-        let default_final_file_size = self
-            .mooncake_table_metadata
-            .config
-            .data_compaction_config
-            .data_file_final_size as usize;
-        let data_compaction_file_size_threshold = match data_compaction_option {
-            MaintenanceOption::Skip => 0,
-            MaintenanceOption::ForceRegular => default_final_file_size,
-            MaintenanceOption::ForceFull => usize::MAX,
-            MaintenanceOption::BestEffort => default_final_file_size,
+        let config = &self.mooncake_table_metadata.config.data_compaction_config;
+        let (
+            min_data_compaction_file_num_threshold,
+            max_data_compaction_file_num_threshold,
+            data_file_deletion_percentage_threshold,
+            data_compaction_file_size_threshold,
+        ) = match data_compaction_option {
+            MaintenanceOption::Skip => (usize::MAX, usize::MAX, 100, 0),
+            MaintenanceOption::ForceRegular => (
+                2,
+                config.max_data_file_to_compact as usize,
+                config.data_file_deletion_percentage as usize,
+                config.data_file_final_size as usize,
+            ),
+            MaintenanceOption::ForceFull => (2, usize::MAX, 1, usize::MAX),
+            MaintenanceOption::BestEffort => (
+                config.min_data_file_to_compact as usize,
+                config.max_data_file_to_compact as usize,
+                config.data_file_deletion_percentage as usize,
+                config.data_file_final_size as usize,
+            ),
         };
 
         // Fast-path: not enough data files to trigger compaction.
@@ -102,22 +85,29 @@ impl SnapshotTableState {
 
         // TODO(hjiang): We should be able to early exit, if left items are not enough to reach the compaction threshold.
         for (cur_data_file, disk_file_entry) in all_disk_files.iter() {
-            // Skip compaction if the file size exceeds threshold, AND it has no persisted deletion vectors.
-            if disk_file_entry.file_size >= data_compaction_file_size_threshold
-                && disk_file_entry.batch_deletion_vector.is_empty()
-            {
+            // Doesn't compact those unpersisted files.
+            if unpersisted_data_files.contains(cur_data_file) {
+                reject_by_unpersistence += 1;
                 continue;
+            }
+
+            // Skip compaction if the file size exceeds threshold, AND deleted rows are below config thresholds.
+            if disk_file_entry.file_size >= data_compaction_file_size_threshold {
+                // Compaction by deletion is skipped.
+                if data_file_deletion_percentage_threshold == 0 {
+                    continue;
+                }
+                let deletion_percentage =
+                    disk_file_entry.batch_deletion_vector.get_num_rows_deleted() * 100
+                        / disk_file_entry.num_rows;
+                if deletion_percentage < data_file_deletion_percentage_threshold {
+                    continue;
+                }
             }
 
             // Break early if tentative data files to compact already reaches upper limit.
             if tentative_data_files_to_compact.len() >= max_data_compaction_file_num_threshold {
                 break;
-            }
-
-            // Doesn't compact those unpersisted files.
-            if unpersisted_data_files.contains(cur_data_file) {
-                reject_by_unpersistence += 1;
-                continue;
             }
 
             // Tentatively decide data file to compact.

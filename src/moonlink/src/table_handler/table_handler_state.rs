@@ -79,6 +79,9 @@ pub(crate) struct TableHandlerState {
     pub(crate) table_consistent_view_lsn: Option<u64>,
     // Latest LSN of the table's latest commit.
     pub(crate) latest_commit_lsn: Option<u64>,
+    // Last unflushed commit LSN for non-streaming transaction.
+    // Used to flush non-streaming writes at streaming transaction commit.
+    pub(crate) last_unflushed_commit_lsn: Option<u64>,
 
     // ================================================
     // Table management and event handling states
@@ -122,6 +125,7 @@ pub(crate) struct TableHandlerState {
     // ================================================
     // Write-ahead log (WAL)
     // ================================================
+    //
     pub(crate) wal_persist_ongoing: bool,
 }
 
@@ -136,6 +140,7 @@ impl TableHandlerState {
             iceberg_snapshot_ongoing: false,
             mooncake_snapshot_ongoing: false,
             initial_persistence_lsn,
+            last_unflushed_commit_lsn: None,
             latest_commit_lsn: None,
             special_table_state: SpecialTableState::Normal,
             // Force snapshot fields.
@@ -157,13 +162,17 @@ impl TableHandlerState {
         if event.is_ingest_event() {
             match event {
                 // Update LSN for commit operations.
-                TableEvent::Commit { lsn, .. } => {
+                TableEvent::Commit { lsn, xact_id } => {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
+                    if xact_id.is_none() {
+                        self.last_unflushed_commit_lsn = Some(*lsn);
+                    }
                 }
                 TableEvent::CommitFlush { lsn, .. } => {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
+                    self.last_unflushed_commit_lsn = None;
                 }
                 // Unset for table write operations.
                 TableEvent::Append { .. }

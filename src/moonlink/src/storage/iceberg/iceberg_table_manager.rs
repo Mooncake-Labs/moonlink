@@ -1,7 +1,6 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
-use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
 use crate::storage::iceberg::table_manager::{
     PersistenceFileParams, PersistenceResult, TableManager,
 };
@@ -42,8 +41,6 @@ pub(crate) struct DataFileEntry {
     pub(crate) data_file: DataFile,
     /// In-memory deletion vector.
     pub(crate) deletion_vector: BatchDeletionVector,
-    /// Puffin blob for its deletion vector.
-    pub(crate) persisted_deletion_vector: Option<PuffinBlobRef>,
 }
 
 #[derive(Debug)]

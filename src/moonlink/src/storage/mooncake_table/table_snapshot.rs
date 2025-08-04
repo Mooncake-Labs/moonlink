@@ -176,6 +176,58 @@ impl IcebergSnapshotPayload {
         }
         false
     }
+
+    /// Get all new data files reference.
+    #[cfg(any(test, debug_assertions))]
+    pub fn get_new_data_files(&self) -> Vec<MooncakeDataFileRef> {
+        let mut new_data_files = vec![];
+        new_data_files.extend(self.import_payload.data_files.clone());
+        new_data_files.extend(
+            self.data_compaction_payload
+                .new_data_files_to_import
+                .clone(),
+        );
+        new_data_files
+    }
+
+    /// Get all old data files reference.
+    #[cfg(any(test, debug_assertions))]
+    pub fn get_old_data_files(&self) -> Vec<MooncakeDataFileRef> {
+        let mut old_data_files = vec![];
+        old_data_files.extend(
+            self.data_compaction_payload
+                .old_data_files_to_remove
+                .clone(),
+        );
+        old_data_files
+    }
+
+    /// Get all new file indices reference.
+    #[cfg(any(test, debug_assertions))]
+    pub fn get_new_file_indices(&self) -> Vec<MooncakeFileIndex> {
+        let mut new_file_indices = vec![];
+        new_file_indices.extend(self.import_payload.file_indices.clone());
+        new_file_indices.extend(self.index_merge_payload.new_file_indices_to_import.clone());
+        new_file_indices.extend(
+            self.data_compaction_payload
+                .new_file_indices_to_import
+                .clone(),
+        );
+        new_file_indices
+    }
+
+    /// Get all old file indices reference.
+    #[cfg(any(test, debug_assertions))]
+    pub fn get_old_file_indices(&self) -> Vec<MooncakeFileIndex> {
+        let mut old_file_indices = vec![];
+        old_file_indices.extend(self.index_merge_payload.old_file_indices_to_remove.clone());
+        old_file_indices.extend(
+            self.data_compaction_payload
+                .old_file_indices_to_remove
+                .clone(),
+        );
+        old_file_indices
+    }
 }
 
 ////////////////////////////

@@ -16,9 +16,10 @@ allow = [
 ]
 
 [sources]
+unknown-git = "deny"
 allow-git = [
     "https://github.com/apache/iceberg-rust.git",
-    "https://github.com/Mooncake-labs/rust-postgres.git",
+    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5",
 ]
 
 # TODO(hjiang): Cleanup these unmaintained crates.
@@ -31,8 +32,15 @@ ignore = [
 # TODO(hjiang): Resolve all duplicate dependencies.
 [bans]
 skip = [
+    { name = "base64" },
+    { name = "bitflags" },
     { name = "getrandom" },
     { name = "hashbrown" },
+    { name = "h2" },
+    { name = "http" },
+    { name = "http-body" },
+    { name = "hyper" },
+    { name = "indexmap" },
     { name = "itertools" },
     { name = "ordered-float" },
     { name = "rand" },
@@ -40,10 +48,24 @@ skip = [
     { name = "rand_core" },
     { name = "regex-automata" },
     { name = "regex-syntax" },
+    { name = "socket2" },
+    { name = "strum" },
+    { name = "strum_macros" },
+    { name = "sync_wrapper" },
     { name = "thiserror" },
     { name = "thiserror-impl" },
+    { name = "tower" },
     { name = "typed-builder" },
     { name = "typed-builder-macro" },
     { name = "wasi" },
     { name = "windows-sys" },
+    { name = "windows-targets" },
+    { name = "windows_aarch64_gnullvm" },
+    { name = "windows_aarch64_msvc" },
+    { name = "windows_i686_gnu" },
+    { name = "windows_i686_gnullvm" },
+    { name = "windows_i686_msvc" },
+    { name = "windows_x86_64_gnu" },
+    { name = "windows_x86_64_gnullvm" },
+    { name = "windows_x86_64_msvc" },
 ]

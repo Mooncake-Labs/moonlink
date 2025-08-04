@@ -210,6 +210,7 @@ pub(crate) fn create_test_table_metadata_with_data_compaction_disable_flush(
         min_data_file_to_compact: 2,
         max_data_file_to_compact: u32::MAX,
         data_file_final_size: u64::MAX,
+        data_file_deletion_percentage: 0,
     };
     let mut config = MooncakeTableConfig::new(local_table_directory.clone());
     config.data_compaction_config = data_compaction_config;
@@ -307,6 +308,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
             data_file_final_size: u64::MAX,
             min_data_file_to_compact: 2,
             max_data_file_to_compact: u32::MAX,
+            data_file_deletion_percentage: 0,
         },
         ..Default::default()
     };

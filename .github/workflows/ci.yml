@@ -217,7 +217,7 @@ jobs:
           files: lcov.info
           fail_ci_if_error: true
 
-  # ──────────────────────── 4 · Chaos test ────────────────────────────
+  # ──────────────────────── 5 · Chaos test ────────────────────────────
   chaos_test:
     name: Chaos test
     runs-on: ubuntu-latest
@@ -228,4 +228,30 @@ jobs:
       - name: Start chaos test
         timeout-minutes: 10
         run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test --features=chaos-test -p moonlink -- --nocapture
+          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_on_local_fs --features=chaos-test -p moonlink -- --nocapture
+
+  # ───────────── 6 · Chaos test with local fs optimization ─────────────
+  chaos_test_with_local_fs_optimization:
+    name: Chaos test with local filesystem optimization
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start chaos test
+        timeout-minutes: 10
+        run: |
+          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_local_system_optimization_chaos --features=chaos-test -p moonlink -- --nocapture
+
+  # ───────────── 7 · Chaos test with chaos injection ─────────────
+  chaos_test_with_chaos_injection:
+    name: Chaos test with chaos injection
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start chaos test
+        timeout-minutes: 10
+        run: |
+          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_injection --features=chaos-test -p moonlink -- --nocapture

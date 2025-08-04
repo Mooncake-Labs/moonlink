@@ -396,6 +396,7 @@ impl MooncakeTable {
         for (file, file_attrs) in disk_slice.output_files().iter() {
             ma::assert_gt!(file_attrs.file_size, 0);
             let disk_file_entry = DiskFileEntry {
+                num_rows: file_attrs.row_num,
                 file_size: file_attrs.file_size,
                 cache_handle: None,
                 batch_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),

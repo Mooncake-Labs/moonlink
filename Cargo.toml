@@ -33,7 +33,7 @@ crc32fast = "1"
 fastbloom = "0.12.0"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15.3"
-iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "b3ea8d1fca14ddc23154615862a62d3e3e56a769", default-features = false, features = [
+iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "fb6fef31fb890e6014f2acdd743bde4021ba9787", default-features = false, features = [
   "storage-fs",
 ] }
 itertools = { version = "0.14" }
@@ -53,7 +53,7 @@ paste = "1"
 postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
 postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5", features = ["with-serde_json-1"] }
 rand = "0.9"
-roaring = "0.10"
+roaring = "0.11"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = "1"
 serial_test = "3.0"

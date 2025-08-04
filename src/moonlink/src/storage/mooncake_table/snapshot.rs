@@ -348,6 +348,7 @@ impl SnapshotTableState {
             self.current_snapshot.disk_files.insert(
                 cur_new_data_file.clone(),
                 DiskFileEntry {
+                    num_rows: cur_entry.num_rows,
                     file_size: cur_entry.file_size,
                     cache_handle: Some(cache_handle),
                     batch_deletion_vector: BatchDeletionVector::new(
@@ -687,6 +688,7 @@ impl SnapshotTableState {
                 self.current_snapshot.disk_files.insert(
                     file.clone(),
                     DiskFileEntry {
+                        num_rows: file_attrs.row_num,
                         file_size: file_attrs.file_size,
                         cache_handle: Some(cache_handle),
                         batch_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),

@@ -87,7 +87,6 @@ impl IcebergTableManager {
         let new_data_file_entry = DataFileEntry {
             data_file: data_file.clone(),
             deletion_vector: BatchDeletionVector::new(UNINITIALIZED_BATCH_DELETION_VECTOR_MAX_ROW),
-            persisted_deletion_vector: None,
         };
 
         self.persisted_data_files
@@ -100,24 +99,25 @@ impl IcebergTableManager {
     }
 
     /// Load deletion vector into table manager from the current manifest entry.
+    /// Return maps from data file's file id to persisted deletion vector.
     async fn load_deletion_vector_from_manifest_entry(
         &mut self,
         entry: &ManifestEntry,
         file_io: &FileIO,
         next_file_id: &mut u64,
-    ) -> IcebergResult<()> {
+    ) -> IcebergResult<Option<(FileId, PuffinBlobRef)>> {
         // Skip data files and file indices.
         if !utils::is_deletion_vector_entry(entry) {
-            return Ok(());
+            return Ok(None);
         }
 
         let data_file = entry.data_file();
         let referenced_data_file = data_file.referenced_data_file().unwrap();
-        let file_id = self
+        let data_file_id = self
             .remote_data_file_to_file_id
             .get(&referenced_data_file)
             .unwrap();
-        let data_file_entry = self.persisted_data_files.get_mut(file_id).unwrap();
+        let data_file_entry = self.persisted_data_files.get_mut(data_file_id).unwrap();
 
         IcebergValidation::validate_puffin_manifest_entry(entry)?;
         let deletion_vector = DeletionVector::load_from_dv_blob(file_io.clone(), data_file).await?;
@@ -160,14 +160,14 @@ impl IcebergTableManager {
                 .with_retryable(true)
             })?;
 
-        data_file_entry.persisted_deletion_vector = Some(PuffinBlobRef {
+        let persisted_deletion_vector = PuffinBlobRef {
             // Deletion vector should be pinned on cache.
             puffin_file_cache_handle: cache_handle.unwrap(),
             start_offset: data_file.content_offset().unwrap() as u32,
             blob_size: data_file.content_size_in_bytes().unwrap() as u32,
-        });
+        };
 
-        Ok(())
+        Ok(Some((*data_file_id, persisted_deletion_vector)))
     }
 
     /// -------- Transformation util functions ---------
@@ -175,7 +175,8 @@ impl IcebergTableManager {
     /// Util function to transform iceberg table status to mooncake table snapshot, assign file id uniquely to all data files.
     fn transform_to_mooncake_snapshot(
         &self,
-        persisted_file_indices: Vec<MooncakeFileIndex>,
+        mut loaded_deletion_vector: HashMap<FileId, PuffinBlobRef>,
+        loaded_file_indices: Vec<MooncakeFileIndex>,
         flush_lsn: Option<u64>,
         wal_metadata: IcebergWalMetadata,
     ) -> MooncakeSnapshot {
@@ -196,23 +197,23 @@ impl IcebergTableManager {
             let data_file =
                 create_data_file(file_id.0, data_file_entry.data_file.file_path().to_string());
 
+            let puffin_deletion_blob = loaded_deletion_vector.remove(file_id);
             mooncake_snapshot.disk_files.insert(
                 data_file,
                 DiskFileEntry {
+                    num_rows: data_file_entry.data_file.record_count() as usize,
                     file_size: data_file_entry.data_file.file_size_in_bytes() as usize,
                     cache_handle: None,
-                    puffin_deletion_blob: data_file_entry.persisted_deletion_vector.clone(),
+                    puffin_deletion_blob,
                     batch_deletion_vector: data_file_entry.deletion_vector.clone(),
                 },
             );
         }
-        // UNDONE:
-        // 1. Update file id in persisted_file_indices.
 
         // Fill in indices.
         mooncake_snapshot.indices = MooncakeIndex {
             in_memory_index: HashSet::new(),
-            file_indices: persisted_file_indices,
+            file_indices: loaded_file_indices,
         };
 
         // Fill in flush LSN.
@@ -294,6 +295,7 @@ impl IcebergTableManager {
         }
 
         // Attempt to load file indices and deletion vector.
+        let mut loaded_deletion_vector = HashMap::new();
         for manifest_file in manifest_list.entries().iter() {
             let manifest = manifest_file_cache
                 .remove(&manifest_file.manifest_path)
@@ -318,16 +320,23 @@ impl IcebergTableManager {
                 }
 
                 // Load deletion vector puffin.
-                self.load_deletion_vector_from_manifest_entry(
-                    entry.as_ref(),
-                    &file_io,
-                    &mut next_file_id,
-                )
-                .await?;
+                if let Some((file_id, puffin_blob_ref)) = self
+                    .load_deletion_vector_from_manifest_entry(
+                        entry.as_ref(),
+                        &file_io,
+                        &mut next_file_id,
+                    )
+                    .await?
+                {
+                    assert!(loaded_deletion_vector
+                        .insert(file_id, puffin_blob_ref)
+                        .is_none());
+                }
             }
         }
 
         let mooncake_snapshot = self.transform_to_mooncake_snapshot(
+            loaded_deletion_vector,
             loaded_file_indices,
             snapshot_property.flush_lsn,
             snapshot_property.wal_persisted_metadata,
