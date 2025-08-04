@@ -978,7 +978,7 @@ async fn test_gcs_chaos_with_data_compaction() {
 /// Chaos test with no background table maintenance enabled.
 #[named]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_chaos_injection_with_no_background_maintenance_with_chaos_injection() {
+async fn test_chaos_injection_with_no_background_maintenance() {
     let iceberg_temp_dir = tempdir().unwrap();
     let root_directory = iceberg_temp_dir.path().to_str().unwrap().to_string();
     let test_env_config = TestEnvConfig {
@@ -996,7 +996,7 @@ async fn test_chaos_injection_with_no_background_maintenance_with_chaos_injectio
 /// Chaos test with index merge enabled by default.
 #[named]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_chaos_injection_with_index_merge_with_chaos_injection() {
+async fn test_chaos_injection_with_index_merge() {
     let iceberg_temp_dir = tempdir().unwrap();
     let root_directory = iceberg_temp_dir.path().to_str().unwrap().to_string();
     let test_env_config = TestEnvConfig {

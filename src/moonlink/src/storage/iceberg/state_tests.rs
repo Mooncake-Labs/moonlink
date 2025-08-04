@@ -293,7 +293,7 @@ async fn validate_no_snapshot(
     assert_eq!(next_file_id, 0);
     assert!(snapshot.disk_files.is_empty());
     assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
+    assert!(snapshot.flush_lsn.is_none());
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -315,7 +315,7 @@ async fn validate_only_initial_snapshot(
     assert_eq!(next_file_id, 2); // one data file, one index block file
     check_prev_data_files(&snapshot, iceberg_table_manager, /*deleted=*/ false).await;
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 100);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 100);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -337,7 +337,7 @@ async fn validate_only_new_data_files_in_snapshot(
     assert_eq!(next_file_id, 2); // one data file, one index block file
     check_new_data_files(&snapshot, iceberg_table_manager, /*deleted=*/ false).await;
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 200);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -359,7 +359,7 @@ async fn validate_only_new_deletion_vectors_in_snapshot(
     assert_eq!(next_file_id, 3); // one data file, one index block file, one deletion vector puffin
     check_prev_data_files(&snapshot, iceberg_table_manager, /*deleted=*/ true).await;
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 300);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -389,7 +389,7 @@ async fn validate_new_data_files_and_deletion_vectors_in_snapshot(
     )
     .await;
     assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), expected_flush_lsn);
+    assert_eq!(snapshot.flush_lsn.unwrap(), expected_flush_lsn);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,

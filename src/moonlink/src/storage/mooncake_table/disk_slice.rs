@@ -227,6 +227,10 @@ impl DiskSliceWriter {
         if self.old_index().is_empty() {
             return Ok(());
         }
+        // If no data files generated, no need to remap and persist file indices.
+        if self.files.is_empty() {
+            return Ok(());
+        }
         let list = self
             .old_index
             .remap_into_vec(&self.batch_id_to_idx, &self.row_offset_mapping);

@@ -518,7 +518,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         .load_snapshot_from_table()
         .await
         .unwrap();
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 2);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 2);
     assert_eq!(
         snapshot.iceberg_snapshot_wal_metadata.earliest_wal_file_num,
         10
@@ -603,7 +603,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         .load_snapshot_from_table()
         .await
         .unwrap();
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 3);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 3);
     assert_eq!(snapshot.disk_files.len(), 1);
     let (data_file, batch_deletion_vector) = snapshot.disk_files.iter().next().unwrap();
     // No deletion vector is expected.
@@ -674,7 +674,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         .load_snapshot_from_table()
         .await
         .unwrap();
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 4);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 4);
     assert!(snapshot.disk_files.is_empty());
     assert!(snapshot.indices.in_memory_index.is_empty());
     assert!(snapshot.indices.file_indices.is_empty());
@@ -836,7 +836,7 @@ async fn test_empty_snapshot_load_impl(iceberg_table_config: IcebergTableConfig)
     assert!(snapshot.disk_files.is_empty());
     assert!(snapshot.indices.in_memory_index.is_empty());
     assert!(snapshot.indices.file_indices.is_empty());
-    assert!(snapshot.data_file_flush_lsn.is_none());
+    assert!(snapshot.flush_lsn.is_none());
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_config.accessor_config.get_root_path(),
@@ -952,7 +952,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
     assert_eq!(next_file_id, 5); // three data files, two index block file
     assert_eq!(snapshot.disk_files.len(), 3);
     assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 3);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 3);
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_config.accessor_config.get_root_path(),
@@ -987,7 +987,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
     assert_eq!(next_file_id, 6); // three data files, one index block file, two deletion vectors
     assert_eq!(snapshot.disk_files.len(), 3);
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 5);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 5);
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_config.accessor_config.get_root_path(),
@@ -1112,7 +1112,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
     assert_eq!(next_file_id, 4); // two data files, two index block file
     assert_eq!(snapshot.disk_files.len(), 2);
     assert_eq!(snapshot.indices.file_indices.len(), 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 3);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 3);
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_config.accessor_config.get_root_path(),
@@ -1153,7 +1153,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
     assert_eq!(next_file_id, 2); // one data file, one index block file
     assert_eq!(snapshot.disk_files.len(), 1);
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 5);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 5);
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_config.accessor_config.get_root_path(),
@@ -1288,7 +1288,7 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_impl(
     assert_eq!(next_file_id, 3); // two data files, and one file index
     assert_eq!(snapshot.disk_files.len(), 2);
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 8);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 8);
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_config.accessor_config.get_root_path(),
@@ -1393,7 +1393,7 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
     assert!(snapshot.disk_files.is_empty());
     assert!(snapshot.indices.in_memory_index.is_empty());
     assert!(snapshot.indices.file_indices.is_empty());
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 0);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -1700,7 +1700,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
     assert_eq!(next_file_id, 2); // one data file, one index block file
     assert_eq!(snapshot.disk_files.len(), 1);
     assert_eq!(snapshot.indices.file_indices.len(), 1);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 10);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 10);
 
     // Get file io after load snapshot.
     let file_io = iceberg_table_manager_for_recovery
@@ -1757,7 +1757,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
     assert_eq!(next_file_id, 7); // three data files, three index block files, one deletion vector puffin
     assert_eq!(snapshot.disk_files.len(), 3);
     assert_eq!(snapshot.indices.file_indices.len(), 3);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 40);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 40);
 
     validate_recovered_snapshot(
         &snapshot,
@@ -1924,7 +1924,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     check_row_index_nonexistent(&snapshot, &row1).await;
     check_row_index_on_disk(&snapshot, &row2, filesystem_accessor.as_ref()).await;
     check_row_index_on_disk(&snapshot, &row3, filesystem_accessor.as_ref()).await;
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 200);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 200);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -1998,7 +1998,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     // row2 is deleted, but still exist in data file
     check_row_index_on_disk(&snapshot, &row2, filesystem_accessor.as_ref()).await;
     check_row_index_on_disk(&snapshot, &row3, filesystem_accessor.as_ref()).await;
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 300);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 300);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -2060,7 +2060,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     // row2 and row3 are deleted, but still exist in data file
     check_row_index_on_disk(&snapshot, &row2, filesystem_accessor.as_ref()).await;
     check_row_index_on_disk(&snapshot, &row3, filesystem_accessor.as_ref()).await;
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 400);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 400);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
@@ -2127,7 +2127,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     check_row_index_on_disk(&snapshot, &row2, filesystem_accessor.as_ref()).await;
     check_row_index_on_disk(&snapshot, &row3, filesystem_accessor.as_ref()).await;
     check_row_index_on_disk(&snapshot, &row4, filesystem_accessor.as_ref()).await;
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 500);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 500);
 
     let (file_in_new_snapshot, _) = snapshot
         .disk_files
@@ -2323,7 +2323,7 @@ async fn test_schema_update_with_no_table_write_impl(iceberg_table_config: Icebe
         .await
         .unwrap();
     assert_eq!(next_file_id, 0);
-    assert_eq!(snapshot.data_file_flush_lsn, Some(0));
+    assert_eq!(snapshot.flush_lsn, Some(0));
     assert!(snapshot.disk_files.is_empty());
     assert!(snapshot.indices.file_indices.is_empty());
 
@@ -2365,7 +2365,7 @@ async fn test_schema_update_with_no_table_write_impl(iceberg_table_config: Icebe
         .await
         .unwrap();
     assert_eq!(next_file_id, 2); // one data file, one file index
-    assert_eq!(snapshot.data_file_flush_lsn, Some(20));
+    assert_eq!(snapshot.flush_lsn, Some(20));
     assert_eq!(snapshot.disk_files.len(), 1);
     assert_eq!(snapshot.indices.file_indices.len(), 1);
 
@@ -2460,7 +2460,7 @@ async fn test_schema_update_impl(iceberg_table_config: IcebergTableConfig) {
         .await
         .unwrap();
     assert_eq!(next_file_id, 2);
-    assert_eq!(snapshot.data_file_flush_lsn, Some(10));
+    assert_eq!(snapshot.flush_lsn, Some(10));
     assert_eq!(snapshot.disk_files.len(), 1);
     assert_eq!(snapshot.indices.file_indices.len(), 1);
 
@@ -2498,7 +2498,7 @@ async fn test_schema_update_impl(iceberg_table_config: IcebergTableConfig) {
         .await
         .unwrap();
     assert_eq!(next_file_id, 4); // two data files, two file indices
-    assert_eq!(snapshot.data_file_flush_lsn, Some(20));
+    assert_eq!(snapshot.flush_lsn, Some(20));
     assert_eq!(snapshot.disk_files.len(), 2);
     assert_eq!(snapshot.indices.file_indices.len(), 2);
 }

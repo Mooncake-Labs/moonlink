@@ -217,7 +217,7 @@ impl IcebergTableManager {
         };
 
         // Fill in flush LSN.
-        mooncake_snapshot.data_file_flush_lsn = flush_lsn;
+        mooncake_snapshot.flush_lsn = flush_lsn;
         // Fill in wal persistence metadata.
         mooncake_snapshot.iceberg_snapshot_wal_metadata = wal_metadata;
 
@@ -252,7 +252,7 @@ impl IcebergTableManager {
         if table_metadata.current_snapshot().is_none() {
             let mut empty_mooncake_snapshot =
                 MooncakeSnapshot::new(self.mooncake_table_metadata.clone());
-            empty_mooncake_snapshot.data_file_flush_lsn = snapshot_property.flush_lsn;
+            empty_mooncake_snapshot.flush_lsn = snapshot_property.flush_lsn;
             return Ok((next_file_id as u32, empty_mooncake_snapshot));
         }
 

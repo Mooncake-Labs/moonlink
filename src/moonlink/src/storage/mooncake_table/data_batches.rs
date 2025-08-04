@@ -30,6 +30,9 @@ impl InMemoryBatch {
             return Ok(None);
         }
         let batch = self.deletions.apply_to_batch(self.data.as_ref().unwrap())?;
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
         Ok(Some(batch))
     }
 

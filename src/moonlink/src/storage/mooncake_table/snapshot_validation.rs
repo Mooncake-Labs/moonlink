@@ -12,22 +12,16 @@ impl SnapshotTableState {
         opt: &SnapshotOption,
     ) {
         if let Some(new_flush_lsn) = task.new_flush_lsn {
-            if self.current_snapshot.data_file_flush_lsn.is_some() {
+            if self.current_snapshot.flush_lsn.is_some() {
                 // Invariant-1: flush LSN doesn't regress.
                 //
                 // Force snapshot not change table states, it's possible to use the latest flush LSN.
                 if opt.force_create {
-                    ma::assert_le!(
-                        self.current_snapshot.data_file_flush_lsn.unwrap(),
-                        new_flush_lsn
-                    );
+                    ma::assert_le!(self.current_snapshot.flush_lsn.unwrap(), new_flush_lsn);
                 }
                 // Otherwise, flush LSN always progresses.
                 else {
-                    ma::assert_lt!(
-                        self.current_snapshot.data_file_flush_lsn.unwrap(),
-                        new_flush_lsn
-                    );
+                    ma::assert_lt!(self.current_snapshot.flush_lsn.unwrap(), new_flush_lsn);
                 }
 
                 // Invariant-2: flush must follow a commit, but commit doesn't need to be followed by a flush.

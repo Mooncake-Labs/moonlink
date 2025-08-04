@@ -143,6 +143,34 @@ async fn test_streaming_delete() {
     env.shutdown().await;
 }
 
+/// Testing scenario: flush an empty batch record doesn't generate data file.
+#[tokio::test]
+async fn test_flush_empty_batch_records() {
+    let mut env = TestEnvironment::default().await;
+
+    // operation-1: append and commit in non-streaming transaction
+    env.append_row(1, "User-1", 10, /*lsn=*/ 50, /*xact_id=*/ None)
+        .await;
+    env.commit(/*lsn=*/ 150).await;
+
+    // operation-2: in a non-streaming transaction, delete rows committed in the above transaction
+    env.delete_row(1, "User-1", 20, /*lsn=*/ 200, /*xact_id=*/ None)
+        .await;
+    env.commit(/*lsn=*/ 250).await;
+    // Later when we do flush and create snapshot, there should be no data files generated for the deleted row.
+
+    // operation-3: start and commit a streaming transaction
+    let xact_id = 0;
+    env.append_row(10, "User-3", 25, /*lsn=*/ 300, Some(xact_id))
+        .await;
+    env.stream_commit(350, xact_id).await;
+
+    env.set_readable_lsn(350);
+    env.verify_snapshot(350, &[10]).await;
+
+    env.shutdown().await;
+}
+
 /// Testing scenario:
 /// operation-1: append and commit in non-streaming transaction
 /// operation-2: in a non-streaming transaction, delete rows committed in the above transaction
@@ -163,7 +191,7 @@ async fn test_delete_committed_unflushed_follow_streaming() {
         .await;
     env.commit(/*lsn=*/ 250).await;
 
-    // start and commit a streaming transaction
+    // operation-3: start and commit a streaming transaction
     let xact_id = 0;
     env.append_row(10, "User-3", 25, /*lsn=*/ 300, Some(xact_id))
         .await;
@@ -1257,7 +1285,7 @@ async fn test_flush_lsn_consistency_across_snapshots() {
             .load_snapshot_from_table()
             .await
             .unwrap();
-        assert_eq!(snapshot.data_file_flush_lsn, Some(lsn));
+        assert_eq!(snapshot.flush_lsn, Some(lsn));
     }
 
     env.shutdown().await;
@@ -1371,7 +1399,7 @@ async fn test_periodical_force_snapshot() {
         .load_snapshot_from_table()
         .await
         .unwrap();
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 10);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 10);
 }
 
 #[tokio::test]
@@ -1413,7 +1441,7 @@ async fn test_index_merge_with_sufficient_file_indices() {
         .await
         .unwrap();
     assert_eq!(next_file_id, 3);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 20);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 20);
     assert_eq!(snapshot.disk_files.len(), 2); // two data files created by two flushes
     assert_eq!(snapshot.indices.file_indices.len(), 1); // one merged file index
 
@@ -1441,7 +1469,7 @@ async fn test_index_merge_with_sufficient_file_indices() {
         .await
         .unwrap();
     assert_eq!(next_file_id, 4);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 30);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 30);
     assert_eq!(snapshot.disk_files.len(), 3); // three data files created by three flushes
     assert_eq!(snapshot.indices.file_indices.len(), 1); // one merged file index
 }
@@ -1485,7 +1513,7 @@ async fn test_data_compaction_with_sufficient_data_files() {
         .await
         .unwrap();
     assert_eq!(next_file_id, 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 20);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 20);
     assert_eq!(snapshot.disk_files.len(), 1); // one compacted data file
     assert_eq!(snapshot.indices.file_indices.len(), 1); // one compacted file index
 
@@ -1513,7 +1541,7 @@ async fn test_data_compaction_with_sufficient_data_files() {
         .await
         .unwrap();
     assert_eq!(next_file_id, 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 30);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 30);
     assert_eq!(snapshot.disk_files.len(), 1); // one compacted data file
     assert_eq!(snapshot.indices.file_indices.len(), 1); // one compacted file index
 }
@@ -1573,7 +1601,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
         .await
         .unwrap();
     assert_eq!(next_file_id, 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 20);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 20);
     assert_eq!(snapshot.disk_files.len(), 1); // one compacted data file
     assert_eq!(snapshot.indices.file_indices.len(), 1); // one compacted file index
 
@@ -1601,7 +1629,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
         .await
         .unwrap();
     assert_eq!(next_file_id, 2);
-    assert_eq!(snapshot.data_file_flush_lsn.unwrap(), 30);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 30);
     assert_eq!(snapshot.disk_files.len(), 1); // one compacted data file
     assert_eq!(snapshot.indices.file_indices.len(), 1); // one compacted file index
 }
@@ -1622,7 +1650,7 @@ async fn test_discard_duplicate_writes() {
     });
 
     let mut mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
-    mock_mooncake_snapshot.data_file_flush_lsn = Some(10);
+    mock_mooncake_snapshot.flush_lsn = Some(10);
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
         .expect_get_warehouse_location()
