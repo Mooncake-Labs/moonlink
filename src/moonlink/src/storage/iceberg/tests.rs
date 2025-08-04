@@ -520,7 +520,9 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         .unwrap();
     assert_eq!(snapshot.flush_lsn.unwrap(), 2);
     assert_eq!(
-        snapshot.iceberg_snapshot_wal_metadata.earliest_wal_file_num,
+        snapshot
+            .iceberg_corresponding_wal_metadata
+            .earliest_wal_file_num,
         10
     );
     assert!(snapshot.indices.in_memory_index.is_empty());

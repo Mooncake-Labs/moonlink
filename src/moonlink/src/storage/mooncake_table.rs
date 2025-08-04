@@ -164,8 +164,10 @@ pub struct Snapshot {
     /// At iceberg snapshot creation, we should only dump consistent data files and deletion logs.
     /// Data file flush LSN is recorded here, to get corresponding deletion logs from "committed deletion logs".
     pub(crate) flush_lsn: Option<u64>,
-    /// WAL persistence metadata - currently only used at recovery time and is not set again
-    pub(crate) iceberg_snapshot_wal_metadata: IcebergCorrespondingWalMetadata,
+    /// WAL data corresponding to the iceberg snapshot.
+    ///
+    /// Note that we only currently use this for recovery.
+    pub(crate) iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
     /// indices
     pub(crate) indices: MooncakeIndex,
 }
@@ -177,7 +179,7 @@ impl Snapshot {
             disk_files: HashMap::new(),
             snapshot_version: 0,
             flush_lsn: None,
-            iceberg_snapshot_wal_metadata: IcebergCorrespondingWalMetadata {
+            iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata {
                 earliest_wal_file_num: 0,
             },
             indices: MooncakeIndex::new(),
@@ -522,7 +524,8 @@ impl MooncakeTable {
         let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
         let last_iceberg_snapshot_lsn = current_snapshot.flush_lsn;
         // TODO(Paul): Change wal manager to pick up to latest WAL file number on recovery
-        let last_wal_persisted_metadata = current_snapshot.iceberg_snapshot_wal_metadata.clone();
+        let iceberg_snapshot_wal_metadata =
+            current_snapshot.iceberg_corresponding_wal_metadata.clone();
         if let Some(persistence_lsn) = last_iceberg_snapshot_lsn {
             table_snapshot_watch_sender.send(persistence_lsn).unwrap();
         }
@@ -559,7 +562,7 @@ impl MooncakeTable {
             streaming_batch_id_counter,
             iceberg_table_manager: Some(table_manager),
             last_iceberg_snapshot_lsn,
-            iceberg_corresponding_wal_metadata: last_wal_persisted_metadata,
+            iceberg_corresponding_wal_metadata: iceberg_snapshot_wal_metadata,
             table_notify: None,
             wal_manager,
         })

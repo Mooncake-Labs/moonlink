@@ -1913,7 +1913,7 @@ async fn test_wal_iceberg_snapshot_metadata_retrieval() {
         .unwrap();
 
     // Retrieve the WAL persistence metadata from the latest snapshot
-    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_snapshot_wal_metadata;
+    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_corresponding_wal_metadata;
     let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
     assert!(
@@ -1966,7 +1966,7 @@ async fn test_wal_iceberg_snapshot_keeps_relevant_events() {
         .unwrap();
 
     // Retrieve the WAL persistence metadata from the latest snapshot
-    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_snapshot_wal_metadata;
+    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_corresponding_wal_metadata;
     let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
     env.check_wal_events(highest_file_number, &expected_events, &not_expected_events)
@@ -2023,7 +2023,7 @@ async fn test_wal_iceberg_snapshot_truncates_correctly() {
         .unwrap();
 
     // Retrieve the WAL persistence metadata from the latest snapshot
-    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_snapshot_wal_metadata;
+    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_corresponding_wal_metadata;
     let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
 
     env.check_wal_events(highest_file_number, &expected_events, &not_expected_events)
