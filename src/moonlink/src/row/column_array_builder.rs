@@ -392,21 +392,21 @@ mod tests {
     fn test_column_array_builder() {
         // Test Int32 type
         let mut builder = ColumnArrayBuilder::new(&DataType::Int32, 2, false);
-        builder.append_value(&RowValue::Int32(1)).unwrap();
-        builder.append_value(&RowValue::Int32(2)).unwrap();
+        builder.append_value(&RowValue::Int32(1)).expect("Failed to append value");
+        builder.append_value(&RowValue::Int32(2)).expect("Failed to append value");
         let array = builder.finish(&DataType::Int32);
         assert_eq!(array.len(), 2);
-        let int32_array = array.as_any().downcast_ref::<Int32Array>().unwrap();
+        let int32_array = array.as_any().downcast_ref::<Int32Array>().expect("Failed to downcast");
         assert_eq!(int32_array.value(0), 1);
         assert_eq!(int32_array.value(1), 2);
 
         // Test Int64 type
         let mut builder = ColumnArrayBuilder::new(&DataType::Int64, 2, false);
-        builder.append_value(&RowValue::Int64(100)).unwrap();
-        builder.append_value(&RowValue::Int64(200)).unwrap();
+        builder.append_value(&RowValue::Int64(100)).expect("Failed to append value");
+        builder.append_value(&RowValue::Int64(200)).expect("Failed to append value");
         let array = builder.finish(&DataType::Int64);
         assert_eq!(array.len(), 2);
-        let int64_array = array.as_any().downcast_ref::<Int64Array>().unwrap();
+        let int64_array = array.as_any().downcast_ref::<Int64Array>().expect("Failed to downcast");
         assert_eq!(int64_array.value(0), 100);
         assert_eq!(int64_array.value(1), 200);
 
@@ -414,13 +414,13 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(&DataType::Float32, 2, false);
         builder
             .append_value(&RowValue::Float32(std::f32::consts::PI))
-            .unwrap();
+            .expect("Failed to append value");
         builder
             .append_value(&RowValue::Float32(std::f32::consts::E))
-            .unwrap();
+            .expect("Failed to append value");
         let array = builder.finish(&DataType::Float32);
         assert_eq!(array.len(), 2);
-        let float32_array = array.as_any().downcast_ref::<Float32Array>().unwrap();
+        let float32_array = array.as_any().downcast_ref::<Float32Array>().expect("Failed to downcast");
         assert!((float32_array.value(0) - std::f32::consts::PI).abs() < 0.0001);
         assert!((float32_array.value(1) - std::f32::consts::E).abs() < 0.0001);
 
@@ -428,23 +428,23 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(&DataType::Float64, 2, false);
         builder
             .append_value(&RowValue::Float64(std::f64::consts::PI))
-            .unwrap();
+            .expect("Failed to append value");
         builder
             .append_value(&RowValue::Float64(std::f64::consts::E))
-            .unwrap();
+            .expect("Failed to append value");
         let array = builder.finish(&DataType::Float64);
         assert_eq!(array.len(), 2);
-        let float64_array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+        let float64_array = array.as_any().downcast_ref::<Float64Array>().expect("Failed to downcast");
         assert!((float64_array.value(0) - std::f64::consts::PI).abs() < 0.00001);
         assert!((float64_array.value(1) - std::f64::consts::E).abs() < 0.00001);
 
         // Test Boolean type
         let mut builder = ColumnArrayBuilder::new(&DataType::Boolean, 2, false);
-        builder.append_value(&RowValue::Bool(true)).unwrap();
-        builder.append_value(&RowValue::Bool(false)).unwrap();
+        builder.append_value(&RowValue::Bool(true)).expect("Failed to append value");
+        builder.append_value(&RowValue::Bool(false)).expect("Failed to append value");
         let array = builder.finish(&DataType::Boolean);
         assert_eq!(array.len(), 2);
-        let bool_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+        let bool_array = array.as_any().downcast_ref::<BooleanArray>().expect("Failed to downcast");
         assert!(bool_array.value(0));
         assert!(!bool_array.value(1));
 
@@ -452,13 +452,13 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(&DataType::Utf8, 2, false);
         builder
             .append_value(&RowValue::ByteArray("hello".as_bytes().to_vec()))
-            .unwrap();
+            .expect("Failed to append value");
         builder
             .append_value(&RowValue::ByteArray("world".as_bytes().to_vec()))
-            .unwrap();
+            .expect("Failed to append value");
         let array = builder.finish(&DataType::Utf8);
         assert_eq!(array.len(), 2);
-        let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+        let string_array = array.as_any().downcast_ref::<StringArray>().expect("Failed to downcast");
         assert_eq!(string_array.value(0), "hello");
         assert_eq!(string_array.value(1), "world");
 
@@ -468,39 +468,39 @@ mod tests {
         let bytes2 = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
         builder
             .append_value(&RowValue::FixedLenByteArray(bytes1))
-            .unwrap();
+            .expect("Failed to append value");
         builder
             .append_value(&RowValue::FixedLenByteArray(bytes2))
-            .unwrap();
+            .expect("Failed to append value");
         let array = builder.finish(&DataType::FixedSizeBinary(16));
         assert_eq!(array.len(), 2);
         let binary_array = array
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
+            .expect("Failed to downcast");
         assert_eq!(binary_array.value(0), bytes1);
         assert_eq!(binary_array.value(1), bytes2);
 
         // Test null values
         let mut builder = ColumnArrayBuilder::new(&DataType::Int32, 3, false);
-        builder.append_value(&RowValue::Int32(1)).unwrap();
-        builder.append_value(&RowValue::Null).unwrap();
-        builder.append_value(&RowValue::Int32(3)).unwrap();
+        builder.append_value(&RowValue::Int32(1)).expect("Failed to append value");
+        builder.append_value(&RowValue::Null).expect("Failed to append null");
+        builder.append_value(&RowValue::Int32(3)).expect("Failed to append value");
         let array = builder.finish(&DataType::Int32);
         assert_eq!(array.len(), 3);
-        let int32_array = array.as_any().downcast_ref::<Int32Array>().unwrap();
+        let int32_array = array.as_any().downcast_ref::<Int32Array>().expect("Failed to downcast");
         assert_eq!(int32_array.value(0), 1);
         assert!(int32_array.is_null(1));
         assert_eq!(int32_array.value(2), 3);
 
         // Test using null values directly from RowValue::Null
         let mut builder = ColumnArrayBuilder::new(&DataType::Int32, 3, false);
-        builder.append_value(&RowValue::Int32(1)).unwrap();
-        builder.append_value(&RowValue::Null).unwrap();
-        builder.append_value(&RowValue::Int32(3)).unwrap();
+        builder.append_value(&RowValue::Int32(1)).expect("Failed to append value");
+        builder.append_value(&RowValue::Null).expect("Failed to append null");
+        builder.append_value(&RowValue::Int32(3)).expect("Failed to append value");
         let array = builder.finish(&DataType::Int32);
         assert_eq!(array.len(), 3);
-        let int32_array = array.as_any().downcast_ref::<Int32Array>().unwrap();
+        let int32_array = array.as_any().downcast_ref::<Int32Array>().expect("Failed to downcast");
         assert_eq!(int32_array.value(0), 1);
         assert!(int32_array.is_null(1));
         assert_eq!(int32_array.value(2), 3);
@@ -526,7 +526,7 @@ mod tests {
                 RowValue::Int32(2),
                 RowValue::Int32(3),
             ]))
-            .unwrap();
+            .expect("Failed to append value");
 
         // Add another list of integers [4, 5]
         builder
@@ -534,7 +534,7 @@ mod tests {
                 RowValue::Int32(4),
                 RowValue::Int32(5),
             ]))
-            .unwrap();
+            .expect("Failed to append value");
 
         let array = builder.finish(&DataType::List(Arc::new(arrow::datatypes::Field::new(
             "item",
@@ -543,11 +543,11 @@ mod tests {
         ))));
 
         assert_eq!(array.len(), 2);
-        let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
+        let list_array = array.as_any().downcast_ref::<ListArray>().expect("Failed to downcast");
 
         // Check first list [1, 2, 3]
         let first_list = list_array.value(0);
-        let first_int_array = first_list.as_any().downcast_ref::<Int32Array>().unwrap();
+        let first_int_array = first_list.as_any().downcast_ref::<Int32Array>().expect("Failed to downcast");
         assert_eq!(first_int_array.len(), 3);
         assert_eq!(first_int_array.value(0), 1);
         assert_eq!(first_int_array.value(1), 2);
@@ -555,7 +555,7 @@ mod tests {
 
         // Check second list [4, 5]
         let second_list = list_array.value(1);
-        let second_int_array = second_list.as_any().downcast_ref::<Int32Array>().unwrap();
+        let second_int_array = second_list.as_any().downcast_ref::<Int32Array>().expect("Failed to downcast");
         assert_eq!(second_int_array.len(), 2);
         assert_eq!(second_int_array.value(0), 4);
         assert_eq!(second_int_array.value(1), 5);
