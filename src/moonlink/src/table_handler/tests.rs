@@ -1982,7 +1982,7 @@ async fn test_wal_persistent_metadata_truncates_correctly() {
 
     expected_events.push(env.append_row(8, "George", 60, 9, Some(102)).await);
     expected_events.push(env.commit(9).await);
-    // we keep events in this WAL file, because the previous exact 101 is still uncomitted
+    // we keep events in this WAL file, because the previous exact 101 is still uncommitted
     env.force_wal_persistence(9).await;
 
     let wal_metadata = env.get_latest_wal_metadata().await;

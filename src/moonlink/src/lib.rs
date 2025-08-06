@@ -16,7 +16,7 @@ pub use storage::{
     MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
     MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig, SnapshotReadOutput,
     StorageConfig, TableEventManager, TableManager, TableSnapshotStatus, TableStatusReader,
-    WalConfig, WalManager, WalTransactionState
+    WalConfig, WalManager, WalTransactionState,
 };
 pub use table_handler::TableHandler;
 pub use table_notify::TableEvent;

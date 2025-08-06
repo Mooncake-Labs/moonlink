@@ -927,6 +927,7 @@ impl WalManager {
     // ------------------------------
     // Recovery
     // ------------------------------
+    #[allow(dead_code)]
     pub async fn recover_persistent_wal_metadata(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> PersistentWalMetadata {
@@ -1012,6 +1013,7 @@ impl WalManager {
             .boxed()
     }
 
+    #[allow(dead_code)]
     pub async fn get_xact_map_from_wal_events(
         mut wal_events: Pin<Box<dyn Stream<Item = Result<TableEvent>> + Send>>,
     ) -> HashMap<u32, WalTransactionState> {
@@ -1055,6 +1057,7 @@ impl WalManager {
 
     /// Returns true if the streaming xact event should be applied before the source replay lsn.
     /// Takes in an xact_map which contains the states of each streaming xact by the end of the WAL.
+    #[allow(dead_code)]
     fn streaming_xact_event_should_be_applied_before_source_replay(
         xact_id: u32,
         xact_map: &HashMap<u32, WalTransactionState>,
@@ -1082,6 +1085,7 @@ impl WalManager {
 
     /// Returns true if the lsn is before the last iceberg snapshot lsn.
     /// Assumes that there is no last iceberg snapshot lsn if the option is None.
+    #[allow(dead_code)]
     fn event_already_captured_in_iceberg_snapshot(
         lsn: u64,
         last_iceberg_snapshot_lsn: Option<u64>,
@@ -1093,6 +1097,7 @@ impl WalManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn should_reapply_wal_event(
         event: &TableEvent,
         xact_map: &HashMap<u32, WalTransactionState>,

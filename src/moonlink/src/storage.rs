@@ -17,7 +17,6 @@ pub use cache::object_storage::cache_config::ObjectStorageCacheConfig;
 pub(crate) use cache::object_storage::cache_handle::NonEvictableHandle;
 pub use cache::object_storage::object_storage_cache::ObjectStorageCache;
 pub use compaction::compaction_config::DataCompactionConfig;
-pub use filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 pub use filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 pub use filesystem::accessor_config::AccessorConfig;
 pub use filesystem::storage_config::StorageConfig;
