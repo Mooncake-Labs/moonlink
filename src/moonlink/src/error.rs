@@ -30,6 +30,16 @@ pub enum ErrorStatus {
     Persistent,
 }
 
+impl fmt::Display for ErrorStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorStatus::Permanent => write!(f, "permanent"),
+            ErrorStatus::Temporary => write!(f, "temporary"),
+            ErrorStatus::Persistent => write!(f, "persistent"),
+        }
+    }
+}
+
 /// Custom error struct for moonlink
 #[derive(Clone, Debug)]
 pub struct ErrorStruct {
@@ -40,7 +50,7 @@ pub struct ErrorStruct {
 
 impl fmt::Display for ErrorStruct {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{} ({})", self.message, self.status)
     }
 }
 
