@@ -10,8 +10,23 @@ use tokio::sync::watch;
 /// Error status indicating whether an error is retryable
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorStatus {
+    /// Permanent means without external changes, the error never changes.
+    ///
+    /// For example, underlying services returns a not found error.
+    ///
+    /// Users SHOULD never retry this operation.
     Permanent,
+    /// Temporary means this error is returned for temporary.
+    ///
+    /// For example, underlying services is rate limited or unavailable for temporary.
+    ///
+    /// Users CAN retry the operation to resolve it.
     Temporary,
+    /// Persistent means this error used to be temporary but still failed after retry.
+    ///
+    /// For example, underlying services kept returning network errors.
+    ///
+    /// Users MAY retry this operation but it's highly possible to error again.
     Persistent,
 }
 
@@ -82,36 +97,79 @@ impl From<watch::error::RecvError> for Error {
 
 impl From<ArrowError> for Error {
     fn from(source: ArrowError) -> Self {
+        let status = match source {
+            ArrowError::MemoryError(_) | ArrowError::IoError(_, _) => ErrorStatus::Temporary,
+            ArrowError::ExternalError(_) => ErrorStatus::Persistent,
+
+            // All other errors are regard as permanent
+            _ => ErrorStatus::Permanent,
+        };
+
         Error::Arrow(ErrorStruct {
             message: format!("Arrow error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
         })
     }
 }
 
 impl From<IcebergError> for Error {
     fn from(source: IcebergError) -> Self {
+        let status = match source.kind() {
+            iceberg::ErrorKind::CatalogCommitConflicts => ErrorStatus::Persistent,
+            iceberg::ErrorKind::NamespaceNotFound => ErrorStatus::Persistent,
+
+            // All other errors are permanent
+            _ => ErrorStatus::Permanent,
+        };
+
         Error::IcebergError(ErrorStruct {
             message: format!("Iceberg error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
         })
     }
 }
 
 impl From<io::Error> for Error {
     fn from(source: io::Error) -> Self {
+        let status = match source.kind() {
+            io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset => ErrorStatus::Temporary,
+
+            io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound => ErrorStatus::Persistent,
+
+            // All other errors are permanent
+            _ => ErrorStatus::Permanent,
+        };
+
         Error::Io(ErrorStruct {
             message: format!("IO error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
         })
     }
 }
 
 impl From<opendal::Error> for Error {
     fn from(source: opendal::Error) -> Self {
+        let status = match source.kind() {
+            opendal::ErrorKind::RateLimited | opendal::ErrorKind::Unexpected => {
+                ErrorStatus::Temporary
+            }
+
+            opendal::ErrorKind::ConfigInvalid
+            | opendal::ErrorKind::PermissionDenied
+            | opendal::ErrorKind::NotFound => ErrorStatus::Persistent,
+
+            // All other errors are permanent
+            _ => ErrorStatus::Permanent,
+        };
+
         Error::OpenDal(ErrorStruct {
             message: format!("OpenDAL error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
         })
     }
 }
@@ -127,18 +185,34 @@ impl From<tokio::task::JoinError> for Error {
 
 impl From<ParquetError> for Error {
     fn from(source: ParquetError) -> Self {
+        let status = match source {
+            ParquetError::EOF(_) | ParquetError::NeedMoreData(_) => ErrorStatus::Temporary,
+
+            ParquetError::External(_) => ErrorStatus::Persistent,
+
+            // All other errors are permanent
+            _ => ErrorStatus::Permanent,
+        };
+
         Error::Parquet(ErrorStruct {
             message: format!("Parquet error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
         })
     }
 }
 
 impl From<serde_json::Error> for Error {
     fn from(source: serde_json::Error) -> Self {
-        Error::Parquet(ErrorStruct {
+        let status = match source.classify() {
+            serde_json::error::Category::Io => ErrorStatus::Temporary,
+
+            // All other errors are permanent - data format/syntax issues
+            _ => ErrorStatus::Permanent,
+        };
+
+        Error::Json(ErrorStruct {
             message: format!("JSON serialization/deserialization error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
         })
     }
 }
