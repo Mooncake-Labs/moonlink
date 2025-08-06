@@ -163,6 +163,7 @@ mod tests {
     ) -> FileSystemAccessor {
         let storage_config = StorageConfig::FileSystem {
             root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
         };
         let accessor_config = AccessorConfig {
             storage_config,

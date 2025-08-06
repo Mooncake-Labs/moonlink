@@ -13,6 +13,7 @@ pub(crate) fn create_test_file_catalog(tmp_dir: &TempDir, iceberg_schema: Schema
     let warehouse_path = tmp_dir.path().to_str().unwrap();
     let storage_config = StorageConfig::FileSystem {
         root_directory: warehouse_path.to_string(),
+        atomic_write_dir: None,
     };
     FileCatalog::new(
         AccessorConfig::new_with_storage_config(storage_config),

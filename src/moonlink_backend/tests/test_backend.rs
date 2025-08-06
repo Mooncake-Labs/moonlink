@@ -6,7 +6,7 @@ mod tests {
         current_wal_lsn, ids_from_state, smoke_create_and_insert, DatabaseId, TableId, TestGuard,
         TestGuardMode, TABLE_ID,
     };
-    use moonlink::TableStatus;
+    use moonlink_backend::table_status::TableStatus;
     use moonlink_backend::MoonlinkBackend;
     use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, SqliteMetadataStore};
 

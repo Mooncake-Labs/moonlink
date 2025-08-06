@@ -137,7 +137,7 @@ async fn test_data_file_compaction_2() {
     // Create deletion vector puffin file.
     let puffin_filepath = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector.delete_row(1);
+    assert!(batch_deletion_vector.delete_row(1));
     let puffin_blob_ref = test_utils::dump_deletion_vector_puffin(
         data_file.file_path().clone(),
         puffin_filepath.to_str().unwrap().to_string(),
@@ -223,9 +223,9 @@ async fn test_data_file_compaction_3() {
     // Create deletion vector puffin file.
     let puffin_filepath = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector.delete_row(0);
-    batch_deletion_vector.delete_row(1);
-    batch_deletion_vector.delete_row(2);
+    assert!(batch_deletion_vector.delete_row(0));
+    assert!(batch_deletion_vector.delete_row(1));
+    assert!(batch_deletion_vector.delete_row(2));
     let puffin_blob_ref = test_utils::dump_deletion_vector_puffin(
         data_file.file_path().clone(),
         puffin_filepath.to_str().unwrap().to_string(),
@@ -408,7 +408,7 @@ async fn test_data_file_compaction_5() {
     // Create deletion vector puffin file.
     let puffin_filepath_1 = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector_1 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_1.delete_row(1);
+    assert!(batch_deletion_vector_1.delete_row(1));
     let puffin_blob_ref_1 = test_utils::dump_deletion_vector_puffin(
         data_file_1.file_path().clone(),
         puffin_filepath_1.to_str().unwrap().to_string(),
@@ -421,8 +421,8 @@ async fn test_data_file_compaction_5() {
 
     let puffin_filepath_2 = temp_dir.path().join("deletion-vector-2.bin");
     let mut batch_deletion_vector_2 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_2.delete_row(0);
-    batch_deletion_vector_2.delete_row(2);
+    assert!(batch_deletion_vector_2.delete_row(0));
+    assert!(batch_deletion_vector_2.delete_row(2));
     let puffin_blob_ref_2 = test_utils::dump_deletion_vector_puffin(
         data_file_2.file_path().clone(),
         puffin_filepath_2.to_str().unwrap().to_string(),
@@ -528,9 +528,9 @@ async fn test_data_file_compaction_6() {
     // Create deletion vector puffin file.
     let puffin_filepath_1 = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector_1 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_1.delete_row(0);
-    batch_deletion_vector_1.delete_row(1);
-    batch_deletion_vector_1.delete_row(2);
+    assert!(batch_deletion_vector_1.delete_row(0));
+    assert!(batch_deletion_vector_1.delete_row(1));
+    assert!(batch_deletion_vector_1.delete_row(2));
     let puffin_blob_ref_1 = test_utils::dump_deletion_vector_puffin(
         data_file_1.file_path().clone(),
         puffin_filepath_1.to_str().unwrap().to_string(),
@@ -543,9 +543,9 @@ async fn test_data_file_compaction_6() {
 
     let puffin_filepath_2 = temp_dir.path().join("deletion-vector-2.bin");
     let mut batch_deletion_vector_2 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_2.delete_row(0);
-    batch_deletion_vector_2.delete_row(1);
-    batch_deletion_vector_2.delete_row(2);
+    assert!(batch_deletion_vector_2.delete_row(0));
+    assert!(batch_deletion_vector_2.delete_row(1));
+    assert!(batch_deletion_vector_2.delete_row(2));
     let puffin_blob_ref_2 = test_utils::dump_deletion_vector_puffin(
         data_file_2.file_path().clone(),
         puffin_filepath_2.to_str().unwrap().to_string(),
@@ -629,12 +629,12 @@ async fn test_data_file_compaction_7() {
     let puffin_filepath = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 6);
     // Deletion record for the first record batch.
-    batch_deletion_vector.delete_row(0);
-    batch_deletion_vector.delete_row(1);
-    batch_deletion_vector.delete_row(2);
+    assert!(batch_deletion_vector.delete_row(0));
+    assert!(batch_deletion_vector.delete_row(1));
+    assert!(batch_deletion_vector.delete_row(2));
     // Deletion record for the second record batch.
-    batch_deletion_vector.delete_row(3);
-    batch_deletion_vector.delete_row(5);
+    assert!(batch_deletion_vector.delete_row(3));
+    assert!(batch_deletion_vector.delete_row(5));
     // Dump deletion records to puffin blob.
     let puffin_blob_ref = test_utils::dump_deletion_vector_puffin(
         data_file.file_path().clone(),
@@ -796,12 +796,12 @@ async fn test_data_file_compaction_9() {
     let puffin_filepath = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 6);
     // Deletion record for the first record batch.
-    batch_deletion_vector.delete_row(0);
-    batch_deletion_vector.delete_row(2);
+    assert!(batch_deletion_vector.delete_row(0));
+    assert!(batch_deletion_vector.delete_row(2));
     // Deletion record for the second record batch.
-    batch_deletion_vector.delete_row(3);
-    batch_deletion_vector.delete_row(4);
-    batch_deletion_vector.delete_row(5);
+    assert!(batch_deletion_vector.delete_row(3));
+    assert!(batch_deletion_vector.delete_row(4));
+    assert!(batch_deletion_vector.delete_row(5));
     // Dump deletion records to puffin blob.
     let puffin_blob_ref = test_utils::dump_deletion_vector_puffin(
         data_file.file_path().clone(),
@@ -891,13 +891,13 @@ async fn test_data_file_compaction_10() {
     let puffin_filepath = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector = BatchDeletionVector::new(/*max_rows=*/ 6);
     // Deletion record for the first record batch.
-    batch_deletion_vector.delete_row(0);
-    batch_deletion_vector.delete_row(1);
-    batch_deletion_vector.delete_row(2);
+    assert!(batch_deletion_vector.delete_row(0));
+    assert!(batch_deletion_vector.delete_row(1));
+    assert!(batch_deletion_vector.delete_row(2));
     // Deletion record for the second record batch.
-    batch_deletion_vector.delete_row(3);
-    batch_deletion_vector.delete_row(4);
-    batch_deletion_vector.delete_row(5);
+    assert!(batch_deletion_vector.delete_row(3));
+    assert!(batch_deletion_vector.delete_row(4));
+    assert!(batch_deletion_vector.delete_row(5));
     // Dump deletion records to puffin blob.
     let puffin_blob_ref = test_utils::dump_deletion_vector_puffin(
         data_file.file_path().clone(),
@@ -1004,7 +1004,7 @@ async fn test_multiple_compacted_data_files_1() {
     // Create deletion vector puffin file.
     let puffin_filepath_1 = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector_1 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_1.delete_row(1);
+    assert!(batch_deletion_vector_1.delete_row(1));
     let puffin_blob_ref_1 = test_utils::dump_deletion_vector_puffin(
         data_file_1.file_path().clone(),
         puffin_filepath_1.to_str().unwrap().to_string(),
@@ -1017,8 +1017,8 @@ async fn test_multiple_compacted_data_files_1() {
 
     let puffin_filepath_2 = temp_dir.path().join("deletion-vector-2.bin");
     let mut batch_deletion_vector_2 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_2.delete_row(0);
-    batch_deletion_vector_2.delete_row(2);
+    assert!(batch_deletion_vector_2.delete_row(0));
+    assert!(batch_deletion_vector_2.delete_row(2));
     let puffin_blob_ref_2 = test_utils::dump_deletion_vector_puffin(
         data_file_2.file_path().clone(),
         puffin_filepath_2.to_str().unwrap().to_string(),
@@ -1137,9 +1137,9 @@ async fn test_multiple_compacted_data_files_2() {
     // Create deletion vector puffin file.
     let puffin_filepath_1 = temp_dir.path().join("deletion-vector-1.bin");
     let mut batch_deletion_vector_1 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_1.delete_row(0);
-    batch_deletion_vector_1.delete_row(1);
-    batch_deletion_vector_1.delete_row(2);
+    assert!(batch_deletion_vector_1.delete_row(0));
+    assert!(batch_deletion_vector_1.delete_row(1));
+    assert!(batch_deletion_vector_1.delete_row(2));
     let puffin_blob_ref_1 = test_utils::dump_deletion_vector_puffin(
         data_file_1.file_path().clone(),
         puffin_filepath_1.to_str().unwrap().to_string(),
@@ -1152,9 +1152,9 @@ async fn test_multiple_compacted_data_files_2() {
 
     let puffin_filepath_2 = temp_dir.path().join("deletion-vector-2.bin");
     let mut batch_deletion_vector_2 = BatchDeletionVector::new(/*max_rows=*/ 3);
-    batch_deletion_vector_2.delete_row(0);
-    batch_deletion_vector_2.delete_row(1);
-    batch_deletion_vector_2.delete_row(2);
+    assert!(batch_deletion_vector_2.delete_row(0));
+    assert!(batch_deletion_vector_2.delete_row(1));
+    assert!(batch_deletion_vector_2.delete_row(2));
     let puffin_blob_ref_2 = test_utils::dump_deletion_vector_puffin(
         data_file_2.file_path().clone(),
         puffin_filepath_2.to_str().unwrap().to_string(),

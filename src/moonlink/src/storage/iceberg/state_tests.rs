@@ -433,7 +433,7 @@ async fn test_state_1_2() {
     // Prepare data file pre-requisite.
     let row = get_test_row_1();
     table.append(row.clone()).unwrap();
-    // Prepate deletion log pre-requisite.
+    // Prepare deletion log pre-requisite.
     table.delete(row.clone(), /*lsn=*/ 1).await;
 
     // Request to persist.
@@ -457,7 +457,7 @@ async fn test_state_1_3() {
     // Prepare deletion pre-requisite.
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
 
@@ -482,7 +482,7 @@ async fn test_state_1_4() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     // Prepare deletion pre-requisite (uncommitted deletion record).
@@ -512,7 +512,7 @@ async fn test_state_1_5() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
 
@@ -544,7 +544,7 @@ async fn test_state_1_6() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     // Prepare deletion pre-requisite (uncommitted deletion record).
@@ -593,7 +593,7 @@ async fn test_state_2_2() {
     let row = get_test_row_1();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
-    // Prepate deletion log pre-requisite.
+    // Prepare deletion log pre-requisite.
     table.delete(row.clone(), /*lsn=*/ 200).await;
 
     // Request to persist.
@@ -617,7 +617,7 @@ async fn test_state_2_3() {
     // Prepare deletion pre-requisite.
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -643,7 +643,7 @@ async fn test_state_2_4() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -674,7 +674,7 @@ async fn test_state_2_5() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -707,7 +707,7 @@ async fn test_state_2_6() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -767,7 +767,7 @@ async fn test_state_3_2() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 200)
         .await
         .unwrap();
-    // Prepate deletion log pre-requisite.
+    // Prepare deletion log pre-requisite.
     table.delete(row.clone(), /*lsn=*/ 300).await;
 
     // Request to persist.
@@ -795,7 +795,7 @@ async fn test_state_3_3_deletion_before_flush() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -829,7 +829,7 @@ async fn test_state_3_3_deletion_after_flush() {
     // Prepare environment setup.
     let (old_row, _) =
         prepare_committed_and_flushed_data_files(&mut table, &mut notify_rx, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
@@ -868,7 +868,7 @@ async fn test_state_3_4_committed_deletion_before_flush() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -904,7 +904,7 @@ async fn test_state_3_4_committed_deletion_after_flush() {
     // Prepare environment setup.
     let (old_row, _) =
         prepare_committed_and_flushed_data_files(&mut table, &mut notify_rx, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
@@ -948,7 +948,7 @@ async fn test_state_3_5() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -988,7 +988,7 @@ async fn test_state_3_6() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1048,7 +1048,7 @@ async fn test_state_4_2() {
     let row = get_test_row_1();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 100);
-    // Prepate deletion log pre-requisite.
+    // Prepare deletion log pre-requisite.
     table.delete(row.clone(), /*lsn=*/ 200).await;
     // Prepare uncommitted record batch.
     let row = get_test_row_3();
@@ -1075,7 +1075,7 @@ async fn test_state_4_3() {
     // Prepare deletion pre-requisite (committed record batch).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1104,7 +1104,7 @@ async fn test_state_4_4() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1241,7 +1241,7 @@ async fn test_state_5_2() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 200)
         .await
         .unwrap();
-    // Prepate deletion log pre-requisite.
+    // Prepare deletion log pre-requisite.
     table.delete(row.clone(), /*lsn=*/ 300).await;
     // Prepare committed but unflushed record batch.
     let row = get_test_row_3();
@@ -1273,7 +1273,7 @@ async fn test_state_5_3_deletion_before_flush() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1311,7 +1311,7 @@ async fn test_state_5_3_deletion_after_flush() {
     // Prepare environment setup.
     let (old_row, _) =
         prepare_committed_and_flushed_data_files(&mut table, &mut notify_rx, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
@@ -1354,7 +1354,7 @@ async fn test_state_5_4_committed_deletion_before_flush() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1394,7 +1394,7 @@ async fn test_state_5_4_committed_deletion_after_flush() {
     // Prepare environment setup.
     let (old_row, _) =
         prepare_committed_and_flushed_data_files(&mut table, &mut notify_rx, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
@@ -1442,7 +1442,7 @@ async fn test_state_5_5() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1486,7 +1486,7 @@ async fn test_state_5_6() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1564,7 +1564,7 @@ async fn test_state_6_2() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 200)
         .await
         .unwrap();
-    // Prepate deletion log pre-requisite.
+    // Prepare deletion log pre-requisite.
     table.delete(row.clone(), /*lsn=*/ 300).await;
     // Prepare committed but unflushed record batch.
     let row = get_test_row_3();
@@ -1599,7 +1599,7 @@ async fn test_state_6_3_deletion_before_flush() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1640,7 +1640,7 @@ async fn test_state_6_3_deletion_after_flush() {
     // Prepare environment setup.
     let (old_row, _) =
         prepare_committed_and_flushed_data_files(&mut table, &mut notify_rx, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
@@ -1685,7 +1685,7 @@ async fn test_state_6_4_committed_deletion_before_flush() {
     // Prepare deletion pre-requisite (committed deletion record).
     table.delete(old_row.clone(), /*lsn=*/ 200).await;
     table.commit(/*lsn=*/ 300);
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1728,7 +1728,7 @@ async fn test_state_6_4_committed_deletion_after_flush() {
     // Prepare environment setup.
     let (old_row, _) =
         prepare_committed_and_flushed_data_files(&mut table, &mut notify_rx, /*lsn=*/ 100).await;
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 200);
@@ -1779,7 +1779,7 @@ async fn test_state_6_5() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);
@@ -1826,7 +1826,7 @@ async fn test_state_6_6() {
     flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 300)
         .await
         .unwrap();
-    // Prepate data files pre-requisite.
+    // Prepare data files pre-requisite.
     let row = get_test_row_2();
     table.append(row.clone()).unwrap();
     table.commit(/*lsn=*/ 400);

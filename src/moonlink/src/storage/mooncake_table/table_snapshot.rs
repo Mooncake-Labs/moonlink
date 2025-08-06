@@ -387,7 +387,7 @@ impl Clone for IcebergSnapshotResult {
 
 impl IcebergSnapshotResult {
     /// Return whether iceberg snapshot result contains table maintenance persistence result.
-    pub fn contains_maintanence_result(&self) -> bool {
+    pub fn contains_maintenance_result(&self) -> bool {
         if !self.index_merge_result.is_empty() {
             return true;
         }

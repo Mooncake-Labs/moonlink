@@ -49,13 +49,13 @@ impl MaintenanceRequestStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum MaintenanceProcessStatus {
-    /// Force maintainence request is not being requested.
+    /// Force maintenance request is not being requested.
     Unrequested,
-    /// Force maintainence request is being processed.
+    /// Force maintenance request is being processed.
     InProcess,
-    /// Maintainence result has been put into snapshot buffer, which will be persisted into iceberg later.
+    /// Maintenance result has been put into snapshot buffer, which will be persisted into iceberg later.
     ReadyToPersist,
-    /// Maintainence task result is being peristed into iceberg.
+    /// Maintenance task result is being peristed into iceberg.
     InPersist,
 }
 
@@ -108,16 +108,16 @@ pub(crate) struct TableHandlerState {
     pub(crate) initial_copy_buffered_events: Vec<TableEvent>,
 
     // ================================================
-    // Table maintainence status
+    // Table maintenance status
     // ================================================
     //
-    // Assume there's at most one table maintainence operation ongoing.
+    // Assume there's at most one table maintenance operation ongoing.
     //
     // Index merge request status.
     pub(crate) index_merge_request_status: MaintenanceRequestStatus,
     /// Data compaction request status.
     pub(crate) data_compaction_request_status: MaintenanceRequestStatus,
-    /// Table maintainance process status.
+    /// Table maintenance process status.
     pub(crate) table_maintenance_process_status: MaintenanceProcessStatus,
     /// Notify when data compaction completes.
     pub(crate) table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
@@ -166,13 +166,13 @@ impl TableHandlerState {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
                     if xact_id.is_none() {
+                        // Unset at flush operation.
                         self.last_unflushed_commit_lsn = Some(*lsn);
                     }
                 }
                 TableEvent::CommitFlush { lsn, .. } => {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
-                    self.last_unflushed_commit_lsn = None;
                 }
                 // Unset for table write operations.
                 TableEvent::Append { .. }
@@ -305,7 +305,7 @@ impl TableHandlerState {
             return false;
         }
 
-        // Case-1: there're completed but not persisted table maintainence changes.
+        // Case-1: there're completed but not persisted table maintenance changes.
         if self.table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
             return true;
         }
@@ -442,7 +442,7 @@ impl TableHandlerState {
     }
 
     /// ============================
-    /// Table maintainence
+    /// Table maintenance
     /// ============================
     ///
     /// Get Maintenance task operation option.

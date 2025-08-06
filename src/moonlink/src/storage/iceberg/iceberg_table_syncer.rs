@@ -403,7 +403,7 @@ impl IcebergTableManager {
     /// * local_data_file_to_remote: contains mappings from newly imported data files to remote paths.
     ///
     /// TODO(hjiang): Need to configure (1) the number of blobs in a puffin file; and (2) the number of file index in a puffin blob.
-    /// For implementation simpicity, put everything in a single file and a single blob.
+    /// For implementation simplicity, put everything in a single file and a single blob.
     async fn sync_file_indices(
         &mut self,
         file_indices_to_import: &[MooncakeFileIndex],

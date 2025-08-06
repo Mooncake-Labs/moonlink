@@ -188,6 +188,7 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
 
     let storage_config = StorageConfig::FileSystem {
         root_directory: warehouse_uri.clone(),
+        atomic_write_dir: None,
     };
     let iceberg_table_config = IcebergTableConfig {
         accessor_config: AccessorConfig::new_with_storage_config(storage_config),

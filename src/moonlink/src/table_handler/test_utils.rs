@@ -45,6 +45,7 @@ pub fn create_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
 pub fn get_iceberg_manager_config(table_name: String, warehouse_uri: String) -> IcebergTableConfig {
     let storage_config = StorageConfig::FileSystem {
         root_directory: warehouse_uri,
+        atomic_write_dir: None,
     };
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
@@ -300,10 +301,10 @@ impl TestEnvironment {
         rx.recv().await.unwrap()
     }
 
-    pub async fn flush_table_and_sync(&mut self, lsn: u64) {
+    pub async fn flush_table_and_sync(&mut self, lsn: u64, xact_id: Option<u32>) {
         self.send_event(TableEvent::CommitFlush {
             lsn,
-            xact_id: None,
+            xact_id,
             is_recovery: false,
         })
         .await;

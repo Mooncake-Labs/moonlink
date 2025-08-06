@@ -1,0 +1,37 @@
+# Ignore build artifacts and dependencies
+target
+.cargo
+node_modules
+__pycache__
+
+# Ignore documentation dependencies.
+asserts
+
+# Ignore devcontainer setup.
+.devcontainer
+
+# Ignore CI setup.
+.config
+
+# Ignore mac filesystem file.
+.DS_Store
+
+# Ignore VCS
+.git
+.gitignore
+
+# Ignore IDE/editor config
+.vscode
+.idea
+
+# Ignore local data or temp files
+*.log
+*.tmp
+*.parquet
+*.db
+*.sqlite
+*.ipynb_checkpoints
+
+# Ignore Docker itself
+Dockerfile
+.dockerignore

@@ -46,6 +46,7 @@ fn get_storage_config() -> StorageConfig {
     {
         return StorageConfig::FileSystem {
             root_directory: "/tmp/test_warehouse_uri".to_string(),
+            atomic_write_dir: None,
         };
     }
 
@@ -165,7 +166,7 @@ async fn test_table_metadata_load_from_non_existent_table() {
     assert!(res.is_err());
 }
 
-/// Test senario: delete table metadata store.
+/// Test scenario: delete table metadata store.
 #[tokio::test]
 async fn test_delete_table_metadata_store() {
     let tmp_dir = tempdir().unwrap();

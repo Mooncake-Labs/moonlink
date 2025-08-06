@@ -58,6 +58,7 @@ fn bench_write(c: &mut Criterion) {
                     accessor_config: AccessorConfig::new_with_storage_config(
                         StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
                         },
                     ),
                     ..Default::default()
@@ -79,6 +80,7 @@ fn bench_write(c: &mut Criterion) {
                     Arc::new(FileSystemAccessor::new(
                         AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
                         }),
                     )),
                 )
@@ -105,6 +107,7 @@ fn bench_write(c: &mut Criterion) {
                     accessor_config: AccessorConfig::new_with_storage_config(
                         StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
                         },
                     ),
                     ..Default::default()
@@ -126,6 +129,7 @@ fn bench_write(c: &mut Criterion) {
                     Arc::new(FileSystemAccessor::new(
                         AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
                         }),
                     )),
                 )
@@ -155,6 +159,7 @@ fn bench_write(c: &mut Criterion) {
                     accessor_config: AccessorConfig::new_with_storage_config(
                         StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
                         },
                     ),
                     ..Default::default()
@@ -177,6 +182,7 @@ fn bench_write(c: &mut Criterion) {
                         Arc::new(FileSystemAccessor::new(
                             AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
                                 root_directory: temp_warehouse_uri.clone(),
+                                atomic_write_dir: None,
                             }),
                         )),
                     ))

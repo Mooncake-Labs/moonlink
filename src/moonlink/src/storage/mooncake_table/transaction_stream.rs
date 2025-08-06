@@ -216,12 +216,12 @@ impl MooncakeTable {
                                 lsn: record.lsn,
                             });
                             // Mark the row as deleted in the batch
-                            stream_state
+                            assert!(stream_state
                                 .new_record_batches
                                 .get_mut(&batch_id)
                                 .unwrap()
                                 .deletions
-                                .delete_row(row_id);
+                                .delete_row(row_id));
                             return;
                         }
                         RecordLocation::DiskFile(file_id, row_id) => {
@@ -248,7 +248,7 @@ impl MooncakeTable {
                                     pos: loc,
                                     lsn: record.lsn,
                                 });
-                                disk_file_entry.batch_deletion_vector.delete_row(row_id);
+                                assert!(disk_file_entry.batch_deletion_vector.delete_row(row_id));
                                 return;
                             }
                         }
@@ -275,7 +275,7 @@ impl MooncakeTable {
     }
 
     pub fn abort_in_stream_batch(&mut self, xact_id: u32) {
-        // Record abortion in snapshot task so we can remove any uncomitted deletions
+        // Record abortion in snapshot task so we can remove any uncommitted deletions
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
@@ -314,11 +314,12 @@ impl MooncakeTable {
         for batch in batches.iter_mut() {
             let filtered_batch = batch.batch.get_filtered_batch()?;
             if let Some(filtered_batch) = filtered_batch {
+                let num_rows = filtered_batch.num_rows();
                 stream_state.new_record_batches.insert(
                     batch.id,
                     InMemoryBatch {
                         data: Some(Arc::new(filtered_batch)),
-                        deletions: BatchDeletionVector::default(),
+                        deletions: BatchDeletionVector::new(num_rows),
                     },
                 );
             }
@@ -458,11 +459,12 @@ impl MooncakeTable {
         for batch in batches.iter_mut() {
             let filtered_batch = batch.batch.get_filtered_batch()?;
             if let Some(filtered_batch) = filtered_batch {
+                let num_rows = filtered_batch.num_rows();
                 stream_state.new_record_batches.insert(
                     batch.id,
                     InMemoryBatch {
                         data: Some(Arc::new(filtered_batch)),
-                        deletions: BatchDeletionVector::default(),
+                        deletions: BatchDeletionVector::new(num_rows),
                     },
                 );
             }

@@ -168,7 +168,8 @@ mod tests {
             config,
             AccessorConfig {
                 storage_config: StorageConfig::FileSystem {
-                    root_directory: "/tmp".to_string()
+                    root_directory: "/tmp".to_string(),
+                    atomic_write_dir: None,
                 },
                 retry_config: RetryConfig::default(),
                 timeout_config: TimeoutConfig::default(),
@@ -196,7 +197,8 @@ mod tests {
             config,
             AccessorConfig {
                 storage_config: StorageConfig::FileSystem {
-                    root_directory: "/tmp".to_string()
+                    root_directory: "/tmp".to_string(),
+                    atomic_write_dir: None,
                 },
                 retry_config: RetryConfig {
                     delay_factor: 2.0,

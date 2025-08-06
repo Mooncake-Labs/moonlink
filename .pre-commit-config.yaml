@@ -1,4 +1,8 @@
 repos:
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.35.1
+    hooks:
+      - id: typos
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:

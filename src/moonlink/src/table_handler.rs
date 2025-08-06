@@ -340,7 +340,7 @@ impl TableHandler {
                             table_handler_state.mooncake_snapshot_ongoing = table.create_snapshot(table_handler_state.get_mooncake_snapshot_option(/*request_force=*/false, uuid));
                         }
                         TableEvent::RegularIcebergSnapshot { mut iceberg_snapshot_payload } => {
-                            // Update table maintainence status.
+                            // Update table maintenance status.
                             if iceberg_snapshot_payload.contains_table_maintenance_payload() && table_handler_state.table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
                                 table_handler_state.table_maintenance_process_status = MaintenanceProcessStatus::InPersist;
                             }
@@ -430,7 +430,7 @@ impl TableHandler {
                             match iceberg_snapshot_result {
                                 Ok(snapshot_res) => {
                                     // Update table maintenance operation status.
-                                    if table_handler_state.table_maintenance_process_status == MaintenanceProcessStatus::InPersist && snapshot_res.contains_maintanence_result() {
+                                    if table_handler_state.table_maintenance_process_status == MaintenanceProcessStatus::InPersist && snapshot_res.contains_maintenance_result() {
                                         table_handler_state.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
                                         // Table maintenance could come from table internal events, which doesn't have notification receiver.
                                         let _ = table_handler_state.table_maintenance_completion_tx.send(Ok(()));
@@ -454,7 +454,7 @@ impl TableHandler {
                                         }
                                     }
 
-                                    // Update table maintainence operation status.
+                                    // Update table maintenance operation status.
                                     if table_handler_state.table_maintenance_process_status == MaintenanceProcessStatus::InPersist {
                                         table_handler_state.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
                                         // Table maintenance could come from table internal events, which doesn't have notification receiver.
@@ -569,7 +569,7 @@ impl TableHandler {
             return;
         }
 
-        // In the case that this is an initial copy event we acutally expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
+        // In the case that this is an initial copy event we actually expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
         if table_handler_state.should_discard_event(&event) && !is_initial_copy_event {
             return;
         }

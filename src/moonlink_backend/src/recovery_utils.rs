@@ -29,7 +29,6 @@ where
         .add_table(
             &metadata_entry.src_table_uri,
             mooncake_table_id,
-            metadata_entry.database_id,
             metadata_entry.table_id,
             &metadata_entry.src_table_name,
             metadata_entry.moonlink_table_config,

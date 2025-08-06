@@ -20,6 +20,8 @@ impl Default for IcebergTableConfig {
     fn default() -> Self {
         let storage_config = StorageConfig::FileSystem {
             root_directory: Self::DEFAULT_WAREHOUSE_URI.to_string(),
+            // There's only one iceberg writer per-table, no need for atomic write feature.
+            atomic_write_dir: None,
         };
         Self {
             namespace: vec![Self::DEFAULT_NAMESPACE.to_string()],

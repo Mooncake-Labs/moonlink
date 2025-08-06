@@ -62,6 +62,7 @@ async fn test_local_iceberg_table_creation() {
     let warehouse_path = temp_dir.path().to_str().unwrap();
     let storage_config = StorageConfig::FileSystem {
         root_directory: warehouse_path.to_string(),
+        atomic_write_dir: None,
     };
     let catalog = FileCatalog::new(
         AccessorConfig::new_with_storage_config(storage_config),

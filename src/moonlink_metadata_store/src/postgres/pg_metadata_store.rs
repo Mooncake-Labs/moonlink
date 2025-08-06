@@ -75,7 +75,7 @@ impl MetadataStoreTrait for PgMetadataStore {
                 })
             };
             let moonlink_table_config =
-                config_utils::deserialze_moonlink_table_config(serialized_config, secret_entry)?;
+                config_utils::deserialize_moonlink_table_config(serialized_config, secret_entry)?;
 
             let metadata_entry = TableMetadataEntry {
                 database_id,

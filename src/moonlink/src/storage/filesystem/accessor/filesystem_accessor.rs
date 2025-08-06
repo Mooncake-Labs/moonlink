@@ -63,6 +63,7 @@ impl FileSystemAccessor {
 
         let storage_config = crate::StorageConfig::FileSystem {
             root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
         };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
         create_filesystem_accessor(accessor_config)
@@ -448,6 +449,7 @@ mod tests {
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
         let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
+            atomic_write_dir: None,
         };
         let filesystem_accessor = create_filesystem_accessor(
             AccessorConfig::new_with_storage_config(storage_config.clone()),
@@ -471,6 +473,33 @@ mod tests {
         assert_eq!(metadata.content_length(), TARGET_FILESIZE as u64);
     }
 
+    // Test atomic write operation for local filesystem.
+    #[tokio::test]
+    async fn test_atomic_write() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: root_directory.clone(),
+            atomic_write_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+        };
+        let filesystem_accessor = create_filesystem_accessor(
+            AccessorConfig::new_with_storage_config(storage_config.clone()),
+        );
+
+        const DST_FILENAME: &str = "target";
+        const TARGET_FILESIZE: usize = 10;
+
+        // Write object atomically.
+        let random_content = create_random_string(TARGET_FILESIZE);
+        filesystem_accessor
+            .write_object(DST_FILENAME, random_content.as_bytes().to_vec())
+            .await
+            .unwrap();
+        // Read object and check.
+        let actual_content = filesystem_accessor.read_object(DST_FILENAME).await.unwrap();
+        assert_eq!(actual_content, random_content.as_bytes().to_vec());
+    }
+
     // Local filesystem doesn't support conditional write, which should behave the same as [`write_object`].
     #[tokio::test]
     async fn test_conditional_write() {
@@ -478,6 +507,7 @@ mod tests {
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
         let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
+            atomic_write_dir: None,
         };
         let filesystem_accessor = create_filesystem_accessor(
             AccessorConfig::new_with_storage_config(storage_config.clone()),
@@ -525,6 +555,7 @@ mod tests {
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
         let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
+            atomic_write_dir: None,
         };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
         let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
@@ -560,6 +591,7 @@ mod tests {
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
         let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
+            atomic_write_dir: None,
         };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
         let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
@@ -593,6 +625,7 @@ mod tests {
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
         let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
+            atomic_write_dir: None,
         };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
         let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());
@@ -622,6 +655,7 @@ mod tests {
         let root_directory = temp_dir.path().to_str().unwrap().to_string();
         let storage_config = StorageConfig::FileSystem {
             root_directory: root_directory.clone(),
+            atomic_write_dir: None,
         };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
         let filesystem_accessor = create_filesystem_accessor(accessor_config.clone());

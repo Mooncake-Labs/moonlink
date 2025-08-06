@@ -64,6 +64,8 @@ impl TableConfig {
         if config.iceberg_config.is_none() {
             let storage_config = StorageConfig::FileSystem {
                 root_directory: default_table_directory.to_string(),
+                // By default disable atomic write option.
+                atomic_write_dir: None,
             };
             config.iceberg_config = Some(IcebergConfig::new_with_storage_config(storage_config));
         }
@@ -106,6 +108,7 @@ mod tests {
             iceberg_config: Some(IcebergConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
                     root_directory: "/tmp/path".to_string(),
+                    atomic_write_dir: None,
                 },
             )),
         };
@@ -143,6 +146,7 @@ mod tests {
             iceberg_config: Some(IcebergConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
                     root_directory: "/tmp".to_string(),
+                    atomic_write_dir: None,
                 },
             )),
         };

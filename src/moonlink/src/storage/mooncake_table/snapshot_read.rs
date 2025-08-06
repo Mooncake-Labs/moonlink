@@ -32,6 +32,7 @@ impl SnapshotTableState {
         Ok(TableSnapshotStatus {
             commit_lsn: self.current_snapshot.snapshot_version,
             flush_lsn: self.current_snapshot.flush_lsn,
+            iceberg_warehouse_location: self.iceberg_warehouse_location.clone(),
         })
     }
 

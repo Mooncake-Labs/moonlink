@@ -64,7 +64,10 @@ impl TestGuard {
                 skip_data_compaction: true,
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
-                StorageConfig::FileSystem { root_directory },
+                StorageConfig::FileSystem {
+                    root_directory,
+                    atomic_write_dir: None,
+                },
             )),
         };
         serde_json::to_string(&table_config).unwrap()
@@ -267,7 +270,10 @@ fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
             skip_data_compaction: true,
         },
         iceberg_config: Some(AccessorConfig::new_with_storage_config(
-            StorageConfig::FileSystem { root_directory },
+            StorageConfig::FileSystem {
+                root_directory,
+                atomic_write_dir: None,
+            },
         )),
     };
     serde_json::to_string(&table_config).unwrap()

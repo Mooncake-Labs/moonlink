@@ -128,6 +128,8 @@ pub(crate) fn parse_moonlink_table_config(
 }
 
 /// Recover filesystem config from persisted config and secret.
+///
+/// For local filesystem, atomic write option is by default disabled, and it's caller's responsibility to enable if necessary.
 fn recover_storage_config(
     persisted_config: &MoonlinkTableConfigForPersistence,
     secret_entry: Option<MoonlinkTableSecret>,
@@ -166,17 +168,19 @@ fn recover_storage_config(
             MoonlinkSecretType::FileSystem => {
                 return StorageConfig::FileSystem {
                     root_directory: persisted_config.iceberg_table_config.warehouse_uri.clone(),
+                    atomic_write_dir: None,
                 };
             }
         }
     }
     StorageConfig::FileSystem {
         root_directory: persisted_config.iceberg_table_config.warehouse_uri.clone(),
+        atomic_write_dir: None,
     }
 }
 
 /// Deserialize json value to moonlink table config.
-pub(crate) fn deserialze_moonlink_table_config(
+pub(crate) fn deserialize_moonlink_table_config(
     serialized_config: serde_json::Value,
     secret_entry: Option<MoonlinkTableSecret>,
 ) -> Result<MoonlinkTableConfig> {
@@ -211,7 +215,7 @@ mod tests {
         let (serialized_persisted_config, secret_entry) =
             parse_moonlink_table_config(old_moonlink_table_config.clone()).unwrap();
         let new_moonlink_table_config =
-            deserialze_moonlink_table_config(serialized_persisted_config, secret_entry).unwrap();
+            deserialize_moonlink_table_config(serialized_persisted_config, secret_entry).unwrap();
         assert_eq!(old_moonlink_table_config, new_moonlink_table_config);
     }
 

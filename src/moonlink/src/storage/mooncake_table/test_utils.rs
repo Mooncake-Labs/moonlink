@@ -48,7 +48,10 @@ pub fn test_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
 /// Test util function to get iceberg table config for testing purpose.
 pub fn test_iceberg_table_config(context: &TestContext, table_name: &str) -> IcebergTableConfig {
     let root_directory = context.path().to_str().unwrap().to_string();
-    let storage_config = StorageConfig::FileSystem { root_directory };
+    let storage_config = StorageConfig::FileSystem {
+        root_directory,
+        atomic_write_dir: None,
+    };
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),

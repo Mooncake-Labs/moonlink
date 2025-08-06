@@ -4,12 +4,13 @@ mod logging;
 pub mod mooncake_table_id;
 mod recovery_utils;
 pub mod table_config;
+pub mod table_status;
 
 use arrow_schema::Schema;
 pub use error::{Error, Result};
 use mooncake_table_id::MooncakeTableId;
 pub use moonlink::ReadState;
-use moonlink::{TableEventManager, TableStatus};
+use moonlink::TableEventManager;
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
 use std::hash::Hash;
@@ -18,6 +19,7 @@ use tokio::sync::RwLock;
 
 use crate::recovery_utils::BackendAttributes;
 use crate::table_config::TableConfig;
+use crate::table_status::TableStatus;
 
 pub struct MoonlinkBackend<
     D: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
@@ -124,7 +126,6 @@ where
                 .add_table(
                     &src_uri,
                     mooncake_table_id,
-                    database_id,
                     table_id,
                     &src_table_name,
                     moonlink_table_config.clone(),
@@ -192,16 +193,26 @@ where
 
     /// List all tables at moonlink backend, and return their states.
     pub async fn list_tables(&self) -> Result<Vec<TableStatus>> {
-        let mut table_states = vec![];
+        let mut table_statuses = vec![];
         let manager = self.replication_manager.read().await;
         let table_state_readers = manager.get_table_status_readers();
-        for cur_table_state_reader in table_state_readers.into_iter() {
-            table_states.push(cur_table_state_reader.get_current_table_state().await?);
+        for (mooncake_table_id, cur_table_state_readers) in table_state_readers.into_iter() {
+            for cur_reader in cur_table_state_readers.iter() {
+                let table_snapshot_status = cur_reader.get_current_table_state().await?;
+                let table_status = TableStatus {
+                    database_id: mooncake_table_id.get_database_id_value(),
+                    table_id: mooncake_table_id.get_table_id_value(),
+                    commit_lsn: table_snapshot_status.commit_lsn,
+                    flush_lsn: table_snapshot_status.flush_lsn,
+                    iceberg_warehouse_location: table_snapshot_status.iceberg_warehouse_location,
+                };
+                table_statuses.push(table_status);
+            }
         }
-        Ok(table_states)
+        Ok(table_statuses)
     }
 
-    /// Perform a table maintaince operation based on requested mode, block wait until maintenance results have been persisted.
+    /// Perform a table maintenance operation based on requested mode, block wait until maintenance results have been persisted.
     /// Notice, it's only exposed for debugging, testing and admin usage.
     ///
     /// There're currently three modes supported:

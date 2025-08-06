@@ -51,7 +51,6 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         &mut self,
         src_uri: &str,
         mooncake_table_id: T,
-        database_id: u32,
         table_id: u32,
         table_name: &str,
         moonlink_table_config: MoonlinkTableConfig,
@@ -66,7 +65,6 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
             let base_path = tokio::fs::canonicalize(&self.table_base_path).await?;
             let replication_connection = ReplicationConnection::new(
                 src_uri.to_string(),
-                database_id,
                 base_path.to_str().unwrap().to_string(),
                 self.object_storage_cache.clone(),
             )
@@ -135,10 +133,18 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         Ok(connection.get_table_status_reader(src_table_id))
     }
 
-    pub fn get_table_status_readers(&self) -> Vec<&TableStatusReader> {
-        let mut table_state_readers = vec![];
-        for (_, cur_repl_conn) in self.connections.iter() {
-            table_state_readers.extend(cur_repl_conn.get_table_status_readers());
+    /// Return mapping from mooncake table id to its table status readers.
+    pub fn get_table_status_readers(&self) -> HashMap<T, Vec<&TableStatusReader>> {
+        let mut table_state_readers = HashMap::with_capacity(self.connections.len());
+        for (mooncake_table_id, (uri, _)) in self.table_info.iter() {
+            let cur_repl_conn = self
+                .connections
+                .get(uri)
+                .unwrap_or_else(|| panic!("replication connection with uri {uri} should exist."));
+            table_state_readers.insert(
+                mooncake_table_id.clone(),
+                cur_repl_conn.get_table_status_readers(),
+            );
         }
         table_state_readers
     }

@@ -92,6 +92,7 @@ impl MemSlice {
         None
     }
 
+    #[must_use]
     pub fn try_delete_at_pos(&mut self, pos: (u64, usize)) -> bool {
         self.column_store.try_delete_at_pos(pos)
     }

@@ -238,7 +238,7 @@ impl DeletionVector {
         let max_rows = self.max_num_rows.unwrap();
         let mut batch_delete_vector = BatchDeletionVector::new(max_rows);
         for row_idx in self.bitmap.iter() {
-            batch_delete_vector.delete_row(row_idx as usize);
+            assert!(batch_delete_vector.delete_row(row_idx as usize));
         }
         batch_delete_vector
     }

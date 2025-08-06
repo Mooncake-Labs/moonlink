@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-rust-cli
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-rust-cli
+  template:
+    metadata:
+      labels:
+        app: my-rust-cli
+    spec:
+      containers:
+      # TODO(hjiang): Rename container name.
+      # TODO(hjiang): Add resource limit/request.
+      - name: my-rust-cli
+        image: us-west1-docker.pkg.dev/coral-ring-465417-r0/moonlink-standalone-experiment/my-rust-cli:deefde16-0ab8-4c03-90b6-b1a2ae201df0
+        env:
+        - name: PGHOST
+          value: localhost
+        - name: PGUSER
+          value: user
+        - name: PGPASSWORD
+          value: password
+        - name: PGDATABASE
+          value: mydb
+        - name: PGPORT
+          value: "5432"
+      # TODO(hjiang): Postgres container to test moonlink.
+      - name: postgres
+        image: postgres:17
+        env:
+        - name: POSTGRES_USER
+          value: user
+        - name: POSTGRES_PASSWORD
+          value: password
+        - name: POSTGRES_DB
+          value: mydb
+        - name: POSTGRES_INITDB_ARGS
+          value: "-c wal_level=logical"
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: pgdata
+        emptyDir: {}

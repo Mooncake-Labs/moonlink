@@ -13,8 +13,14 @@ use opendal::Operator;
 fn create_opendal_operator_impl(storage_config: &StorageConfig) -> Result<Operator> {
     match storage_config {
         #[cfg(feature = "storage-fs")]
-        StorageConfig::FileSystem { root_directory } => {
-            let builder = services::Fs::default().root(root_directory);
+        StorageConfig::FileSystem {
+            root_directory,
+            atomic_write_dir,
+        } => {
+            let mut builder = services::Fs::default().root(root_directory);
+            if let Some(atomic_write_dir) = atomic_write_dir {
+                builder = builder.atomic_write_dir(atomic_write_dir);
+            }
             Ok(Operator::new(builder)?.finish())
         }
         #[cfg(feature = "storage-gcs")]

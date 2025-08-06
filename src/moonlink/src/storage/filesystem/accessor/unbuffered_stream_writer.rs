@@ -70,7 +70,10 @@ mod tests {
         let dst_filename = "dst".to_string();
 
         // Create an operator.
-        let storage_config = StorageConfig::FileSystem { root_directory };
+        let storage_config = StorageConfig::FileSystem {
+            root_directory,
+            atomic_write_dir: None,
+        };
         let accessor_config = AccessorConfig::new_with_storage_config(storage_config.clone());
         let operator = operator_utils::create_opendal_operator(&accessor_config)
             .await

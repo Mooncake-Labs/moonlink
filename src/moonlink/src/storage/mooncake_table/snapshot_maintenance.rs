@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-/// This file contains maintaince related features for mooncake snapshot.
+/// This file contains maintenance related features for mooncake snapshot.
 use crate::storage::compaction::table_compaction::SingleFileToCompact;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
 use crate::storage::mooncake_table::{
@@ -33,7 +33,7 @@ fn remap_record_location_after_compaction(
 
 impl SnapshotTableState {
     /// ===============================
-    /// Get maintence payload
+    /// Get maintenance payload
     /// ===============================
     ///
     /// Util function to decide whether and what to compact data files.
@@ -382,7 +382,7 @@ impl SnapshotTableState {
                 }
                 // Case-2: the deletion log exists in the compacted new data file, perform a remap.
                 //
-                // Committed deletion log only contains unpersisted records, so remap should succed.
+                // Committed deletion log only contains unpersisted records, so remap should succeed.
                 let remap_succ =
                     remap_record_location_after_compaction(&mut cur_deletion_log, task);
                 assert!(
@@ -399,7 +399,7 @@ impl SnapshotTableState {
         self.committed_deletion_log = new_committed_deletion_log;
     }
 
-    /// Remap uncomitted deletion log after compaction.
+    /// Remap uncommitted deletion log after compaction.
     pub(super) fn remap_uncommitted_deletion_logs_after_compaction(
         &mut self,
         task: &mut SnapshotTask,

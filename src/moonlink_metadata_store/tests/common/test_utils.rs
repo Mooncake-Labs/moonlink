@@ -10,6 +10,7 @@ pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
             table_name: "table".to_string(),
             accessor_config: AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
                 root_directory: "/tmp/test_warehouse_uri".to_string(),
+                atomic_write_dir: None,
             }),
         },
         ..Default::default()

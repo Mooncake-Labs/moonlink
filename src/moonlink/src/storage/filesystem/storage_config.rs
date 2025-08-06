@@ -7,7 +7,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub enum StorageConfig {
     #[cfg(feature = "storage-fs")]
-    FileSystem { root_directory: String },
+    FileSystem {
+        root_directory: String,
+        // Used for atomic write operation: write files to a temporary directory and rename.
+        //
+        // Caveat:
+        // - Not every filesystem provides atomic [`rename`] semantics;
+        // - Rename doesn't work across different devices.
+        atomic_write_dir: Option<String>,
+    },
     #[cfg(feature = "storage-s3")]
     S3 {
         access_key_id: String,
@@ -41,9 +49,13 @@ impl std::fmt::Debug for StorageConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             #[cfg(feature = "storage-fs")]
-            StorageConfig::FileSystem { root_directory } => f
+            StorageConfig::FileSystem {
+                root_directory,
+                atomic_write_dir,
+            } => f
                 .debug_struct("FileSystem")
                 .field("root_directory", root_directory)
+                .field("atomic_write_dir", atomic_write_dir)
                 .finish(),
 
             #[cfg(feature = "storage-s3")]
@@ -90,7 +102,7 @@ impl StorageConfig {
     pub fn get_root_path(&self) -> String {
         match &self {
             #[cfg(feature = "storage-fs")]
-            StorageConfig::FileSystem { root_directory } => root_directory.to_string(),
+            StorageConfig::FileSystem { root_directory, .. } => root_directory.to_string(),
             #[cfg(feature = "storage-gcs")]
             StorageConfig::Gcs { bucket, .. } => format!("gs://{bucket}"),
             #[cfg(feature = "storage-s3")]

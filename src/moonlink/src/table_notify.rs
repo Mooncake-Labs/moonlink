@@ -11,7 +11,7 @@ use crate::Result;
 
 /// Table maintenance status.
 #[derive(Clone, Debug)]
-pub enum TableMainenanceStatus<T> {
+pub enum TableMaintenanceStatus<T> {
     /// Requested to skip table maintenance, so it's unknown whether there's maintenance payload.
     Unknown,
     /// Nothing to maintenance.
@@ -19,20 +19,20 @@ pub enum TableMainenanceStatus<T> {
     /// Table maintenance payload.
     Payload(T),
 }
-pub type IndexMergeMaintenanceStatus = TableMainenanceStatus<FileIndiceMergePayload>;
-pub type DataCompactionMaintenanceStatus = TableMainenanceStatus<DataCompactionPayload>;
+pub type IndexMergeMaintenanceStatus = TableMaintenanceStatus<FileIndiceMergePayload>;
+pub type DataCompactionMaintenanceStatus = TableMaintenanceStatus<DataCompactionPayload>;
 
-impl<T> TableMainenanceStatus<T> {
+impl<T> TableMaintenanceStatus<T> {
     /// Return whether there's nothing to maintain.
     pub fn is_nothing(&self) -> bool {
-        matches!(self, TableMainenanceStatus::Nothing)
+        matches!(self, TableMaintenanceStatus::Nothing)
     }
     pub fn has_payload(&self) -> bool {
-        matches!(self, TableMainenanceStatus::Payload(_))
+        matches!(self, TableMaintenanceStatus::Payload(_))
     }
     pub fn take_payload(self) -> Option<T> {
         match self {
-            TableMainenanceStatus::Payload(payload) => Some(payload),
+            TableMaintenanceStatus::Payload(payload) => Some(payload),
             _ => None,
         }
     }

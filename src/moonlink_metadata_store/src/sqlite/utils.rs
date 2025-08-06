@@ -1,4 +1,4 @@
-/// Util functiosn for metadata storage based on sqlite.
+/// Util function for metadata storage based on sqlite.
 use crate::error::Result;
 
 /// Util function to get database filepath and database uri.

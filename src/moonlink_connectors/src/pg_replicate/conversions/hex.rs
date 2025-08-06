@@ -8,7 +8,7 @@ pub enum ByteaHexParseError {
     InvalidPrefix,
 
     #[error("invalid byte")]
-    OddNumerOfDigits,
+    OddNumberOfDigits,
 
     #[error("parse int result: {0}")]
     ParseInt(#[from] ParseIntError),
@@ -23,7 +23,7 @@ pub fn from_bytea_hex(s: &str) -> Result<Vec<u8>, ByteaHexParseError> {
     let s = &s[2..];
 
     if s.len() % 2 != 0 {
-        return Err(ByteaHexParseError::OddNumerOfDigits);
+        return Err(ByteaHexParseError::OddNumberOfDigits);
     }
 
     for i in (0..s.len()).step_by(2) {

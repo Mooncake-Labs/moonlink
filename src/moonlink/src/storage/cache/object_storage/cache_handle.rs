@@ -72,7 +72,7 @@ impl NonEvictableHandle {
     ///
     /// But local cache files are still subject to eviction and deletion, for example, when
     /// - Object storage cache goes out of space;
-    /// - Maintainance job like compaction kicks in and requests to delete old compacted files;
+    /// - Maintenance job like compaction kicks in and requests to delete old compacted files;
     /// - Moonlink process restarts and recreates the cache directory.
     #[must_use]
     pub(crate) async fn unreference_and_replace_with_remote(
@@ -99,7 +99,7 @@ impl NonEvictableHandle {
     ///
     /// But local cache files are still subject to eviction and deletion, for example, when
     /// - Object storage cache goes out of space;
-    /// - Maintainance job like compaction kicks in and requests to delete old compacted files;
+    /// - Maintenance job like compaction kicks in and requests to delete old compacted files;
     /// - Moonlink process restarts and recreates the cache directory.
     #[must_use]
     #[allow(dead_code)]

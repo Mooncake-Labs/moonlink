@@ -238,10 +238,10 @@ impl ColumnStoreBuffer {
                     identity,
                 )
             {
-                self.in_memory_batches[idx]
+                assert!(self.in_memory_batches[idx]
                     .batch
                     .deletions
-                    .delete_row(*row_offset);
+                    .delete_row(*row_offset));
                 return Some((*batch_id, *row_offset));
             }
         }
@@ -271,6 +271,7 @@ impl ColumnStoreBuffer {
         self.current_rows.get_snapshot()
     }
 
+    #[must_use]
     pub(super) fn try_delete_at_pos(&mut self, pos: (u64, usize)) -> bool {
         let idx = self
             .in_memory_batches

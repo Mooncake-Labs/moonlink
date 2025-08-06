@@ -13,7 +13,7 @@ use futures::future::join_all;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 /// This module contains the file-based catalog implementation, which relies on version hint file to decide current version snapshot.
-/// Dispite a few limitation (i.e. atomic rename for local filesystem), it's not a problem for moonlink, which guarantees at most one writer at the same time (for nows).
+/// Despite a few limitation (i.e. atomic rename for local filesystem), it's not a problem for moonlink, which guarantees at most one writer at the same time (for nows).
 /// It leverages `opendal` and iceberg `FileIO` as an abstraction layer to operate on all possible storage backends.
 ///
 /// Iceberg table format from object storage's perspective:
@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 ///   - An empty file, indicates it's a valid namespace
 /// - data
 ///   - parquet files
-/// - metdata
+/// - metadata
 ///   - version hint file
 ///     + version-hint.text
 ///     + contains the latest version number for metadata
@@ -182,8 +182,8 @@ impl FileCatalog {
         table_requirements: Vec<TableRequirement>,
         table_metadata: &TableMetadata,
     ) -> IcebergResult<()> {
-        for cur_requirment in table_requirements.into_iter() {
-            cur_requirment.check(Some(table_metadata))?;
+        for cur_requirement in table_requirements.into_iter() {
+            cur_requirement.check(Some(table_metadata))?;
         }
         Ok(())
     }

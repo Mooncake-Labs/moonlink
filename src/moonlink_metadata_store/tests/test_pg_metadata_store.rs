@@ -125,7 +125,7 @@ mod tests {
         assert!(res.is_err());
     }
 
-    /// Test senario: delete table metadata store.
+    /// Test scenario: delete table metadata store.
     #[tokio::test]
     #[serial]
     async fn test_delete_table_metadata_store() {
