@@ -300,18 +300,6 @@ impl PersistentWalMetadata {
             iceberg_snapshot_lsn,
         }
     }
-
-    pub fn to_wal_manager(self, file_system_accessor: Arc<dyn BaseFileSystemAccess>) -> WalManager {
-        WalManager {
-            in_mem_buf: Vec::new(),
-            highest_seen_lsn: self.highest_seen_lsn,
-            live_wal_files_tracker: self.live_wal_files_tracker,
-            curr_file_number: self.curr_file_number,
-            active_transactions: self.active_transactions,
-            main_transaction_tracker: self.main_transaction_tracker,
-            file_system_accessor,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -390,37 +378,43 @@ impl WalManager {
     }
 
     pub fn get_metadata_file_name() -> String {
-        format!("metadata_wal.json")
+        "metadata_wal.json".to_string()
     }
 
     pub fn get_file_system_accessor(&self) -> Arc<dyn BaseFileSystemAccess> {
         self.file_system_accessor.clone()
     }
 
-    /// ------------------------------
-    /// Helpers to maintain WAL tracking data structures
-    /// ------------------------------
+    // ------------------------------
+    // Helpers to maintain WAL tracking data structures
+    // ------------------------------
 
     fn compute_updated_live_wal_file_tracker(
         &self,
-        files_to_delete: &Vec<WalFileInfo>,
+        files_to_delete: &[WalFileInfo],
+        file_to_persist: &Option<WalFileInfo>,
     ) -> Vec<WalFileInfo> {
-        if files_to_delete.is_empty() {
-            return self.live_wal_files_tracker.clone();
+        let mut updated_live_wal_file_tracker_copy = if files_to_delete.is_empty() {
+            self.live_wal_files_tracker.clone()
         } else {
             let lowest_file_to_keep = files_to_delete.last().unwrap().file_number + 1;
             let mut updated_live_wal_file_tracker_copy = self.live_wal_files_tracker.clone();
             updated_live_wal_file_tracker_copy
                 .retain(|wal_file_info| wal_file_info.file_number >= lowest_file_to_keep);
             updated_live_wal_file_tracker_copy
+        };
+
+        if let Some(file_to_persist) = file_to_persist {
+            updated_live_wal_file_tracker_copy.push(file_to_persist.clone());
         }
+        updated_live_wal_file_tracker_copy
     }
 
     /// Remove all xacts that have been captured in the most recent iceberg snapshot.
     fn compute_cleanedup_xacts(
         &self,
         iceberg_snapshot_lsn: Option<u64>,
-        files_to_delete: &Vec<WalFileInfo>,
+        files_to_delete: &[WalFileInfo],
     ) -> (HashMap<u32, WalTransactionState>, Vec<WalTransactionState>) {
         if iceberg_snapshot_lsn.is_none() {
             return (
@@ -664,11 +658,8 @@ impl WalManager {
         files_to_delete: Vec<WalFileInfo>,
         file_to_persist: Option<WalFileInfo>,
     ) -> PersistentWalMetadata {
-        let mut live_wal_files_tracker =
-            self.compute_updated_live_wal_file_tracker(&files_to_delete);
-        if let Some(file_to_persist) = file_to_persist {
-            live_wal_files_tracker.push(file_to_persist);
-        }
+        let live_wal_files_tracker =
+            self.compute_updated_live_wal_file_tracker(&files_to_delete, &file_to_persist);
 
         let (cleanedup_xacts, cleanedup_main_xacts) =
             self.compute_cleanedup_xacts(iceberg_snapshot_lsn, &files_to_delete);
@@ -830,60 +821,76 @@ impl WalManager {
     // ------------------------------
     // Handling completed persistence and truncation
     // ------------------------------
-    /// Handles the persistence side of a WAL persistence update.
-    fn handle_complete_persistence(
-        &mut self,
-        persistence_update_result: &WalPersistenceUpdateResult,
-    ) {
-        if let Some((_, wal_file_info)) = &persistence_update_result
-            .prepare_persistent_update
-            .file_to_persist
-        {
-            assert_eq!(wal_file_info.file_number, self.curr_file_number - 1);
-            // Add the persisted file to the live tracker
-            self.live_wal_files_tracker.push(wal_file_info.clone());
-        }
-    }
 
-    fn clean_up_xacts(&mut self, iceberg_snapshot_lsn: u64, files_to_delete: &Vec<WalFileInfo>) {
+    fn clean_up_xacts(&mut self, iceberg_snapshot_lsn: u64, files_to_delete: &[WalFileInfo]) {
         let (cleanedup_xacts, cleanedup_main_xacts) =
             self.compute_cleanedup_xacts(Some(iceberg_snapshot_lsn), files_to_delete);
         self.active_transactions = cleanedup_xacts;
         self.main_transaction_tracker = cleanedup_main_xacts;
     }
 
-    fn update_live_wal_file_tracker(&mut self, files_to_delete: &Vec<WalFileInfo>) {
-        self.live_wal_files_tracker = self.compute_updated_live_wal_file_tracker(files_to_delete);
+    fn update_live_wal_file_tracker(
+        &mut self,
+        files_to_delete: &[WalFileInfo],
+        file_to_persist: &Option<WalFileInfo>,
+    ) {
+        self.live_wal_files_tracker =
+            self.compute_updated_live_wal_file_tracker(files_to_delete, file_to_persist);
     }
 
-    /// Handles the truncation side of a WAL persistence update.
-    /// This cleans up any files that no longer need to be tracked, and also any xacts that no longer need to
-    /// be tracked as a result.
-    ///
-    /// This uses the same files_to_delete as computed when preparing for truncation, for the sake of simplicity.
-    fn handle_complete_truncate(&mut self, persistence_update_result: &WalPersistenceUpdateResult) {
-        if persistence_update_result
+    /// Updates the trackers for a persistence update result.
+    /// Under the hood, this should be calling the exact same functions using the same iceberg LSN
+    ///  as the ones used when preparing for this persistence update job
+    fn update_trackers_for_persistence_update_result(
+        &mut self,
+        persistence_update_result: &WalPersistenceUpdateResult,
+    ) {
+        let accompanying_iceberg_snapshot_lsn = persistence_update_result
             .prepare_persistent_update
-            .files_to_delete
-            .is_empty()
-        {
-            return;
-        } else {
-            let accompanying_iceberg_snapshot_lsn = persistence_update_result
-                .prepare_persistent_update
-                .accompanying_iceberg_snapshot_lsn
-                .expect("There must be an iceberg snapshot if WAL files_to_delete is not empty");
+            .accompanying_iceberg_snapshot_lsn;
 
-            self.update_live_wal_file_tracker(
-                &persistence_update_result
-                    .prepare_persistent_update
-                    .files_to_delete,
-            );
+        self.update_live_wal_file_tracker(
+            &persistence_update_result
+                .prepare_persistent_update
+                .files_to_delete,
+            &persistence_update_result
+                .prepare_persistent_update
+                .file_to_persist
+                .as_ref()
+                .map(|(_, file_info)| file_info.clone()),
+        );
+        if let Some(accompanying_iceberg_snapshot_lsn) = accompanying_iceberg_snapshot_lsn {
             self.clean_up_xacts(
                 accompanying_iceberg_snapshot_lsn,
                 &persistence_update_result
                     .prepare_persistent_update
                     .files_to_delete,
+            );
+        }
+
+        debug_assert_eq!(
+            self.live_wal_files_tracker,
+            persistence_update_result
+                .prepare_persistent_update
+                .persistent_wal_metadata
+                .live_wal_files_tracker,
+            "live wal files stored in metadata should match the live wal files tracker"
+        );
+
+        // test to check that the xacts in the metadata snapshot are a
+        // subset of the xacts in the curr active transactions map.
+        {
+            let xact_map = self.active_transactions.clone();
+            let xact_map_from_metadata = persistence_update_result
+                .prepare_persistent_update
+                .persistent_wal_metadata
+                .active_transactions
+                .clone();
+            debug_assert!(
+                xact_map_from_metadata
+                    .keys()
+                    .all(|xact_id| xact_map.contains_key(xact_id)),
+                "all xacts in the metadata should be in the active transactions map"
             );
         }
     }
@@ -897,34 +904,7 @@ impl WalManager {
         &mut self,
         wal_persistence_update_result: &WalPersistenceUpdateResult,
     ) -> Option<u64> {
-        self.handle_complete_truncate(wal_persistence_update_result);
-        self.handle_complete_persistence(wal_persistence_update_result);
-
-        debug_assert_eq!(
-            self.live_wal_files_tracker,
-            wal_persistence_update_result
-                .prepare_persistent_update
-                .persistent_wal_metadata
-                .live_wal_files_tracker,
-            "live wal files stored in metadata should match the live wal files tracker"
-        );
-
-        // TODO(Paul): We could also test to check that the xacts in the metadata snapshot are a
-        // subset of the xacts in the curr active transactions map.
-        {
-            let xact_map = self.active_transactions.clone();
-            let xact_map_from_metadata = wal_persistence_update_result
-                .prepare_persistent_update
-                .persistent_wal_metadata
-                .active_transactions
-                .clone();
-            debug_assert!(
-                xact_map_from_metadata
-                    .keys()
-                    .all(|xact_id| xact_map.contains_key(xact_id)),
-                "all xacts in the metadata should be in the active transactions map"
-            );
-        }
+        self.update_trackers_for_persistence_update_result(wal_persistence_update_result);
 
         wal_persistence_update_result
             .prepare_persistent_update
@@ -953,8 +933,24 @@ impl WalManager {
             .read_object(&metadata_file_name)
             .await
             .unwrap();
-        let metadata = serde_json::from_slice(&metadata_bytes).unwrap();
-        metadata
+
+        serde_json::from_slice(&metadata_bytes).unwrap()
+    }
+
+    #[allow(dead_code)]
+    pub fn from_persistent_wal_metadata(
+        file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+        persistent_wal_metadata: PersistentWalMetadata,
+    ) -> Self {
+        Self {
+            in_mem_buf: Vec::new(),
+            highest_seen_lsn: persistent_wal_metadata.highest_seen_lsn,
+            live_wal_files_tracker: persistent_wal_metadata.live_wal_files_tracker,
+            curr_file_number: persistent_wal_metadata.curr_file_number,
+            active_transactions: persistent_wal_metadata.active_transactions,
+            main_transaction_tracker: persistent_wal_metadata.main_transaction_tracker,
+            file_system_accessor,
+        }
     }
 
     /// Recover the flushed WALs from the file system. Start file number and begin_from_lsn are
@@ -1020,17 +1016,19 @@ impl WalManager {
         let mut xact_map = HashMap::new();
         while let Some(event_result) = wal_events.next().await {
             match event_result {
-                Ok(TableEvent::Commit { xact_id, lsn, .. }) => {
-                    if let Some(xact_id) = xact_id {
-                        xact_map.insert(
-                            xact_id,
-                            WalTransactionState::Commit {
-                                start_file: 0,
-                                completion_lsn: lsn,
-                                file_end: 0,
-                            },
-                        );
-                    }
+                Ok(TableEvent::Commit {
+                    xact_id: Some(xact_id),
+                    lsn,
+                    ..
+                }) => {
+                    xact_map.insert(
+                        xact_id,
+                        WalTransactionState::Commit {
+                            start_file: 0,
+                            completion_lsn: lsn,
+                            file_end: 0,
+                        },
+                    );
                 }
                 Ok(TableEvent::StreamAbort { xact_id, .. }) => {
                     xact_map.insert(
