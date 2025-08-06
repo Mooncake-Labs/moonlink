@@ -147,6 +147,7 @@ impl Sink {
                             .send(TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
+                                is_recovery: false,
                             })
                             .await
                         {
@@ -178,6 +179,7 @@ impl Sink {
                                 .send(TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
+                                    is_recovery: false,
                                 })
                                 .await
                             {
@@ -200,6 +202,7 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                             is_copied: false,
+                            is_recovery: false,
                         })
                         .await
                     {
@@ -225,6 +228,7 @@ impl Sink {
                             row: PostgresTableRow(old_table_row.unwrap()).into(),
                             lsn: final_lsn,
                             xact_id,
+                            is_recovery: false,
                         })
                         .await
                     {
@@ -236,6 +240,7 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                             is_copied: false,
+                            is_recovery: false,
                         })
                         .await
                     {
@@ -252,6 +257,7 @@ impl Sink {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
+                            is_recovery: false,
                         })
                         .await
                     {
@@ -295,8 +301,12 @@ impl Sink {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(event_sender) = event_sender {
-                            if let Err(e) =
-                                event_sender.send(TableEvent::StreamAbort { xact_id }).await
+                            if let Err(e) = event_sender
+                                .send(TableEvent::StreamAbort {
+                                    xact_id,
+                                    is_recovery: false,
+                                })
+                                .await
                             {
                                 warn!(error = ?e, "failed to send stream abort event");
                             }

@@ -69,25 +69,35 @@ pub enum TableEvent {
         xact_id: Option<u32>,
         lsn: u64,
         is_copied: bool,
+        is_recovery: bool,
     },
     /// Delete a row from the table
     Delete {
         row: MoonlinkRow,
         lsn: u64,
         xact_id: Option<u32>,
+        is_recovery: bool,
     },
     /// Commit all pending operations with a given LSN and xact_id
-    Commit { lsn: u64, xact_id: Option<u32> },
+    Commit {
+        lsn: u64,
+        xact_id: Option<u32>,
+        is_recovery: bool,
+    },
     /// Abort current stream with given xact_id
-    StreamAbort { xact_id: u32 },
+    StreamAbort { xact_id: u32, is_recovery: bool },
     /// ==============================
     /// Test events
     /// ==============================
     ///
     /// Commit and flush the table to disk
-    CommitFlush { lsn: u64, xact_id: Option<u32> },
+    CommitFlush {
+        lsn: u64,
+        xact_id: Option<u32>,
+        is_recovery: bool,
+    },
     /// Flush the transaction stream with given xact_id
-    StreamFlush { xact_id: u32 },
+    StreamFlush { xact_id: u32, is_recovery: bool },
     /// ==============================
     /// Interactive blocking events
     /// ==============================
@@ -219,6 +229,36 @@ impl TableEvent {
             TableEvent::StreamAbort { .. } => None,
             TableEvent::CommitFlush { lsn, .. } => Some(*lsn),
             _ => None,
+        }
+    }
+
+    pub fn is_recovery(&self) -> bool {
+        match self {
+            TableEvent::Append { is_recovery, .. }
+            | TableEvent::Delete { is_recovery, .. }
+            | TableEvent::Commit { is_recovery, .. }
+            | TableEvent::StreamAbort { is_recovery, .. }
+            | TableEvent::CommitFlush { is_recovery, .. }
+            | TableEvent::StreamFlush { is_recovery, .. } => *is_recovery,
+            _ => unimplemented!(
+                "TableEvent variant not supported for is_recovery: {:?}",
+                self
+            ),
+        }
+    }
+
+    pub fn set_is_recovery(&mut self, is_recovery_to_set: bool) {
+        match self {
+            TableEvent::Append { is_recovery, .. }
+            | TableEvent::Delete { is_recovery, .. }
+            | TableEvent::Commit { is_recovery, .. }
+            | TableEvent::StreamAbort { is_recovery, .. }
+            | TableEvent::CommitFlush { is_recovery, .. }
+            | TableEvent::StreamFlush { is_recovery, .. } => *is_recovery = is_recovery_to_set,
+            _ => unimplemented!(
+                "TableEvent variant not supported for set_recovery: {:?}",
+                self
+            ),
         }
     }
 }

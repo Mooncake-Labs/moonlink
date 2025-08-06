@@ -37,7 +37,6 @@ use crate::storage::storage_utils;
 use crate::storage::storage_utils::create_data_file;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
-use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::DataCompactionConfig;
@@ -303,9 +302,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
-    let iceberg_corresponding_wal_metadata = IcebergCorrespondingWalMetadata {
-        earliest_wal_file_num: 10,
-    };
 
     // ==============
     // Step 1
@@ -346,7 +342,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 0,
-        iceberg_corresponding_wal_metadata: iceberg_corresponding_wal_metadata.clone(),
         new_table_schema: None,
         committed_deletion_logs: test_committed_deletion_logs_to_persist_1(data_file_1.clone()),
         import_payload: IcebergSnapshotImportPayload {
@@ -400,7 +395,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 1,
-        iceberg_corresponding_wal_metadata: iceberg_corresponding_wal_metadata.clone(),
         new_table_schema: None,
         committed_deletion_logs: test_committed_deletion_logs_to_persist_2(data_file_2.clone()),
         import_payload: IcebergSnapshotImportPayload {
@@ -478,7 +472,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 2,
-        iceberg_corresponding_wal_metadata: iceberg_corresponding_wal_metadata.clone(),
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload {
@@ -519,12 +512,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         .await
         .unwrap();
     assert_eq!(snapshot.flush_lsn.unwrap(), 2);
-    assert_eq!(
-        snapshot
-            .iceberg_corresponding_wal_metadata
-            .earliest_wal_file_num,
-        10
-    );
     assert!(snapshot.indices.in_memory_index.is_empty());
     assert_eq!(snapshot.indices.file_indices.len(), 1);
     validate_recovered_snapshot(
@@ -566,7 +553,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 3,
-        iceberg_corresponding_wal_metadata: iceberg_corresponding_wal_metadata.clone(),
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload {
@@ -637,7 +623,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 4,
-        iceberg_corresponding_wal_metadata: iceberg_corresponding_wal_metadata.clone(),
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload {
@@ -1357,13 +1342,9 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
         iceberg_table_config.clone(),
     )
     .unwrap();
-    let iceberg_corresponding_wal_metadata = IcebergCorrespondingWalMetadata {
-        earliest_wal_file_num: 0,
-    };
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
         flush_lsn: 0,
-        iceberg_corresponding_wal_metadata: iceberg_corresponding_wal_metadata.clone(),
         new_table_schema: None,
         committed_deletion_logs: HashSet::new(),
         import_payload: IcebergSnapshotImportPayload::default(),

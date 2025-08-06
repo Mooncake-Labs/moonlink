@@ -19,7 +19,6 @@ mod table_snapshot;
 pub mod table_status;
 pub mod table_status_reader;
 mod transaction_stream;
-use more_asserts as ma;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
@@ -50,10 +49,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
 };
 use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::storage_utils::{FileId, TableId};
-use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
-use crate::storage::wal::{
-    IcebergSnapshotWalInfo, WalConfig, WalManager, WalPersistenceUpdateResult,
-};
+use crate::storage::wal::{WalConfig, WalManager, WalPersistenceUpdateResult};
 use crate::table_notify::{EvictedFiles, TableEvent};
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -70,8 +66,8 @@ use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResul
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{watch, RwLock};
+use tracing::info_span;
 use tracing::Instrument;
-use tracing::{error, info_span};
 use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
 /// Special transaction id used for initial copy append operation.
@@ -164,10 +160,6 @@ pub struct Snapshot {
     /// At iceberg snapshot creation, we should only dump consistent data files and deletion logs.
     /// Data file flush LSN is recorded here, to get corresponding deletion logs from "committed deletion logs".
     pub(crate) flush_lsn: Option<u64>,
-    /// WAL data corresponding to the iceberg snapshot.
-    ///
-    /// Note that we only currently use this for recovery.
-    pub(crate) iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
     /// indices
     pub(crate) indices: MooncakeIndex,
 }
@@ -179,9 +171,6 @@ impl Snapshot {
             disk_files: HashMap::new(),
             snapshot_version: 0,
             flush_lsn: None,
-            iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata {
-                earliest_wal_file_num: 0,
-            },
             indices: MooncakeIndex::new(),
         }
     }
@@ -215,9 +204,6 @@ pub struct SnapshotTask {
     /// Assigned at a flush operation.
     new_flush_lsn: Option<u64>,
     new_commit_point: Option<RecordLocation>,
-
-    /// WAL metadata corresponding to the iceberg snapshot. This will always be populated at the time of update_snapshot.
-    iceberg_corresponding_wal_metadata: Option<IcebergCorrespondingWalMetadata>,
 
     /// streaming xact
     new_streaming_xact: Vec<TransactionStreamOutput>,
@@ -254,7 +240,6 @@ impl SnapshotTask {
             new_commit_lsn: 0,
             new_flush_lsn: None,
             new_commit_point: None,
-            iceberg_corresponding_wal_metadata: None,
             new_streaming_xact: Vec::new(),
             force_empty_iceberg_payload: false,
             // Committed deletion logs which have been persisted, and should be pruned from mooncake snapshot.
@@ -456,12 +441,6 @@ pub struct MooncakeTable {
     /// LSN of the latest iceberg snapshot.
     last_iceberg_snapshot_lsn: Option<u64>,
 
-    /// Metadata for latest WAL file that accompanies the latest iceberg snapshot.
-    /// The lowest relevant WAL file number is calculated when triggering an iceberg snapshot,
-    /// and this is updated when the iceberg snapshot is completed.
-    /// The WAL manager will truncate up to this file number on the next periodic WAL truncation.
-    iceberg_corresponding_wal_metadata: IcebergCorrespondingWalMetadata,
-
     /// Table notifier, which is used to sent multiple types of event completion information.
     table_notify: Option<Sender<TableEvent>>,
 
@@ -524,8 +503,6 @@ impl MooncakeTable {
         let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
         let last_iceberg_snapshot_lsn = current_snapshot.flush_lsn;
         // TODO(Paul): Change wal manager to pick up to latest WAL file number on recovery
-        let iceberg_snapshot_wal_metadata =
-            current_snapshot.iceberg_corresponding_wal_metadata.clone();
         if let Some(persistence_lsn) = last_iceberg_snapshot_lsn {
             table_snapshot_watch_sender.send(persistence_lsn).unwrap();
         }
@@ -562,7 +539,6 @@ impl MooncakeTable {
             streaming_batch_id_counter,
             iceberg_table_manager: Some(table_manager),
             last_iceberg_snapshot_lsn,
-            iceberg_corresponding_wal_metadata: iceberg_snapshot_wal_metadata,
             table_notify: None,
             wal_manager,
         })
@@ -650,9 +626,6 @@ impl MooncakeTable {
             self.metadata = new_table_schema;
         }
 
-        self.iceberg_corresponding_wal_metadata =
-            iceberg_snapshot_res.corresponding_wal_metadata.clone();
-
         assert!(self.iceberg_table_manager.is_none());
         self.iceberg_table_manager = Some(iceberg_snapshot_res.table_manager.unwrap());
 
@@ -710,7 +683,7 @@ impl MooncakeTable {
     }
 
     /// Get iceberg snapshot flush LSN.
-    pub(crate) fn get_iceberg_snapshot_lsn(&self) -> Option<u64> {
+    pub fn get_iceberg_snapshot_lsn(&self) -> Option<u64> {
         self.last_iceberg_snapshot_lsn
     }
 
@@ -864,25 +837,7 @@ impl MooncakeTable {
         self.mooncake_snapshot_ongoing = true;
 
         self.next_snapshot_task.new_rows = Some(self.mem_slice.get_latest_rows());
-        let mut next_snapshot_task = std::mem::take(&mut self.next_snapshot_task);
-
-        let lowest_wal_file_to_keep = if let Some(flush_lsn) = next_snapshot_task.new_flush_lsn {
-            self.wal_manager.get_lowest_file_to_keep(flush_lsn)
-        } else {
-            self.iceberg_corresponding_wal_metadata
-                .earliest_wal_file_num
-        };
-        ma::assert_le!(
-            self.iceberg_corresponding_wal_metadata
-                .earliest_wal_file_num,
-            lowest_wal_file_to_keep
-        );
-        let iceberg_corresponding_wal_metadata = IcebergCorrespondingWalMetadata {
-            earliest_wal_file_num: lowest_wal_file_to_keep,
-        };
-
-        next_snapshot_task.iceberg_corresponding_wal_metadata =
-            Some(iceberg_corresponding_wal_metadata);
+        let next_snapshot_task = std::mem::take(&mut self.next_snapshot_task);
 
         // Re-initialize mooncake table fields.
         self.next_snapshot_task = SnapshotTask::new(self.metadata.config.clone());
@@ -1036,8 +991,6 @@ impl MooncakeTable {
             table_auto_incr_ids,
         };
 
-        let wal_persisted_metadata = snapshot_payload.iceberg_corresponding_wal_metadata.clone();
-
         let iceberg_persistence_res = iceberg_table_manager
             .sync_snapshot(snapshot_payload, persistence_file_params)
             .await;
@@ -1080,7 +1033,6 @@ impl MooncakeTable {
             uuid,
             table_manager: Some(iceberg_table_manager),
             flush_lsn,
-            corresponding_wal_metadata: wal_persisted_metadata,
             new_table_schema,
             committed_deletion_logs,
             import_result: IcebergSnapshotImportResult {
@@ -1190,40 +1142,20 @@ impl MooncakeTable {
     #[must_use]
     pub(crate) fn do_wal_persistence_update(&mut self, uuid: uuid::Uuid) -> bool {
         let latest_iceberg_snapshot_lsn = self.get_iceberg_snapshot_lsn();
-        let last_iceberg_wal_metadata = self.iceberg_corresponding_wal_metadata.clone();
 
-        let iceberg_snapshot_wal_info =
-            if let Some(latest_iceberg_snapshot_lsn) = latest_iceberg_snapshot_lsn {
-                Some(IcebergSnapshotWalInfo::new(
-                    last_iceberg_wal_metadata.earliest_wal_file_num,
-                    latest_iceberg_snapshot_lsn,
-                ))
-            } else {
-                if last_iceberg_wal_metadata.earliest_wal_file_num > 0 {
-                    error!(
-                    "latest iceberg flush LSN is not set even though WAL has been truncated to > 0"
-                );
-                }
-                None
-            };
-
-        let files_to_truncate = self
+        let wal_persistence_update_result = self
             .wal_manager
-            .get_files_to_truncate(last_iceberg_wal_metadata);
+            .prepare_persistent_update(latest_iceberg_snapshot_lsn);
 
-        let file_to_persist = self.wal_manager.extract_next_persistence_file();
-
-        if !files_to_truncate.is_empty() || file_to_persist.is_some() {
+        if wal_persistence_update_result.should_do_persistence() {
             let event_sender_clone = self.table_notify.as_ref().unwrap().clone();
             let file_system_accessor = self.wal_manager.get_file_system_accessor();
             tokio::spawn(async move {
                 WalManager::wal_persist_truncate_async(
                     uuid,
-                    files_to_truncate,
-                    file_to_persist,
+                    wal_persistence_update_result,
                     file_system_accessor,
                     event_sender_clone,
-                    iceberg_snapshot_wal_info,
                 )
                 .await;
             });
@@ -1267,9 +1199,6 @@ mod mooncake_tests {
             uuid: uuid::Uuid::new_v4(),
             table_manager: None,
             flush_lsn: 1,
-            corresponding_wal_metadata: IcebergCorrespondingWalMetadata {
-                earliest_wal_file_num: 0,
-            },
             new_table_schema: None,
             committed_deletion_logs: HashSet::new(),
             import_result: IcebergSnapshotImportResult {

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::storage::mooncake_table::test_utils::TestContext;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::test_utils::*;
@@ -35,7 +33,7 @@ async fn test_wal_empty_persist() {
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // No file should be created for empty WAL
-    assert!(local_dir_is_empty(&PathBuf::from(&wal_config.accessor_config.get_root_path())).await);
+    assert!(!wal_file_exists(wal.get_file_system_accessor(), 0).await);
 }
 
 #[tokio::test]
@@ -134,7 +132,10 @@ async fn test_wal_truncation_deletes_all_files() {
     wal.do_wal_persistence_update_for_test(Some(200))
         .await
         .unwrap(); // Higher than any LSN
-    assert!(local_dir_is_empty(&PathBuf::from(&wal_config.accessor_config.get_root_path())).await);
+
+    // check that the files are deleted
+    assert!(!wal_file_exists(wal.get_file_system_accessor(), 0).await);
+    assert!(!wal_file_exists(wal.get_file_system_accessor(), 1).await);
 }
 
 // ------------------------------------------------------------

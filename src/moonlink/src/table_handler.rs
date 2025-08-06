@@ -439,7 +439,6 @@ impl TableHandler {
                                     // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
                                     let iceberg_flush_lsn = snapshot_res.flush_lsn;
                                     event_sync_sender.flush_lsn_tx.send(iceberg_flush_lsn).unwrap();
-                                    debug!("Iceberg snapshot result wal metadata: {:?}", snapshot_res.corresponding_wal_metadata);
                                     table.set_iceberg_snapshot_res(snapshot_res);
                                     table_handler_state.iceberg_snapshot_result_consumed = false;
 
@@ -511,10 +510,10 @@ impl TableHandler {
                         TableEvent::PeriodicalWalPersistenceUpdateResult { result } => {
                             match result {
                                 Ok(result) => {
-                                    table_handler_state.wal_persist_ongoing = false;
                                     if let Some(highest_lsn) = table.handle_completed_wal_persistence_update(&result) {
                                         event_sync_sender.wal_flush_lsn_tx.send(highest_lsn).unwrap();
                                     }
+                                    table_handler_state.wal_persist_ongoing = false;
 
                                     // Check whether need to drop table.
                                     if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
@@ -579,7 +578,9 @@ impl TableHandler {
             table_handler_state.special_table_state == SpecialTableState::InitialCopy
         );
 
-        table.push_wal_event(&event);
+        if !event.is_recovery() {
+            table.push_wal_event(&event);
+        }
 
         match event {
             TableEvent::Append {
@@ -612,13 +613,15 @@ impl TableHandler {
                     error!(error = %e, "failed to append row");
                 }
             }
-            TableEvent::Delete { row, lsn, xact_id } => {
+            TableEvent::Delete {
+                row, lsn, xact_id, ..
+            } => {
                 match xact_id {
                     Some(xact_id) => table.delete_in_stream_batch(row, xact_id).await,
                     None => table.delete(row, lsn).await,
                 };
             }
-            TableEvent::Commit { lsn, xact_id } => {
+            TableEvent::Commit { lsn, xact_id, .. } => {
                 Self::commit_and_attempt_flush(
                     lsn,
                     xact_id,
@@ -628,10 +631,10 @@ impl TableHandler {
                 )
                 .await;
             }
-            TableEvent::StreamAbort { xact_id } => {
+            TableEvent::StreamAbort { xact_id, .. } => {
                 table.abort_in_stream_batch(xact_id);
             }
-            TableEvent::CommitFlush { lsn, xact_id } => {
+            TableEvent::CommitFlush { lsn, xact_id, .. } => {
                 Self::commit_and_attempt_flush(
                     lsn,
                     xact_id,
@@ -641,7 +644,7 @@ impl TableHandler {
                 )
                 .await;
             }
-            TableEvent::StreamFlush { xact_id } => {
+            TableEvent::StreamFlush { xact_id, .. } => {
                 if let Err(e) = table.flush_stream(xact_id, None).await {
                     error!(error = %e, "stream flush failed");
                 }

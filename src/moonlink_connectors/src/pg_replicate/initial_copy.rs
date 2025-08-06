@@ -39,6 +39,7 @@ pub async fn copy_table_stream_impl(
                 xact_id: None,
                 lsn: 0,
                 is_copied: true,
+                is_recovery: false,
             })
             .await
         {
@@ -76,6 +77,7 @@ where
                 xact_id: None,
                 lsn: 0,
                 is_copied: true,
+                is_recovery: false,
             })
             .await
         {

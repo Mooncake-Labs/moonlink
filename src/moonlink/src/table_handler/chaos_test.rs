@@ -417,6 +417,7 @@ impl ChaosState {
                     xact_id: self.get_cur_xact_id(),
                     lsn: self.get_and_update_cur_lsn(),
                     is_copied: false,
+                    is_recovery: false,
                 }])
             }
             EventKind::BeginNonStreamingTxn => {
@@ -427,6 +428,7 @@ impl ChaosState {
                     xact_id: self.get_cur_xact_id(),
                     lsn: self.get_and_update_cur_lsn(),
                     is_copied: false,
+                    is_recovery: false,
                 }])
             }
             EventKind::Append => ChaosEvent::create_table_events(vec![TableEvent::Append {
@@ -434,33 +436,47 @@ impl ChaosState {
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
                 is_copied: false,
+                is_recovery: false,
             }]),
             EventKind::Delete => ChaosEvent::create_table_events(vec![TableEvent::Delete {
                 row: self.get_random_row_to_delete(),
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
+                is_recovery: false,
             }]),
             EventKind::StreamFlush => {
                 ChaosEvent::create_table_events(vec![TableEvent::StreamFlush {
                     xact_id: self.get_cur_xact_id().unwrap(),
+                    is_recovery: false,
                 }])
             }
             EventKind::StreamAbort => {
                 let xact_id = self.get_cur_xact_id().unwrap();
                 self.stream_abort_transaction();
-                ChaosEvent::create_table_events(vec![TableEvent::StreamAbort { xact_id }])
+                ChaosEvent::create_table_events(vec![TableEvent::StreamAbort {
+                    xact_id,
+                    is_recovery: false,
+                }])
             }
             EventKind::EndWithFlush => {
                 let lsn = self.get_and_update_cur_lsn();
                 let xact_id = self.get_cur_xact_id();
                 self.commit_transaction(lsn);
-                ChaosEvent::create_table_events(vec![TableEvent::CommitFlush { lsn, xact_id }])
+                ChaosEvent::create_table_events(vec![TableEvent::CommitFlush {
+                    lsn,
+                    xact_id,
+                    is_recovery: false,
+                }])
             }
             EventKind::EndNoFlush => {
                 let lsn = self.get_and_update_cur_lsn();
                 let xact_id = self.get_cur_xact_id();
                 self.commit_transaction(lsn);
-                ChaosEvent::create_table_events(vec![TableEvent::Commit { lsn, xact_id }])
+                ChaosEvent::create_table_events(vec![TableEvent::Commit {
+                    lsn,
+                    xact_id,
+                    is_recovery: false,
+                }])
             }
         }
     }

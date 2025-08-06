@@ -561,14 +561,6 @@ impl SnapshotTableState {
         let flush_by_table_write = self.current_snapshot.flush_lsn.is_some()
             && (flush_by_new_files_or_maintainence || flush_by_deletion);
 
-        let iceberg_corresponding_wal_metadata = task
-            .iceberg_corresponding_wal_metadata
-            .clone()
-            .expect("accompanying wal metadata should always be populated in a snapshot");
-
-        self.current_snapshot.iceberg_corresponding_wal_metadata =
-            iceberg_corresponding_wal_metadata.clone();
-
         // TODO(hjiang): When there's only schema evolution, we should also flush even no flush.
         if !opt.skip_iceberg_snapshot && (force_empty_iceberg_payload || flush_by_table_write) {
             // Getting persistable committed deletion logs is not cheap, which requires iterating through all logs,
@@ -582,11 +574,8 @@ impl SnapshotTableState {
                 || flush_by_new_files_or_maintainence
                 || force_empty_iceberg_payload
             {
-                iceberg_snapshot_payload = Some(self.get_iceberg_snapshot_payload(
-                    flush_lsn,
-                    committed_deletion_logs,
-                    iceberg_corresponding_wal_metadata,
-                ));
+                iceberg_snapshot_payload =
+                    Some(self.get_iceberg_snapshot_payload(flush_lsn, committed_deletion_logs));
             }
         }
 

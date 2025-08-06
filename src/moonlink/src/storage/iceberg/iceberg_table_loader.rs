@@ -14,7 +14,6 @@ use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::storage_utils::{create_data_file, FileId, TableId, TableUniqueFileId};
-use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
 
 use std::collections::{HashMap, HashSet};
 use std::vec;
@@ -178,7 +177,6 @@ impl IcebergTableManager {
         mut loaded_deletion_vector: HashMap<FileId, PuffinBlobRef>,
         loaded_file_indices: Vec<MooncakeFileIndex>,
         flush_lsn: Option<u64>,
-        wal_metadata: IcebergCorrespondingWalMetadata,
     ) -> MooncakeSnapshot {
         let mut mooncake_snapshot = MooncakeSnapshot::new(self.mooncake_table_metadata.clone());
 
@@ -218,8 +216,6 @@ impl IcebergTableManager {
 
         // Fill in flush LSN.
         mooncake_snapshot.flush_lsn = flush_lsn;
-        // Fill in wal persistence metadata.
-        mooncake_snapshot.iceberg_corresponding_wal_metadata = wal_metadata;
 
         mooncake_snapshot
     }
@@ -339,7 +335,6 @@ impl IcebergTableManager {
             loaded_deletion_vector,
             loaded_file_indices,
             snapshot_property.flush_lsn,
-            snapshot_property.corresponding_wal_metadata,
         );
         Ok((next_file_id as u32, mooncake_snapshot))
     }

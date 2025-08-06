@@ -17,6 +17,7 @@ pub use cache::object_storage::cache_config::ObjectStorageCacheConfig;
 pub(crate) use cache::object_storage::cache_handle::NonEvictableHandle;
 pub use cache::object_storage::object_storage_cache::ObjectStorageCache;
 pub use compaction::compaction_config::DataCompactionConfig;
+pub use filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 pub use filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 pub use filesystem::accessor_config::AccessorConfig;
 pub use filesystem::storage_config::StorageConfig;
@@ -36,7 +37,7 @@ pub use mooncake_table::SnapshotReadOutput;
 pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
 pub use mooncake_table_config::IcebergPersistenceConfig;
 pub use mooncake_table_config::MooncakeTableConfig;
-pub use wal::WalConfig;
+pub use wal::{WalConfig, WalManager, WalTransactionState};
 
 #[cfg(test)]
 pub(crate) use iceberg::puffin_utils::*;

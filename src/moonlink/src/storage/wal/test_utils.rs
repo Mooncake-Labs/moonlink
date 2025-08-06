@@ -1,14 +1,11 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::test_row;
-use crate::storage::wal::iceberg_corresponding_wal_metadata::IcebergCorrespondingWalMetadata;
-use crate::storage::wal::{
-    IcebergSnapshotWalInfo, WalEvent, WalManager, WalPersistenceUpdateResult,
-};
+use crate::storage::wal::{PersistentWalMetadata, WalEvent, WalFileInfo, WalManager};
 use crate::table_notify::TableEvent;
-use crate::{Result, WalConfig};
+use crate::{Result, WalConfig, WalTransactionState};
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::fs;
 
 /// The ID used to test the WAL. Note that for now this could be decoupled from the
 /// tableID of the mooncake table that this may be embedded in during testing,
@@ -23,51 +20,57 @@ impl WalManager {
         &mut self,
         last_iceberg_snapshot_lsn: Option<u64>,
     ) -> Result<()> {
-        let iceberg_snapshot_wal_info =
-            if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
-                let lowest_file_to_keep = self.get_lowest_file_to_keep(last_iceberg_snapshot_lsn);
+        let prepare_persistent_update = self.prepare_persistent_update(last_iceberg_snapshot_lsn);
 
-                Some(IcebergSnapshotWalInfo::new(
-                    lowest_file_to_keep,
-                    last_iceberg_snapshot_lsn,
-                ))
-            } else {
-                None
-            };
+        let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel::<TableEvent>(100);
 
-        // handle the truncate side
-        if let Some(iceberg_snapshot_wal_info) = &iceberg_snapshot_wal_info {
-            let corresponding_wal_metadata = IcebergCorrespondingWalMetadata {
-                earliest_wal_file_num: iceberg_snapshot_wal_info.iceberg_snapshot_wal_file_num,
-            };
-            let files_to_truncate = self.get_files_to_truncate(corresponding_wal_metadata);
-            if !files_to_truncate.is_empty() {
-                WalManager::delete_files(self.file_system_accessor.clone(), &files_to_truncate)
-                    .await?;
-            };
+        WalManager::wal_persist_truncate_async(
+            uuid::Uuid::new_v4(),
+            prepare_persistent_update,
+            self.file_system_accessor.clone(),
+            event_sender,
+        )
+        .await;
+
+        // receive the event
+        while let Some(event) = event_receiver.recv().await {
+            match event {
+                TableEvent::PeriodicalWalPersistenceUpdateResult { result } => match result {
+                    Ok(wal_persistence_update_result) => {
+                        self.handle_complete_wal_persistence_update(&wal_persistence_update_result);
+                    }
+                    Err(e) => panic!("Error receiving wal persistence update result: {e:?}"),
+                },
+                _ => panic!("Unexpected event: {event:?}"),
+            }
         }
-
-        // handle the persist side
-        let mut persisted_wal_file = None;
-        let to_persist_wal_info = self.extract_next_persistence_file();
-        if let Some((wal_to_persist, file_info_to_persist)) = to_persist_wal_info {
-            WalManager::persist(
-                self.file_system_accessor.clone(),
-                &wal_to_persist,
-                &file_info_to_persist,
-            )
-            .await?;
-            persisted_wal_file = Some(file_info_to_persist);
-        }
-
-        let wal_persistence_update = WalPersistenceUpdateResult {
-            uuid: uuid::Uuid::new_v4(),
-            file_persisted: persisted_wal_file,
-            iceberg_snapshot_wal_info,
-        };
-
-        self.handle_complete_wal_persistence_update(&wal_persistence_update);
         Ok(())
+    }
+}
+
+impl PersistentWalMetadata {
+    pub fn get_live_wal_files_tracker(&self) -> &Vec<WalFileInfo> {
+        &self.live_wal_files_tracker
+    }
+
+    pub fn get_highest_seen_lsn(&self) -> u64 {
+        self.highest_seen_lsn
+    }
+
+    pub fn get_curr_file_number(&self) -> u64 {
+        self.curr_file_number
+    }
+
+    pub fn get_active_transactions(&self) -> &HashMap<u32, WalTransactionState> {
+        &self.active_transactions
+    }
+
+    pub fn get_main_transaction_tracker(&self) -> &Vec<WalTransactionState> {
+        &self.main_transaction_tracker
+    }
+
+    pub fn get_iceberg_snapshot_lsn(&self) -> Option<u64> {
+        self.iceberg_snapshot_lsn
     }
 }
 
@@ -82,17 +85,6 @@ pub async fn extract_file_contents(
 ) -> Vec<WalEvent> {
     let file_content = file_system_accessor.read_object(file_path).await.unwrap();
     serde_json::from_slice(&file_content).unwrap()
-}
-
-/// Helper to check if a directory is empty
-pub async fn local_dir_is_empty(path: &std::path::Path) -> bool {
-    // first check if the directory exists
-    if !fs::try_exists(path).await.unwrap() {
-        return true;
-    }
-    // then check if it's empty
-    let mut entries = fs::read_dir(path).await.unwrap();
-    entries.next_entry().await.unwrap().is_none()
 }
 
 pub async fn get_wal_logs_from_files(
@@ -141,12 +133,14 @@ pub fn ingestion_events_equal(actual: &TableEvent, expected: &TableEvent) -> boo
                 lsn: lsn1,
                 xact_id: xact1,
                 is_copied: copied1,
+                ..
             },
             TableEvent::Append {
                 row: row2,
                 lsn: lsn2,
                 xact_id: xact2,
                 is_copied: copied2,
+                ..
             },
         ) => row1 == row2 && lsn1 == lsn2 && xact1 == xact2 && copied1 == copied2,
         (
@@ -154,30 +148,34 @@ pub fn ingestion_events_equal(actual: &TableEvent, expected: &TableEvent) -> boo
                 row: row1,
                 lsn: lsn1,
                 xact_id: xact1,
+                ..
             },
             TableEvent::Delete {
                 row: row2,
                 lsn: lsn2,
                 xact_id: xact2,
+                ..
             },
         ) => row1 == row2 && lsn1 == lsn2 && xact1 == xact2,
         (
             TableEvent::Commit {
                 lsn: lsn1,
                 xact_id: xact1,
+                ..
             },
             TableEvent::Commit {
                 lsn: lsn2,
                 xact_id: xact2,
+                ..
             },
         ) => lsn1 == lsn2 && xact1 == xact2,
         (
-            TableEvent::StreamAbort { xact_id: xact1 },
-            TableEvent::StreamAbort { xact_id: xact2 },
+            TableEvent::StreamAbort { xact_id: xact1, .. },
+            TableEvent::StreamAbort { xact_id: xact2, .. },
         ) => xact1 == xact2,
         (
-            TableEvent::StreamFlush { xact_id: xact1 },
-            TableEvent::StreamFlush { xact_id: xact2 },
+            TableEvent::StreamFlush { xact_id: xact1, .. },
+            TableEvent::StreamFlush { xact_id: xact2, .. },
         ) => xact1 == xact2,
         _ => false,
     }
@@ -266,6 +264,7 @@ pub async fn create_test_wal(wal_config: WalConfig) -> (WalManager, Vec<TableEve
             xact_id: None,
             lsn: 100 + i,
             is_copied: false,
+            is_recovery: false,
         };
 
         wal.push(&event);
@@ -275,6 +274,7 @@ pub async fn create_test_wal(wal_config: WalConfig) -> (WalManager, Vec<TableEve
     let commit_event = TableEvent::Commit {
         lsn: 100 + 5,
         xact_id: None,
+        is_recovery: false,
     };
     wal.push(&commit_event);
     expected_events.push(commit_event);
@@ -287,7 +287,11 @@ pub fn add_new_example_commit_event(
     wal: &mut WalManager,
     expected_events: &mut Vec<TableEvent>,
 ) {
-    let event = TableEvent::Commit { lsn, xact_id };
+    let event = TableEvent::Commit {
+        lsn,
+        xact_id,
+        is_recovery: false,
+    };
     wal.push(&event);
     expected_events.push(event);
 }
@@ -303,6 +307,7 @@ pub fn add_new_example_append_event(
         lsn,
         xact_id,
         is_copied: false,
+        is_recovery: false,
     };
     wal.push(&event);
     expected_events.push(event);
@@ -318,6 +323,7 @@ pub fn add_new_example_delete_event(
         row: test_row(1, "Alice", 30),
         lsn,
         xact_id,
+        is_recovery: false,
     };
     wal.push(&event);
     expected_events.push(event);
@@ -328,7 +334,10 @@ pub fn add_new_example_stream_abort_event(
     wal: &mut WalManager,
     expected_events: &mut Vec<TableEvent>,
 ) {
-    let event = TableEvent::StreamAbort { xact_id };
+    let event = TableEvent::StreamAbort {
+        xact_id,
+        is_recovery: false,
+    };
     wal.push(&event);
     expected_events.push(event);
 }

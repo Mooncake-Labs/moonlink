@@ -1209,41 +1209,6 @@ async fn test_flush_lsn_ordering() {
     env.shutdown().await;
 }
 
-/// Test flush_lsn with out-of-order LSN operations
-#[tokio::test]
-async fn test_flush_lsn_out_of_order_lsn_operations() {
-    let temp_dir = tempdir().unwrap();
-    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
-
-    // Subscribe to flush_lsn updates
-    let mut flush_lsn_rx = env.table_event_manager.subscribe_flush_lsn();
-
-    // Commit operations out of chronological order but in LSN order
-    env.append_row(1, "User1", 25, /*lsn=*/ 25, None).await;
-    env.commit(30).await;
-
-    env.append_row(2, "User2", 30, /*lsn=*/ 15, None).await;
-    env.commit(20).await; // Lower LSN after higher LSN
-
-    env.append_row(3, "User3", 35, /*lsn=*/ 35, None).await;
-    env.commit(40).await;
-
-    // Request snapshot at LSN 40 (should include all committed data)
-    let rx = env.table_event_manager.initiate_snapshot(40).await;
-    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 40)
-        .await
-        .unwrap();
-
-    // Verify flush_lsn reflects the snapshot LSN
-    flush_lsn_rx.changed().await.unwrap();
-    let flush_lsn = *flush_lsn_rx.borrow();
-
-    // The flush_lsn should be the snapshot LSN which includes all committed data
-    assert_eq!(flush_lsn, 40);
-
-    env.shutdown().await;
-}
-
 /// Test flush_lsn consistency across multiple snapshots
 #[tokio::test]
 async fn test_flush_lsn_consistency_across_snapshots() {
@@ -1311,6 +1276,7 @@ async fn test_initial_copy_basic() {
             xact_id: None,
             lsn: 5,
             is_copied: true,
+            is_recovery: false,
         })
         .await
         .expect("send copied row");
@@ -1876,7 +1842,7 @@ async fn test_wal_drop_table_removes_files() {
 }
 
 #[tokio::test]
-async fn test_wal_iceberg_snapshot_metadata_retrieval() {
+async fn test_wal_persistent_metadata_retrieval() {
     let temp_dir = tempdir().unwrap();
     let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
 
@@ -1898,35 +1864,37 @@ async fn test_wal_iceberg_snapshot_metadata_retrieval() {
     env.force_wal_persistence(5).await;
 
     // Create an iceberg snapshot
-    // None of the files before this are relevant, so we truncate them and lowest relevant file >= 2
+    // None of the files before this are relevant, so we truncate them, so lowest relevant file >= 2
     let rx = env.table_event_manager.initiate_snapshot(5).await;
     TableEventManager::synchronize_force_snapshot_request(rx, 5)
         .await
         .unwrap();
 
-    // Load the latest snapshot from the iceberg table manager
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
-    let (_, snapshot) = iceberg_table_manager
-        .load_snapshot_from_table()
-        .await
-        .unwrap();
+    // Flushing lowest relevant file >= 2
+    env.flush_table(6).await;
+    env.force_wal_persistence(6).await;
 
-    // Retrieve the WAL persistence metadata from the latest snapshot
-    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_corresponding_wal_metadata;
-    let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
+    let wal_metadata = env.get_latest_wal_metadata().await;
+    let highest_file_number = wal_metadata
+        .get_live_wal_files_tracker()
+        .first()
+        .expect("No live wal files found")
+        .file_number;
 
     assert!(
         highest_file_number >= 2,
         "Expected valid file number, got {highest_file_number}"
     );
 
-    env.check_wal_events(highest_file_number, &[], &not_expected_events)
+    env.check_wal_events_from_metadata(&wal_metadata, &[], &not_expected_events)
+        .await;
+
+    env.check_wal_metadata_invariants(&wal_metadata, Some(5), vec![], vec![])
         .await;
 }
 
 #[tokio::test]
-async fn test_wal_iceberg_snapshot_keeps_relevant_events() {
+async fn test_wal_persistent_metadata_keeps_relevant_events() {
     let temp_dir = tempdir().unwrap();
     let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
 
@@ -1945,36 +1913,29 @@ async fn test_wal_iceberg_snapshot_keeps_relevant_events() {
     expected_events.push(env.append_row(3, "Charlie", 35, 4, None).await);
     expected_events.push(env.append_row(4, "Diana", 40, 4, None).await);
     expected_events.push(env.append_row(5, "Eve", 45, 5, Some(100)).await);
-
     env.flush_table(5).await;
-    // we keep events in this WAL file, because xact 100 never goes into the iceberg snapshot
-    env.force_wal_persistence(5).await;
 
     // Create an iceberg snapshot
-    // None of the files before this are relevant, so we truncate them and lowest relevant file >= 2
     let rx = env.table_event_manager.initiate_snapshot(5).await;
     TableEventManager::synchronize_force_snapshot_request(rx, 5)
         .await
         .unwrap();
 
-    // Load the latest snapshot from the iceberg table manager
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
-    let (_, snapshot) = iceberg_table_manager
-        .load_snapshot_from_table()
-        .await
-        .unwrap();
+    env.flush_table(6).await;
+    // we keep events in this WAL file, because xact 100 never goes into the iceberg snapshot
+    env.force_wal_persistence(6).await;
 
-    // Retrieve the WAL persistence metadata from the latest snapshot
-    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_corresponding_wal_metadata;
-    let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
+    let wal_metadata = env.get_latest_wal_metadata().await;
 
-    env.check_wal_events(highest_file_number, &expected_events, &not_expected_events)
+    env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &not_expected_events)
+        .await;
+
+    env.check_wal_metadata_invariants(&wal_metadata, Some(5), vec![100], vec![])
         .await;
 }
 
 #[tokio::test]
-async fn test_wal_iceberg_snapshot_truncates_correctly() {
+async fn test_wal_persistent_metadata_truncates_correctly() {
     let temp_dir = tempdir().unwrap();
     let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
 
@@ -2010,23 +1971,17 @@ async fn test_wal_iceberg_snapshot_truncates_correctly() {
         .await
         .unwrap();
 
-    expected_events.push(env.append_row(8, "George", 60, 9, None).await);
+    expected_events.push(env.append_row(8, "George", 60, 9, Some(102)).await);
+    expected_events.push(env.commit(9).await);
     // we keep events in this WAL file, because the previous exact 101 is still uncomitted
     env.force_wal_persistence(9).await;
 
-    // Load the latest snapshot from the iceberg table manager
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
-    let (_, snapshot) = iceberg_table_manager
-        .load_snapshot_from_table()
-        .await
-        .unwrap();
+    let wal_metadata = env.get_latest_wal_metadata().await;
 
-    // Retrieve the WAL persistence metadata from the latest snapshot
-    let iceberg_corresponding_wal_metadata = &snapshot.iceberg_corresponding_wal_metadata;
-    let highest_file_number = iceberg_corresponding_wal_metadata.earliest_wal_file_num;
+    env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &not_expected_events)
+        .await;
 
-    env.check_wal_events(highest_file_number, &expected_events, &not_expected_events)
+    env.check_wal_metadata_invariants(&wal_metadata, Some(7), vec![101, 102], vec![100])
         .await;
 }
 

@@ -162,7 +162,7 @@ impl TableHandlerState {
         if event.is_ingest_event() {
             match event {
                 // Update LSN for commit operations.
-                TableEvent::Commit { lsn, xact_id } => {
+                TableEvent::Commit { lsn, xact_id, .. } => {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
                     if xact_id.is_none() {

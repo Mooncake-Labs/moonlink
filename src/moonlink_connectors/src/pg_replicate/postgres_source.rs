@@ -50,6 +50,12 @@ pub struct PostgresSource {
     uri: String,
 }
 
+impl PostgresSource {
+    pub fn get_confirmed_flush_lsn(&self) -> PgLsn {
+        self.confirmed_flush_lsn
+    }
+}
+
 /// Configuration needed to create a CDC stream
 #[derive(Clone, Debug)]
 pub struct CdcStreamConfig {

@@ -5,18 +5,18 @@ use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
-use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::test_utils::{
     assert_wal_events_contains, assert_wal_events_does_not_contain,
 };
-use crate::storage::wal::WalManager;
+use crate::storage::wal::test_utils::{wal_file_exists, WAL_TEST_TABLE_ID};
+use crate::storage::wal::{PersistentWalMetadata, WalManager};
 use crate::storage::IcebergTableConfig;
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
-    WalConfig,
+    WalConfig, WalTransactionState,
 };
 use crate::{ObjectStorageCache, Result};
 
@@ -24,6 +24,7 @@ use arrow_array::RecordBatch;
 use futures::StreamExt;
 use iceberg::io::FileIOBuilder;
 use iceberg::io::FileRead;
+use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,7 +111,7 @@ impl TestEnvironment {
             WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let wal_filesystem_path = default_wal_config.get_accessor_config().get_root_path();
         let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
-            default_wal_config.get_accessor_config(),
+            default_wal_config.get_accessor_config().clone(),
         ));
 
         let handler = TableHandler::new(
@@ -227,6 +228,7 @@ impl TestEnvironment {
             row,
             lsn,
             xact_id,
+            is_recovery: false,
         };
         self.send_event(event.clone()).await;
         event
@@ -241,13 +243,22 @@ impl TestEnvironment {
         xact_id: Option<u32>,
     ) -> TableEvent {
         let row = create_row(id, name, age);
-        let event = TableEvent::Delete { row, lsn, xact_id };
+        let event = TableEvent::Delete {
+            row,
+            lsn,
+            xact_id,
+            is_recovery: false,
+        };
         self.send_event(event.clone()).await;
         event
     }
 
     pub async fn commit(&self, lsn: u64) -> TableEvent {
-        let event = TableEvent::Commit { lsn, xact_id: None };
+        let event = TableEvent::Commit {
+            lsn,
+            xact_id: None,
+            is_recovery: false,
+        };
         self.send_event(event.clone()).await;
         event
     }
@@ -256,13 +267,17 @@ impl TestEnvironment {
         let event = TableEvent::Commit {
             lsn,
             xact_id: Some(xact_id),
+            is_recovery: false,
         };
         self.send_event(event.clone()).await;
         event
     }
 
     pub async fn stream_abort(&self, xact_id: u32) -> TableEvent {
-        let event = TableEvent::StreamAbort { xact_id };
+        let event = TableEvent::StreamAbort {
+            xact_id,
+            is_recovery: false,
+        };
         self.send_event(event.clone()).await;
         event
     }
@@ -286,8 +301,12 @@ impl TestEnvironment {
     }
 
     pub async fn flush_table_and_sync(&mut self, lsn: u64) {
-        self.send_event(TableEvent::CommitFlush { lsn, xact_id: None })
-            .await;
+        self.send_event(TableEvent::CommitFlush {
+            lsn,
+            xact_id: None,
+            is_recovery: false,
+        })
+        .await;
         self.send_event(TableEvent::ForceSnapshot { lsn: Some(lsn) })
             .await;
         TableEventManager::synchronize_force_snapshot_request(
@@ -299,12 +318,20 @@ impl TestEnvironment {
     }
 
     pub async fn flush_table(&self, lsn: u64) {
-        self.send_event(TableEvent::CommitFlush { lsn, xact_id: None })
-            .await;
+        self.send_event(TableEvent::CommitFlush {
+            lsn,
+            xact_id: None,
+            is_recovery: false,
+        })
+        .await;
     }
 
     pub async fn stream_flush(&self, xact_id: u32) {
-        self.send_event(TableEvent::StreamFlush { xact_id }).await;
+        self.send_event(TableEvent::StreamFlush {
+            xact_id,
+            is_recovery: false,
+        })
+        .await;
     }
 
     // --- LSN and Verification Helpers ---
@@ -397,6 +424,12 @@ impl TestEnvironment {
             debug!("file: {:?}", file);
             let path = file.path();
             let file_name = path.file_name()?.to_str()?;
+
+            // skip metadata file
+            if file_name == WalManager::get_metadata_file_name() {
+                continue;
+            }
+
             if let Some(num_str) = file_name.strip_prefix("wal_")?.strip_suffix(".json") {
                 if let Ok(num) = num_str.parse::<u64>() {
                     lowest = lowest.min(num);
@@ -449,18 +482,111 @@ impl TestEnvironment {
         assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
     }
 
-    pub async fn check_wal_events(
+    pub async fn get_latest_wal_metadata(&self) -> PersistentWalMetadata {
+        WalManager::recover_persistent_wal_metadata(self.wal_filesystem_accessor.clone()).await
+    }
+
+    pub async fn check_wal_events_from_metadata(
         &self,
-        start_file_number: u64,
+        wal_metadata: &PersistentWalMetadata,
         should_contain_table_events: &[TableEvent],
         should_not_contain_table_events: &[TableEvent],
     ) {
+        let live_wal_files_tracker = wal_metadata.get_live_wal_files_tracker();
+        if wal_metadata.get_live_wal_files_tracker().is_empty() {
+            assert!(
+                should_contain_table_events.is_empty(),
+                "No live wal files found in wal metadata but should contain events was not empty: {should_contain_table_events:?}"
+            );
+            return;
+        }
+
+        let start_file_number = live_wal_files_tracker.first().unwrap().file_number;
+
         let wal_events = self
             .get_wal_events_with_start_file_number(start_file_number)
             .await;
 
         assert_wal_events_contains(&wal_events, should_contain_table_events);
         assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
+    }
+
+    pub async fn check_wal_metadata_invariants(
+        &self,
+        metadata: &PersistentWalMetadata,
+        iceberg_snapshot_lsn: Option<u64>,
+        should_contain_xact_ids: Vec<u32>,
+        should_not_contain_xact_ids: Vec<u32>,
+    ) {
+        assert_eq!(
+            metadata.get_iceberg_snapshot_lsn(),
+            iceberg_snapshot_lsn,
+            "iceberg snapshot lsn should be the same"
+        );
+
+        // Assertions for active transaction tracking
+        for (xact_id, xact_state) in metadata.get_active_transactions() {
+            assert!(
+                should_contain_xact_ids.contains(xact_id),
+                "xact {xact_id} should be in the metadata"
+            );
+            assert!(
+                !should_not_contain_xact_ids.contains(xact_id),
+                "xact {xact_id} should not be in the metadata"
+            );
+
+            if let WalTransactionState::Commit { completion_lsn, .. }
+            | WalTransactionState::Abort { completion_lsn, .. } = xact_state
+            {
+                if let Some(lsn) = iceberg_snapshot_lsn {
+                    ma::assert_gt!(
+                        *completion_lsn,
+                        lsn,
+                        "xact {xact_id} should have completion LSN > iceberg snapshot LSN"
+                    );
+                }
+            }
+        }
+
+        // Assertions for main transaction tracking
+        for i in 0..metadata.get_main_transaction_tracker().len() {
+            let xact = &metadata.get_main_transaction_tracker()[i];
+            if i != metadata.get_main_transaction_tracker().len() - 1 {
+                if let WalTransactionState::Open { .. } = xact {
+                    panic!("xact {xact:?} should not be open unless it is the last xact");
+                }
+            }
+            if let WalTransactionState::Commit { completion_lsn, .. }
+            | WalTransactionState::Abort { completion_lsn, .. } = xact
+            {
+                if let Some(lsn) = iceberg_snapshot_lsn {
+                    ma::assert_gt!(
+                        *completion_lsn,
+                        lsn,
+                        "xact {xact:?} should have completion LSN > iceberg snapshot LSN"
+                    );
+                }
+            }
+        }
+
+        // Check consistency between files
+        let active_wal_files = metadata.get_live_wal_files_tracker();
+
+        let lowest_file_number_from_fs = self.infer_lowest_wal_file_number().await;
+        let lowest_file_number_from_metadata =
+            active_wal_files.first().map(|file| file.file_number);
+        assert_eq!(
+            lowest_file_number_from_fs, lowest_file_number_from_metadata,
+            "lowest file number from fs and metadata should be the same"
+        );
+
+        for file in active_wal_files {
+            assert!(
+                wal_file_exists(self.wal_filesystem_accessor.clone(), file.file_number).await,
+                "file {file_number} should exist",
+                file_number = file.file_number
+            );
+        }
     }
 }
 

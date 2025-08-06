@@ -563,14 +563,10 @@ impl IcebergTableManager {
             .await?;
 
         // Update snapshot summary properties.
-        let mut snapshot_properties = HashMap::<String, String>::from([(
+        let snapshot_properties = HashMap::<String, String>::from([(
             MOONCAKE_TABLE_FLUSH_LSN.to_string(),
             snapshot_payload.flush_lsn.to_string(),
         )]);
-        snapshot_properties.insert(
-            MOONCAKE_WAL_METADATA.to_string(),
-            serde_json::to_string(&snapshot_payload.iceberg_corresponding_wal_metadata).unwrap(),
-        );
 
         let mut txn = Transaction::new(self.iceberg_table.as_ref().unwrap());
         let action = txn.fast_append();
