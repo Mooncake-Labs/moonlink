@@ -1,10 +1,9 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::test_row;
-use crate::storage::wal::{PersistentWalMetadata, WalEvent, WalFileInfo, WalManager};
+use crate::storage::wal::{WalEvent, WalManager};
 use crate::table_notify::TableEvent;
-use crate::{Result, WalConfig, WalTransactionState};
+use crate::{Result, WalConfig};
 use futures::StreamExt;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The ID used to test the WAL. Note that for now this could be decoupled from the
@@ -45,32 +44,6 @@ impl WalManager {
             }
         }
         Ok(())
-    }
-}
-
-impl PersistentWalMetadata {
-    pub fn get_live_wal_files_tracker(&self) -> &Vec<WalFileInfo> {
-        &self.live_wal_files_tracker
-    }
-
-    pub fn get_highest_seen_lsn(&self) -> u64 {
-        self.highest_seen_lsn
-    }
-
-    pub fn get_curr_file_number(&self) -> u64 {
-        self.curr_file_number
-    }
-
-    pub fn get_active_transactions(&self) -> &HashMap<u32, WalTransactionState> {
-        &self.active_transactions
-    }
-
-    pub fn get_main_transaction_tracker(&self) -> &Vec<WalTransactionState> {
-        &self.main_transaction_tracker
-    }
-
-    pub fn get_iceberg_snapshot_lsn(&self) -> Option<u64> {
-        self.iceberg_snapshot_lsn
     }
 }
 

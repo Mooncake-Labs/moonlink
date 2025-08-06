@@ -1872,7 +1872,10 @@ async fn test_wal_persistent_metadata_retrieval() {
     env.flush_table(6).await;
     env.force_wal_persistence(6).await;
 
-    let wal_metadata = env.get_latest_wal_metadata().await;
+    let wal_metadata = env
+        .get_latest_wal_metadata()
+        .await
+        .expect("No wal metadata found");
     let highest_file_number = wal_metadata
         .get_live_wal_files_tracker()
         .first()
@@ -1923,7 +1926,10 @@ async fn test_wal_persistent_metadata_keeps_relevant_events() {
     // we keep events in this WAL file, because xact 100 never goes into the iceberg snapshot
     env.force_wal_persistence(6).await;
 
-    let wal_metadata = env.get_latest_wal_metadata().await;
+    let wal_metadata = env
+        .get_latest_wal_metadata()
+        .await
+        .expect("No wal metadata found");
 
     env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &not_expected_events)
         .await;
@@ -1974,7 +1980,10 @@ async fn test_wal_persistent_metadata_truncates_correctly() {
     // we keep events in this WAL file, because the previous exact 101 is still uncommitted
     env.force_wal_persistence(9).await;
 
-    let wal_metadata = env.get_latest_wal_metadata().await;
+    let wal_metadata = env
+        .get_latest_wal_metadata()
+        .await
+        .expect("No wal metadata found");
 
     env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &not_expected_events)
         .await;
@@ -1992,6 +2001,7 @@ fn test_get_persisted_table_lsn() {
         table_maintenance_completion_tx,
         force_snapshot_completion_tx,
         /*initial_persistence_lsn=*/ None,
+        /*iceberg_snapshot_lsn=*/ None,
     );
 
     // Case-1: no table activity since for the current table.

@@ -9,7 +9,8 @@ use crate::storage::mooncake_table::snapshot_read_output::DataFileForRead;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
-use crate::StorageConfig;
+use crate::storage::wal::WalManager;
+use crate::{StorageConfig, WalConfig};
 use arrow::array::Int32Array;
 use futures::future::join_all;
 use iceberg::io::FileIOBuilder;
@@ -74,6 +75,7 @@ pub async fn test_table(
     let mut table_config = test_mooncake_table_config(context);
     table_config.batch_size = 2;
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
+    let wal_manager = WalManager::new(&wal_config);
     MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),
@@ -82,7 +84,7 @@ pub async fn test_table(
         identity,
         iceberg_table_config.clone(),
         table_config,
-        wal_config,
+        wal_manager,
         ObjectStorageCache::default_for_test(&context.temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )

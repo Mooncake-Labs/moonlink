@@ -319,10 +319,26 @@ where
         Ok(read_state.clone())
     }
 
-    /// Gracefully shutdown a replication connection identified by its URI.
-    pub async fn shutdown_connection(&self, uri: &str) {
+    pub async fn wait_for_wal_flush(&self, database_id: D, table_id: T, lsn: u64) -> Result<()> {
         let mut manager = self.replication_manager.write().await;
-        manager.shutdown_connection(uri);
+        let mooncake_table_id = MooncakeTableId {
+            database_id,
+            table_id,
+        };
+        let writer = manager.get_table_event_manager(&mooncake_table_id)?;
+
+        // Wait for WAL flush LSN to reach the requested LSN
+        let mut rx = writer.subscribe_wal_flush_lsn();
+        while *rx.borrow() < lsn {
+            rx.changed().await.unwrap();
+        }
+        Ok(())
+    }
+
+    /// Gracefully shutdown a replication connection identified by its URI.
+    pub async fn shutdown_connection(&self, uri: &str, drop_publication_and_replication: bool) {
+        let mut manager = self.replication_manager.write().await;
+        manager.shutdown_connection(uri, drop_publication_and_replication);
     }
 
     /// Initialize event API connection for data ingestion.

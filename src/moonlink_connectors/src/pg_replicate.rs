@@ -22,7 +22,9 @@ use crate::pg_replicate::table::{SrcTableId, TableSchema};
 use crate::pg_replicate::table_init::{build_table_components, TableComponents};
 use crate::Result;
 use futures::StreamExt;
-use moonlink::{MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent};
+use moonlink::{
+    MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent, WalManager,
+};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::mem::take;
@@ -375,6 +377,7 @@ impl PostgresConnection {
             &table_base_path.to_string(),
             &self.replication_state,
             table_components,
+            is_recovery,
         )
         .await?;
 
@@ -405,6 +408,24 @@ impl PostgresConnection {
             is_recovery,
         )
         .await?;
+        if is_recovery {
+            debug!(
+                "Performing recovery for table with ID {:?}",
+                table_schema.src_table_id
+            );
+            // Perform recovery
+            WalManager::replay_recovery_from_wal(
+                table_resources.event_sender.clone(),
+                table_resources.wal_persistence_metadata.clone(),
+                table_resources.wal_file_accessor.clone(),
+                table_resources.last_iceberg_snapshot_lsn,
+            )
+            .await?;
+            debug!(
+                "Finished recovery for table with ID {:?}",
+                table_schema.src_table_id
+            );
+        }
 
         debug!(src_table_id = table_schema.src_table_id, "table added");
 
@@ -440,9 +461,11 @@ impl PostgresConnection {
     }
 
     /// Shutdown PostgreSQL replication
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.drop_publication().await?;
-        self.drop_replication_slot().await?;
+    pub async fn shutdown(&mut self, drop_publication_and_replication: bool) -> Result<()> {
+        if drop_publication_and_replication {
+            self.drop_publication().await?;
+            self.drop_replication_slot().await?;
+        }
         // Wait for any pending retry operations to complete
         self.wait_for_pending_retries().await;
 
@@ -498,17 +521,21 @@ pub async fn run_event_loop(
 
     let mut status_interval = tokio::time::interval(Duration::from_secs(10));
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
-    // TODO(Paul): Currently unused. In preparation for acknowledging latest WAL flush LSN to replication sink.
-    let mut _wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
+    let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
 
     loop {
         tokio::select! {
             _ = status_interval.tick() => {
                 let mut confirmed_lsn: Option<u64> = None;
-                for rx in flush_lsn_rxs.values() {
+                debug!("confirming an lsn...: {:?}", confirmed_lsn);
+                for rx in wal_flush_lsn_rxs.values() {
                     let lsn = *rx.borrow();
                     confirmed_lsn = Some(match confirmed_lsn {
-                        Some(v) => v.min(lsn),
+                        Some(v) => {
+                            let lsn = v.min(lsn);
+                            debug!("confirming more lsn...: {}", lsn);
+                            lsn
+                        }
                         None => lsn,
                     });
                 }
@@ -523,15 +550,17 @@ pub async fn run_event_loop(
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
                 PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
+                    debug!("adding a table...: {:?}", src_table_id);
                     sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
-                    _wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
+                    wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
+                    debug!("added into wal_flush_lsn_rxs: {:?}", wal_flush_lsn_rxs.len());
                     stream.as_mut().add_table_schema(schema);
                 }
                 PostgresReplicationCommand::DropTable { src_table_id } => {
                     sink.drop_table(src_table_id);
                     flush_lsn_rxs.remove(&src_table_id);
-                    _wal_flush_lsn_rxs.remove(&src_table_id);
+                    wal_flush_lsn_rxs.remove(&src_table_id);
                     stream.as_mut().remove_table_schema(src_table_id);
                 }
                 PostgresReplicationCommand::Shutdown => {

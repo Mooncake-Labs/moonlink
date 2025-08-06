@@ -202,7 +202,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
         repl_conn.drop_table(src_table_id).await?;
         if repl_conn.table_count() == 0 && table_uri != REST_API_URI {
-            self.shutdown_connection(&table_uri);
+            self.shutdown_connection(&table_uri, true);
         }
 
         debug!(src_table_id, "table dropped through manager");
@@ -252,12 +252,12 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
     }
 
     /// Gracefully shutdown a replication connection by its URI.
-    pub fn shutdown_connection(&mut self, uri: &str) {
+    pub fn shutdown_connection(&mut self, uri: &str, drop_publication_and_replication: bool) {
         // Clean up completed shutdown handles first
         self.cleanup_completed_shutdowns();
 
         if let Some(conn) = self.connections.remove(uri) {
-            let shutdown_handle = conn.shutdown();
+            let shutdown_handle = conn.shutdown(drop_publication_and_replication);
             self.shutdown_handles.push(shutdown_handle);
             self.table_info.retain(|_, (u, _)| u != uri);
         }

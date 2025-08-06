@@ -54,7 +54,7 @@ use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::storage_utils::{FileId, TableId};
-use crate::storage::wal::{WalConfig, WalManager, WalPersistenceUpdateResult};
+use crate::storage::wal::{WalManager, WalPersistenceUpdateResult};
 use crate::table_notify::{EvictedFiles, TableEvent};
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -450,7 +450,7 @@ impl MooncakeTable {
         identity: IdentityProp,
         iceberg_table_config: IcebergTableConfig,
         table_config: MooncakeTableConfig,
-        wal_config: WalConfig,
+        wal_manager: WalManager,
         object_storage_cache: ObjectStorageCache,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
@@ -469,7 +469,6 @@ impl MooncakeTable {
             iceberg_table_config,
         )?);
 
-        let wal_manager = WalManager::new(&wal_config);
         Self::new_with_table_manager(
             metadata,
             iceberg_table_manager,
@@ -491,9 +490,12 @@ impl MooncakeTable {
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
         let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
         let last_iceberg_snapshot_lsn = current_snapshot.flush_lsn;
-        // TODO(Paul): Change wal manager to pick up to latest WAL file number on recovery
-        if let Some(persistence_lsn) = last_iceberg_snapshot_lsn {
-            table_snapshot_watch_sender.send(persistence_lsn).unwrap();
+        if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
+            // We should NOT send the wal_highest_completion_lsn, because those events are not applied at this point yet.
+            // They will replayed through the event stream, and re-applied to the table.
+            table_snapshot_watch_sender
+                .send(last_iceberg_snapshot_lsn)
+                .unwrap();
         }
 
         let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
@@ -954,6 +956,14 @@ impl MooncakeTable {
 
     pub fn push_wal_event(&mut self, event: &TableEvent) {
         self.wal_manager.push(event);
+    }
+
+    pub fn get_wal_highest_completion_lsn(&self) -> u64 {
+        self.wal_manager.get_highest_completion_lsn()
+    }
+
+    pub fn get_wal_curr_file_number(&self) -> u64 {
+        self.wal_manager.get_curr_file_number()
     }
 
     /// Shutdown the current table, which unpins all referenced data files in the global data file.

@@ -11,6 +11,7 @@ use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::table_handler::table_handler_state::MaintenanceProcessStatus;
 use crate::table_handler::table_handler_state::TableHandlerState;
 use crate::FileSystemAccessor;
+use crate::WalConfig;
 use iceberg::{Error as IcebergError, ErrorKind};
 use rstest::*;
 use rstest_reuse::{self, *};
@@ -507,6 +508,7 @@ async fn test_table_recovery() {
     // Recovery from iceberg snapshot and check mooncake table recovery.
     let iceberg_table_config = test_iceberg_table_config(&context, table_name);
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
+    let wal_manager = WalManager::new(&wal_config);
     let recovered_table = MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),
@@ -515,7 +517,7 @@ async fn test_table_recovery() {
         row_identity.clone(),
         iceberg_table_config.clone(),
         test_mooncake_table_config(&context),
-        wal_config,
+        wal_manager,
         ObjectStorageCache::default_for_test(&context.temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )

@@ -39,7 +39,9 @@ pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
 pub use mooncake_table_config::DiskSliceWriterConfig;
 pub use mooncake_table_config::IcebergPersistenceConfig;
 pub use mooncake_table_config::MooncakeTableConfig;
-pub use wal::{WalConfig, WalManager, WalTransactionState};
+pub use wal::{PersistentWalMetadata, WalConfig, WalManager, WalTransactionState};
+
+pub use filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 
 #[cfg(test)]
 pub(crate) use iceberg::puffin_utils::*;

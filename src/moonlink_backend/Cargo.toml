@@ -23,6 +23,7 @@ moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 more-asserts = { workspace = true }
 nix = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
+rstest = "0.26.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

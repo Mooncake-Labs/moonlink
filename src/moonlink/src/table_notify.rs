@@ -87,7 +87,10 @@ pub enum TableEvent {
         is_recovery: bool,
     },
     /// Abort current stream with given xact_id
-    StreamAbort { xact_id: u32, is_recovery: bool },
+    StreamAbort {
+        xact_id: u32,
+        is_recovery: bool,
+    },
     /// ==============================
     /// Test events
     /// ==============================
@@ -99,14 +102,19 @@ pub enum TableEvent {
         is_recovery: bool,
     },
     /// Flush the transaction stream with given xact_id
-    StreamFlush { xact_id: u32, is_recovery: bool },
+    StreamFlush {
+        xact_id: u32,
+        is_recovery: bool,
+    },
     /// ==============================
     /// Interactive blocking events
     /// ==============================
     ///
     /// Force a mooncake and iceberg snapshot.
     /// - If [`lsn`] unassigned, will force snapshot on the latest committed LSN.
-    ForceSnapshot { lsn: Option<u64> },
+    ForceSnapshot {
+        lsn: Option<u64>,
+    },
     /// There's at most one outstanding force table maintenance requests.
     ///
     /// Force a regular index merge operation.
@@ -118,13 +126,17 @@ pub enum TableEvent {
     /// Drop table.
     DropTable,
     /// Alter table,
-    AlterTable { columns_to_drop: Vec<String> },
+    AlterTable {
+        columns_to_drop: Vec<String>,
+    },
     /// Start initial table copy.
     /// `start_lsn` is the `pg_current_wal_lsn` when the initial copy starts.
     StartInitialCopy,
     /// Finish initial table copy and merge buffered changes.
     /// `start_lsn` is the `pg_current_wal_lsn` when the initial copy starts. We want this in FinishInitialCopy so we can set the commit LSN correctly.
-    FinishInitialCopy { start_lsn: u64 },
+    FinishInitialCopy {
+        start_lsn: u64,
+    },
     /// ==============================
     /// Table internal events
     /// ==============================
@@ -183,6 +195,9 @@ pub enum TableEvent {
     /// Periodic persist and truncate wal completes.
     PeriodicalWalPersistenceUpdateResult {
         result: Result<WalPersistenceUpdateResult>,
+    },
+    FinishRecovery {
+        highest_completion_lsn: u64,
     },
     FlushResult {
         // Transaction ID

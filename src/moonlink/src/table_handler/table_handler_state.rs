@@ -134,6 +134,7 @@ impl TableHandlerState {
         table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
         force_snapshot_completion_tx: watch::Sender<Option<Result<u64>>>,
         initial_persistence_lsn: Option<u64>,
+        iceberg_snapshot_lsn: Option<u64>,
     ) -> Self {
         Self {
             iceberg_snapshot_result_consumed: true,
@@ -144,7 +145,7 @@ impl TableHandlerState {
             latest_commit_lsn: None,
             special_table_state: SpecialTableState::Normal,
             // Force snapshot fields.
-            table_consistent_view_lsn: initial_persistence_lsn,
+            table_consistent_view_lsn: iceberg_snapshot_lsn,
             largest_force_snapshot_lsn: None,
             force_snapshot_completion_tx,
             // Table maintenance fields.

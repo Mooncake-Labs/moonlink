@@ -9,6 +9,7 @@ use moonlink::{
     MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, ReadStateManager,
     TableEventManager, TableStatusReader,
 };
+
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -42,9 +43,9 @@ impl SourceType {
         }
     }
 
-    async fn finalize(&mut self) -> Result<()> {
+    async fn finalize(&mut self, drop_publication_and_replication: bool) -> Result<()> {
         match self {
-            SourceType::Postgres(conn) => conn.shutdown().await,
+            SourceType::Postgres(conn) => conn.shutdown(drop_publication_and_replication).await,
             SourceType::RestApi(_) => Ok(()),
         }
     }
@@ -202,7 +203,7 @@ impl ReplicationConnection {
         arrow_schema: ArrowSchema,
         moonlink_table_config: MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
-        _is_recovery: bool,
+        is_recovery: bool,
     ) -> Result<SrcTableId> {
         match &mut self.source {
             SourceType::RestApi(conn) => {
@@ -227,6 +228,7 @@ impl ReplicationConnection {
                     // REST API doesn't have replication state, create a dummy one
                     &crate::pg_replicate::replication_state::ReplicationState::new(),
                     table_components,
+                    is_recovery,
                 )
                 .await?;
 
@@ -297,7 +299,7 @@ impl ReplicationConnection {
         Ok(())
     }
 
-    pub fn shutdown(mut self) -> JoinHandle<Result<()>> {
+    pub fn shutdown(mut self, drop_publication_and_replication: bool) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
@@ -311,7 +313,9 @@ impl ReplicationConnection {
             }
 
             // Finalize the source connection
-            self.source.finalize().await?;
+            self.source
+                .finalize(drop_publication_and_replication)
+                .await?;
 
             debug!("replication connection shutdown complete");
             Ok(())

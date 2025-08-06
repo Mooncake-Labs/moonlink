@@ -58,7 +58,7 @@ use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::table_notify::TableEvent;
 use crate::{
     IcebergTableConfig, IcebergTableManager, MooncakeTable, ObjectStorageCache,
-    ObjectStorageCacheConfig, TableManager, WalConfig,
+    ObjectStorageCacheConfig, TableManager, WalConfig, WalManager,
 };
 
 async fn prepare_test_disk_file(
@@ -212,6 +212,7 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
     };
 
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
+    let wal_manager = WalManager::new(&wal_config);
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
         "test_table".to_string(),
@@ -220,7 +221,7 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
         identity_property,
         iceberg_table_config.clone(),
         mooncake_table_config,
-        wal_config,
+        wal_manager,
         object_storage_cache,
         create_test_filesystem_accessor(&iceberg_table_config),
     )

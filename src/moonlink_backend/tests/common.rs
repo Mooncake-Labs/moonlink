@@ -2,6 +2,7 @@ use arrow_array::Int64Array;
 use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
@@ -34,8 +35,8 @@ pub struct TestGuard {
 }
 
 impl TestGuard {
-    pub async fn new(table_name: Option<&'static str>) -> (Self, Client) {
-        let (tmp, backend, client, database_id) = setup_backend(table_name).await;
+    pub async fn new(table_name: Option<&'static str>, has_primary_key: bool) -> (Self, Client) {
+        let (tmp, backend, client, database_id) = setup_backend(table_name, has_primary_key).await;
         let guard = Self {
             backend: Arc::new(backend),
             tmp: Some(tmp),
@@ -106,7 +107,7 @@ impl Drop for TestGuard {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
                 let _ = backend.drop_table(database_id, TABLE_ID).await;
-                let _ = backend.shutdown_connection(SRC_URI).await;
+                let _ = backend.shutdown_connection(SRC_URI, true).await;
                 let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
                 drop(tmp);
             });
@@ -166,6 +167,160 @@ pub fn ids_from_state(read_state: &ReadState) -> HashSet<i64> {
         .into_iter()
         .flat_map(|f| read_ids_from_parquet(&f).into_iter().flatten())
         .collect()
+}
+
+#[allow(dead_code)]
+pub fn nonunique_ids_from_state(read_state: &ReadState) -> HashMap<i64, u64> {
+    let (files, _, _, _) = decode_read_state_for_testing(read_state);
+    files
+        .into_iter()
+        .flat_map(|f| read_ids_from_parquet(&f).into_iter().flatten())
+        .fold(HashMap::new(), |mut counts, id| {
+            *counts.entry(id).or_insert(0) += 1;
+            counts
+        })
+}
+
+/// Convenience: create a backend using a given filesystem base path.
+/// Backed by a sqlite metadata store in that directory.
+#[allow(dead_code)]
+pub async fn create_backend_from_base_path(
+    base_path: String,
+) -> MoonlinkBackend<DatabaseId, TableId> {
+    let sqlite_metadata_store = SqliteMetadataStore::new_with_directory(&base_path)
+        .await
+        .unwrap();
+    MoonlinkBackend::<DatabaseId, TableId>::new(base_path, None, Box::new(sqlite_metadata_store))
+        .await
+        .unwrap()
+}
+
+/// Convenience: create a backend using the path of a `TempDir`.
+#[allow(dead_code)]
+pub async fn create_backend_from_tempdir(
+    tempdir: &TempDir,
+) -> MoonlinkBackend<DatabaseId, TableId> {
+    let base_path = tempdir.path().to_str().unwrap().to_string();
+    create_backend_from_base_path(base_path).await
+}
+
+/// Scan and return the set of unique primary-key IDs at a given LSN.
+#[allow(dead_code)]
+pub async fn scan_ids(
+    backend: &MoonlinkBackend<DatabaseId, TableId>,
+    database_id: DatabaseId,
+    table_id: TableId,
+    lsn: u64,
+) -> HashSet<i64> {
+    let state = backend
+        .scan_table(database_id, table_id, Some(lsn))
+        .await
+        .unwrap();
+    ids_from_state(&state)
+}
+
+/// Scan and return counts for possibly non-unique primary-key IDs at a given LSN.
+/// Blocks until the snapshot is created.
+#[allow(dead_code)]
+pub async fn scan_id_counts(
+    backend: &MoonlinkBackend<DatabaseId, TableId>,
+    database_id: DatabaseId,
+    table_id: TableId,
+    lsn: u64,
+) -> HashMap<i64, u64> {
+    let state = backend
+        .scan_table(database_id, table_id, Some(lsn))
+        .await
+        .unwrap();
+    nonunique_ids_from_state(&state)
+}
+
+/// Assert that scanning at `lsn` yields exactly `expected` IDs.
+/// Blocks until the snapshot is created.
+#[allow(dead_code)]
+pub async fn assert_scan_ids_eq(
+    backend: &MoonlinkBackend<DatabaseId, TableId>,
+    database_id: DatabaseId,
+    table_id: TableId,
+    lsn: u64,
+    expected: impl IntoIterator<Item = i64>,
+) {
+    let expected: HashSet<i64> = expected.into_iter().collect();
+    let actual = scan_ids(backend, database_id, table_id, lsn).await;
+    assert_eq!(actual, expected);
+}
+
+/// Assert that scanning at `lsn` yields exactly `expected_counts` occurrences per ID.
+/// Blocks until the snapshot is created.
+#[allow(dead_code)]
+pub async fn assert_scan_nonunique_ids_eq(
+    backend: &MoonlinkBackend<DatabaseId, TableId>,
+    database_id: DatabaseId,
+    table_id: TableId,
+    lsn: u64,
+    expected_counts: &HashMap<i64, u64>,
+) {
+    let actual = scan_id_counts(backend, database_id, table_id, lsn).await;
+    assert_eq!(actual, *expected_counts);
+}
+
+/// Create an Iceberg snapshot after ensuring Mooncake is caught up to the latest LSN.
+/// Returns the LSN used for the snapshot.
+#[allow(dead_code)]
+pub async fn create_updated_iceberg_snapshot(
+    backend: &MoonlinkBackend<DatabaseId, TableId>,
+    database_id: DatabaseId,
+    table_id: TableId,
+    client: &Client,
+) -> u64 {
+    let lsn = current_wal_lsn(client).await;
+    // Ensure changes are reflected in Mooncake snapshot first
+    backend
+        .scan_table(database_id, table_id, Some(lsn))
+        .await
+        .unwrap();
+    backend
+        .create_snapshot(database_id, table_id, lsn)
+        .await
+        .unwrap();
+    lsn
+}
+
+/// Shutdown the backend connection and recover a new backend using the same base directory.
+/// Returns the tempdir as well so it does not get dropped.
+#[allow(dead_code)]
+pub async fn crash_and_recover_backend_with_guard(
+    mut guard: TestGuard,
+) -> (MoonlinkBackend<DatabaseId, TableId>, TempDir) {
+    // Ensure the guard stops cleaning up on drop to simulate crash semantics
+    guard.set_test_mode(TestGuardMode::Crash);
+
+    // Shutdown pg connection and table handler.
+    guard.backend().shutdown_connection(SRC_URI, false).await;
+    // Take the testing directory, for recovery from iceberg table.
+    let testing_directory_before_recovery = guard.take_test_directory();
+    // Drop everything for the old backend.
+    drop(guard);
+
+    // Attempt recovery logic.
+    let base_path = testing_directory_before_recovery
+        .path()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let backend = create_backend_from_base_path(base_path).await;
+    (backend, testing_directory_before_recovery)
+}
+
+/// Shutdown an existing backend connection and recover a new backend using the given `TempDir`.
+#[allow(dead_code)]
+pub async fn crash_and_recover_backend(
+    backend: MoonlinkBackend<DatabaseId, TableId>,
+    tempdir: &TempDir,
+) -> MoonlinkBackend<DatabaseId, TableId> {
+    backend.shutdown_connection(SRC_URI, false).await;
+    let base_path = tempdir.path().to_str().unwrap().to_string();
+    create_backend_from_base_path(base_path).await
 }
 
 /// Extract primary-key IDs from `read_state` **after applying deletion vectors and position deletes**.
@@ -284,6 +439,7 @@ fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
 /// Moonlink.
 async fn setup_backend(
     table_name: Option<&'static str>,
+    has_primary_key: bool,
 ) -> (
     TempDir,
     MoonlinkBackend<DatabaseId, TableId>,
@@ -325,10 +481,15 @@ async fn setup_backend(
 
     // Re-create the working table.
     if let Some(table_name) = table_name {
+        let create_table_query = if has_primary_key {
+            format!("CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);")
+        } else {
+            format!("CREATE TABLE {table_name} (id BIGINT, name TEXT);")
+        };
         client
             .simple_query(&format!(
                 "DROP TABLE IF EXISTS {table_name};
-                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
+                 {create_table_query}"
             ))
             .await
             .unwrap();

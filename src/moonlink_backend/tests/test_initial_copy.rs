@@ -38,7 +38,7 @@ mod tests {
             .unwrap();
 
         // Create the backend with no tables
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = guard.backend();
 
         // Register the table - this kicks off *initial copy* in the background
@@ -110,7 +110,7 @@ mod tests {
             .unwrap();
 
         // Create the backend with no tables
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = guard.backend();
 
         // Register the table - this kicks off *initial copy* in the background
@@ -172,7 +172,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         // Start create_table without awaiting so we can modify data during copy
@@ -246,7 +246,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         // Start create_table without awaiting so we can modify data during copy
@@ -354,7 +354,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, new_client) = TestGuard::new(None).await;
+        let (guard, new_client) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
@@ -429,7 +429,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, new_client) = TestGuard::new(None).await;
+        let (guard, new_client) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
@@ -508,7 +508,7 @@ mod tests {
             .unwrap();
 
         // Spin up backend & kick off the initial copy in its own task.
-        let (guard, new_client) = TestGuard::new(None).await;
+        let (guard, new_client) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
