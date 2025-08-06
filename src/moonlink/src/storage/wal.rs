@@ -227,21 +227,24 @@ impl WalTransactionState {
     fn is_captured_in_iceberg_snapshot(
         &self,
         iceberg_snapshot_lsn: u64,
-        iceberg_snapshot_wal_file_num: Option<u64>,
+        lowest_file_kept: Option<u64>,
     ) -> bool {
         let completion_lsn_and_file = self.get_completion_lsn_and_file();
 
         // the xact has a known completion lsn by the iceberg snapshot lsn,
         // so it is captured in the iceberg snapshot
         if let Some((completion_lsn, completion_file_number)) = completion_lsn_and_file {
-            // here we do the check for consistency
-            if let Some(iceberg_snapshot_wal_file_num) = iceberg_snapshot_wal_file_num {
-                self.check_completed_xact_consistent_with_iceberg_snapshot(
-                    completion_lsn,
-                    completion_file_number,
-                    iceberg_snapshot_lsn,
-                    iceberg_snapshot_wal_file_num,
-                );
+            #[cfg(debug_assertions)]
+            {
+                // here we do the check for consistency
+                if let Some(iceberg_snapshot_wal_file_num) = lowest_file_kept {
+                    self.check_completed_xact_consistent_with_iceberg_snapshot(
+                        completion_lsn,
+                        completion_file_number,
+                        iceberg_snapshot_lsn,
+                        iceberg_snapshot_wal_file_num,
+                    );
+                }
             }
             if completion_lsn <= iceberg_snapshot_lsn {
                 return true;
@@ -427,16 +430,16 @@ impl WalManager {
 
         let iceberg_snapshot_lsn = iceberg_snapshot_lsn.unwrap();
 
-        let highest_truncated_file = files_to_delete.last().map(|file| file.file_number);
+        let lowest_file_kept = files_to_delete.last().map(|file| file.file_number + 1);
         let mut cleanedup_xacts = self.active_transactions.clone();
         // remove all xacts that are captured in the iceberg snapshot
         cleanedup_xacts.retain(|_, state| {
-            !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn, highest_truncated_file)
+            !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn, lowest_file_kept)
         });
         let mut cleanedup_main_xacts = self.main_transaction_tracker.clone();
         // remove all main xacts that are captured in the iceberg snapshot
         cleanedup_main_xacts.retain(|state| {
-            !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn, highest_truncated_file)
+            !state.is_captured_in_iceberg_snapshot(iceberg_snapshot_lsn, lowest_file_kept)
         });
 
         (cleanedup_xacts, cleanedup_main_xacts)
@@ -870,18 +873,19 @@ impl WalManager {
             );
         }
 
-        debug_assert_eq!(
-            self.live_wal_files_tracker,
-            persistence_update_result
-                .prepare_persistent_update
-                .persistent_wal_metadata
-                .live_wal_files_tracker,
-            "live wal files stored in metadata should match the live wal files tracker"
-        );
-
-        // test to check that the xacts in the metadata snapshot are a
-        // subset of the xacts in the curr active transactions map.
+        #[cfg(debug_assertions)]
         {
+            assert_eq!(
+                self.live_wal_files_tracker,
+                persistence_update_result
+                    .prepare_persistent_update
+                    .persistent_wal_metadata
+                    .live_wal_files_tracker,
+                "live wal files stored in metadata should match the live wal files tracker"
+            );
+
+            // test to check that the xacts in the metadata snapshot are a
+            // subset of the xacts in the curr active transactions map.
             let xact_map = self.active_transactions.clone();
             let xact_map_from_metadata = persistence_update_result
                 .prepare_persistent_update
