@@ -37,6 +37,7 @@ chaos-test = ["function_name"]
 
 [dependencies]
 ahash = "0.8.11"
+anyhow = "1.0.98"
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }

@@ -2693,6 +2693,7 @@ name = "moonlink"
 version = "0.0.1"
 dependencies = [
  "ahash 0.8.12",
+ "anyhow",
  "arrow",
  "arrow-array",
  "arrow-schema",
