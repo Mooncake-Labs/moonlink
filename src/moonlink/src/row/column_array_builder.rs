@@ -486,7 +486,7 @@ impl ColumnArrayBuilder {
                 (Arc::new(builder.finish()), array_helper)
             }
             ColumnArrayBuilder::Struct(helper, array_helper) => {
-                (Arc::new(helper.finish_cloned()), array_helper)
+                (Arc::new(helper.finish()), array_helper)
             }
         };
         if let Some(helper) = array_helper.as_mut() {
