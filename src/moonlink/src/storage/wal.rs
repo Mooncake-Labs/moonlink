@@ -892,12 +892,9 @@ impl WalManager {
                 .persistent_wal_metadata
                 .active_transactions
                 .clone();
-            debug_assert!(
-                xact_map_from_metadata
-                    .keys()
-                    .all(|xact_id| xact_map.contains_key(xact_id)),
-                "all xacts in the metadata should be in the active transactions map"
-            );
+            for (xact_id, xact_state) in xact_map_from_metadata.iter() {
+                assert!(xact_map.contains_key(xact_id), "xact_id {xact_id} with state {xact_state:?} should be in the updated metadata, but is not. Previously calculated metadata: {xact_map_from_metadata:?} Metadata: {xact_map:?}");
+            }
         }
     }
 
