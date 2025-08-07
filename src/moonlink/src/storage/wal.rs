@@ -892,8 +892,33 @@ impl WalManager {
                 .persistent_wal_metadata
                 .active_transactions
                 .clone();
-            for (xact_id, xact_state) in xact_map_from_metadata.iter() {
-                assert!(xact_map.contains_key(xact_id), "xact_id {xact_id} with state {xact_state:?} should be in the updated metadata, but is not. Previously calculated metadata: {xact_map_from_metadata:?} Metadata: {xact_map:?}");
+            // we check that the persisted xact map contains all xacts that should have been kept
+            for (xact_id, xact_state) in xact_map.iter() {
+                // we skip aborted xacts, they may be dropped in the middle of the persistence update
+                if !matches!(xact_state, WalTransactionState::Abort { .. }) {
+                    // if the xact has completed
+                    if let Some((completion_lsn, _)) = xact_state.get_completion_lsn_and_file() {
+                        // we first check that completion LSN has to be greater than the iceberg snapshot lsn
+                        if let Some(iceberg_snapshot_lsn) = persistence_update_result
+                            .prepare_persistent_update
+                            .accompanying_iceberg_snapshot_lsn
+                        {
+                            ma::assert_gt!(
+                                completion_lsn, iceberg_snapshot_lsn,
+                                "completion lsn {completion_lsn} should be greater than the iceberg snapshot lsn {iceberg_snapshot_lsn}"
+                            );
+                        }
+                        // now, if completion lsn is <= the persisted wal highest seen lsn, then it should be in the persisted metadata
+                        if completion_lsn
+                            <= persistence_update_result
+                                .prepare_persistent_update
+                                .persistent_wal_metadata
+                                .highest_seen_lsn
+                        {
+                            assert!(xact_map_from_metadata.contains_key(xact_id), "xact_id {xact_id} with state {xact_state:?} should be in the persisted metadata, but is not. Recently persisted metadata: {xact_map_from_metadata:?} Recently updated Metadata: {xact_map:?}");
+                        }
+                    }
+                }
             }
         }
     }
