@@ -12,6 +12,10 @@ use mooncake_table_id::MooncakeTableId;
 pub use moonlink::ReadState;
 use moonlink::TableEventManager;
 use moonlink_connectors::ReplicationManager;
+pub use moonlink_connectors::{
+    rest_ingest::rest_source::{EventOperation, EventRequest},
+    REST_API_URI,
+};
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -31,8 +35,10 @@ pub struct MoonlinkBackend<
     temp_files_dir: String,
     // Metadata storage accessor.
     metadata_store_accessor: Box<dyn MetadataStoreTrait>,
-    // Could be either relative or absolute path.
+
     replication_manager: RwLock<ReplicationManager<MooncakeTableId<D, T>>>,
+
+    event_api_sender: Option<tokio::sync::mpsc::Sender<EventRequest>>,
 }
 
 impl<D, T> MoonlinkBackend<D, T>
@@ -77,6 +83,7 @@ where
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager: RwLock::new(replication_manager),
             metadata_store_accessor,
+            event_api_sender: None,
         })
     }
 
@@ -96,9 +103,14 @@ where
         Ok(())
     }
 
+    /// Create a table in the database.
+    ///
     /// # Arguments
     ///
-    /// * src_uri: connection string for source database (row storage database).
+    /// * database_id: database id of the table, which must exist.
+    /// * table_id: table id assigned to this table.
+    /// * src_table_name: Table name at the data source
+    /// * src_uri: URI to the data source
     /// * table_config: json serialized table configuration.
     pub async fn create_table(
         &self,
@@ -106,6 +118,7 @@ where
         table_id: T,
         src_table_name: String,
         src_uri: String,
+        input_schema: Option<Schema>,
         serialized_table_config: &str,
     ) -> Result<()> {
         let mooncake_table_id = MooncakeTableId {
@@ -122,17 +135,31 @@ where
             .take_as_moonlink_config(self.temp_files_dir.clone(), mooncake_table_id.to_string());
         {
             let mut manager = self.replication_manager.write().await;
-            manager
-                .add_table(
-                    &src_uri,
-                    mooncake_table_id,
-                    table_id,
-                    &src_table_name,
-                    moonlink_table_config.clone(),
-                    /*is_recovery=*/ false,
-                )
-                .await?;
-            manager.start_replication(&src_uri).await?;
+            if src_uri == REST_API_URI {
+                manager
+                    .add_rest_table(
+                        &src_uri,
+                        mooncake_table_id,
+                        table_id,
+                        &src_table_name,
+                        input_schema.expect("arrow_schema is required for REST API"),
+                        moonlink_table_config.clone(),
+                        /*is_recovery=*/ false,
+                    )
+                    .await?;
+            } else {
+                manager
+                    .add_table(
+                        &src_uri,
+                        mooncake_table_id,
+                        table_id,
+                        &src_table_name,
+                        moonlink_table_config.clone(),
+                        /*is_recovery=*/ false,
+                    )
+                    .await?;
+                manager.start_replication(&src_uri).await?;
+            }
         };
 
         // Create metadata store entry.
@@ -268,5 +295,26 @@ where
     pub async fn shutdown_connection(&self, uri: &str) {
         let mut manager = self.replication_manager.write().await;
         manager.shutdown_connection(uri);
+    }
+
+    /// Initialize event API connection for data ingestion.
+    /// This should be called during service startup to ensure event API is ready.
+    pub async fn initialize_event_api(&mut self) -> Result<()> {
+        let event_api_sender = {
+            let mut manager = self.replication_manager.write().await;
+            manager.initialize_event_api(&self.base_path).await?
+        };
+
+        self.event_api_sender = Some(event_api_sender);
+        Ok(())
+    }
+
+    pub async fn send_event_request(&self, request: EventRequest) -> Result<()> {
+        self.event_api_sender
+            .as_ref()
+            .expect("event api sender not initialized")
+            .send(request)
+            .await
+            .map_err(|e| Error::MoonlinkConnectorError { source: e.into() })
     }
 }

@@ -48,6 +48,7 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                None, /* input_schema */
                 &guard.get_serialized_table_config(),
             )
             .await
@@ -119,6 +120,7 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                None, /* input_schema */
                 &guard.get_serialized_table_config(),
             )
             .await
@@ -183,6 +185,7 @@ mod tests {
                     TABLE_ID,
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
+                    None, /* input_schema */
                     &table_config,
                 )
                 .await
@@ -256,6 +259,7 @@ mod tests {
                     TABLE_ID,
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
+                    None, /* input_schema */
                     &table_config,
                 )
                 .await
@@ -360,6 +364,7 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                None, /* input_schema */
                 &guard.get_serialized_table_config(),
             )
             .await
@@ -434,6 +439,7 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                None, /* input_schema */
                 &guard.get_serialized_table_config(),
             )
             .await
@@ -512,6 +518,7 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                None, /* input_schema */
                 &guard.get_serialized_table_config(),
             )
             .await

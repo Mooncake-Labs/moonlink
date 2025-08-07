@@ -1,13 +1,23 @@
 use crate::pg_replicate::table::SrcTableId;
+use crate::pg_replicate::table_init::build_table_components;
 use crate::pg_replicate::PostgresConnection;
+use crate::rest_ingest::rest_source::EventRequest;
+use crate::rest_ingest::RestApiConnection;
 use crate::Result;
+use arrow_schema::Schema as ArrowSchema;
 use moonlink::{
     MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager, TableStatusReader,
 };
-
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceType {
+    Postgres,
+    RestApi,
+}
 
 struct TableState {
     src_table_name: String,
@@ -15,10 +25,15 @@ struct TableState {
     event_manager: TableEventManager,
     status_reader: TableStatusReader,
 }
-/// Manages replication for table(s) within a database.
+
+/// Manages replication for table(s) within a database from various sources (PostgreSQL CDC, REST API, etc.).
 pub struct ReplicationConnection {
-    postgres_connection: PostgresConnection,
+    source_type: SourceType,
     table_base_path: String,
+    // Source-specific connections
+    postgres_connection: Option<PostgresConnection>,
+    rest_connection: Option<RestApiConnection>,
+    // Common fields
     handle: Option<JoinHandle<Result<()>>>,
     table_states: HashMap<SrcTableId, TableState>,
     replication_started: bool,
@@ -32,22 +47,50 @@ impl ReplicationConnection {
         table_base_path: String,
         object_storage_cache: ObjectStorageCache,
     ) -> Result<Self> {
-        debug!(%uri, "initializing replication connection");
+        let source_type = if uri.starts_with("rest://") {
+            SourceType::RestApi
+        } else {
+            SourceType::Postgres
+        };
 
-        let postgres_connection = PostgresConnection::new(uri).await?;
+        let (postgres_connection, rest_connection) = match source_type {
+            SourceType::Postgres => {
+                let postgres_conn = PostgresConnection::new(uri.clone()).await?;
+                (Some(postgres_conn), None)
+            }
+            SourceType::RestApi => {
+                let rest_conn = RestApiConnection::new().await?;
+                (None, Some(rest_conn))
+            }
+        };
 
         Ok(Self {
+            source_type,
             postgres_connection,
+            rest_connection,
             table_base_path,
-            handle: None,
+            object_storage_cache,
             table_states: HashMap::new(),
             replication_started: false,
-            object_storage_cache,
+            handle: None,
         })
     }
 
+    pub fn source_type(&self) -> &SourceType {
+        &self.source_type
+    }
+
+    /// Check if replication has started.
     pub fn replication_started(&self) -> bool {
         self.replication_started
+    }
+
+    /// Get the REST request sender for submitting REST API requests
+    pub fn get_rest_request_sender(&self) -> mpsc::Sender<EventRequest> {
+        self.rest_connection
+            .as_ref()
+            .expect("REST connection not available")
+            .get_rest_request_sender()
     }
 
     pub fn get_table_reader(&self, src_table_id: SrcTableId) -> &ReadStateManager {
@@ -78,17 +121,36 @@ impl ReplicationConnection {
     }
 
     pub async fn start_replication(&mut self) -> Result<()> {
+        assert!(!self.replication_started);
+        assert!(self.handle.is_none());
+
         debug!("starting replication");
 
-        self.handle = Some(self.postgres_connection.spawn_replication_task().await);
+        let handle = match self.source_type {
+            SourceType::Postgres => {
+                self.postgres_connection
+                    .as_mut()
+                    .unwrap()
+                    .spawn_replication_task()
+                    .await
+            }
+            SourceType::RestApi => {
+                self.rest_connection
+                    .as_mut()
+                    .unwrap()
+                    .spawn_rest_task()
+                    .await
+            }
+        };
         self.replication_started = true;
 
+        self.handle = Some(handle);
         debug!("replication started");
-
         Ok(())
     }
 
-    pub async fn add_table<T: std::fmt::Display>(
+    /// Add a table for PostgreSQL CDC replication
+    pub async fn add_table_replication<T: std::fmt::Display>(
         &mut self,
         table_name: &str,
         mooncake_table_id: &T,
@@ -96,29 +158,120 @@ impl ReplicationConnection {
         moonlink_table_config: MoonlinkTableConfig,
         is_recovery: bool,
     ) -> Result<SrcTableId> {
-        let (src_table_id, table_resources) = self
-            .postgres_connection
-            .add_table(
-                table_name,
-                mooncake_table_id,
-                table_id,
-                moonlink_table_config,
-                is_recovery,
-                &self.table_base_path,
-                self.object_storage_cache.clone(),
-            )
-            .await?;
+        match self.source_type {
+            SourceType::Postgres => {
+                debug!(table_name, "adding PostgreSQL table for replication");
 
-        let table_state = TableState {
-            src_table_name: table_name.to_string(),
-            reader: table_resources.read_state_manager,
-            event_manager: table_resources.table_event_manager,
-            status_reader: table_resources.table_status_reader,
-        };
+                let (src_table_id, table_resources) = self
+                    .postgres_connection
+                    .as_mut()
+                    .unwrap()
+                    .add_table(
+                        table_name,
+                        mooncake_table_id,
+                        table_id,
+                        moonlink_table_config,
+                        is_recovery,
+                        &self.table_base_path,
+                        self.object_storage_cache.clone(),
+                    )
+                    .await?;
 
-        self.table_states.insert(src_table_id, table_state);
+                let table_state = TableState {
+                    src_table_name: table_name.to_string(),
+                    reader: table_resources.read_state_manager,
+                    event_manager: table_resources.table_event_manager,
+                    status_reader: table_resources.table_status_reader,
+                };
 
-        Ok(src_table_id)
+                self.table_states.insert(src_table_id, table_state);
+                debug!(src_table_id, "PostgreSQL table added for replication");
+                Ok(src_table_id)
+            }
+            SourceType::RestApi => {
+                panic!("Cannot add replication table to REST API connection")
+            }
+        }
+    }
+
+    /// Add a table for REST API ingestion with Arrow schema
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_table_api<T: std::fmt::Display>(
+        &mut self,
+        table_name: &str,
+        mooncake_table_id: &T,
+        table_id: u32,
+        arrow_schema: ArrowSchema,
+        moonlink_table_config: MoonlinkTableConfig,
+        _is_recovery: bool,
+    ) -> Result<SrcTableId> {
+        match self.source_type {
+            SourceType::RestApi => {
+                debug!(table_name, "adding REST API table");
+
+                let rest_connection = self
+                    .rest_connection
+                    .as_mut()
+                    .expect("REST connection not available");
+                let src_table_id = rest_connection.next_src_table_id();
+
+                // Create MooncakeTable resources using the table init function
+                let mut table_resources = build_table_components(
+                    mooncake_table_id.to_string(),
+                    table_id,
+                    arrow_schema.clone(),
+                    moonlink::row::IdentityProp::FullRow, // REST API doesn't need identity
+                    table_name.to_string(),
+                    src_table_id,
+                    &self.table_base_path,
+                    // REST API doesn't have replication state, create a dummy one
+                    &crate::pg_replicate::replication_state::ReplicationState::new(),
+                    self.object_storage_cache.clone(),
+                    moonlink_table_config,
+                )
+                .await?;
+
+                // Add table to RestSource and connect to RestSink
+                rest_connection
+                    .add_table(
+                        table_name.to_string(),
+                        src_table_id,
+                        std::sync::Arc::new(arrow_schema),
+                        table_resources.event_sender.clone(),
+                        table_resources
+                            .commit_lsn_tx
+                            .take()
+                            .expect("commit_lsn_tx not set"),
+                        table_resources
+                            .flush_lsn_rx
+                            .take()
+                            .expect("flush_lsn_rx not set"),
+                        table_resources
+                            .wal_flush_lsn_rx
+                            .take()
+                            .expect("wal_flush_lsn_rx not set"),
+                    )
+                    .await?;
+
+                // Store table state
+                let table_state = TableState {
+                    src_table_name: table_name.to_string(),
+                    reader: table_resources.read_state_manager,
+                    event_manager: table_resources.table_event_manager,
+                    status_reader: table_resources.table_status_reader,
+                };
+
+                self.table_states.insert(src_table_id, table_state);
+                debug!(
+                    src_table_id,
+                    table_name, "REST API table added successfully"
+                );
+                Ok(src_table_id)
+            }
+            SourceType::Postgres => {
+                panic!("Cannot add API table to PostgreSQL connection")
+            }
+        }
     }
 
     /// Remove the given table from connection.
@@ -139,11 +292,25 @@ impl ReplicationConnection {
         let mut event_manager = table_state.event_manager;
         event_manager.drop_table().await?;
 
-        // Drop from PostgreSQL replication
-        self.postgres_connection
-            .drop_table(src_table_id, table_name)
-            .await?;
+        // Drop from the appropriate source
+        match self.source_type {
+            SourceType::Postgres => {
+                self.postgres_connection
+                    .as_mut()
+                    .unwrap()
+                    .drop_table(src_table_id, table_name)
+                    .await?;
+            }
+            SourceType::RestApi => {
+                self.rest_connection
+                    .as_mut()
+                    .unwrap()
+                    .drop_table(src_table_id, table_name)
+                    .await?;
+            }
+        }
 
+        debug!(src_table_id, "table dropped");
         Ok(())
     }
 
@@ -151,7 +318,22 @@ impl ReplicationConnection {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
-                self.postgres_connection.shutdown_replication().await?;
+                match self.source_type {
+                    SourceType::Postgres => {
+                        self.postgres_connection
+                            .as_mut()
+                            .unwrap()
+                            .shutdown_replication()
+                            .await?;
+                    }
+                    SourceType::RestApi => {
+                        self.rest_connection
+                            .as_mut()
+                            .unwrap()
+                            .shutdown_replication()
+                            .await?;
+                    }
+                }
                 if let Some(handle) = self.handle.take() {
                     if let Err(e) = handle.await {
                         warn!(error = ?e, "task join error during shutdown");
@@ -159,11 +341,51 @@ impl ReplicationConnection {
                 }
                 self.replication_started = false;
             }
-
-            self.postgres_connection.shutdown().await?;
+            match self.source_type {
+                SourceType::Postgres => {
+                    self.postgres_connection
+                        .as_mut()
+                        .unwrap()
+                        .shutdown()
+                        .await?;
+                }
+                SourceType::RestApi => {}
+            }
 
             debug!("replication connection shutdown complete");
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonlink::{ObjectStorageCache, ObjectStorageCacheConfig};
+
+    #[tokio::test]
+    async fn test_rest_api_connection_creation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_config = ObjectStorageCacheConfig::new(
+            1 << 30, // 1GB
+            temp_dir.path().to_str().unwrap().to_string(),
+            false, // optimize_local_filesystem
+        );
+        let object_storage_cache = ObjectStorageCache::new(cache_config);
+
+        let mut connection = ReplicationConnection::new(
+            crate::replication_manager::REST_API_URI.to_string(),
+            temp_dir.path().join("tables").to_string_lossy().to_string(),
+            object_storage_cache,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*connection.source_type(), SourceType::RestApi);
+        assert!(connection.postgres_connection.is_none());
+        assert!(connection.rest_connection.is_some());
+        let _ = connection.get_rest_request_sender();
+        connection.start_replication().await.unwrap();
+        assert!(connection.replication_started());
     }
 }

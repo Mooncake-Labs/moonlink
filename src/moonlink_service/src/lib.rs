@@ -1,33 +1,68 @@
 mod error;
+pub mod rest_api;
 
 use arrow_ipc::writer::StreamWriter;
 pub use error::{Error, Result};
 use moonlink_backend::MoonlinkBackend;
 use moonlink_metadata_store::SqliteMetadataStore;
 use moonlink_rpc::{read, write, Request, Table};
+use rest_api::ApiState;
 use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
+use tracing::{info, warn};
 
-pub async fn start(base_path: String) -> Result<()> {
+pub struct ServiceConfig {
+    pub base_path: String,
+    pub rest_api_port: Option<u16>,
+}
+
+pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
-    let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(&base_path)
+    let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(&config.base_path)
         .await
         .unwrap();
-    let backend =
-        MoonlinkBackend::new(base_path.clone(), Box::new(sqlite_metadata_accessor)).await?;
+    let mut backend =
+        MoonlinkBackend::new(config.base_path.clone(), Box::new(sqlite_metadata_accessor)).await?;
+
+    if config.rest_api_port.is_some() {
+        backend.initialize_event_api().await?;
+    }
+
     let backend = Arc::new(backend);
-    let socket_path = std::path::PathBuf::from(base_path).join("moonlink.sock");
+    // Setup Unix socket RPC server
+    let socket_path = std::path::PathBuf::from(&config.base_path).join("moonlink.sock");
     if fs::metadata(&socket_path).await.is_ok() {
         fs::remove_file(&socket_path).await?;
     }
     let listener = UnixListener::bind(&socket_path)?;
+    info!(
+        "Moonlink RPC server listening on Unix socket: {:?}",
+        socket_path
+    );
+
+    let rest_api_handle = if let Some(port) = config.rest_api_port {
+        let api_state = ApiState::new(backend.clone());
+        Some(tokio::spawn(async move {
+            if let Err(e) = rest_api::start_server(api_state, port).await {
+                warn!("REST API server failed: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
+    info!("Moonlink service started successfully");
+
     loop {
         tokio::select! {
-            _ = sigterm.recv() => break,
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+                break;
+            }
             Ok((stream, _addr)) = listener.accept() => {
                 let backend = Arc::clone(&backend);
                 tokio::spawn(async move {
@@ -41,6 +76,13 @@ pub async fn start(base_path: String) -> Result<()> {
             }
         }
     }
+
+    // Clean shutdown
+    if let Some(handle) = rest_api_handle {
+        handle.abort();
+    }
+
+    info!("Moonlink service shut down complete");
     Ok(())
 }
 
@@ -71,7 +113,14 @@ async fn handle_stream(
                 // Use default mooncake config, and local filesystem for storage layer.
                 let serialized_table_config = "{}";
                 backend
-                    .create_table(database_id, table_id, src, src_uri, serialized_table_config)
+                    .create_table(
+                        database_id,
+                        table_id,
+                        src,
+                        src_uri,
+                        None, /* input_schema */
+                        serialized_table_config,
+                    )
                     .await
                     .unwrap();
                 write(&mut stream, &()).await?;

@@ -30,6 +30,14 @@ pub enum Error {
     // Requested database table not found.
     #[error("Table {0} not found")]
     TableNotFound(String),
+
+    // Invalid source type for operation.
+    #[error("Invalid source type: {0}")]
+    InvalidSourceType(String),
+
+    // REST API error.
+    #[error("REST API error: {0}")]
+    RestApi(String),
 }
 
 pub type Result<T> = result::Result<T, Error>;

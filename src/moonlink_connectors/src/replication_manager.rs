@@ -8,6 +8,8 @@ use std::hash::Hash;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
+pub const REST_API_URI: &str = "rest://api";
+
 /// Manage replication sources keyed by their connection URI.
 ///
 /// This struct abstracts the lifecycle of `MoonlinkPostgresSource` and
@@ -75,7 +77,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         let replication_connection = self.connections.get_mut(src_uri).unwrap();
 
         let src_table_id = replication_connection
-            .add_table(
+            .add_table_replication(
                 table_name,
                 &mooncake_table_id,
                 table_id,
@@ -89,6 +91,86 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         debug!(src_table_id, "table added through manager");
 
         Ok(())
+    }
+
+    /// Add a table for REST API ingestion from the given REST API URI.
+    ///
+    /// The REST API connection must already exist - this will fail if it doesn't.
+    ///
+    /// # Arguments
+    ///
+    /// * src_uri: should be a REST API URL
+    /// * arrow_schema: Arrow schema for the table
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_rest_table(
+        &mut self,
+        src_uri: &str,
+        mooncake_table_id: T,
+        table_id: u32,
+        table_name: &str,
+        arrow_schema: arrow_schema::Schema,
+        moonlink_table_config: MoonlinkTableConfig,
+        is_recovery: bool,
+    ) -> Result<()> {
+        debug!(%src_uri, table_name, "adding REST API table through manager");
+
+        // Fail if REST API connection doesn't exist
+        if !self.connections.contains_key(src_uri) {
+            return Err(crate::Error::RestApi(format!(
+                "REST API connection '{src_uri}' not found. Initialize REST API first."
+            )));
+        }
+
+        let replication_connection = self.connections.get_mut(src_uri).unwrap();
+
+        let src_table_id = replication_connection
+            .add_table_api(
+                table_name,
+                &mooncake_table_id,
+                table_id,
+                arrow_schema,
+                moonlink_table_config,
+                is_recovery,
+            )
+            .await?;
+        self.table_info
+            .insert(mooncake_table_id, (src_uri.to_string(), src_table_id));
+
+        debug!(src_table_id, "REST API table added through manager");
+
+        Ok(())
+    }
+
+    /// Initialize event API connection for data ingestion.
+    /// Returns the event request sender channel for the API to use.
+    pub async fn initialize_event_api(
+        &mut self,
+        base_path: &str,
+    ) -> Result<tokio::sync::mpsc::Sender<crate::rest_ingest::rest_source::EventRequest>> {
+        assert!(!self.connections.contains_key(REST_API_URI));
+
+        // Create the directory that will hold all tables
+        tokio::fs::create_dir_all(base_path).await?;
+        let base_path = tokio::fs::canonicalize(base_path).await?;
+
+        // Create event API connection
+        let replication_connection = crate::ReplicationConnection::new(
+            REST_API_URI.to_string(),
+            base_path.to_str().unwrap().to_string(),
+            self.object_storage_cache.clone(),
+        )
+        .await?;
+
+        // Get the sender before inserting the connection
+        let rest_sender = replication_connection.get_rest_request_sender();
+        // Insert the connection
+        self.connections
+            .insert(REST_API_URI.to_string(), replication_connection);
+
+        // Start the REST API replication
+        self.start_replication(REST_API_URI).await?;
+
+        Ok(rest_sender)
     }
 
     pub async fn start_replication(&mut self, src_uri: &str) -> Result<()> {
@@ -115,7 +197,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         debug!(src_table_id, %table_uri, "dropping table through manager");
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
         repl_conn.drop_table(src_table_id).await?;
-        if repl_conn.table_count() == 0 {
+        if repl_conn.table_count() == 0 && table_uri != REST_API_URI {
             self.shutdown_connection(&table_uri);
         }
 
