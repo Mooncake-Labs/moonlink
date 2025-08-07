@@ -37,7 +37,13 @@ pub struct ErrorStruct {
 
 impl fmt::Display for ErrorStruct {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.message, self.status)
+        write!(f, "{} ({})", self.message, self.status)?;
+
+        if let Some(source) = &self.source {
+            write!(f, ", source: {source}")?;
+        }
+
+        Ok(())
     }
 }
 
