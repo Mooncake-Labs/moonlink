@@ -48,8 +48,11 @@ impl fmt::Display for ErrorStruct {
 }
 
 impl ErrorStruct {
-    /// Set source for error.
-    /// A panic will be raise if the source is already being set
+    /// Sets the source error for this error struct.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the source error has already been set.
     pub fn with_source(mut self, src: impl Into<anyhow::Error>) -> Self {
         debug_assert!(self.source.is_none(), "the source error has been set");
         self.source = Some(Arc::new(src.into()));
