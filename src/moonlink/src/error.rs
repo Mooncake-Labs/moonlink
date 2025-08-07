@@ -131,7 +131,7 @@ impl From<watch::error::RecvError> for Error {
 impl From<ArrowError> for Error {
     fn from(source: ArrowError) -> Self {
         let status = match source {
-            ArrowError::MemoryError(_) | ArrowError::IoError(_, _) => ErrorStatus::Temporary,
+            ArrowError::IoError(_, _) => ErrorStatus::Temporary,
 
             // All other errors are regard as permanent
             _ => ErrorStatus::Permanent,
@@ -147,9 +147,18 @@ impl From<ArrowError> for Error {
 
 impl From<IcebergError> for Error {
     fn from(source: IcebergError) -> Self {
+        let status = match source.kind() {
+            iceberg::ErrorKind::CatalogCommitConflicts | iceberg::ErrorKind::Unexpected => {
+                ErrorStatus::Temporary
+            }
+
+            // All other errors are permanent
+            _ => ErrorStatus::Permanent,
+        };
+
         Error::IcebergError(ErrorStruct {
             message: format!("Iceberg error: {source}"),
-            status: ErrorStatus::Permanent,
+            status,
             source: Some(Arc::new(source.into())),
         })
     }
@@ -163,7 +172,11 @@ impl From<io::Error> for Error {
             | io::ErrorKind::WouldBlock
             | io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset => ErrorStatus::Temporary,
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NetworkDown
+            | io::ErrorKind::ResourceBusy
+            | io::ErrorKind::QuotaExceeded => ErrorStatus::Temporary,
 
             // All other errors are permanent
             _ => ErrorStatus::Permanent,
