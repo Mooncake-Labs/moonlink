@@ -21,6 +21,7 @@ pub struct ReplicationConnection {
     table_base_path: String,
     handle: Option<JoinHandle<Result<()>>>,
     table_states: HashMap<SrcTableId, TableState>,
+    replication_started: bool,
     /// Object storage cache.
     object_storage_cache: ObjectStorageCache,
 }
@@ -40,12 +41,13 @@ impl ReplicationConnection {
             table_base_path,
             handle: None,
             table_states: HashMap::new(),
+            replication_started: false,
             object_storage_cache,
         })
     }
 
     pub fn replication_started(&self) -> bool {
-        self.postgres_connection.replication_started
+        self.replication_started
     }
 
     pub fn get_table_reader(&self, src_table_id: SrcTableId) -> &ReadStateManager {
@@ -79,6 +81,7 @@ impl ReplicationConnection {
         debug!("starting replication");
 
         self.handle = Some(self.postgres_connection.spawn_replication_task().await);
+        self.replication_started = true;
 
         debug!("replication started");
 
@@ -146,13 +149,18 @@ impl ReplicationConnection {
 
     pub fn shutdown(mut self) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
-            self.postgres_connection.shutdown().await?;
-
-            if let Some(handle) = self.handle {
-                if let Err(e) = handle.await {
-                    warn!(error = ?e, "task join error during shutdown");
+            // Stop the replication event loop
+            if self.replication_started {
+                self.postgres_connection.shutdown_replication().await?;
+                if let Some(handle) = self.handle.take() {
+                    if let Err(e) = handle.await {
+                        warn!(error = ?e, "task join error during shutdown");
+                    }
                 }
+                self.replication_started = false;
             }
+
+            self.postgres_connection.shutdown().await?;
 
             debug!("replication connection shutdown complete");
             Ok(())

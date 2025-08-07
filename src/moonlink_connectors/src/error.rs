@@ -83,10 +83,7 @@ impl From<std::io::Error> for Error {
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(err: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Error::Io {
-            source: Arc::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Channel send error: {}", err),
-            )),
+            source: Arc::new(std::io::Error::other(format!("Channel send error: {err}"))),
         }
     }
 }

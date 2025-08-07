@@ -62,7 +62,6 @@ pub struct PostgresConnection {
     pub cmd_tx: mpsc::Sender<PostgresReplicationCommand>,
     pub cmd_rx: Option<mpsc::Receiver<PostgresReplicationCommand>>,
     pub replication_state: Arc<ReplicationState>,
-    pub replication_started: bool,
     pub retry_handles: Vec<JoinHandle<Result<()>>>,
 }
 
@@ -120,15 +119,8 @@ impl PostgresConnection {
             cmd_tx,
             cmd_rx: Some(cmd_rx),
             replication_state: ReplicationState::new(),
-            replication_started: false,
             retry_handles: Vec::new(),
         })
-    }
-
-    /// Start PostgreSQL replication
-    pub fn start_replication(&mut self) -> mpsc::Receiver<PostgresReplicationCommand> {
-        self.replication_started = true;
-        self.cmd_rx.take().unwrap()
     }
 
     /// Include full row in cdc stream (not just primary keys).
@@ -269,11 +261,6 @@ impl PostgresConnection {
     /// Get a clone of the replication state
     pub fn get_replication_state(&self) -> Arc<ReplicationState> {
         self.replication_state.clone()
-    }
-
-    /// Set replication started flag
-    pub fn set_replication_started(&mut self, started: bool) {
-        self.replication_started = started;
     }
 
     /// Add table to PostgreSQL replication
@@ -449,15 +436,8 @@ impl PostgresConnection {
 
     /// Shutdown PostgreSQL replication
     pub async fn shutdown(&mut self) -> Result<()> {
-        debug!("shutting down replication connection");
-        if self.replication_started {
-            self.shutdown_replication().await?;
-            self.replication_started = false;
-        }
-
         self.drop_publication().await?;
         self.drop_replication_slot().await?;
-
         // Wait for any pending retry operations to complete
         self.wait_for_pending_retries().await;
 
@@ -468,7 +448,7 @@ impl PostgresConnection {
     /// Spawn replication task
     pub async fn spawn_replication_task(&mut self) -> JoinHandle<Result<()>> {
         let sink = Sink::new(self.replication_state.clone());
-        let receiver = self.start_replication();
+        let receiver = self.cmd_rx.take().unwrap();
 
         let uri = self.uri.clone();
         let cfg = self.source.get_cdc_stream_config().unwrap();
