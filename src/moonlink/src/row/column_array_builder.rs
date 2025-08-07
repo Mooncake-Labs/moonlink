@@ -1102,4 +1102,36 @@ mod tests {
             .unwrap();
         assert!(active_column.value(0));
     }
+
+    #[test]
+    fn test_column_array_builder_empty_struct() {
+        use arrow::array::StructArray;
+        use arrow::datatypes::Fields;
+
+        // Test struct with no fields (empty struct)
+        let struct_fields: Fields = Vec::<Arc<arrow::datatypes::Field>>::new().into();
+
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone()), 3, false);
+
+        // Add empty structs
+        builder.append_value(&RowValue::Struct(vec![])).unwrap();
+        builder.append_value(&RowValue::Struct(vec![])).unwrap();
+
+        // Add null struct
+        builder.append_value(&RowValue::Null).unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields));
+        assert_eq!(array.len(), 3);
+
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+
+        // Check struct has no columns
+        assert_eq!(struct_array.num_columns(), 0);
+
+        // Check validity - first two are valid, third is null
+        assert!(!struct_array.is_null(0));
+        assert!(!struct_array.is_null(1));
+        assert!(struct_array.is_null(2));
+    }
 }
