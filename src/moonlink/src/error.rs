@@ -236,3 +236,42 @@ impl From<serde_json::Error> for Error {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+    use std::io;
+
+    #[test]
+    fn test_error_struct_without_source() {
+        let error = ErrorStruct {
+            message: "Test error".to_string(),
+            status: ErrorStatus::Temporary,
+            source: None,
+        };
+        assert_eq!(error.to_string(), "Test error (temporary)");
+        assert!(error.source.is_none());
+    }
+
+    #[test]
+    fn test_error_struct_with_source() {
+        let io_error = io::Error::new(io::ErrorKind::NotFound, "File not found");
+        let error = ErrorStruct {
+            message: "Test error".to_string(),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(io_error.into())),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Test error (permanent), source: File not found"
+        );
+        assert!(error.source.is_some());
+
+        // Test accessing structured error information
+        let source = error.source().unwrap();
+        let io_err = source.downcast_ref::<io::Error>().unwrap();
+        assert_eq!(io_err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(io_err.to_string(), "File not found");
+    }
+}
