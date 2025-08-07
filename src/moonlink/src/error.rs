@@ -7,35 +7,20 @@ use std::result;
 use thiserror::Error;
 use tokio::sync::watch;
 
-/// Error status indicating whether an error is retryable
+/// Error status categories
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorStatus {
-    /// Permanent means without external changes, the error never changes.
-    ///
-    /// For example, underlying services returns a not found error.
-    ///
-    /// Users SHOULD never retry this operation.
-    Permanent,
-    /// Temporary means this error is returned for temporary.
-    ///
-    /// For example, underlying services is rate limited or unavailable for temporary.
-    ///
-    /// Users CAN retry the operation to resolve it.
+    /// Temporary errors that can be resolved by retrying (e.g., rate limits, timeouts)
     Temporary,
-    /// Persistent means this error used to be temporary but still failed after retry.
-    ///
-    /// For example, underlying services kept returning network errors.
-    ///
-    /// Users MAY retry this operation but it's highly possible to error again.
-    Persistent,
+    /// Permanent errors that cannot be solved by retrying (e.g., not found, permission denied)
+    Permanent,
 }
 
 impl fmt::Display for ErrorStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ErrorStatus::Permanent => write!(f, "permanent"),
             ErrorStatus::Temporary => write!(f, "temporary"),
-            ErrorStatus::Persistent => write!(f, "persistent"),
+            ErrorStatus::Permanent => write!(f, "permanent"),
         }
     }
 }
@@ -109,7 +94,6 @@ impl From<ArrowError> for Error {
     fn from(source: ArrowError) -> Self {
         let status = match source {
             ArrowError::MemoryError(_) | ArrowError::IoError(_, _) => ErrorStatus::Temporary,
-            ArrowError::ExternalError(_) => ErrorStatus::Persistent,
 
             // All other errors are regard as permanent
             _ => ErrorStatus::Permanent,
@@ -124,17 +108,9 @@ impl From<ArrowError> for Error {
 
 impl From<IcebergError> for Error {
     fn from(source: IcebergError) -> Self {
-        let status = match source.kind() {
-            iceberg::ErrorKind::CatalogCommitConflicts => ErrorStatus::Persistent,
-            iceberg::ErrorKind::NamespaceNotFound => ErrorStatus::Persistent,
-
-            // All other errors are permanent
-            _ => ErrorStatus::Permanent,
-        };
-
         Error::IcebergError(ErrorStruct {
             message: format!("Iceberg error: {source}"),
-            status,
+            status: ErrorStatus::Permanent,
         })
     }
 }
@@ -148,8 +124,6 @@ impl From<io::Error> for Error {
             | io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::ConnectionReset => ErrorStatus::Temporary,
-
-            io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound => ErrorStatus::Persistent,
 
             // All other errors are permanent
             _ => ErrorStatus::Permanent,
@@ -168,10 +142,6 @@ impl From<opendal::Error> for Error {
             opendal::ErrorKind::RateLimited | opendal::ErrorKind::Unexpected => {
                 ErrorStatus::Temporary
             }
-
-            opendal::ErrorKind::ConfigInvalid
-            | opendal::ErrorKind::PermissionDenied
-            | opendal::ErrorKind::NotFound => ErrorStatus::Persistent,
 
             // All other errors are permanent
             _ => ErrorStatus::Permanent,
@@ -197,8 +167,6 @@ impl From<ParquetError> for Error {
     fn from(source: ParquetError) -> Self {
         let status = match source {
             ParquetError::EOF(_) | ParquetError::NeedMoreData(_) => ErrorStatus::Temporary,
-
-            ParquetError::External(_) => ErrorStatus::Persistent,
 
             // All other errors are permanent
             _ => ErrorStatus::Permanent,
