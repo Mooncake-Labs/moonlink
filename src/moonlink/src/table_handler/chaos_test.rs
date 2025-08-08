@@ -24,6 +24,7 @@ use crate::{StorageConfig, TableEventManager};
 
 use function_name::named;
 use more_asserts as ma;
+use pico_args::Arguments;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -36,6 +37,39 @@ use tokio::sync::watch;
 
 /// To avoid excessive and continuous table maintenance operations, set an interval between each invocation for each non table update operation.
 const NON_UPDATE_COMMAND_INTERVAL_LSN: u64 = 5;
+
+/// Parsed chaos test arguments for convenience
+#[derive(Clone)]
+struct ChaosTestArgs {
+    seed: u64,
+    print_events_on_success: bool,
+}
+
+/// Combine argument parsing logic into one function using pico-args.
+/// Since cargo test filters unknown flags, we use a different approach:
+/// - Try to parse from command line args first (for direct binary execution)
+/// - Fall back to timestamp-based seed
+/// - For print events, we'll use a simple flag that might work
+fn parse_chaos_test_args() -> ChaosTestArgs {
+    let mut pargs = Arguments::from_env();
+
+    // Try to parse command line arguments (works when running binary directly)
+    let seed: Option<u64> = pargs.opt_value_from_str("--seed").unwrap_or(None);
+    let print_events_on_success = pargs.contains("--print-events-on-success");
+
+    // Default seed if not provided
+    let seed = seed.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    });
+
+    ChaosTestArgs {
+        seed,
+        print_events_on_success,
+    }
+}
 
 /// Create a test moonlink row.
 fn create_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
@@ -160,15 +194,13 @@ struct ChaosState {
     last_commit_lsn: Option<u64>,
     /// Whether the last finished transaction committed successfully, or not.
     last_txn_is_committed: bool,
+    /// Parsed chaos test arguments.
+    _args: ChaosTestArgs,
 }
 
 impl ChaosState {
-    fn new(read_state_manager: ReadStateManager) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let random_seed = nanos as u64;
+    fn new(read_state_manager: ReadStateManager, args: ChaosTestArgs) -> Self {
+        let random_seed = args.seed;
         let rng = StdRng::seed_from_u64(random_seed);
         Self {
             random_seed,
@@ -185,6 +217,7 @@ impl ChaosState {
             cur_xact_id: 0,
             last_commit_lsn: None,
             last_txn_is_committed: false,
+            _args: args,
         }
     }
 
@@ -654,8 +687,11 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
     let mooncake_table_metadata = env.mooncake_table_metadata.clone();
     let iceberg_table_config = env.iceberg_table_config.clone();
 
+    let args = parse_chaos_test_args();
+    let cloned_args = args.clone();
+
     let task = tokio::spawn(async move {
-        let mut state = ChaosState::new(read_state_manager);
+        let mut state = ChaosState::new(read_state_manager, args);
         println!(
             "Test {} is with random seed {}",
             test_env_config.test_name, state.random_seed
@@ -739,6 +775,11 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
         // Propagate the panic to fail the test.
         if let Ok(panic) = e.try_into_panic() {
             std::panic::resume_unwind(panic);
+        }
+    } else if cloned_args.print_events_on_success {
+        // Optionally print events even when the test succeeded, for debugging.
+        while let Some(cur_event) = env.event_replay_rx.recv().await {
+            println!("{cur_event:?}");
         }
     }
 }
