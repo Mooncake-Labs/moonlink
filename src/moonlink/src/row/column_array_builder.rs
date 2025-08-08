@@ -116,30 +116,21 @@ impl ColumnArrayBuilder {
             match value {
                 RowValue::Bool(v) => bool_builder.append_value(*v),
                 RowValue::Null => bool_builder.append_null(),
-                _ => unreachable!(
-                    "Bool expected from well-typed input, but get {:?}",
-                    value
-                ),
+                _ => unreachable!("Bool expected from well-typed input, but get {:?}", value),
             }
         } else if let Some(int32_builder) = builder.field_builder::<PrimitiveBuilder<Int32Type>>(i)
         {
             match value {
                 RowValue::Int32(v) => int32_builder.append_value(*v),
                 RowValue::Null => int32_builder.append_null(),
-                _ => unreachable!(
-                    "Int32 expected from well-typed input, but get {:?}",
-                    value
-                ),
+                _ => unreachable!("Int32 expected from well-typed input, but get {:?}", value),
             }
         } else if let Some(int64_builder) = builder.field_builder::<PrimitiveBuilder<Int64Type>>(i)
         {
             match value {
                 RowValue::Int64(v) => int64_builder.append_value(*v),
                 RowValue::Null => int64_builder.append_null(),
-                _ => unreachable!(
-                    "Int64 expected from well-typed input, but get {:?}",
-                    value
-                ),
+                _ => unreachable!("Int64 expected from well-typed input, but get {:?}", value),
             }
         } else if let Some(float32_builder) =
             builder.field_builder::<PrimitiveBuilder<Float32Type>>(i)
@@ -523,10 +514,7 @@ impl ColumnArrayBuilder {
                             builder.append(false);
                         }
                     }
-                    _ => unreachable!(
-                        "Struct expected from well-typed input, but get {:?}",
-                        value
-                    ),
+                    _ => unreachable!("Struct expected from well-typed input, but get {:?}", value),
                 };
                 Ok(())
             }
@@ -602,7 +590,11 @@ mod tests {
     #[test]
     fn test_column_array_builder() {
         // Test Int32 type
-        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Int32,
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         builder.append_value(&RowValue::Int32(1)).unwrap();
         builder.append_value(&RowValue::Int32(2)).unwrap();
         let array = builder.finish(&DataType::Int32);
@@ -612,7 +604,11 @@ mod tests {
         assert_eq!(int32_array.value(1), 2);
 
         // Test Int64 type
-        let mut builder = ColumnArrayBuilder::new(&DataType::Int64, 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Int64,
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         builder.append_value(&RowValue::Int64(100)).unwrap();
         builder.append_value(&RowValue::Int64(200)).unwrap();
         let array = builder.finish(&DataType::Int64);
@@ -622,7 +618,11 @@ mod tests {
         assert_eq!(int64_array.value(1), 200);
 
         // Test Float32 type
-        let mut builder = ColumnArrayBuilder::new(&DataType::Float32, 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Float32,
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         builder
             .append_value(&RowValue::Float32(std::f32::consts::PI))
             .unwrap();
@@ -636,7 +636,11 @@ mod tests {
         assert!((float32_array.value(1) - std::f32::consts::E).abs() < 0.0001);
 
         // Test Float64 type
-        let mut builder = ColumnArrayBuilder::new(&DataType::Float64, 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Float64,
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         builder
             .append_value(&RowValue::Float64(std::f64::consts::PI))
             .unwrap();
@@ -650,7 +654,11 @@ mod tests {
         assert!((float64_array.value(1) - std::f64::consts::E).abs() < 0.00001);
 
         // Test Boolean type
-        let mut builder = ColumnArrayBuilder::new(&DataType::Boolean, 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Boolean,
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         builder.append_value(&RowValue::Bool(true)).unwrap();
         builder.append_value(&RowValue::Bool(false)).unwrap();
         let array = builder.finish(&DataType::Boolean);
@@ -660,7 +668,11 @@ mod tests {
         assert!(!bool_array.value(1));
 
         // Test Utf8 (ByteArray) type
-        let mut builder = ColumnArrayBuilder::new(&DataType::Utf8, 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Utf8,
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         builder
             .append_value(&RowValue::ByteArray("hello".as_bytes().to_vec()))
             .unwrap();
@@ -674,7 +686,11 @@ mod tests {
         assert_eq!(string_array.value(1), "world");
 
         // Test FixedSizeBinary type
-        let mut builder = ColumnArrayBuilder::new(&DataType::FixedSizeBinary(16), 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::FixedSizeBinary(16),
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
         let bytes1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let bytes2 = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
         builder
@@ -693,7 +709,11 @@ mod tests {
         assert_eq!(binary_array.value(1), bytes2);
 
         // Test null values
-        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, 3, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Int32,
+            /*capacity=*/ 3,
+            /*is_list=*/ false,
+        );
         builder.append_value(&RowValue::Int32(1)).unwrap();
         builder.append_value(&RowValue::Null).unwrap();
         builder.append_value(&RowValue::Int32(3)).unwrap();
@@ -705,7 +725,11 @@ mod tests {
         assert_eq!(int32_array.value(2), 3);
 
         // Test using null values directly from RowValue::Null
-        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, 3, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Int32,
+            /*capacity=*/ 3,
+            /*is_list=*/ false,
+        );
         builder.append_value(&RowValue::Int32(1)).unwrap();
         builder.append_value(&RowValue::Null).unwrap();
         builder.append_value(&RowValue::Int32(3)).unwrap();
@@ -724,10 +748,10 @@ mod tests {
             &DataType::List(Arc::new(arrow::datatypes::Field::new(
                 "item",
                 DataType::Int32,
-                true,
+                /*nullable=*/ true,
             ))),
-            2,
-            true,
+            /*capacity=*/ 2,
+            /*is_list=*/ true,
         );
 
         // Add a list of integers [1, 2, 3]
@@ -750,7 +774,7 @@ mod tests {
         let array = builder.finish(&DataType::List(Arc::new(arrow::datatypes::Field::new(
             "item",
             DataType::Int32,
-            true,
+            /*nullable=*/ true,
         ))));
 
         assert_eq!(array.len(), 2);
@@ -778,17 +802,28 @@ mod tests {
 
         // Test struct with primitive types
         let struct_fields = vec![
-            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
-            Arc::new(arrow::datatypes::Field::new("name", DataType::Utf8, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "id",
+                DataType::Int32,
+                /*nullable=*/ true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                "name",
+                DataType::Utf8,
+                /*nullable=*/ true,
+            )),
             Arc::new(arrow::datatypes::Field::new(
                 "active",
                 DataType::Boolean,
-                true,
+                /*nullable=*/ true,
             )),
         ];
 
-        let mut builder =
-            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 2, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Struct(struct_fields.clone().into()),
+            /*capacity=*/ 2,
+            /*is_list=*/ false,
+        );
 
         // Add a struct with values
         builder
@@ -848,16 +883,23 @@ mod tests {
 
         // Test struct with nulls
         let struct_fields = vec![
-            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "id",
+                DataType::Int32,
+                /*nullable=*/ true,
+            )),
             Arc::new(arrow::datatypes::Field::new(
                 "score",
                 DataType::Float64,
-                true,
+                /*nullable=*/ true,
             )),
         ];
 
-        let mut builder =
-            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 3, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Struct(struct_fields.clone().into()),
+            /*capacity=*/ 3,
+            /*is_list=*/ false,
+        );
 
         // Add struct with all values
         builder
@@ -914,52 +956,55 @@ mod tests {
             Arc::new(arrow::datatypes::Field::new(
                 "bool_field",
                 DataType::Boolean,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "int32_field",
                 DataType::Int32,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "int64_field",
                 DataType::Int64,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "float32_field",
                 DataType::Float32,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "float64_field",
                 DataType::Float64,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "decimal_field",
                 DataType::Decimal128(10, 2),
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "string_field",
                 DataType::Utf8,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "binary_field",
                 DataType::Binary,
-                true,
+                /*nullable=*/ true,
             )),
             Arc::new(arrow::datatypes::Field::new(
                 "fixed_binary_field",
                 DataType::FixedSizeBinary(16),
-                true,
+                /*nullable=*/ true,
             )),
         ];
 
-        let mut builder =
-            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 1, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Struct(struct_fields.clone().into()),
+            /*capacity=*/ 1,
+            /*is_list=*/ false,
+        );
 
         // Add struct with all types
         builder
@@ -1057,12 +1102,20 @@ mod tests {
 
         // Test List<Struct> type
         let struct_fields = vec![
-            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
-            Arc::new(arrow::datatypes::Field::new("name", DataType::Utf8, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "id",
+                DataType::Int32,
+                /*nullable=*/ true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                "name",
+                DataType::Utf8,
+                /*nullable=*/ true,
+            )),
             Arc::new(arrow::datatypes::Field::new(
                 "active",
                 DataType::Boolean,
-                true,
+                /*nullable=*/ true,
             )),
         ];
 
@@ -1070,10 +1123,10 @@ mod tests {
             &DataType::List(Arc::new(arrow::datatypes::Field::new(
                 "item",
                 DataType::Struct(struct_fields.clone().into()),
-                true,
+                /*nullable=*/ true,
             ))),
-            2,
-            true,
+            /*capacity=*/ 2,
+            /*is_list=*/ true,
         );
 
         // Add a list of structs
@@ -1105,7 +1158,7 @@ mod tests {
         let array = builder.finish(&DataType::List(Arc::new(arrow::datatypes::Field::new(
             "item",
             DataType::Struct(struct_fields.into()),
-            true,
+            /*nullable=*/ true,
         ))));
 
         assert_eq!(array.len(), 2);
@@ -1188,8 +1241,11 @@ mod tests {
         // Test struct with no fields (empty struct)
         let struct_fields: Fields = Vec::<Arc<arrow::datatypes::Field>>::new().into();
 
-        let mut builder =
-            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone()), 3, false);
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Struct(struct_fields.clone()),
+            /*capacity=*/ 3,
+            /*is_list=*/ false,
+        );
 
         // Add empty structs
         builder.append_value(&RowValue::Struct(vec![])).unwrap();
