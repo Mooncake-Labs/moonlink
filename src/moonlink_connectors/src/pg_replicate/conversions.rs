@@ -31,6 +31,7 @@ pub enum Cell {
     Json(serde_json::Value),
     Bytes(Vec<u8>),
     Array(ArrayCell),
+    Composite(Vec<Cell>),
 }
 
 #[derive(Debug, Clone)]
@@ -52,4 +53,5 @@ pub enum ArrayCell {
     Uuid(Vec<Option<Uuid>>),
     Json(Vec<Option<serde_json::Value>>),
     Bytes(Vec<Option<Vec<u8>>>),
+    Composite(Vec<Option<Vec<Cell>>>),
 }
