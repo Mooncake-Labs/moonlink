@@ -304,6 +304,22 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
+        ArrayCell::Composite(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|cells| {
+                    let struct_values: Vec<RowValue> = cells
+                        .into_iter()
+                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
+                        .map(|row: MoonlinkRow| {
+                            row.values.into_iter().next().unwrap_or(RowValue::Null)
+                        })
+                        .collect();
+                    RowValue::Struct(struct_values)
+                })
+                .unwrap_or(RowValue::Null)
+            })
+            .collect(),
     }
 }
 
@@ -361,6 +377,16 @@ impl From<PostgresTableRow> for MoonlinkRow {
                 }
                 Cell::Array(value) => {
                     values.push(RowValue::Array(convert_array_cell(value)));
+                }
+                Cell::Composite(composite_values) => {
+                    let struct_values: Vec<RowValue> = composite_values
+                        .into_iter()
+                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
+                        .map(|row: MoonlinkRow| {
+                            row.values.into_iter().next().unwrap_or(RowValue::Null)
+                        })
+                        .collect();
+                    values.push(RowValue::Struct(struct_values));
                 }
                 Cell::Numeric(value) => {
                     match value {
@@ -766,6 +792,130 @@ mod tests {
         } else {
             panic!("Expected fixed length byte array");
         };
+    }
+
+    #[test]
+    fn test_postgres_composite_to_moonlink_row() {
+        // Test nested composite and array field in composite
+        let postgres_table_row = PostgresTableRow(TableRow {
+            values: vec![
+                Cell::I32(1),
+                Cell::Composite(vec![
+                    Cell::I32(100),
+                    Cell::Array(ArrayCell::String(vec![
+                        Some("tag1".to_string()),
+                        Some("tag2".to_string()),
+                    ])),
+                    Cell::Composite(vec![
+                        Cell::F32(3.5),
+                        Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), None])),
+                    ]),
+                ]),
+            ],
+        });
+
+        let moonlink_row: MoonlinkRow = postgres_table_row.into();
+        assert_eq!(moonlink_row.values.len(), 2);
+        assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
+
+        // Check the outer composite/struct field
+        match &moonlink_row.values[1] {
+            RowValue::Struct(outer_fields) => {
+                assert_eq!(outer_fields.len(), 3);
+                assert_eq!(outer_fields[0], RowValue::Int32(100));
+
+                // Check array within struct
+                match &outer_fields[1] {
+                    RowValue::Array(tags) => {
+                        assert_eq!(tags.len(), 2);
+                        assert_eq!(tags[0], RowValue::ByteArray("tag1".as_bytes().to_vec()));
+                        assert_eq!(tags[1], RowValue::ByteArray("tag2".as_bytes().to_vec()));
+                    }
+                    _ => panic!("Expected array in struct"),
+                }
+
+                // Check nested struct within struct
+                match &outer_fields[2] {
+                    RowValue::Struct(inner_fields) => {
+                        assert_eq!(inner_fields.len(), 2);
+                        assert_eq!(inner_fields[0], RowValue::Float32(3.5));
+
+                        // Check array within nested struct
+                        match &inner_fields[1] {
+                            RowValue::Array(scores) => {
+                                assert_eq!(scores.len(), 3);
+                                assert_eq!(scores[0], RowValue::Int32(10));
+                                assert_eq!(scores[1], RowValue::Int32(20));
+                                assert_eq!(scores[2], RowValue::Null);
+                            }
+                            _ => panic!("Expected array in nested struct"),
+                        }
+                    }
+                    _ => panic!("Expected nested struct"),
+                }
+            }
+            _ => panic!("Expected struct"),
+        }
+    }
+
+    #[test]
+    fn test_postgres_array_of_composites_to_moonlink_row() {
+        // Test array of composite types
+        let postgres_table_row = PostgresTableRow(TableRow {
+            values: vec![
+                Cell::I32(1),
+                Cell::Array(ArrayCell::Composite(vec![
+                    Some(vec![
+                        Cell::I32(100),
+                        Cell::String("alice".to_string()),
+                        Cell::Bool(true),
+                    ]),
+                    None, // null composite
+                    Some(vec![
+                        Cell::I32(200),
+                        Cell::String("bob".to_string()),
+                        Cell::Bool(false),
+                    ]),
+                ])),
+            ],
+        });
+
+        let moonlink_row: MoonlinkRow = postgres_table_row.into();
+        assert_eq!(moonlink_row.values.len(), 2);
+        assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
+
+        // Check the array of composites
+        match &moonlink_row.values[1] {
+            RowValue::Array(structs) => {
+                assert_eq!(structs.len(), 3);
+
+                // First struct
+                match &structs[0] {
+                    RowValue::Struct(fields) => {
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[0], RowValue::Int32(100));
+                        assert_eq!(fields[1], RowValue::ByteArray("alice".as_bytes().to_vec()));
+                        assert_eq!(fields[2], RowValue::Bool(true));
+                    }
+                    _ => panic!("Expected struct in array"),
+                }
+
+                // Second is null
+                assert_eq!(structs[1], RowValue::Null);
+
+                // Third struct
+                match &structs[2] {
+                    RowValue::Struct(fields) => {
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[0], RowValue::Int32(200));
+                        assert_eq!(fields[1], RowValue::ByteArray("bob".as_bytes().to_vec()));
+                        assert_eq!(fields[2], RowValue::Bool(false));
+                    }
+                    _ => panic!("Expected struct in array"),
+                }
+            }
+            _ => panic!("Expected array"),
+        }
     }
 
     #[test]
