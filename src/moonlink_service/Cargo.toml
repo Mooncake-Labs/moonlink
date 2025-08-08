@@ -4,20 +4,27 @@ version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 
+[features]
+default = []
+rest_api_demo = ["dep:reqwest"]
+
 [dependencies]
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.7"
 clap = { workspace = true }
-hyper = { features = ["full"], version = "1.0" }
 moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 moonlink_rpc = { path = "../moonlink_rpc" }
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
-tracing = "0.1"
+tracing = { workspace = true }
+
+[[example]]
+name = "rest_api_demo"
+required-features = ["rest_api_demo"]

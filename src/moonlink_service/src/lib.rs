@@ -1,6 +1,6 @@
 mod error;
-pub mod rest_api;
-pub mod rpc_server;
+mod rest_api;
+mod rpc_server;
 
 pub use error::Result;
 use moonlink_backend::MoonlinkBackend;

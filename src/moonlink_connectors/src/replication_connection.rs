@@ -13,10 +13,40 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum SourceType {
-    Postgres,
-    RestApi,
+    Postgres(PostgresConnection),
+    RestApi(RestApiConnection),
+}
+
+impl SourceType {
+    async fn spawn_task(&mut self) -> JoinHandle<Result<()>> {
+        match self {
+            SourceType::Postgres(conn) => conn.spawn_replication_task().await,
+            SourceType::RestApi(conn) => conn.spawn_rest_task().await,
+        }
+    }
+
+    async fn shutdown_task(&mut self) -> Result<()> {
+        match self {
+            SourceType::Postgres(conn) => conn.shutdown_replication().await,
+            SourceType::RestApi(conn) => conn.shutdown_replication().await,
+        }
+    }
+
+    async fn drop_table(&mut self, src_table_id: u32, table_name: &str) -> Result<()> {
+        match self {
+            SourceType::Postgres(conn) => conn.drop_table(src_table_id, table_name).await,
+            SourceType::RestApi(conn) => conn.drop_table(src_table_id, table_name).await,
+        }
+    }
+
+    async fn finalize(&mut self) -> Result<()> {
+        match self {
+            SourceType::Postgres(conn) => conn.shutdown().await,
+            SourceType::RestApi(_) => Ok(()),
+        }
+    }
 }
 
 struct TableState {
@@ -28,11 +58,9 @@ struct TableState {
 
 /// Manages replication for table(s) within a database from various sources (PostgreSQL CDC, REST API, etc.).
 pub struct ReplicationConnection {
-    source_type: SourceType,
     table_base_path: String,
     // Source-specific connections
-    postgres_connection: Option<PostgresConnection>,
-    rest_connection: Option<RestApiConnection>,
+    source: SourceType,
     // Common fields
     handle: Option<JoinHandle<Result<()>>>,
     table_states: HashMap<SrcTableId, TableState>,
@@ -47,37 +75,20 @@ impl ReplicationConnection {
         table_base_path: String,
         object_storage_cache: ObjectStorageCache,
     ) -> Result<Self> {
-        let source_type = if uri.starts_with("rest://") {
-            SourceType::RestApi
+        let source = if uri.starts_with("rest://") {
+            SourceType::RestApi(RestApiConnection::new().await?)
         } else {
-            SourceType::Postgres
-        };
-
-        let (postgres_connection, rest_connection) = match source_type {
-            SourceType::Postgres => {
-                let postgres_conn = PostgresConnection::new(uri.clone()).await?;
-                (Some(postgres_conn), None)
-            }
-            SourceType::RestApi => {
-                let rest_conn = RestApiConnection::new().await?;
-                (None, Some(rest_conn))
-            }
+            SourceType::Postgres(PostgresConnection::new(uri).await?)
         };
 
         Ok(Self {
-            source_type,
-            postgres_connection,
-            rest_connection,
+            source,
             table_base_path,
             object_storage_cache,
             table_states: HashMap::new(),
             replication_started: false,
             handle: None,
         })
-    }
-
-    pub fn source_type(&self) -> &SourceType {
-        &self.source_type
     }
 
     /// Check if replication has started.
@@ -87,10 +98,12 @@ impl ReplicationConnection {
 
     /// Get the REST request sender for submitting REST API requests
     pub fn get_rest_request_sender(&self) -> mpsc::Sender<EventRequest> {
-        self.rest_connection
-            .as_ref()
-            .expect("REST connection not available")
-            .get_rest_request_sender()
+        match &self.source {
+            SourceType::Postgres(_) => {
+                panic!("rest request sender not available for postgres source")
+            }
+            SourceType::RestApi(conn) => conn.get_rest_request_sender(),
+        }
     }
 
     pub fn get_table_reader(&self, src_table_id: SrcTableId) -> &ReadStateManager {
@@ -126,22 +139,7 @@ impl ReplicationConnection {
 
         debug!("starting replication");
 
-        let handle = match self.source_type {
-            SourceType::Postgres => {
-                self.postgres_connection
-                    .as_mut()
-                    .unwrap()
-                    .spawn_replication_task()
-                    .await
-            }
-            SourceType::RestApi => {
-                self.rest_connection
-                    .as_mut()
-                    .unwrap()
-                    .spawn_rest_task()
-                    .await
-            }
-        };
+        let handle = self.source.spawn_task().await;
         self.replication_started = true;
 
         self.handle = Some(handle);
@@ -158,14 +156,11 @@ impl ReplicationConnection {
         moonlink_table_config: MoonlinkTableConfig,
         is_recovery: bool,
     ) -> Result<SrcTableId> {
-        match self.source_type {
-            SourceType::Postgres => {
+        match &mut self.source {
+            SourceType::Postgres(conn) => {
                 debug!(table_name, "adding PostgreSQL table for replication");
 
-                let (src_table_id, table_resources) = self
-                    .postgres_connection
-                    .as_mut()
-                    .unwrap()
+                let (src_table_id, table_resources) = conn
                     .add_table(
                         table_name,
                         mooncake_table_id,
@@ -188,7 +183,7 @@ impl ReplicationConnection {
                 debug!(src_table_id, "PostgreSQL table added for replication");
                 Ok(src_table_id)
             }
-            SourceType::RestApi => {
+            SourceType::RestApi(_) => {
                 panic!("Cannot add replication table to REST API connection")
             }
         }
@@ -205,15 +200,11 @@ impl ReplicationConnection {
         moonlink_table_config: MoonlinkTableConfig,
         _is_recovery: bool,
     ) -> Result<SrcTableId> {
-        match self.source_type {
-            SourceType::RestApi => {
+        match &mut self.source {
+            SourceType::RestApi(conn) => {
                 debug!(table_name, "adding REST API table");
 
-                let rest_connection = self
-                    .rest_connection
-                    .as_mut()
-                    .expect("REST connection not available");
-                let src_table_id = rest_connection.next_src_table_id();
+                let src_table_id = conn.next_src_table_id();
 
                 // Create MooncakeTable resources using the table init function
                 let mut table_resources = build_table_components(
@@ -232,26 +223,25 @@ impl ReplicationConnection {
                 .await?;
 
                 // Add table to RestSource and connect to RestSink
-                rest_connection
-                    .add_table(
-                        table_name.to_string(),
-                        src_table_id,
-                        std::sync::Arc::new(arrow_schema),
-                        table_resources.event_sender.clone(),
-                        table_resources
-                            .commit_lsn_tx
-                            .take()
-                            .expect("commit_lsn_tx not set"),
-                        table_resources
-                            .flush_lsn_rx
-                            .take()
-                            .expect("flush_lsn_rx not set"),
-                        table_resources
-                            .wal_flush_lsn_rx
-                            .take()
-                            .expect("wal_flush_lsn_rx not set"),
-                    )
-                    .await?;
+                conn.add_table(
+                    table_name.to_string(),
+                    src_table_id,
+                    std::sync::Arc::new(arrow_schema),
+                    table_resources.event_sender.clone(),
+                    table_resources
+                        .commit_lsn_tx
+                        .take()
+                        .expect("commit_lsn_tx not set"),
+                    table_resources
+                        .flush_lsn_rx
+                        .take()
+                        .expect("flush_lsn_rx not set"),
+                    table_resources
+                        .wal_flush_lsn_rx
+                        .take()
+                        .expect("wal_flush_lsn_rx not set"),
+                )
+                .await?;
 
                 // Store table state
                 let table_state = TableState {
@@ -268,7 +258,7 @@ impl ReplicationConnection {
                 );
                 Ok(src_table_id)
             }
-            SourceType::Postgres => {
+            SourceType::Postgres(_) => {
                 panic!("Cannot add API table to PostgreSQL connection")
             }
         }
@@ -293,22 +283,7 @@ impl ReplicationConnection {
         event_manager.drop_table().await?;
 
         // Drop from the appropriate source
-        match self.source_type {
-            SourceType::Postgres => {
-                self.postgres_connection
-                    .as_mut()
-                    .unwrap()
-                    .drop_table(src_table_id, table_name)
-                    .await?;
-            }
-            SourceType::RestApi => {
-                self.rest_connection
-                    .as_mut()
-                    .unwrap()
-                    .drop_table(src_table_id, table_name)
-                    .await?;
-            }
-        }
+        self.source.drop_table(src_table_id, table_name).await?;
 
         debug!(src_table_id, "table dropped");
         Ok(())
@@ -318,22 +293,7 @@ impl ReplicationConnection {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
-                match self.source_type {
-                    SourceType::Postgres => {
-                        self.postgres_connection
-                            .as_mut()
-                            .unwrap()
-                            .shutdown_replication()
-                            .await?;
-                    }
-                    SourceType::RestApi => {
-                        self.rest_connection
-                            .as_mut()
-                            .unwrap()
-                            .shutdown_replication()
-                            .await?;
-                    }
-                }
+                self.source.shutdown_task().await?;
                 if let Some(handle) = self.handle.take() {
                     if let Err(e) = handle.await {
                         warn!(error = ?e, "task join error during shutdown");
@@ -341,16 +301,9 @@ impl ReplicationConnection {
                 }
                 self.replication_started = false;
             }
-            match self.source_type {
-                SourceType::Postgres => {
-                    self.postgres_connection
-                        .as_mut()
-                        .unwrap()
-                        .shutdown()
-                        .await?;
-                }
-                SourceType::RestApi => {}
-            }
+
+            // Finalize the source connection
+            self.source.finalize().await?;
 
             debug!("replication connection shutdown complete");
             Ok(())
@@ -381,9 +334,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(*connection.source_type(), SourceType::RestApi);
-        assert!(connection.postgres_connection.is_none());
-        assert!(connection.rest_connection.is_some());
+        assert!(matches!(connection.source, SourceType::RestApi(_)));
         let _ = connection.get_rest_request_sender();
         connection.start_replication().await.unwrap();
         assert!(connection.replication_started());

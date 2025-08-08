@@ -2887,7 +2887,6 @@ dependencies = [
  "arrow-schema",
  "axum 0.7.9",
  "clap",
- "hyper 1.6.0",
  "moonlink",
  "moonlink_backend",
  "moonlink_metadata_store",

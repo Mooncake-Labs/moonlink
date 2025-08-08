@@ -71,13 +71,19 @@ impl RestSource {
     }
 
     pub fn add_table(&mut self, table_name: String, src_table_id: SrcTableId, schema: Arc<Schema>) {
-        self.table_schemas.insert(table_name.clone(), schema);
-        self.table_name_to_src_id.insert(table_name, src_table_id);
+        assert!(self
+            .table_schemas
+            .insert(table_name.clone(), schema)
+            .is_none());
+        assert!(self
+            .table_name_to_src_id
+            .insert(table_name, src_table_id)
+            .is_none());
     }
 
     pub fn remove_table(&mut self, table_name: &str) {
-        self.table_schemas.remove(table_name);
-        self.table_name_to_src_id.remove(table_name);
+        assert!(self.table_schemas.remove(table_name).is_some());
+        assert!(self.table_name_to_src_id.remove(table_name).is_some());
     }
 
     pub fn process_request(
