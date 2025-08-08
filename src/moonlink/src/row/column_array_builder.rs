@@ -116,21 +116,30 @@ impl ColumnArrayBuilder {
             match value {
                 RowValue::Bool(v) => bool_builder.append_value(*v),
                 RowValue::Null => bool_builder.append_null(),
-                _ => unreachable!("Bool expected from well-typed input"),
+                _ => unreachable!(
+                    "Bool expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(int32_builder) = builder.field_builder::<PrimitiveBuilder<Int32Type>>(i)
         {
             match value {
                 RowValue::Int32(v) => int32_builder.append_value(*v),
                 RowValue::Null => int32_builder.append_null(),
-                _ => unreachable!("Int32 expected from well-typed input"),
+                _ => unreachable!(
+                    "Int32 expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(int64_builder) = builder.field_builder::<PrimitiveBuilder<Int64Type>>(i)
         {
             match value {
                 RowValue::Int64(v) => int64_builder.append_value(*v),
                 RowValue::Null => int64_builder.append_null(),
-                _ => unreachable!("Int64 expected from well-typed input"),
+                _ => unreachable!(
+                    "Int64 expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(float32_builder) =
             builder.field_builder::<PrimitiveBuilder<Float32Type>>(i)
@@ -138,7 +147,10 @@ impl ColumnArrayBuilder {
             match value {
                 RowValue::Float32(v) => float32_builder.append_value(*v),
                 RowValue::Null => float32_builder.append_null(),
-                _ => unreachable!("Float32 expected from well-typed input"),
+                _ => unreachable!(
+                    "Float32 expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(float64_builder) =
             builder.field_builder::<PrimitiveBuilder<Float64Type>>(i)
@@ -146,7 +158,10 @@ impl ColumnArrayBuilder {
             match value {
                 RowValue::Float64(v) => float64_builder.append_value(*v),
                 RowValue::Null => float64_builder.append_null(),
-                _ => unreachable!("Float64 expected from well-typed input"),
+                _ => unreachable!(
+                    "Float64 expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(decimal_builder) =
             builder.field_builder::<PrimitiveBuilder<Decimal128Type>>(i)
@@ -154,7 +169,10 @@ impl ColumnArrayBuilder {
             match value {
                 RowValue::Decimal(v) => decimal_builder.append_value(*v),
                 RowValue::Null => decimal_builder.append_null(),
-                _ => unreachable!("Decimal128 expected from well-typed input"),
+                _ => unreachable!(
+                    "Decimal128 expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(string_builder) = builder.field_builder::<StringBuilder>(i) {
             match value {
@@ -162,19 +180,28 @@ impl ColumnArrayBuilder {
                     string_builder.append_value(unsafe { std::str::from_utf8_unchecked(v) })
                 }
                 RowValue::Null => string_builder.append_null(),
-                _ => unreachable!("String expected from well-typed input"),
-            }
-        } else if let Some(binary_builder) = builder.field_builder::<BinaryBuilder>(i) {
-            match value {
-                RowValue::ByteArray(v) => binary_builder.append_value(v),
-                RowValue::Null => binary_builder.append_null(),
-                _ => unreachable!("Binary expected from well-typed input"),
+                _ => unreachable!(
+                    "ByteArray expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else if let Some(fixed_builder) = builder.field_builder::<FixedSizeBinaryBuilder>(i) {
             match value {
                 RowValue::FixedLenByteArray(v) => fixed_builder.append_value(v)?,
                 RowValue::Null => fixed_builder.append_null(),
-                _ => unreachable!("FixedSizeBinary expected from well-typed input"),
+                _ => unreachable!(
+                    "FixedLenByteArray expected from well-typed input, but get {:?}",
+                    value
+                ),
+            }
+        } else if let Some(binary_builder) = builder.field_builder::<BinaryBuilder>(i) {
+            match value {
+                RowValue::ByteArray(v) => binary_builder.append_value(v),
+                RowValue::Null => binary_builder.append_null(),
+                _ => unreachable!(
+                    "ByteArray expected from well-typed input, but get {:?}",
+                    value
+                ),
             }
         } else {
             // TODO: handle nested struct and list
@@ -479,7 +506,10 @@ impl ColumnArrayBuilder {
                                     }
                                     builder.append(false);
                                 }
-                                _ => unreachable!("Struct expected from well-typed input"),
+                                _ => unreachable!(
+                                    "Struct expected from well-typed input, but get {:?}",
+                                    item
+                                ),
                             }
                         }
                     }
@@ -493,7 +523,10 @@ impl ColumnArrayBuilder {
                             builder.append(false);
                         }
                     }
-                    _ => unreachable!("Struct expected from well-typed input"),
+                    _ => unreachable!(
+                        "Struct expected from well-typed input, but get {:?}",
+                        value
+                    ),
                 };
                 Ok(())
             }
