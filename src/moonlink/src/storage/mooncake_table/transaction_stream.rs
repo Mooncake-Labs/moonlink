@@ -372,8 +372,12 @@ impl MooncakeTable {
                 disk_slice.writer_lsn = Some(commit_lsn);
             }
 
+            let should_remove = stream_state.ongoing_flush_count == 0;
+            let _ = stream_state;
+
+            self.try_set_next_flush_lsn(commit_lsn);
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
-            if stream_state.ongoing_flush_count == 0 {
+            if should_remove {
                 self.transaction_stream_states.remove(&xact_id);
             }
             return;
