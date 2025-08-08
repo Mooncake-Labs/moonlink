@@ -54,7 +54,7 @@ impl ErrorStruct {
     ///
     /// Panics if the source error has already been set.
     pub fn with_source(mut self, src: impl Into<anyhow::Error>) -> Self {
-        debug_assert!(self.source.is_none(), "the source error has been set");
+        assert!(self.source.is_none(), "the source error has been set");
         self.source = Some(Arc::new(src.into()));
         self
     }
