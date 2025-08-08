@@ -419,7 +419,16 @@ impl MooncakeTable {
 
         // Remap local in mem deletions to disk deletions
         for deletion in stream_state.local_deletions.iter_mut() {
-            disk_slice.remap_deletion_if_needed(deletion);
+            if let Some(RecordLocation::DiskFile(file_id, row_idx)) =
+                disk_slice.remap_deletion_if_needed(deletion)
+            {
+                for (file, disk_file_entry) in stream_state.flushed_files.iter_mut() {
+                    if file.file_id() == file_id {
+                        assert!(disk_file_entry.batch_deletion_vector.delete_row(row_idx));
+                        break;
+                    }
+                }
+            }
         }
     }
 
