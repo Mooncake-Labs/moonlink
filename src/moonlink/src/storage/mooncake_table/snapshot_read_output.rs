@@ -92,7 +92,7 @@ impl ReadOutput {
                             .unwrap()
                             .send(TableEvent::EvictedFilesToDelete {
                                 evicted_files: EvictedFiles {
-                                    files: files_to_delete,
+                                    files: files_to_delete.to_vec(),
                                 },
                             })
                             .await

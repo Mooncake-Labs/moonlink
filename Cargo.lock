@@ -2731,6 +2731,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",

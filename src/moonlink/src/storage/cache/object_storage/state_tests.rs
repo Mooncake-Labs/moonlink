@@ -36,6 +36,7 @@ use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCa
 use crate::storage::cache::object_storage::test_utils::*;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 
+use smallvec::SmallVec;
 use tempfile::tempdir;
 
 // (1) + create mooncake snapshot => (2)
@@ -321,7 +322,7 @@ async fn test_cache_2_new_entry_with_insufficient_space() {
     )
     .await;
     let cache_file_1 = cache_handle_1.cache_entry.cache_filepath.clone();
-    assert_eq!(files_to_evict, vec![cache_file_1]);
+    assert_eq!(files_to_evict, SmallVec::from([cache_file_1]));
 
     // Check cache status.
     assert_cache_bytes_size(&mut cache, /*expected_bytes=*/ CONTENT.len() as u64).await;
@@ -472,7 +473,10 @@ async fn test_cache_2_requested_to_delete_4() {
 
     // Unreference and delete cache handle, so requested cache handle is not referenced.
     let evicted_files = cache_handle.unreference_and_delete().await;
-    assert_eq!(evicted_files, vec![test_file.to_str().unwrap().to_string()]);
+    assert_eq!(
+        evicted_files,
+        SmallVec::from([test_file.to_str().unwrap().to_string()])
+    );
 
     // Check cache status.
     assert_cache_bytes_size(&mut cache, /*expected_bytes=*/ 0).await;

@@ -12,6 +12,7 @@ use crate::Result;
 
 use lru::LruCache;
 use more_asserts as ma;
+use smallvec::SmallVec;
 #[cfg(test)]
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -118,7 +119,7 @@ impl ObjectStorageCacheInternal {
         &mut self,
         file_id: TableUniqueFileId,
         panic_if_non_existent: bool,
-    ) -> Vec<String> {
+    ) -> SmallVec<[String; 1]> {
         let mut evicted_files_to_delete = vec![];
 
         // If the requested entries are already evictable, remove it directly.
@@ -140,7 +141,7 @@ impl ObjectStorageCacheInternal {
             }
         }
 
-        evicted_files_to_delete
+        evicted_files_to_delete.into()
     }
 
     /// Unreference the given cache entry.
@@ -388,7 +389,7 @@ impl CacheTrait for ObjectStorageCache {
         &mut self,
         file_id: TableUniqueFileId,
         cache_entry: CacheEntry,
-    ) -> (NonEvictableHandle, Vec<String>) {
+    ) -> (NonEvictableHandle, SmallVec<[String; 1]>) {
         let cache_entry_wrapper = CacheEntryWrapper {
             cache_entry: cache_entry.clone(),
             reference_count: 1,
@@ -409,7 +410,7 @@ impl CacheTrait for ObjectStorageCache {
                 /*tolerate_insufficiency=*/ false,
             )
             .1;
-        (non_evictable_handle, cache_files_to_delete)
+        (non_evictable_handle, cache_files_to_delete.into())
     }
 
     async fn get_cache_entry(
@@ -419,7 +420,7 @@ impl CacheTrait for ObjectStorageCache {
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> Result<(
         Option<NonEvictableHandle>,
-        Vec<String>, /*files_to_delete*/
+        SmallVec<[String; 1]>, /*files_to_delete*/
     )> {
         {
             let mut guard = self.cache.write().await;
@@ -432,7 +433,10 @@ impl CacheTrait for ObjectStorageCache {
                 let cache_entry = value.cache_entry.clone();
                 let non_evictable_handle =
                     NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
-                return Ok((Some(non_evictable_handle), /*files_to_delete=*/ vec![]));
+                return Ok((
+                    Some(non_evictable_handle),
+                    /*files_to_delete=*/ vec![].into(),
+                ));
             }
 
             // Check evictable cache.
@@ -452,7 +456,10 @@ impl CacheTrait for ObjectStorageCache {
                 assert!(files_to_delete.is_empty());
                 let non_evictable_handle =
                     NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
-                return Ok((Some(non_evictable_handle), /*files_to_delete=*/ vec![]));
+                return Ok((
+                    Some(non_evictable_handle),
+                    /*files_to_delete=*/ vec![].into(),
+                ));
             }
         }
 
@@ -478,18 +485,21 @@ impl CacheTrait for ObjectStorageCache {
                 /*tolerate_insufficiency=*/ true,
             );
             if cache_succ {
-                return Ok((Some(non_evictable_handle), files_to_delete));
+                return Ok((Some(non_evictable_handle), files_to_delete.into()));
             }
 
             // Otherwise, it means cache entry failed to insert.
             ma::assert_ge!(guard.cur_bytes, file_size);
             guard.cur_bytes -= file_size;
 
-            Ok((None, files_to_delete))
+            Ok((None, files_to_delete.into()))
         }
     }
 
-    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId) -> Vec<String> {
+    async fn try_delete_cache_entry(
+        &mut self,
+        file_id: TableUniqueFileId,
+    ) -> SmallVec<[String; 1]> {
         let mut guard = self.cache.write().await;
         guard.delete_cache_entry(file_id, /*panic_if_non_existent=*/ false)
     }

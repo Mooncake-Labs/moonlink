@@ -9,6 +9,7 @@ use crate::storage::cache::object_storage::cache_handle::NonEvictableHandle;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::Result;
+use smallvec::SmallVec;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileMetadata {
@@ -34,12 +35,13 @@ pub trait CacheTrait {
         &mut self,
         file_id: TableUniqueFileId,
         cache_entry: CacheEntry,
-    ) -> (NonEvictableHandle, Vec<String>);
+    ) -> (NonEvictableHandle, SmallVec<[String; 1]>);
 
     /// Similar to [`delete_cache_entry`], but doesn't panic if requested entry doesn't exist.
     #[must_use]
     #[allow(async_fn_in_trait)]
-    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId) -> Vec<String>;
+    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId)
+        -> SmallVec<[String; 1]>;
 
     /// Attempt to get a pinned cache file entry.
     ///
@@ -55,6 +57,6 @@ pub trait CacheTrait {
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> Result<(
         Option<NonEvictableHandle>,
-        Vec<String>, /*files_to_delete*/
+        SmallVec<[String; 1]>, /*files_to_delete*/
     )>;
 }
