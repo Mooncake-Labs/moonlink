@@ -46,13 +46,14 @@ impl TableHandler {
         event_sync_sender: EventSyncSender,
         mut table_handler_timer: TableHandlerTimer,
         replication_lsn_rx: watch::Receiver<u64>,
+        event_completion_tx: Sender<TableEvent>,
         event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
     ) -> Self {
         // Create channel for events
         let (event_sender, event_receiver) = mpsc::channel(100);
 
         // Create channel for internal control events.
-        table.register_table_notify(event_sender.clone()).await;
+        table.register_table_notify(event_completion_tx).await;
 
         // Spawn the task to notify periodical events.
         let table_handler_event_sender = event_sender.clone();

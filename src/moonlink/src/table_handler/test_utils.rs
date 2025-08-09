@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::{mpsc, watch};
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Creates a `MoonlinkRow` for testing purposes.
 pub fn create_row(id: i32, name: &str, age: i32) -> MoonlinkRow {
@@ -118,18 +118,30 @@ impl TestEnvironment {
             default_wal_config.get_accessor_config().clone(),
         ));
         let table_handler_timer = create_table_handler_timers();
+        let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
 
         let handler = TableHandler::new(
             mooncake_table,
             table_event_sync_sender,
             table_handler_timer,
             replication_rx.clone(),
+            event_completion_tx,
             /*event_replay_tx=*/ None,
         )
         .await;
         let table_event_manager =
             TableEventManager::new(handler.get_event_sender(), table_event_sync_receiver);
         let event_sender = handler.get_event_sender();
+        let event_sender_clone = event_sender.clone();
+
+        // Spawn a background task to transmit completed events to table handler.
+        tokio::task::spawn(async move {
+            while let Some(event) = event_completion_rx.recv().await {
+                if let Err(err) = event_sender_clone.send(event).await {
+                    error!("Failed to send event to the table handler: {:?}", err);
+                }
+            }
+        });
 
         Self {
             handler,

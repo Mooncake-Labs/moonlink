@@ -16,6 +16,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, mpsc::Sender, oneshot, watch};
+use tracing::error;
 
 /// Components required to create a mooncake table.
 pub struct TableComponents {
@@ -119,11 +120,14 @@ pub async fn build_table_components(
     );
     let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
     let table_handler_timers = create_table_handler_timers();
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+
     let table_handler = TableHandler::new(
         table,
         event_sync_sender,
         table_handler_timers,
         replication_state.subscribe(),
+        event_completion_tx,
         /*event_replay_tx=*/ None,
     )
     .await;
@@ -132,6 +136,16 @@ pub async fn build_table_components(
     let table_event_manager =
         TableEventManager::new(table_handler.get_event_sender(), event_sync_receiver);
     let event_sender = table_handler.get_event_sender();
+    let event_sender_clone = event_sender.clone();
+
+    // Spawn a background task to transmit completed events to table handler.
+    tokio::task::spawn(async move {
+        while let Some(event) = event_completion_rx.recv().await {
+            if let Err(err) = event_sender_clone.send(event).await {
+                error!("Failed to send event to the table handler: {:?}", err);
+            }
+        }
+    });
 
     let table_resource = TableResources {
         event_sender,

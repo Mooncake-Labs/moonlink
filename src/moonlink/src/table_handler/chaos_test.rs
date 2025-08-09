@@ -40,7 +40,7 @@ use tokio::sync::watch;
 const NON_UPDATE_COMMAND_INTERVAL_LSN: u64 = 5;
 
 /// Parsed chaos test arguments for convenience
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ChaosTestArgs {
     seed: u64,
     print_events_on_success: bool,
@@ -153,6 +153,9 @@ enum EventKind {
     /// Foreground force table maintenance only happens after commit operation, otherwise it gets blocked.
     ForegroundForceIndexMerge,
     ForegroundForceDataCompaction,
+    /// Completed events should be considered.
+    /// [idx] is the index of completed event in [ChaosState]'s [`completed_events`].
+    CompletedEvent(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -195,8 +198,8 @@ struct ChaosState {
     last_commit_lsn: Option<u64>,
     /// Whether the last finished transaction committed successfully, or not.
     last_txn_is_committed: bool,
-    /// Parsed chaos test arguments.
-    _args: ChaosTestArgs,
+    /// Completed events, which could be scheduled to the table handler.
+    completed_events: Vec<TableEvent>,
 }
 
 impl ChaosState {
@@ -218,7 +221,7 @@ impl ChaosState {
             cur_xact_id: 0,
             last_commit_lsn: None,
             last_txn_is_committed: false,
-            _args: args,
+            completed_events: vec![],
         }
     }
 
@@ -409,8 +412,13 @@ impl ChaosState {
         }
     }
 
+    fn add_completion_events(&mut self, completed_events: Vec<TableEvent>) {
+        self.completed_events.extend(completed_events);
+    }
+
     fn generate_random_events(&mut self) -> ChaosEvent {
         let mut choices = vec![];
+        choices.extend((0..self.completed_events.len()).map(EventKind::CompletedEvent));
 
         self.try_push_read_snapshot_cmd(&mut choices);
         self.try_push_table_maintenance_cmd(&mut choices);
@@ -512,6 +520,10 @@ impl ChaosState {
                     is_recovery: false,
                 }])
             }
+            EventKind::CompletedEvent(idx) => {
+                let cur_event = self.completed_events.remove(idx);
+                ChaosEvent::create_table_events(vec![cur_event])
+            }
         }
     }
 }
@@ -552,6 +564,7 @@ struct TestEnvironment {
     table_event_manager: TableEventManager,
     table_handler: TableHandler,
     event_sender: mpsc::Sender<TableEvent>,
+    event_completion_rx: mpsc::Receiver<TableEvent>,
     event_replay_rx: mpsc::UnboundedReceiver<TableEvent>,
     wal_flush_lsn_rx: watch::Receiver<u64>,
     last_commit_lsn_tx: watch::Sender<u64>,
@@ -615,12 +628,14 @@ impl TestEnvironment {
             read_state_filepath_remap,
         );
         let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
+        let (event_completion_tx, event_completion_rx) = mpsc::channel(100);
         let (event_replay_tx, event_replay_rx) = mpsc::unbounded_channel();
         let table_handler = TableHandler::new(
             table,
             table_event_sync_sender,
             create_table_handler_timers(),
             replication_lsn_rx.clone(),
+            event_completion_tx,
             Some(event_replay_tx),
         )
         .await;
@@ -638,6 +653,7 @@ impl TestEnvironment {
             read_state_manager,
             table_handler,
             event_sender,
+            event_completion_rx,
             event_replay_rx,
             wal_flush_lsn_rx,
             replication_lsn_tx,
@@ -695,6 +711,7 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
     let mut table_event_manager = env.table_event_manager;
     let last_commit_lsn_tx = env.last_commit_lsn_tx.clone();
     let replication_lsn_tx = env.replication_lsn_tx.clone();
+    let mut event_completion_rx = env.event_completion_rx;
 
     // Fields used to recreate a new mooncake table.
     let mooncake_table_metadata = env.mooncake_table_metadata.clone();
@@ -766,6 +783,15 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
                     state.get_valid_ids(),
                 )
                 .await;
+            }
+
+            // After each round of event iteration, try fetch completion event from channel, and add into ready event queue.
+            let event_size = event_completion_rx.len();
+            if event_size > 0 {
+                let mut buffer = Vec::with_capacity(event_size);
+                event_completion_rx.recv_many(&mut buffer, event_size).await;
+                assert_eq!(buffer.len(), event_size);
+                state.add_completion_events(buffer);
             }
         }
 
