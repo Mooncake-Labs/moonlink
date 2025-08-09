@@ -54,6 +54,34 @@ impl JsonToMoonlinkRowConverter {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
             }
+            DataType::Boolean => {
+                if let Some(b) = value.as_bool() {
+                    Ok(RowValue::Bool(b))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Float32 => {
+                if let Some(f) = value.as_f64() {
+                    Ok(RowValue::Float32(f as f32))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Float64 => {
+                if let Some(f) = value.as_f64() {
+                    Ok(RowValue::Float64(f))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Int64 => {
+                if let Some(i) = value.as_i64() {
+                    Ok(RowValue::Int64(i))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
             // TODO: Add more type conversions (Bool, Float, Date, etc.)
             _ => Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone())),
         }
@@ -71,6 +99,10 @@ mod tests {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, false),
+            Field::new("is_active", DataType::Boolean, false),
+            Field::new("score", DataType::Float64, false),
+            Field::new("id_int64", DataType::Int64, false),
+            Field::new("score_float32", DataType::Float32, false),
         ]))
     }
 
@@ -80,12 +112,20 @@ mod tests {
         let converter = JsonToMoonlinkRowConverter::new(schema);
         let input = json!({
             "id": 42,
-            "name": "moonlink"
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
         });
         let row = converter.convert(&input).unwrap();
-        assert_eq!(row.values.len(), 2);
+        assert_eq!(row.values.len(), 6);
         assert_eq!(row.values[0], RowValue::Int32(42));
         assert_eq!(row.values[1], RowValue::ByteArray(b"moonlink".to_vec()));
+        assert_eq!(row.values[2], RowValue::Bool(true));
+        assert_eq!(row.values[3], RowValue::Float64(100.0));
+        assert_eq!(row.values[4], RowValue::Int64(123));
+        assert_eq!(row.values[5], RowValue::Float32(100.0));
     }
 
     #[test]
