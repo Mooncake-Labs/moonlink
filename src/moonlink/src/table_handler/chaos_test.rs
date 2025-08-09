@@ -16,11 +16,11 @@ use crate::storage::filesystem::s3::s3_test_utils::*;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::test_guard::TestGuard as S3TestGuard;
 use crate::storage::mooncake_table::{table_creation_test_utils::*, TableMetadata};
+use crate::storage::timer::fake_timer::{ManualTicker, ManualTickerHandle};
 use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
-use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::ReadStateManager;
-use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig};
+use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, TableHandlerTimer};
 use crate::{StorageConfig, TableEventManager};
 
 use function_name::named;
@@ -38,6 +38,10 @@ use tokio::sync::watch;
 
 /// To avoid excessive and continuous table maintenance operations, set an interval between each invocation for each non table update operation.
 const NON_UPDATE_COMMAND_INTERVAL_LSN: u64 = 5;
+/// Event count to trigger periodical mooncake snapshot.
+const PERIODICAL_MOONCAKE_SNAPSHOT_EVENT_INTERVAL: usize = 150;
+/// Event count to trigger periodical WAL operations.
+const PERIODICAL_WAL_OPERATION_EVENT_INTERVAL: usize = 150;
 
 /// Parsed chaos test arguments for convenience
 #[derive(Clone)]
@@ -556,6 +560,9 @@ struct TestEnvironment {
     wal_flush_lsn_rx: watch::Receiver<u64>,
     last_commit_lsn_tx: watch::Sender<u64>,
     replication_lsn_tx: watch::Sender<u64>,
+    wal_snapshot_timer_handle: ManualTickerHandle,
+    mooncake_snapshot_timer_handle: ManualTickerHandle,
+    force_snapshot_timer_handle: ManualTickerHandle,
     mooncake_table_metadata: Arc<TableMetadata>,
     iceberg_table_config: IcebergTableConfig,
 }
@@ -592,6 +599,16 @@ impl TestEnvironment {
             ObjectStorageCache::default_for_test(&cache_temp_dir)
         };
 
+        // Create fake timers for table handler.
+        let (wal_snapshot_timer, wal_snapshot_timer_handle) = ManualTicker::new();
+        let (mooncake_snapshot_timer, mooncake_snapshot_timer_handle) = ManualTicker::new();
+        let (force_snapshot_timer, force_snapshot_timer_handle) = ManualTicker::new();
+        let table_handler_timer = TableHandlerTimer {
+            wal_snapshot_timer: Box::new(wal_snapshot_timer),
+            mooncake_snapshot_timer: Box::new(mooncake_snapshot_timer),
+            force_snapshot_timer: Box::new(force_snapshot_timer),
+        };
+
         // Create mooncake table and table event notification receiver.
         let iceberg_table_config = if config.error_injection_enabled {
             get_iceberg_table_config_with_chaos_injection(config.storage_config.clone())
@@ -619,7 +636,7 @@ impl TestEnvironment {
         let table_handler = TableHandler::new(
             table,
             table_event_sync_sender,
-            create_table_handler_timers(),
+            table_handler_timer,
             replication_lsn_rx.clone(),
             Some(event_replay_tx),
         )
@@ -642,6 +659,9 @@ impl TestEnvironment {
             wal_flush_lsn_rx,
             replication_lsn_tx,
             last_commit_lsn_tx,
+            wal_snapshot_timer_handle,
+            mooncake_snapshot_timer_handle,
+            force_snapshot_timer_handle,
             mooncake_table_metadata,
             iceberg_table_config,
         }
@@ -695,6 +715,8 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
     let mut table_event_manager = env.table_event_manager;
     let last_commit_lsn_tx = env.last_commit_lsn_tx.clone();
     let replication_lsn_tx = env.replication_lsn_tx.clone();
+    let mooncake_snapshot_timer_handler = env.mooncake_snapshot_timer_handle.clone();
+    let wal_operation_timer_handler = env.wal_snapshot_timer_handle.clone();
 
     // Fields used to recreate a new mooncake table.
     let mooncake_table_metadata = env.mooncake_table_metadata.clone();
@@ -710,8 +732,17 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
             test_env_config.test_name, state.random_seed
         );
 
-        for _ in 0..test_env_config.event_count {
+        for cur_event_idx in 0..test_env_config.event_count {
             let chaos_events = state.generate_random_events();
+
+            // Attempt periodical events.
+            if cur_event_idx > 0 && cur_event_idx % PERIODICAL_MOONCAKE_SNAPSHOT_EVENT_INTERVAL == 0
+            {
+                mooncake_snapshot_timer_handler.trigger();
+            }
+            if cur_event_idx > 0 && cur_event_idx % PERIODICAL_WAL_OPERATION_EVENT_INTERVAL == 0 {
+                wal_operation_timer_handler.trigger();
+            }
 
             // Perform table maintenance operations.
             if let Some(TableEvent::ForceRegularIndexMerge) = &chaos_events.table_maintenance_event

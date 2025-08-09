@@ -20,7 +20,7 @@ impl ManualTicker {
     }
 }
 
-#[allow(unused)]
+#[derive(Clone)]
 pub struct ManualTickerHandle {
     tx: UnboundedSender<()>,
 }
