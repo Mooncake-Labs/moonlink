@@ -120,7 +120,7 @@ impl ObjectStorageCacheInternal {
         file_id: TableUniqueFileId,
         panic_if_non_existent: bool,
     ) -> SmallVec<[String; 1]> {
-        let mut evicted_files_to_delete = vec![];
+        let mut evicted_files_to_delete: SmallVec<[String; 1]> = SmallVec::new();
 
         // If the requested entries are already evictable, remove it directly.
         if let Some((_, cache_entry_wrapper)) = self.evictable_cache.pop_entry(&file_id) {
@@ -141,7 +141,7 @@ impl ObjectStorageCacheInternal {
             }
         }
 
-        evicted_files_to_delete.into()
+        evicted_files_to_delete
     }
 
     /// Unreference the given cache entry.
@@ -435,7 +435,7 @@ impl CacheTrait for ObjectStorageCache {
                     NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
                 return Ok((
                     Some(non_evictable_handle),
-                    /*files_to_delete=*/ vec![].into(),
+                    /*files_to_delete=*/ SmallVec::new(),
                 ));
             }
 
@@ -458,7 +458,7 @@ impl CacheTrait for ObjectStorageCache {
                     NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
                 return Ok((
                     Some(non_evictable_handle),
-                    /*files_to_delete=*/ vec![].into(),
+                    /*files_to_delete=*/ SmallVec::new(),
                 ));
             }
         }
