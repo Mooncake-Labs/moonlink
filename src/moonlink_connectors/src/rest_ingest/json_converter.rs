@@ -1,10 +1,9 @@
+use crate::rest_ingest::datetime_utils::{parse_date, parse_time, parse_timestamp};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use moonlink::row::{MoonlinkRow, RowValue};
 use serde_json::Value;
 use std::sync::Arc;
 use thiserror::Error;
-
-use super::datetime_utils::{parse_date, parse_time, parse_timestamp};
 
 #[derive(Debug, Error)]
 pub enum JsonToMoonlinkRowError {
