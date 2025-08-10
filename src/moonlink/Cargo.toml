@@ -80,7 +80,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.7.0"
 mockall = "0.13"
 pico-args = "0.5"
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
