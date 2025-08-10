@@ -13,7 +13,7 @@ pub fn parse_date(date_str: &str) -> Result<RowValue, String> {
             let days_since_epoch = date.signed_duration_since(ARROW_EPOCH).num_days() as i32;
             RowValue::Int32(days_since_epoch)
         })
-        .map_err(|e| format!("Invalid date format: {}", e))
+        .map_err(|e| format!("Invalid date format: {e}"))
 }
 
 /// Parse a time string in HH:MM:SS[.fraction] format to Time64 (microseconds since midnight)
@@ -21,7 +21,7 @@ pub fn parse_time(time_str: &str) -> Result<RowValue, String> {
     // Try parsing with fractional seconds first, then without
     let time = NaiveTime::parse_from_str(time_str, "%H:%M:%S%.f")
         .or_else(|_| NaiveTime::parse_from_str(time_str, "%H:%M:%S"))
-        .map_err(|e| format!("Invalid time format: {}", e))?;
+        .map_err(|e| format!("Invalid time format: {e}"))?;
 
     // Convert to microseconds since midnight
     let duration = time.signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
@@ -36,7 +36,7 @@ pub fn parse_time(time_str: &str) -> Result<RowValue, String> {
 pub fn parse_timestamp(timestamp_str: &str) -> Result<RowValue, String> {
     // Parse RFC3339/ISO8601 timestamp
     let dt = DateTime::parse_from_rfc3339(timestamp_str)
-        .map_err(|e| format!("Invalid timestamp format: {}", e))?;
+        .map_err(|e| format!("Invalid timestamp format: {e}"))?;
 
     // Convert to UTC
     let utc_dt = dt.with_timezone(&Utc);
