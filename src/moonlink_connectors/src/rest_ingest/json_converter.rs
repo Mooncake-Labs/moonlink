@@ -1,8 +1,10 @@
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use moonlink::row::{MoonlinkRow, RowValue};
 use serde_json::Value;
 use std::sync::Arc;
 use thiserror::Error;
+
+use super::datetime_utils::{parse_date, parse_time, parse_timestamp};
 
 #[derive(Debug, Error)]
 pub enum JsonToMoonlinkRowError {
@@ -82,7 +84,30 @@ impl JsonToMoonlinkRowConverter {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
             }
-            // TODO: Add more type conversions (Bool, Float, Date, etc.)
+            DataType::Date32 => {
+                if let Some(s) = value.as_str() {
+                    parse_date(s)
+                        .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Time64(TimeUnit::Microsecond) => {
+                if let Some(s) = value.as_str() {
+                    parse_time(s)
+                        .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _tz) => {
+                if let Some(s) = value.as_str() {
+                    parse_timestamp(s)
+                        .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
             _ => Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone())),
         }
     }
@@ -91,7 +116,8 @@ impl JsonToMoonlinkRowConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use chrono::{NaiveDate, TimeZone, Utc};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -103,6 +129,23 @@ mod tests {
             Field::new("score", DataType::Float64, false),
             Field::new("id_int64", DataType::Int64, false),
             Field::new("score_float32", DataType::Float32, false),
+        ]))
+    }
+
+    fn make_datetime_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("date", DataType::Date32, false),
+            Field::new("time", DataType::Time64(TimeUnit::Microsecond), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new(
+                "timestamp_utc",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
         ]))
     }
 
@@ -211,5 +254,186 @@ mod tests {
             JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "id_int64"),
             _ => panic!("unexpected error: {err:?}"),
         }
+    }
+
+    #[test]
+    fn test_date_conversion() {
+        let schema = make_datetime_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+
+        // Test valid date
+        let input = json!({
+            "date": "2024-03-15",
+            "time": "12:00:00",
+            "timestamp": "2024-03-15T12:00:00Z",
+            "timestamp_utc": "2024-03-15T12:00:00Z",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // Date: 2024-03-15 is 19797 days since 1970-01-01
+        let expected_days = NaiveDate::from_ymd_opt(2024, 3, 15)
+            .unwrap()
+            .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+            .num_days() as i32;
+        assert_eq!(row.values[0], RowValue::Int32(expected_days));
+    }
+
+    #[test]
+    fn test_time_conversion() {
+        let schema = make_datetime_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+
+        // Test time without fractional seconds
+        let input = json!({
+            "date": "2024-01-01",
+            "time": "14:30:45",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "timestamp_utc": "2024-01-01T00:00:00Z",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // 14:30:45 = 14*3600 + 30*60 + 45 = 52245 seconds = 52245000000 microseconds
+        assert_eq!(row.values[1], RowValue::Int64(52245000000));
+
+        // Test time with fractional seconds
+        let input = json!({
+            "date": "2024-01-01",
+            "time": "09:15:30.123456",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "timestamp_utc": "2024-01-01T00:00:00Z",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // 9:15:30.123456 = 33330123456 microseconds
+        assert_eq!(row.values[1], RowValue::Int64(33330123456));
+    }
+
+    #[test]
+    fn test_timestamp_conversion() {
+        let schema = make_datetime_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+
+        // Test UTC timestamp
+        let input = json!({
+            "date": "2024-01-01",
+            "time": "00:00:00",
+            "timestamp": "2024-03-15T10:30:45.123Z",
+            "timestamp_utc": "2024-03-15T10:30:45.123Z",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // Verify it's converted to microseconds since epoch
+        // Using chrono to calculate the exact value
+        let dt = Utc
+            .with_ymd_and_hms(2024, 3, 15, 10, 30, 45)
+            .unwrap()
+            .timestamp_micros()
+            + 123000;
+        assert_eq!(row.values[2], RowValue::Int64(dt));
+        assert_eq!(row.values[3], RowValue::Int64(dt));
+
+        // Test timestamp with timezone offset (should be normalized to UTC)
+        let input = json!({
+            "date": "2024-01-01",
+            "time": "00:00:00",
+            "timestamp": "2024-03-15T10:30:45+05:00",
+            "timestamp_utc": "2024-03-15T10:30:45-08:00",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // Both should be normalized to UTC
+        // 2024-03-15T10:30:45+05:00 -> 2024-03-15T05:30:45Z
+        let expected_micros1 = Utc
+            .with_ymd_and_hms(2024, 3, 15, 5, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+        // 2024-03-15T10:30:45-08:00 -> 2024-03-15T18:30:45Z
+        let expected_micros2 = Utc
+            .with_ymd_and_hms(2024, 3, 15, 18, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+        assert_eq!(row.values[2], RowValue::Int64(expected_micros1));
+        assert_eq!(row.values[3], RowValue::Int64(expected_micros2));
+    }
+
+    #[test]
+    fn test_invalid_date_time_formats() {
+        let schema = make_datetime_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+
+        // Invalid date format
+        let input = json!({
+            "date": "2024/03/15", // Wrong separator
+            "time": "12:00:00",
+            "timestamp": "2024-03-15T12:00:00Z",
+            "timestamp_utc": "2024-03-15T12:00:00Z",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValue(f) => assert_eq!(f, "date"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+
+        // Invalid time format
+        let input = json!({
+            "date": "2024-03-15",
+            "time": "25:00:00", // Invalid hour
+            "timestamp": "2024-03-15T12:00:00Z",
+            "timestamp_utc": "2024-03-15T12:00:00Z",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValue(f) => assert_eq!(f, "time"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+
+        // Invalid timestamp format
+        let input = json!({
+            "date": "2024-03-15",
+            "time": "12:00:00",
+            "timestamp": "2024-03-15 12:00:00", // Not RFC3339
+            "timestamp_utc": "2024-03-15T12:00:00Z",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValue(f) => assert_eq!(f, "timestamp"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let schema = make_datetime_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+
+        // Test epoch date
+        let input = json!({
+            "date": "1970-01-01",
+            "time": "00:00:00",
+            "timestamp": "1970-01-01T00:00:00Z",
+            "timestamp_utc": "1970-01-01T00:00:00Z",
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values[0], RowValue::Int32(0)); // 0 days since epoch
+        assert_eq!(row.values[1], RowValue::Int64(0)); // 0 microseconds since midnight
+        assert_eq!(row.values[2], RowValue::Int64(0)); // 0 microseconds since epoch
+
+        // Test leap year date
+        let input = json!({
+            "date": "2024-02-29",
+            "time": "23:59:59.999999",
+            "timestamp": "2024-02-29T23:59:59.999999Z",
+            "timestamp_utc": "2024-02-29T23:59:59.999999Z",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        let expected_days = NaiveDate::from_ymd_opt(2024, 2, 29)
+            .unwrap()
+            .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+            .num_days() as i32;
+        assert_eq!(row.values[0], RowValue::Int32(expected_days));
+
+        // 23:59:59.999999 = 86399999999 microseconds
+        assert_eq!(row.values[1], RowValue::Int64(86399999999));
     }
 }
