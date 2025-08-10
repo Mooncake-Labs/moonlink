@@ -148,11 +148,67 @@ mod tests {
         let converter = JsonToMoonlinkRowConverter::new(schema);
         let input = json!({
             "id": "not_an_int",
-            "name": "moonlink"
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
         });
         let err = converter.convert(&input).unwrap_err();
         match err {
             JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "id"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+        let input = json!({
+            "is_active": "true",
+            "name": "moonlink",
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "id": 1,
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "is_active"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+        let input = json!({
+            "score": "not_a_float",
+            "name": "moonlink",
+            "is_active": true,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "id": 1,
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "score"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+        let input = json!({
+            "score_float32": "not_a_float",
+            "name": "moonlink",
+            "is_active": true,
+            "id_int64": 123,
+            "score": 100.0,
+            "id": 1,
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "score_float32"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+        let input = json!({
+            "id_int64": "not_an_int",
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "score_float32": 100.0,
+            "id": 1,
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "id_int64"),
             _ => panic!("unexpected error: {err:?}"),
         }
     }
