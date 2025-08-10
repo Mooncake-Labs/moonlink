@@ -414,27 +414,36 @@ impl TextFormatConverter {
         Ok(Cell::Array(m(res)))
     }
 
+    /// Parses a PostgreSQL composite type from its text representation.
+    ///
+    /// PostgreSQL composite types are represented as `(field1,field2,...)` where:
+    /// - Fields are comma-separated
+    /// - NULL values are represented as empty or the literal 'null' (case-insensitive)
+    /// - Quoted values preserve all characters including commas and parentheses
+    /// - Escaped characters within quotes are handled with backslash
+    ///
+    /// Reference: https://www.postgresql.org/docs/current/rowtypes.html#ROWTYPES-IO-SYNTAX
     fn parse_composite(
-        str: &str,
+        s: &str,
         fields: &[tokio_postgres::types::Field],
     ) -> Result<Cell, FromTextError> {
-        if str.len() < 2 {
+        if s.len() < 2 {
             return Err(CompositeParseError::InputTooShort.into());
         }
 
-        if !str.starts_with('(') || !str.ends_with(')') {
+        if !s.starts_with('(') || !s.ends_with(')') {
             return Err(CompositeParseError::MissingParentheses.into());
         }
 
         let mut res = Vec::with_capacity(fields.len());
-        let str = &str[1..(str.len() - 1)];
+        let inner = &s[1..(s.len() - 1)];
         let mut val_str = String::with_capacity(10);
         let mut in_quotes = false;
         let mut in_escape = false;
         let mut val_quoted = false;
-        let mut chars = str.chars();
+        let mut chars = inner.chars();
         let mut field_iter = fields.iter();
-        let mut done = str.is_empty();
+        let mut done = inner.is_empty();
 
         while !done {
             loop {
@@ -487,29 +496,45 @@ impl TextFormatConverter {
         Ok(Cell::Composite(res))
     }
 
+    /// Parses a PostgreSQL array of composite types from its text representation.
+    ///
+    /// PostgreSQL arrays of composite types are represented as `{"(field1,field2)","(field3,field4)"}` where:
+    /// - The array is enclosed in curly braces `{}`
+    /// - Each composite element is enclosed in double quotes if it contains special characters
+    /// - Composite elements follow the same format as regular composites: `(field1,field2,...)`
+    /// - NULL array elements are represented as the literal 'null' (case-insensitive)
+    /// - Empty arrays are represented as `{}`
+    ///
+    /// Example formats:
+    /// - Simple: `{"(1,hello)","(2,world)"}`
+    /// - With NULLs: `{"(1,hello)",null,"(3,test)"}`
+    /// - With special chars: `{"(1,\"hello, world\")","(2,\"test\")"}`
+    /// - Empty: `{}`
+    ///
+    /// Reference: https://www.postgresql.org/docs/current/arrays.html#ARRAYS-IO
     fn parse_composite_array(
-        str: &str,
+        s: &str,
         fields: &[tokio_postgres::types::Field],
     ) -> Result<Cell, FromTextError> {
-        if str.len() < 2 {
+        if s.len() < 2 {
             return Err(ArrayParseError::InputTooShort.into());
         }
 
-        if !str.starts_with('{') || !str.ends_with('}') {
+        if !s.starts_with('{') || !s.ends_with('}') {
             return Err(ArrayParseError::MissingBraces.into());
         }
 
         let mut res = Vec::new();
-        let str = &str[1..(str.len() - 1)];
+        let inner = &s[1..(s.len() - 1)];
 
-        if str.is_empty() {
+        if inner.is_empty() {
             return Ok(Cell::Array(ArrayCell::Composite(res)));
         }
 
         let mut val_str = String::with_capacity(50);
         let mut in_quotes = false;
         let mut in_escape = false;
-        let mut chars = str.chars();
+        let mut chars = inner.chars();
         let mut done = false;
 
         while !done {
