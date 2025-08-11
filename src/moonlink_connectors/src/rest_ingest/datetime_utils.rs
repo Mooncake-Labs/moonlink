@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use moonlink::row::RowValue;
 
 /// Parse a date string in YYYY-MM-DD format to Date32 (days since epoch)
@@ -23,25 +23,38 @@ pub fn parse_time(time_str: &str) -> Result<RowValue, String> {
         .or_else(|_| NaiveTime::parse_from_str(time_str, "%H:%M:%S"))
         .map_err(|e| format!("Invalid time format: {e}"))?;
 
+    const MIDNIGHT: NaiveTime = match NaiveTime::from_hms_opt(0, 0, 0) {
+        Some(time) => time,
+        None => panic!("Failed to create midnight time"),
+    };
+
     // Convert to microseconds since midnight
-    let duration = time.signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let duration = time.signed_duration_since(MIDNIGHT);
     let microseconds = duration
         .num_microseconds()
-        .ok_or_else(|| "Time value too large".to_string())?;
+        .ok_or_else(|| format!("Time value too large: {duration:?}"))?;
 
     Ok(RowValue::Int64(microseconds))
 }
 
 /// Parse an RFC3339/ISO8601 timestamp and normalize to UTC
+/// Follows the same behavior as pg -> moonlink: canonicalize to UTC timezone
 pub fn parse_timestamp(timestamp_str: &str) -> Result<RowValue, String> {
-    // Parse RFC3339/ISO8601 timestamp
-    let dt = DateTime::parse_from_rfc3339(timestamp_str)
+    // First try parsing as RFC3339/ISO8601 (with timezone info)
+    if let Ok(dt) = DateTime::parse_from_rfc3339(timestamp_str) {
+        // Convert to UTC
+        let utc_dt = dt.with_timezone(&Utc);
+        let timestamp_micros = utc_dt.timestamp_micros();
+        return Ok(RowValue::Int64(timestamp_micros));
+    }
+
+    // If that fails, try parsing as naive datetime and treat as UTC
+    // This matches pg_replicate behavior: t.and_utc().timestamp_micros()
+    let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S%.f"))
         .map_err(|e| format!("Invalid timestamp format: {e}"))?;
 
-    // Convert to UTC
-    let utc_dt = dt.with_timezone(&Utc);
-    let timestamp_micros = utc_dt.timestamp_micros();
-
+    let timestamp_micros = naive_dt.and_utc().timestamp_micros();
     Ok(RowValue::Int64(timestamp_micros))
 }
 
