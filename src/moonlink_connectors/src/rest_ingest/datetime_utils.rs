@@ -51,13 +51,9 @@ mod tests {
 
     #[test]
     fn test_parse_date() {
-        // Valid date
+        // Valid date (2024-03-15 is 19797 days since epoch)
         let result = parse_date("2024-03-15").unwrap();
-        let expected_days = NaiveDate::from_ymd_opt(2024, 3, 15)
-            .unwrap()
-            .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
-            .num_days() as i32;
-        assert_eq!(result, RowValue::Int32(expected_days));
+        assert_eq!(result, RowValue::Int32(19797));
 
         // Invalid date
         assert!(parse_date("2024/03/15").is_err());

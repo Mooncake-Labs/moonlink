@@ -133,17 +133,21 @@ mod tests {
 
     fn make_datetime_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("date", DataType::Date32, false),
-            Field::new("time", DataType::Time64(TimeUnit::Microsecond), false),
+            Field::new("date", DataType::Date32, /*nullable=*/ false),
+            Field::new(
+                "time",
+                DataType::Time64(TimeUnit::Microsecond),
+                /*nullable=*/ false,
+            ),
             Field::new(
                 "timestamp",
                 DataType::Timestamp(TimeUnit::Microsecond, None),
-                false,
+                /*nullable=*/ false,
             ),
             Field::new(
                 "timestamp_utc",
                 DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
+                /*nullable=*/ false,
             ),
         ]))
     }
