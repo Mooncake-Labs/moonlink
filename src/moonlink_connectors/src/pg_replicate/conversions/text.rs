@@ -173,10 +173,14 @@ impl TextFormatConverter {
             _ => match typ.kind() {
                 Kind::Composite(_) => Cell::Composite(Vec::default()),
                 Kind::Array(inner_type) => {
-                    // Handle arrays of composite types
+                    // Handle arrays of composite types.
+                    // Note: inner_type here refers to the element type of the array.
+                    // PostgreSQL supports multi-dimensional arrays (e.g., text[][]),
+                    // but we currently only handle arrays of composite types here.
                     match inner_type.kind() {
                         Kind::Composite(_) => Cell::Array(ArrayCell::Composite(Vec::default())),
-                        _ => Cell::Null, // Unknown array type
+                        Kind::Array(_) => Cell::Null, // TODO: Multi-dimensional arrays not yet handled
+                        _ => Cell::Null,              // Unknown array type
                     }
                 }
                 _ => Cell::Null,
@@ -338,10 +342,16 @@ impl TextFormatConverter {
             _ => match typ.kind() {
                 Kind::Composite(fields) => TextFormatConverter::parse_composite(str, fields),
                 Kind::Array(inner_type) => {
-                    // Check if the array contains composite types
+                    // Check if the array contains composite types.
+                    // PostgreSQL supports multi-dimensional arrays (e.g., int[][], text[][]),
+                    // but here we currently only handle arrays of composite types.
                     match inner_type.kind() {
                         Kind::Composite(fields) => {
                             TextFormatConverter::parse_composite_array(str, fields)
+                        }
+                        Kind::Array(_) => {
+                            // TODO: Multi-dimensional arrays not yet implemented
+                            Err(FromTextError::InvalidConversion())
                         }
                         _ => Err(FromTextError::InvalidConversion()),
                     }
