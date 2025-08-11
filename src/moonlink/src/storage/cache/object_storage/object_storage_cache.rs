@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Object storage cache, which caches data file in file granularity at local filesystem.
-use crate::storage::cache::object_storage::base_cache::{CacheEntry, CacheTrait, FileMetadata};
+use crate::storage::cache::object_storage::base_cache::{
+    CacheEntry, CacheTrait, FileMetadata, InlineEvictedFiles,
+};
 use crate::storage::cache::object_storage::cache_config::ObjectStorageCacheConfig;
 use crate::storage::cache::object_storage::cache_handle::NonEvictableHandle;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
@@ -119,8 +121,8 @@ impl ObjectStorageCacheInternal {
         &mut self,
         file_id: TableUniqueFileId,
         panic_if_non_existent: bool,
-    ) -> SmallVec<[String; 1]> {
-        let mut evicted_files_to_delete: SmallVec<[String; 1]> = SmallVec::new();
+    ) -> InlineEvictedFiles {
+        let mut evicted_files_to_delete: InlineEvictedFiles = InlineEvictedFiles::new();
 
         // If the requested entries are already evictable, remove it directly.
         if let Some((_, cache_entry_wrapper)) = self.evictable_cache.pop_entry(&file_id) {
@@ -389,7 +391,7 @@ impl CacheTrait for ObjectStorageCache {
         &mut self,
         file_id: TableUniqueFileId,
         cache_entry: CacheEntry,
-    ) -> (NonEvictableHandle, SmallVec<[String; 1]>) {
+    ) -> (NonEvictableHandle, InlineEvictedFiles) {
         let cache_entry_wrapper = CacheEntryWrapper {
             cache_entry: cache_entry.clone(),
             reference_count: 1,
@@ -420,7 +422,7 @@ impl CacheTrait for ObjectStorageCache {
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> Result<(
         Option<NonEvictableHandle>,
-        SmallVec<[String; 1]>, /*files_to_delete*/
+        InlineEvictedFiles, /*files_to_delete*/
     )> {
         {
             let mut guard = self.cache.write().await;
@@ -496,10 +498,7 @@ impl CacheTrait for ObjectStorageCache {
         }
     }
 
-    async fn try_delete_cache_entry(
-        &mut self,
-        file_id: TableUniqueFileId,
-    ) -> SmallVec<[String; 1]> {
+    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId) -> InlineEvictedFiles {
         let mut guard = self.cache.write().await;
         guard.delete_cache_entry(file_id, /*panic_if_non_existent=*/ false)
     }
