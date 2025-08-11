@@ -607,7 +607,7 @@ mod tests {
             Cell::Array(ArrayCell::String(v)) => {
                 assert_eq!(v, vec![Some("a".to_string()), Some("null".to_string())]);
             }
-            _ => panic!("unexpected cell"),
+            _ => panic!("unexpected cell: {cell:?}"),
         }
     }
 
@@ -618,7 +618,7 @@ mod tests {
             Cell::Array(ArrayCell::String(v)) => {
                 assert_eq!(v, vec![Some("a".to_string()), None]);
             }
-            _ => panic!("unexpected cell"),
+            _ => panic!("unexpected cell: {cell:?}"),
         }
     }
 
@@ -628,26 +628,26 @@ mod tests {
         let char_cell = TextFormatConverter::try_from_str(&Type::CHAR, "hello   ").unwrap();
         match char_cell {
             Cell::String(s) => assert_eq!(s, "hello"),
-            _ => panic!("expected string cell"),
+            _ => panic!("expected string cell, got: {char_cell:?}"),
         }
 
         let bpchar_cell = TextFormatConverter::try_from_str(&Type::BPCHAR, "world   ").unwrap();
         match bpchar_cell {
             Cell::String(s) => assert_eq!(s, "world"),
-            _ => panic!("expected string cell"),
+            _ => panic!("expected string cell, got: {bpchar_cell:?}"),
         }
 
         // VARCHAR/NAME/TEXT should preserve trailing spaces
         let varchar_cell = TextFormatConverter::try_from_str(&Type::VARCHAR, "hello   ").unwrap();
         match varchar_cell {
             Cell::String(s) => assert_eq!(s, "hello   "),
-            _ => panic!("expected string cell"),
+            _ => panic!("expected string cell, got: {varchar_cell:?}"),
         }
 
         let text_cell = TextFormatConverter::try_from_str(&Type::TEXT, "world   ").unwrap();
         match text_cell {
             Cell::String(s) => assert_eq!(s, "world   "),
-            _ => panic!("expected string cell"),
+            _ => panic!("expected string cell, got: {text_cell:?}"),
         }
     }
 
@@ -664,7 +664,7 @@ mod tests {
                     vec![Some("hello".to_string()), Some("world".to_string())]
                 );
             }
-            _ => panic!("expected string array cell"),
+            _ => panic!("expected string array cell, got: {char_array_cell:?}"),
         }
 
         // VARCHAR_ARRAY should preserve trailing spaces
@@ -678,7 +678,7 @@ mod tests {
                     vec![Some("hello   ".to_string()), Some("world   ".to_string())]
                 );
             }
-            _ => panic!("expected string array cell"),
+            _ => panic!("expected string array cell, got: {varchar_array_cell:?}"),
         }
     }
 
@@ -702,7 +702,7 @@ mod tests {
                 assert!(matches!(values[0], Cell::I32(42)));
                 assert!(matches!(values[1], Cell::String(ref s) if s == "hello world"));
             }
-            _ => panic!("expected composite cell"),
+            _ => panic!("expected composite cell, got: {cell:?}"),
         }
     }
 
@@ -728,7 +728,7 @@ mod tests {
                 assert!(matches!(values[1], Cell::Null));
                 assert!(matches!(values[2], Cell::Bool(true)));
             }
-            _ => panic!("expected composite cell"),
+            _ => panic!("expected composite cell, got: {cell:?}"),
         }
     }
 
@@ -773,7 +773,7 @@ mod tests {
                     _ => panic!("expected int array"),
                 }
             }
-            _ => panic!("expected composite cell"),
+            _ => panic!("expected composite cell, got: {cell:?}"),
         }
     }
 
@@ -819,7 +819,7 @@ mod tests {
                     _ => panic!("expected nested composite"),
                 }
             }
-            _ => panic!("expected composite cell"),
+            _ => panic!("expected composite cell, got: {cell:?}"),
         }
     }
 
@@ -884,7 +884,7 @@ mod tests {
                     _ => panic!("expected nested composite"),
                 }
             }
-            _ => panic!("expected composite cell"),
+            _ => panic!("expected composite cell, got: {cell:?}"),
         }
     }
 
@@ -924,7 +924,7 @@ mod tests {
                 assert!(matches!(third[0], Cell::I32(3)));
                 assert!(matches!(third[1], Cell::String(ref s) if s == "charlie"));
             }
-            _ => panic!("expected array of composites"),
+            _ => panic!("expected array of composites, got: {cell:?}"),
         }
     }
 
@@ -961,7 +961,7 @@ mod tests {
                 assert!(matches!(third[0], Cell::I32(3)));
                 assert!(matches!(third[1], Cell::Null));
             }
-            _ => panic!("expected array of composites"),
+            _ => panic!("expected array of composites, got: {cell:?}"),
         }
     }
 
@@ -982,7 +982,7 @@ mod tests {
             Cell::Array(ArrayCell::Composite(composites)) => {
                 assert_eq!(composites.len(), 0);
             }
-            _ => panic!("expected empty array of composites"),
+            _ => panic!("expected empty array of composites, got: {cell:?}"),
         }
     }
 
@@ -1028,7 +1028,7 @@ mod tests {
                 assert!(matches!(second[0], Cell::I32(2)));
                 assert!(matches!(second[1], Cell::Bool(false)));
             }
-            _ => panic!("expected array of composites"),
+            _ => panic!("expected array of composites, got: {cell:?}"),
         }
     }
 }
