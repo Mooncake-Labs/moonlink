@@ -357,6 +357,28 @@ mod tests {
             .timestamp_micros();
         assert_eq!(row.values[2], RowValue::Int64(expected_micros1));
         assert_eq!(row.values[3], RowValue::Int64(expected_micros2));
+
+        // Test timestamp without timezone (should be treated as UTC)
+        let input = json!({
+            "date": "2024-01-01",
+            "time": "00:00:00",
+            "timestamp": "2024-03-15T10:30:45",
+            "timestamp_utc": "2024-03-15T10:30:45.123456",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // Both should be treated as UTC
+        let expected_micros3 = Utc
+            .with_ymd_and_hms(2024, 3, 15, 10, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+        let expected_micros4 = Utc
+            .with_ymd_and_hms(2024, 3, 15, 10, 30, 45)
+            .unwrap()
+            .timestamp_micros()
+            + 123456;
+        assert_eq!(row.values[2], RowValue::Int64(expected_micros3));
+        assert_eq!(row.values[3], RowValue::Int64(expected_micros4));
     }
 
     #[test]
@@ -405,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_cases() {
+    fn test_datetime_edge_cases() {
         let schema = make_datetime_schema();
         let converter = JsonToMoonlinkRowConverter::new(schema);
 
@@ -420,6 +442,7 @@ mod tests {
         assert_eq!(row.values[0], RowValue::Int32(0)); // 0 days since epoch
         assert_eq!(row.values[1], RowValue::Int64(0)); // 0 microseconds since midnight
         assert_eq!(row.values[2], RowValue::Int64(0)); // 0 microseconds since epoch
+        assert_eq!(row.values[3], RowValue::Int64(0)); // 0 microseconds since epoch
 
         // Test leap year date
         let input = json!({
@@ -438,5 +461,9 @@ mod tests {
 
         // 23:59:59.999999 = 86399999999 microseconds
         assert_eq!(row.values[1], RowValue::Int64(86399999999));
+
+        // 2024-02-29T23:59:59.999999Z = 1709251199999999 microseconds since epoch
+        assert_eq!(row.values[2], RowValue::Int64(1709251199999999));
+        assert_eq!(row.values[3], RowValue::Int64(1709251199999999));
     }
 }

@@ -93,6 +93,23 @@ mod tests {
             .timestamp_micros();
         assert_eq!(result, RowValue::Int64(expected));
 
+        // Timestamp without timezone (treated as UTC)
+        let result = parse_timestamp("2024-03-15T10:30:45").unwrap();
+        let expected = Utc
+            .with_ymd_and_hms(2024, 3, 15, 10, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+        assert_eq!(result, RowValue::Int64(expected));
+
+        // Timestamp without timezone with fractional seconds
+        let result = parse_timestamp("2024-03-15T10:30:45.123456").unwrap();
+        let expected = Utc
+            .with_ymd_and_hms(2024, 3, 15, 10, 30, 45)
+            .unwrap()
+            .timestamp_micros()
+            + 123456;
+        assert_eq!(result, RowValue::Int64(expected));
+
         // Invalid timestamp
         assert!(parse_timestamp("2024-03-15 10:30:45").is_err());
     }
