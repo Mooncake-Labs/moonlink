@@ -7,7 +7,7 @@ license = { workspace = true }
 [features]
 default = ["storage-fs"]
 
-profiling = []
+profiling = ["console-subscriber"]
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
@@ -16,7 +16,7 @@ storage-fs = ["moonlink/storage-fs"]
 [dependencies]
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-console-subscriber = { workspace = true }
+console-subscriber = { version = "0.4", optional = true }
 moonlink = { path = "../moonlink", features = ["test-utils"] }
 moonlink_connectors = { path = "../moonlink_connectors" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
@@ -27,7 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 iceberg = { workspace = true }

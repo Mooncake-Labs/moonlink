@@ -193,6 +193,7 @@ mod tests {
     async fn test_no_delay_no_error() {
         let temp_dir = tempdir().unwrap();
         let chaos_config = ChaosConfig {
+            random_seed: None,
             min_latency: std::time::Duration::ZERO,
             max_latency: std::time::Duration::ZERO,
             err_prob: 0,
@@ -206,6 +207,7 @@ mod tests {
     async fn test_delay_injected() {
         let temp_dir = tempdir().unwrap();
         let chaos_config = ChaosConfig {
+            random_seed: None,
             min_latency: std::time::Duration::from_millis(5000),
             max_latency: std::time::Duration::from_millis(5000),
             err_prob: 0,

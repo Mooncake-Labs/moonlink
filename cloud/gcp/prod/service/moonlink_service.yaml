@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: moonlink-service
+spec:
+  type: LoadBalancer
+  # IP assigned by kubernetes automatically.
+  selector:
+    app: moonlink-deployment
+  ports:
+  # Exposed port for data server.
+  - name: data
+    protocol: TCP
+    port: 8080
+    targetPort: 80
+  # Exposed port for REST API server.
+  - name: rest
+    protocol: TCP
+    port: 3030
+    targetPort: 3030
+  # Exposed port for TCP rpc server.
+  - name: tcp
+    protocol: TCP
+    port: 3031
+    targetPort: 3031
+  # Exposed port for readiness check.
+  - name: readiness
+    protocol: TCP
+    port: 5050
+    targetPort: 5050

@@ -4,6 +4,7 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
+use crate::storage::mooncake_table::table_operation_test_utils::get_read_state_filepath_remap;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::wal::test_utils::{
     assert_wal_events_contains, assert_wal_events_does_not_contain,
@@ -13,6 +14,7 @@ use crate::storage::wal::{PersistentWalMetadata, WalManager};
 use crate::storage::IcebergTableConfig;
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
+use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
@@ -100,6 +102,7 @@ impl TestEnvironment {
             &mooncake_table,
             replication_rx.clone(),
             last_commit_rx,
+            get_read_state_filepath_remap(),
         )));
         let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let force_snapshot_completion_rx = table_event_sync_receiver
@@ -114,10 +117,12 @@ impl TestEnvironment {
         let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
             default_wal_config.get_accessor_config().clone(),
         ));
+        let table_handler_timer = create_table_handler_timers();
 
         let handler = TableHandler::new(
             mooncake_table,
             table_event_sync_sender,
+            table_handler_timer,
             replication_rx.clone(),
             /*event_replay_tx=*/ None,
         )

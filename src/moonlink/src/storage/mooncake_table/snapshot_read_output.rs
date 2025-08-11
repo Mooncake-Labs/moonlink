@@ -5,6 +5,7 @@ use crate::storage::storage_utils::TableUniqueFileId;
 use crate::storage::PuffinDeletionBlobAtRead;
 use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
+use crate::ReadStateFilepathRemap;
 use crate::{NonEvictableHandle, ReadState};
 
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use tokio::sync::mpsc::Sender;
 /// Mooncake snapshot for read.
 ///
 /// Pass out two types of data files to read.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum DataFileForRead {
     /// Temporary data file for in-memory unpersisted data, used for union read.
     TemporaryDataFile(String),
@@ -59,7 +60,10 @@ impl ReadOutput {
     /// Resolve all remote filepaths and convert into [`ReadState`] for query usage.
     ///
     /// TODO(hjiang): Parallelize download and pin.
-    pub async fn take_as_read_state(mut self) -> Arc<ReadState> {
+    pub async fn take_as_read_state(
+        mut self,
+        read_state_filepath_remap: ReadStateFilepathRemap,
+    ) -> Arc<ReadState> {
         // Resolve remote data files.
         let mut resolved_data_files = Vec::with_capacity(self.data_file_paths.len());
         let mut cache_handles = vec![];
@@ -92,7 +96,7 @@ impl ReadOutput {
                             .unwrap()
                             .send(TableEvent::EvictedFilesToDelete {
                                 evicted_files: EvictedFiles {
-                                    files: files_to_delete,
+                                    files: files_to_delete.to_vec(),
                                 },
                             })
                             .await
@@ -112,6 +116,7 @@ impl ReadOutput {
             // Fields used for read state cleanup after query completion.
             self.associated_files,
             cache_handles,
+            read_state_filepath_remap,
         ))
     }
 }

@@ -4,6 +4,7 @@ use crate::storage::cache::object_storage::base_cache::CacheEntry;
 use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCacheInternal;
 use crate::storage::storage_utils::TableUniqueFileId;
 
+use crate::storage::cache::object_storage::base_cache::InlineEvictedFiles;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -52,7 +53,7 @@ impl NonEvictableHandle {
 
     /// Unreference and pinned cache file and mark it as deleted.
     #[must_use]
-    pub(crate) async fn unreference_and_delete(&mut self) -> Vec<String> {
+    pub(crate) async fn unreference_and_delete(&mut self) -> InlineEvictedFiles {
         let mut guard = self.cache.write().await;
 
         // Total bytes within cache doesn't change, so current cache entry not evicted.

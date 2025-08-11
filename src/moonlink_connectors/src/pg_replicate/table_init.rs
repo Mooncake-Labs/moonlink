@@ -3,6 +3,8 @@ use crate::pg_replicate::table::SrcTableId;
 use crate::{Error, Result};
 use arrow_schema::Schema as ArrowSchema;
 use moonlink::event_sync::create_table_event_syncer;
+use moonlink::table_handler_timer::create_table_handler_timers;
+use moonlink::ReadStateFilepathRemap;
 use moonlink::{
     row::IdentityProp, AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor,
     IcebergTableConfig, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
@@ -15,10 +17,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, mpsc::Sender, oneshot, watch};
 
-/// Components required to replicate a single table.
-/// Components that the [`Sink`] needs for processing CDC events.
+/// Components required to create a mooncake table.
 pub struct TableComponents {
-    pub event_sender: Sender<TableEvent>,
+    /// Functor used to remap filepaths at read state.
+    pub read_state_filepath_remap: ReadStateFilepathRemap,
+    /// Shared object storage cache for all mooncake tables.
+    pub object_storage_cache: ObjectStorageCache,
+    /// Mooncake table configuration.
+    pub moonlink_table_config: MoonlinkTableConfig,
 }
 
 /// Resources that should be returned to the caller when a table is initialised.
@@ -56,17 +62,17 @@ pub async fn build_table_components(
     identity: IdentityProp,
     table_name: String,
     src_table_id: SrcTableId,
-    base_path: &String,
+    base_path: &str,
     replication_state: &ReplicationState,
-    object_storage_cache: ObjectStorageCache,
-    moonlink_table_config: MoonlinkTableConfig,
+    table_components: TableComponents,
 ) -> Result<TableResources> {
     // Recreate write-through cache directory.
     let write_cache_path = PathBuf::from(base_path).join(&mooncake_table_id);
     recreate_directory(&write_cache_path).await?;
     // Make sure temporary directory exists.
     tokio::fs::create_dir_all(
-        &moonlink_table_config
+        &table_components
+            .moonlink_table_config
             .mooncake_table_config
             .temp_files_directory,
     )
@@ -80,12 +86,19 @@ pub async fn build_table_components(
         table_id,
         write_cache_path,
         identity,
-        moonlink_table_config.iceberg_table_config.clone(),
-        moonlink_table_config.mooncake_table_config.clone(),
+        table_components
+            .moonlink_table_config
+            .iceberg_table_config
+            .clone(),
+        table_components
+            .moonlink_table_config
+            .mooncake_table_config
+            .clone(),
         wal_config,
-        object_storage_cache,
+        table_components.object_storage_cache,
         Arc::new(FileSystemAccessor::new(
-            moonlink_table_config
+            table_components
+                .moonlink_table_config
                 .iceberg_table_config
                 .accessor_config
                 .clone(),
@@ -94,14 +107,22 @@ pub async fn build_table_components(
     .await?;
 
     let (commit_lsn_tx, commit_lsn_rx) = watch::channel(0u64);
-    let read_state_manager =
-        ReadStateManager::new(&table, replication_state.subscribe(), commit_lsn_rx);
-    let table_status_reader =
-        TableStatusReader::new(&moonlink_table_config.iceberg_table_config, &table);
+    let read_state_manager = ReadStateManager::new(
+        &table,
+        replication_state.subscribe(),
+        commit_lsn_rx,
+        table_components.read_state_filepath_remap,
+    );
+    let table_status_reader = TableStatusReader::new(
+        &table_components.moonlink_table_config.iceberg_table_config,
+        &table,
+    );
     let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
+    let table_handler_timers = create_table_handler_timers();
     let table_handler = TableHandler::new(
         table,
         event_sync_sender,
+        table_handler_timers,
         replication_state.subscribe(),
         /*event_replay_tx=*/ None,
     )

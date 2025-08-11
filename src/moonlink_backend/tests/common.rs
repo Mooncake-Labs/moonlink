@@ -297,6 +297,7 @@ async fn setup_backend(
             .unwrap();
     let backend = MoonlinkBackend::<DatabaseId, TableId>::new(
         temp_dir.path().to_str().unwrap().into(),
+        /*data_server_uri=*/ None,
         Box::new(metadata_store_accessor),
     )
     .await

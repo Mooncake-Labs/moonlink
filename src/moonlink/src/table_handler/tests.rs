@@ -12,6 +12,7 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::validation_test_utils::*;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::storage::mooncake_table_config::DiskSliceWriterConfig;
 use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
@@ -67,11 +68,14 @@ async fn test_table_handler_flush() {
 async fn test_append_with_small_disk_slice() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
-        batch_size: 1,                   // One mem slice only contains one row.
-        disk_slice_parquet_file_size: 1, // One parquet file only contains one arrow record.
+        batch_size: 1, // One mem slice only contains one row.
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
         temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig {
+            parquet_file_size: 1,
+            chaos_config: None,
+        },
         data_compaction_config: DataCompactionConfig::default(),
         file_index_config: FileIndexMergeConfig::default(),
         persistence_config: IcebergPersistenceConfig {
@@ -624,10 +628,10 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
-        disk_slice_parquet_file_size: MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
         temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig::default(),
         data_compaction_config: DataCompactionConfig::default(),
         file_index_config: FileIndexMergeConfig::default(),
         persistence_config: IcebergPersistenceConfig {
@@ -826,10 +830,10 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
-        disk_slice_parquet_file_size: MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
         temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig::default(),
         data_compaction_config: DataCompactionConfig::default(),
         file_index_config: FileIndexMergeConfig::default(),
         persistence_config: IcebergPersistenceConfig {
@@ -1059,10 +1063,10 @@ async fn test_multiple_snapshot_requests() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
-        disk_slice_parquet_file_size: MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
         temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig::default(),
         data_compaction_config: DataCompactionConfig::default(),
         file_index_config: FileIndexMergeConfig::default(),
         persistence_config: IcebergPersistenceConfig {

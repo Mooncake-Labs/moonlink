@@ -14,7 +14,7 @@ use crate::storage::mooncake_table::{
 use crate::table_notify::{
     DataCompactionMaintenanceStatus, IndexMergeMaintenanceStatus, TableEvent,
 };
-use crate::{MooncakeTable, SnapshotReadOutput};
+use crate::{MooncakeTable, ReadStateFilepathRemap, SnapshotReadOutput};
 use crate::{ReadState, Result};
 use tracing::{debug, error};
 
@@ -577,6 +577,10 @@ pub(crate) async fn alter_table_and_persist_to_iceberg(
     } else {
         panic!("Iceberg snapshot payload is not set");
     }
+}
+
+pub(crate) fn get_read_state_filepath_remap() -> ReadStateFilepathRemap {
+    Arc::new(|local_filepath: String| local_filepath)
 }
 
 pub(crate) async fn alter_table(table: &mut MooncakeTable) {

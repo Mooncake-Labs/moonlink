@@ -1,8 +1,8 @@
 use crate::error::Result;
 use moonlink::{
-    AccessorConfig, DataCompactionConfig, FileIndexMergeConfig, IcebergPersistenceConfig,
-    IcebergTableConfig, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
-    MoonlinkTableSecret, StorageConfig,
+    AccessorConfig, DataCompactionConfig, DiskSliceWriterConfig, FileIndexMergeConfig,
+    IcebergPersistenceConfig, IcebergTableConfig, MooncakeTableConfig, MoonlinkSecretType,
+    MoonlinkTableConfig, MoonlinkTableSecret, StorageConfig,
 };
 /// This module contains util functions related to moonlink config.
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,10 @@ impl MoonlinkTableConfigForPersistence {
                 .mooncake_table_config
                 .snapshot_deletion_record_count,
             batch_size: self.mooncake_table_config.batch_size,
-            disk_slice_parquet_file_size: self.mooncake_table_config.disk_slice_parquet_file_size,
+            disk_slice_writer_config: DiskSliceWriterConfig {
+                parquet_file_size: self.mooncake_table_config.disk_slice_parquet_file_size,
+                chaos_config: None,
+            },
             persistence_config: self.mooncake_table_config.persistence_config.clone(),
             data_compaction_config: self.mooncake_table_config.data_compaction_config.clone(),
             file_index_config: self.mooncake_table_config.file_index_config.clone(),
@@ -111,7 +114,9 @@ pub(crate) fn parse_moonlink_table_config(
             mem_slice_size: mooncake_config.mem_slice_size,
             snapshot_deletion_record_count: mooncake_config.snapshot_deletion_record_count,
             batch_size: mooncake_config.batch_size,
-            disk_slice_parquet_file_size: mooncake_config.disk_slice_parquet_file_size,
+            disk_slice_parquet_file_size: mooncake_config
+                .disk_slice_writer_config
+                .parquet_file_size,
             data_compaction_config: mooncake_config.data_compaction_config.clone(),
             file_index_config: mooncake_config.file_index_config.clone(),
             persistence_config: mooncake_config.persistence_config.clone(),

@@ -31,6 +31,7 @@ use crate::storage::mooncake_table::{
     IcebergSnapshotDataCompactionPayload, IcebergSnapshotImportPayload,
     IcebergSnapshotIndexMergePayload,
 };
+use crate::storage::mooncake_table_config::DiskSliceWriterConfig;
 use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::storage_utils;
@@ -1440,7 +1441,10 @@ async fn test_small_batch_size_and_large_parquet_size() {
     let schema = create_test_arrow_schema();
     let mooncake_table_config = MooncakeTableConfig {
         batch_size: 1,
-        disk_slice_parquet_file_size: 1000,
+        disk_slice_writer_config: DiskSliceWriterConfig {
+            parquet_file_size: 1000,
+            chaos_config: None,
+        },
         // Trigger iceberg snapshot as long as there're any commit deletion log.
         persistence_config: IcebergPersistenceConfig {
             new_committed_deletion_log: 1,
@@ -1520,7 +1524,10 @@ async fn test_multiple_table_ids_for_deletion_vector() {
         // Flush as long as there's new rows appended at commit.
         mem_slice_size: 1,
         // At flush, place each row in a separate parquet file.
-        disk_slice_parquet_file_size: 1,
+        disk_slice_writer_config: DiskSliceWriterConfig {
+            parquet_file_size: 1,
+            chaos_config: None,
+        },
         ..Default::default()
     };
     let mooncake_table_metadata = create_test_table_metadata_with_config(

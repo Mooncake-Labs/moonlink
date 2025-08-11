@@ -21,6 +21,11 @@ struct Cli {
     /// Disable standalone deployment.
     #[arg(long)]
     no_tcp_api: bool,
+
+    /// IP/port for data server.
+    /// For example: http://34.19.1.175:8080.
+    #[arg(long)]
+    data_server_uri: Option<String>,
 }
 
 #[tokio::main]
@@ -31,6 +36,7 @@ pub async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = ServiceConfig {
         base_path: cli.base_path,
+        data_server_uri: cli.data_server_uri,
         rest_api_port: if cli.no_rest_api {
             None
         } else {

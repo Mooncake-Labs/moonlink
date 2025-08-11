@@ -802,7 +802,6 @@ impl MooncakeTable {
         self.next_snapshot_task.new_mem_indices.push(index.clone());
 
         let path = self.metadata.path.clone();
-        let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
         let next_file_id = self.next_file_id;
         self.next_file_id += 1;
 
@@ -813,7 +812,7 @@ impl MooncakeTable {
             Some(lsn),
             next_file_id,
             index,
-            parquet_flush_threshold_size,
+            self.metadata.config.disk_slice_writer_config.clone(),
         );
 
         Ok(disk_slice)

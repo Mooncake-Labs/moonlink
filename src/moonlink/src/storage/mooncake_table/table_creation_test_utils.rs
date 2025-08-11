@@ -18,6 +18,8 @@ use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::table_notify::TableEvent;
+#[cfg(feature = "chaos-test")]
+use crate::DiskSliceWriterConfig;
 use crate::ObjectStorageCache;
 use crate::StorageConfig;
 use crate::WalConfig;
@@ -69,10 +71,12 @@ pub(crate) fn get_iceberg_table_config_with_storage_config(
 #[cfg(feature = "chaos-test")]
 pub(crate) fn get_iceberg_table_config_with_chaos_injection(
     storage_config: StorageConfig,
+    random_seed: u64,
 ) -> IcebergTableConfig {
     use crate::storage::filesystem::accessor_config::{ChaosConfig, RetryConfig, TimeoutConfig};
 
     let chaos_config = ChaosConfig {
+        random_seed: Some(random_seed),
         min_latency: std::time::Duration::from_secs(0),
         max_latency: std::time::Duration::from_secs(1),
         err_prob: 5, // 5% error probability, a few retry attempts should work
@@ -186,13 +190,41 @@ pub(crate) fn create_test_table_metadata_with_config(
     })
 }
 
+/// Test util function to create disk slice write option.
+#[cfg(feature = "chaos-test")]
+pub(crate) fn create_disk_slice_write_option(
+    enable_disk_slice_write_chaos: bool,
+    random_seed: u64,
+) -> DiskSliceWriterConfig {
+    use crate::storage::filesystem::accessor_config::ChaosConfig;
+
+    let chaos_config = if enable_disk_slice_write_chaos {
+        Some(ChaosConfig {
+            random_seed: Some(random_seed),
+            err_prob: 0,
+            // Injected latency is comparable to mooncake snapshot interval.
+            min_latency: std::time::Duration::from_millis(50),
+            max_latency: std::time::Duration::from_millis(750),
+        })
+    } else {
+        None
+    };
+
+    DiskSliceWriterConfig {
+        parquet_file_size: DiskSliceWriterConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
+        chaos_config,
+    }
+}
+
 /// Test util function to create mooncake table metadata, which disables flush at commit.
 #[cfg(feature = "chaos-test")]
 pub(crate) fn create_test_table_metadata_disable_flush(
     local_table_directory: String,
+    disk_slice_write_config: DiskSliceWriterConfig,
 ) -> Arc<MooncakeTableMetadata> {
     let mut config = MooncakeTableConfig::new(local_table_directory.clone());
     config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
+    config.disk_slice_writer_config = disk_slice_write_config;
     create_test_table_metadata_with_config(local_table_directory, config)
 }
 
@@ -200,6 +232,7 @@ pub(crate) fn create_test_table_metadata_disable_flush(
 #[cfg(feature = "chaos-test")]
 pub(crate) fn create_test_table_metadata_with_index_merge_disable_flush(
     local_table_directory: String,
+    disk_slice_write_config: DiskSliceWriterConfig,
 ) -> Arc<MooncakeTableMetadata> {
     let file_index_config = FileIndexMergeConfig {
         min_file_indices_to_merge: 2,
@@ -207,6 +240,7 @@ pub(crate) fn create_test_table_metadata_with_index_merge_disable_flush(
         index_block_final_size: u64::MAX,
     };
     let mut config = MooncakeTableConfig::new(local_table_directory.clone());
+    config.disk_slice_writer_config = disk_slice_write_config;
     config.file_index_config = file_index_config;
     config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
     create_test_table_metadata_with_config(local_table_directory, config)
@@ -216,6 +250,7 @@ pub(crate) fn create_test_table_metadata_with_index_merge_disable_flush(
 #[cfg(feature = "chaos-test")]
 pub(crate) fn create_test_table_metadata_with_data_compaction_disable_flush(
     local_table_directory: String,
+    disk_slice_write_config: DiskSliceWriterConfig,
 ) -> Arc<MooncakeTableMetadata> {
     let data_compaction_config = DataCompactionConfig {
         min_data_file_to_compact: 2,
@@ -224,6 +259,7 @@ pub(crate) fn create_test_table_metadata_with_data_compaction_disable_flush(
         data_file_deletion_percentage: 0,
     };
     let mut config = MooncakeTableConfig::new(local_table_directory.clone());
+    config.disk_slice_writer_config = disk_slice_write_config;
     config.data_compaction_config = data_compaction_config;
     config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
     create_test_table_metadata_with_config(local_table_directory, config)

@@ -10,7 +10,7 @@ use arrow_schema::Schema;
 pub use error::{Error, Result};
 use mooncake_table_id::MooncakeTableId;
 pub use moonlink::ReadState;
-use moonlink::TableEventManager;
+use moonlink::{ReadStateFilepathRemap, TableEventManager};
 use moonlink_connectors::ReplicationManager;
 pub use moonlink_connectors::{
     rest_ingest::rest_source::{EventOperation, EventRequest},
@@ -31,6 +31,8 @@ pub struct MoonlinkBackend<
 > {
     // Base directory for all tables.
     base_path: String,
+    // Functor used to remap local filepath within [`ReadState`] to data server URI if specified and if possible, so table access is routed to data server.
+    read_state_filepath_remap: ReadStateFilepathRemap,
     // Directory used to store union read temporary files.
     temp_files_dir: String,
     // Metadata storage accessor.
@@ -48,9 +50,31 @@ where
 {
     pub async fn new(
         base_path: String,
+        data_server_uri: Option<String>,
         metadata_store_accessor: Box<dyn MetadataStoreTrait>,
     ) -> Result<Self> {
         logging::init_logging();
+
+        // Create local filepath remap logic, so IO requests could be routed to data server.
+        let base_path_arc = Arc::new(base_path.clone());
+        let data_server_uri_arc = Arc::new(data_server_uri.clone());
+
+        let read_state_filepath_remap: Arc<dyn Fn(String) -> String + Send + Sync> = {
+            let base_path_arc = Arc::clone(&base_path_arc);
+            let data_server_uri_arc = Arc::clone(&data_server_uri_arc);
+            Arc::new(move |local_filepath: String| {
+                if let Some(ref data_server_uri) = *data_server_uri_arc {
+                    if let Some(stripped) = local_filepath.strip_prefix(&*base_path_arc) {
+                        return format!(
+                            "{}/{}",
+                            data_server_uri.trim_end_matches('/'),
+                            stripped.trim_start_matches('/')
+                        );
+                    }
+                }
+                local_filepath
+            })
+        };
 
         // Canonicalize moonlink backend directory, so all paths stored are of absolute path.
         tokio::fs::create_dir_all(&base_path).await?;
@@ -74,12 +98,14 @@ where
         recovery_utils::recover_all_tables(
             backend_attributes,
             &*metadata_store_accessor,
+            read_state_filepath_remap.clone(),
             &mut replication_manager,
         )
         .await?;
 
         Ok(Self {
             base_path: base_path_str.to_string(),
+            read_state_filepath_remap,
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager: RwLock::new(replication_manager),
             metadata_store_accessor,
@@ -144,6 +170,7 @@ where
                         &src_table_name,
                         input_schema.expect("arrow_schema is required for REST API"),
                         moonlink_table_config.clone(),
+                        self.read_state_filepath_remap.clone(),
                         /*is_recovery=*/ false,
                     )
                     .await?;
@@ -155,6 +182,7 @@ where
                         table_id,
                         &src_table_name,
                         moonlink_table_config.clone(),
+                        self.read_state_filepath_remap.clone(),
                         /*is_recovery=*/ false,
                     )
                     .await?;

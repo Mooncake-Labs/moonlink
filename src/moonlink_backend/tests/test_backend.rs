@@ -351,10 +351,13 @@ mod tests {
         let sqlite_metadata_store = SqliteMetadataStore::new_with_directory(&base_path)
             .await
             .unwrap();
-        let backend =
-            MoonlinkBackend::<DatabaseId, TableId>::new(base_path, Box::new(sqlite_metadata_store))
-                .await
-                .unwrap();
+        let backend = MoonlinkBackend::<DatabaseId, TableId>::new(
+            base_path,
+            /*data_server_uri=*/ None,
+            Box::new(sqlite_metadata_store),
+        )
+        .await
+        .unwrap();
         let ids = ids_from_state(
             &backend
                 .scan_table(database_id, TABLE_ID, Some(lsn))

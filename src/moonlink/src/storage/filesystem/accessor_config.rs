@@ -62,6 +62,9 @@ impl Default for RetryConfig {
 ///
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ChaosConfig {
+    /// Random seed; if unassigned, use current timestamp as random seed.
+    pub random_seed: Option<u64>,
+
     /// Min and max latency introduced to all operation access, both inclusive.
     pub min_latency: std::time::Duration,
     pub max_latency: std::time::Duration,

@@ -1,26 +1,38 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: moonlink-deployment
+  name: moonlink-deployment-staging
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 20%
   selector:
     matchLabels:
-      app: moonlink-deployment
+      app: moonlink-deployment-staging
   template:
     metadata:
       labels:
-        app: moonlink-deployment
+        app: moonlink-deployment-staging
     spec:
       containers:
       # Moonlink deployment, which serves REST API and TCP rpc requests.
-      - name: moonlink-deployment
-        image: us-west1-docker.pkg.dev/coral-ring-465417-r0/moonlink-standalone-experiment/moonlink-deployment:42f29a70-e2f2-4ac2-99f8-95f830464ecc
+      - name: moonlink-deployment-staging
+        image: us-west1-docker.pkg.dev/coral-ring-465417-r0/moonlink-standalone-experiment/moonlink-deployment-staging:7cb80acf-9d2e-4dfe-b19a-ad8e6578415d
         command: ["/app/moonlink_service"]
         args:
         - "/tmp/moonlink"
         - "--no-rest-api"
         - "--tcp-port=3031"
+        # TODO(hjiang): Revisit before release and production deployment, use a dummy guaranteed QoS for now. 
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "1Gi"
+          limits:
+            cpu: "200m"
+            memory: "1Gi"
         env:
         volumeMounts:
         - name: shared-cache-directory
@@ -30,6 +42,16 @@ spec:
         - containerPort: 3030
         # Port number for TCP rpc server.
         - containerPort: 3031
+        # Port number for readiness probe.
+        - containerPort: 5050 
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 5050
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 1
+          failureThreshold: 3
 
       # Data server, which serves data plane requests.
       - name: nginx
@@ -41,21 +63,7 @@ spec:
         - name: shared-cache-directory
           mountPath: /usr/share/nginx/html
 
-      # TODO(hjiang): Currently serves merely as source database to sync from, need to remove before release.
-      - name: postgres
-        image: mooncakelabs/pg_mooncake
-        env:
-        - name: POSTGRES_PASSWORD
-          value: password
-        ports:
-        - containerPort: 5432
-        volumeMounts:
-        - name: pgdata
-          mountPath: /var/lib/postgresql/data
-
       volumes:
-      - name: pgdata
-        emptyDir: {}
       # Shared cache directory between data server and moonlink.
       - name: shared-cache-directory
         emptyDir: {}

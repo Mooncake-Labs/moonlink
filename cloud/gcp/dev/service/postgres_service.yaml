@@ -5,7 +5,7 @@ metadata:
 spec:
   type: LoadBalancer
   selector:
-    app: moonlink-deployment
+    app: moonlink-deployment-dev
   ports:
     - name: postgres
       protocol: TCP

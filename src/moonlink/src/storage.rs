@@ -10,6 +10,7 @@ pub mod mooncake_table_config;
 pub(crate) mod parquet_utils;
 pub(crate) mod path_utils;
 pub(crate) mod storage_utils;
+pub(super) mod timer;
 pub(crate) mod wal;
 
 pub use crate::event_sync::EventSyncReceiver;
@@ -34,6 +35,7 @@ pub use mooncake_table::table_status_reader::TableStatusReader;
 pub use mooncake_table::MooncakeTable;
 pub use mooncake_table::SnapshotReadOutput;
 pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
+pub use mooncake_table_config::DiskSliceWriterConfig;
 pub use mooncake_table_config::IcebergPersistenceConfig;
 pub use mooncake_table_config::MooncakeTableConfig;
 pub use wal::{WalConfig, WalManager, WalTransactionState};

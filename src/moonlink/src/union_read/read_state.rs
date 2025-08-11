@@ -13,6 +13,9 @@ use tracing::{error, info_span, warn};
 
 const BINCODE_CONFIG: config::Configuration = config::standard();
 
+/// Type alias for filepath remap function, which remaps local filepath to remote for [`ReadState`] if possible.
+pub type ReadStateFilepathRemap = std::sync::Arc<dyn Fn(String) -> String + Send + Sync>;
+
 // TODO(hjiang): A better solution might be wrap clean up in a functor.
 #[derive(Debug)]
 pub struct ReadState {
@@ -74,6 +77,7 @@ impl ReadState {
         // Fields used for read state cleanup after query completion.
         associated_files: Vec<String>,
         mut cache_handles: Vec<NonEvictableHandle>, // Cache handles for data files.
+        read_state_filepath_remap: ReadStateFilepathRemap, // Used to remap local filepath to
     ) -> Self {
         deletion_vectors_at_read.sort_by(|dv_1, dv_2| {
             dv_1.data_file_index
@@ -88,9 +92,20 @@ impl ReadState {
             .iter()
             .map(|handle| handle.cache_entry.cache_filepath.clone())
             .collect::<Vec<_>>();
+
+        // Map from local filepath to remote file path if needed and if possible.
+        let remapped_data_files = data_files
+            .into_iter()
+            .map(|path| read_state_filepath_remap(path))
+            .collect::<Vec<_>>();
+        let remapped_puffin_files = puffin_files
+            .into_iter()
+            .map(|path| read_state_filepath_remap(path))
+            .collect::<Vec<_>>();
+
         let metadata = TableMetadata {
-            data_files,
-            puffin_files,
+            data_files: remapped_data_files,
+            puffin_files: remapped_puffin_files,
             deletion_vectors: deletion_vectors_at_read,
             position_deletes,
         };
@@ -122,4 +137,43 @@ pub fn decode_read_state_for_testing(
         metadata.deletion_vectors,
         metadata.position_deletes,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_read_state_construction() {
+        let read_state_filepath_remap = std::sync::Arc::new(|local_filepath: String| {
+            format!("{local_filepath}/some_non_existent_dir")
+        });
+
+        let data_files = vec!["/tmp/file_1".to_string(), "/tmp/file_2".to_string()];
+        let read_state = ReadState::new(
+            data_files,
+            /*puffin_cache_handles=*/ vec![],
+            /*deletion_vectors_at_read=*/ vec![],
+            /*position_deletes=*/ vec![],
+            /*associated_files=*/ vec![],
+            /*cache_handles=*/ vec![],
+            read_state_filepath_remap,
+        );
+        let (
+            deserialized_data_files,
+            deserialized_puffin_files,
+            deserialized_deletion_vector,
+            deserialized_position_deletes,
+        ) = decode_read_state_for_testing(&read_state);
+        assert_eq!(
+            deserialized_data_files,
+            vec![
+                "/tmp/file_1/some_non_existent_dir".to_string(),
+                "/tmp/file_2/some_non_existent_dir".to_string(),
+            ]
+        );
+        assert!(deserialized_puffin_files.is_empty());
+        assert!(deserialized_deletion_vector.is_empty());
+        assert!(deserialized_position_deletes.is_empty());
+    }
 }

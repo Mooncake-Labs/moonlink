@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
 use crate::ReadState;
+use crate::ReadStateFilepathRemap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -14,6 +15,8 @@ pub struct ReadStateManager {
     table_snapshot_watch_receiver: watch::Receiver<u64>,
     replication_lsn_rx: watch::Receiver<u64>,
     last_commit_lsn_rx: watch::Receiver<u64>,
+    /// Functor which maps local filepath to remote URI if possible, should be applied on all files within [`ReadState`].
+    read_state_filepath_remap: ReadStateFilepathRemap,
 }
 
 impl ReadStateManager {
@@ -21,6 +24,7 @@ impl ReadStateManager {
         table: &MooncakeTable,
         replication_lsn_rx: watch::Receiver<u64>,
         last_commit_lsn_rx: watch::Receiver<u64>,
+        read_state_filepath_remap: ReadStateFilepathRemap,
     ) -> Self {
         let (table_snapshot, table_snapshot_watch_receiver) = table.get_state_for_reader();
         ReadStateManager {
@@ -32,11 +36,13 @@ impl ReadStateManager {
                 /*position_deletes=*/ Vec::new(),
                 /*associated_files=*/ Vec::new(),
                 /*cache_handles=*/ Vec::new(),
+                read_state_filepath_remap.clone(), // Unused
             ))),
             table_snapshot,
             table_snapshot_watch_receiver,
             replication_lsn_rx,
             last_commit_lsn_rx,
+            read_state_filepath_remap,
         }
     }
 
@@ -169,7 +175,9 @@ impl ReadStateManager {
             let snapshot_read_output = table_state_snapshot.request_read().await?;
 
             self.last_read_lsn.store(effective_lsn, Ordering::Release);
-            *last_read_state_guard = snapshot_read_output.take_as_read_state().await;
+            *last_read_state_guard = snapshot_read_output
+                .take_as_read_state(self.read_state_filepath_remap.clone())
+                .await;
         }
         Ok(last_read_state_guard.clone())
     }

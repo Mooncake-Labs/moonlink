@@ -3,6 +3,7 @@ mod read_state_manager;
 mod table_metadata;
 
 pub use read_state::ReadState;
+pub use read_state::ReadStateFilepathRemap;
 pub use read_state_manager::ReadStateManager;
 
 #[cfg(any(test, feature = "test-utils"))]

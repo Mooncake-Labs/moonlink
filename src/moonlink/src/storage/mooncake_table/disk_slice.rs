@@ -1,7 +1,9 @@
 use super::data_batches::BatchEntry;
 use crate::error::{Error, Result};
+use crate::storage::filesystem::accessor::chaos_generator::ChaosGenerator;
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
 use crate::storage::index::{cache_utils as index_cache_utils, FileIndex, MemIndex};
+use crate::storage::mooncake_table_config::DiskSliceWriterConfig;
 use crate::storage::parquet_utils;
 use crate::storage::storage_utils::{
     create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
@@ -39,8 +41,8 @@ pub struct DiskSliceWriter {
 
     pub table_auto_incr_id: u32,
 
-    /// Parquet file flush threshold size.
-    parquet_flush_threshold_size: usize,
+    /// Write config.
+    disk_slice_writer_config: DiskSliceWriterConfig,
 
     // a mapping of old record locations to new record locations
     // this is used to remap deletions on the disk slice
@@ -79,7 +81,7 @@ impl DiskSliceWriter {
         writer_lsn: Option<u64>,
         table_auto_incr_id: u32,
         old_index: Arc<MemIndex>,
-        parquet_flush_threshold_size: usize,
+        disk_slice_writer_config: DiskSliceWriterConfig,
     ) -> Self {
         Self {
             schema,
@@ -92,13 +94,20 @@ impl DiskSliceWriter {
             row_offset_mapping: vec![],
             old_index,
             new_index: None,
-            parquet_flush_threshold_size,
+            disk_slice_writer_config,
         }
     }
 
     /// Apply deletion vector to in-memory batches, write to parquet files and remap index.
     #[tracing::instrument(name = "disk_slice_write", skip_all)]
     pub(super) async fn write(&mut self) -> Result<()> {
+        // Attempt to perform chaos operations.
+        if let Some(chaos_config) = &self.disk_slice_writer_config.chaos_config {
+            let chaos_generator = ChaosGenerator::new(chaos_config.clone());
+            chaos_generator.perform_wrapper_function().await?;
+        }
+
+        // Do real parquet write operation.
         let mut filtered_batches = Vec::new();
         let mut id = 0;
         for entry in self.batches.iter() {
@@ -213,7 +222,7 @@ impl DiskSliceWriter {
                 let cur_writer = writer.as_ref().unwrap();
                 cur_writer.in_progress_size() + cur_writer.bytes_written()
             };
-            if estimated_total_size > self.parquet_flush_threshold_size {
+            if estimated_total_size > self.disk_slice_writer_config.parquet_file_size {
                 // Finalize the writer
                 writer.as_mut().unwrap().finish().await?;
                 let file_size = writer.as_ref().unwrap().bytes_written();
@@ -297,7 +306,7 @@ mod tests {
     use crate::row::{IdentityProp, MoonlinkRow, RowValue};
     use crate::storage::index::persisted_bucket_hash_map::test_get_hashes_for_index;
     use crate::storage::mooncake_table::mem_slice::MemSlice;
-    use crate::storage::mooncake_table::{BatchIdCounter, MooncakeTableConfig};
+    use crate::storage::mooncake_table::BatchIdCounter;
     use crate::storage::storage_utils::RawDeletionRecord;
     use arrow::datatypes::{DataType, Field};
     use arrow_array::{Int32Array, StringArray};
@@ -356,7 +365,7 @@ mod tests {
             Some(1),
             /*table_auto_incr_id=*/ 0,
             Arc::new(old_index),
-            MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
+            DiskSliceWriterConfig::default(),
         );
         disk_slice.write().await?;
 
@@ -474,7 +483,7 @@ mod tests {
             Some(1),
             0,
             Arc::new(index),
-            MooncakeTableConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
+            DiskSliceWriterConfig::default(),
         );
 
         // Write the disk slice

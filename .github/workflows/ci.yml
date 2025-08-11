@@ -255,3 +255,16 @@ jobs:
         timeout-minutes: 10
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_injection --features=chaos-test -p moonlink -- --nocapture
+
+  # ───────────── 8 · Chaos test for disk slice write ─────────────
+  disk_slice_write_with_chaos:
+    name: Chaos test for disk slice write
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start chaos test
+        timeout-minutes: 10
+        run: |
+          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_disk_slice_chaos --features=chaos-test -p moonlink -- --nocapture

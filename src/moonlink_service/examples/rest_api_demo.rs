@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_path: demo_path.to_string(),
             rest_api_port: Some(3030),
             tcp_port: None,
+            data_server_uri: None,
         })
         .await
         {

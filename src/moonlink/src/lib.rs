@@ -2,7 +2,8 @@ pub mod error;
 pub mod event_sync;
 pub mod row;
 mod storage;
-mod table_handler;
+pub(crate) mod table_handler;
+pub mod table_handler_timer;
 pub(crate) mod table_notify;
 mod union_read;
 
@@ -11,16 +12,17 @@ pub use event_sync::EventSyncSender;
 pub use storage::storage_utils::create_data_file;
 pub(crate) use storage::NonEvictableHandle;
 pub use storage::{
-    AccessorConfig, DataCompactionConfig, EventSyncReceiver, FileIndexMergeConfig,
-    FileSystemAccessor, IcebergPersistenceConfig, IcebergTableConfig, IcebergTableManager,
-    MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
-    MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig, SnapshotReadOutput,
-    StorageConfig, TableEventManager, TableManager, TableSnapshotStatus, TableStatusReader,
-    WalConfig, WalManager, WalTransactionState,
+    AccessorConfig, DataCompactionConfig, DiskSliceWriterConfig, EventSyncReceiver,
+    FileIndexMergeConfig, FileSystemAccessor, IcebergPersistenceConfig, IcebergTableConfig,
+    IcebergTableManager, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
+    MoonlinkTableConfig, MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig,
+    SnapshotReadOutput, StorageConfig, TableEventManager, TableManager, TableSnapshotStatus,
+    TableStatusReader, WalConfig, WalManager, WalTransactionState,
 };
 pub use table_handler::TableHandler;
+pub use table_handler_timer::TableHandlerTimer;
 pub use table_notify::TableEvent;
-pub use union_read::{ReadState, ReadStateManager};
+pub use union_read::{ReadState, ReadStateFilepathRemap, ReadStateManager};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use union_read::decode_read_state_for_testing;

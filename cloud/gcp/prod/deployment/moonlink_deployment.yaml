@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moonlink-deployment
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 20%
+  selector:
+    matchLabels:
+      app: moonlink-deployment
+  template:
+    metadata:
+      labels:
+        app: moonlink-deployment
+    spec:
+      containers:
+      # Moonlink deployment, which serves REST API and TCP rpc requests.
+      - name: moonlink-deployment
+        image: us-west1-docker.pkg.dev/coral-ring-465417-r0/moonlink-standalone-experiment/moonlink-deployment:478dc9ee-cc19-48f9-b741-21e6e8b27de7
+        command: ["/app/moonlink_service"]
+        args:
+        - "/tmp/moonlink"
+        - "--no-rest-api"
+        - "--tcp-port=3031"
+        # TODO(hjiang): Revisit before release and production deployment, use a dummy guaranteed QoS for now. 
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        env:
+        volumeMounts:
+        - name: shared-cache-directory
+          mountPath: /tmp/moonlink
+        ports:
+        # Port number for REST API server.
+        - containerPort: 3030
+        # Port number for TCP rpc server.
+        - containerPort: 3031
+        # Port number for readiness probe.
+        - containerPort: 5050 
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 5050
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 1
+          failureThreshold: 3
+
+      # Data server, which serves data plane requests.
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        # nginx serves local files under certain directory.
+        - name: shared-cache-directory
+          mountPath: /usr/share/nginx/html
+
+      volumes:
+      # Shared cache directory between data server and moonlink.
+      - name: shared-cache-directory
+        emptyDir: {}

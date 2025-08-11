@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::mooncake_table_id::MooncakeTableId;
+use moonlink::ReadStateFilepathRemap;
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::{MetadataStoreTrait, TableMetadataEntry};
 
@@ -16,6 +17,7 @@ pub(crate) struct BackendAttributes {
 async fn recover_table<D, T>(
     metadata_entry: TableMetadataEntry,
     replication_manager: &mut ReplicationManager<MooncakeTableId<D, T>>,
+    read_state_filepath_remap: ReadStateFilepathRemap,
 ) -> Result<()>
 where
     D: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
@@ -32,6 +34,7 @@ where
             metadata_entry.table_id,
             &metadata_entry.src_table_name,
             metadata_entry.moonlink_table_config,
+            read_state_filepath_remap,
             /*is_recovery=*/ true,
         )
         .await?;
@@ -44,6 +47,7 @@ where
 pub(super) async fn recover_all_tables<D, T>(
     backend_attributes: BackendAttributes,
     metadata_store_accessor: &dyn MetadataStoreTrait,
+    read_state_filepath_remap: ReadStateFilepathRemap,
     replication_manager: &mut ReplicationManager<MooncakeTableId<D, T>>,
 ) -> Result<()>
 where
@@ -73,7 +77,12 @@ where
             .temp_files_directory = backend_attributes.temp_files_dir.clone();
         // Recover current table.
         unique_uris.insert(cur_metadata_entry.src_table_uri.clone());
-        recover_table(cur_metadata_entry, replication_manager).await?;
+        recover_table(
+            cur_metadata_entry,
+            replication_manager,
+            read_state_filepath_remap.clone(),
+        )
+        .await?;
     }
 
     for uri in unique_uris.into_iter() {

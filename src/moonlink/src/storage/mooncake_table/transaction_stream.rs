@@ -327,7 +327,6 @@ impl MooncakeTable {
             .insert_memory_index(index.clone());
 
         let path = self.metadata.path.clone();
-        let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
 
         let disk_slice = DiskSliceWriter::new(
             self.metadata.schema.clone(),
@@ -336,7 +335,7 @@ impl MooncakeTable {
             lsn,
             next_file_id,
             index,
-            parquet_flush_threshold_size,
+            self.metadata.config.disk_slice_writer_config.clone(),
         );
 
         Ok(disk_slice)
