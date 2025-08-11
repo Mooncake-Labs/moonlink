@@ -1031,4 +1031,93 @@ mod tests {
             _ => panic!("expected array of composites, got: {cell:?}"),
         }
     }
+
+    #[test]
+    fn parse_empty_composite() {
+        use tokio_postgres::types::Field;
+
+        // Create an empty composite type (no fields)
+        let fields: Vec<Field> = vec![];
+
+        // Test parsing empty composite
+        let composite_str = "()";
+        let cell = TextFormatConverter::parse_composite(composite_str, &fields).unwrap();
+
+        match cell {
+            Cell::Composite(values) => {
+                assert_eq!(values.len(), 0);
+            }
+            _ => panic!("expected empty composite cell, got: {cell:?}"),
+        }
+    }
+
+    #[test]
+    fn test_composite_parse_errors() {
+        use tokio_postgres::types::Field;
+
+        let fields = vec![
+            Field::new("id".to_string(), Type::INT4),
+            Field::new("name".to_string(), Type::TEXT),
+        ];
+
+        // Test input too short
+        let result = TextFormatConverter::parse_composite("", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::InputTooShort
+            ))
+        ));
+
+        let result = TextFormatConverter::parse_composite("(", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::InputTooShort
+            ))
+        ));
+
+        // Test missing parentheses
+        let result = TextFormatConverter::parse_composite("1,hello", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::MissingParentheses
+            ))
+        ));
+
+        let result = TextFormatConverter::parse_composite("(1,hello", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::MissingParentheses
+            ))
+        ));
+
+        let result = TextFormatConverter::parse_composite("1,hello)", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::MissingParentheses
+            ))
+        ));
+
+        // Test field count mismatch - too many fields
+        let result = TextFormatConverter::parse_composite("(1,hello,extra)", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::FieldCountMismatch
+            ))
+        ));
+
+        // Test field count mismatch - too few fields
+        let result = TextFormatConverter::parse_composite("(1)", &fields);
+        assert!(matches!(
+            result,
+            Err(FromTextError::InvalidComposite(
+                CompositeParseError::FieldCountMismatch
+            ))
+        ));
+    }
 }

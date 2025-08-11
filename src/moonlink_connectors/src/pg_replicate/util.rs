@@ -378,8 +378,8 @@ impl From<PostgresTableRow> for MoonlinkRow {
                 Cell::Array(value) => {
                     values.push(RowValue::Array(convert_array_cell(value)));
                 }
-                Cell::Composite(composite_values) => {
-                    let struct_values: Vec<RowValue> = composite_values
+                Cell::Composite(value) => {
+                    let struct_values: Vec<RowValue> = value
                         .into_iter()
                         .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
                         .map(|row: MoonlinkRow| {
