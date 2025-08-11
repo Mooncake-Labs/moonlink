@@ -5,6 +5,8 @@ use std::hash::{Hash, Hasher};
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum RowValue {
     Int32(i32),
+    // When used to represent [`Time`] type, it indicates microseconds from midnight.
+    // When used to represent [`TimeStamp`] or [`TimeStampTz`] type, it indicates microseconds since UNIX timestamp, after canonicalizing to UTC timezone.
     Int64(i64),
     Float32(f32),
     Float64(f64),

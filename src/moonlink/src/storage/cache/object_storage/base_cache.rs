@@ -11,6 +11,8 @@ use crate::storage::storage_utils::TableUniqueFileId;
 use crate::Result;
 use smallvec::SmallVec;
 
+pub type InlineEvictedFiles = SmallVec<[String; 1]>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileMetadata {
     /// Size of the current file.
@@ -35,13 +37,12 @@ pub trait CacheTrait {
         &mut self,
         file_id: TableUniqueFileId,
         cache_entry: CacheEntry,
-    ) -> (NonEvictableHandle, SmallVec<[String; 1]>);
+    ) -> (NonEvictableHandle, InlineEvictedFiles);
 
     /// Similar to [`delete_cache_entry`], but doesn't panic if requested entry doesn't exist.
     #[must_use]
     #[allow(async_fn_in_trait)]
-    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId)
-        -> SmallVec<[String; 1]>;
+    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId) -> InlineEvictedFiles;
 
     /// Attempt to get a pinned cache file entry.
     ///
@@ -57,6 +58,6 @@ pub trait CacheTrait {
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> Result<(
         Option<NonEvictableHandle>,
-        SmallVec<[String; 1]>, /*files_to_delete*/
+        InlineEvictedFiles, /*files_to_delete*/
     )>;
 }

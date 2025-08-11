@@ -11,7 +11,7 @@ rest_api_demo = ["dep:reqwest"]
 [dependencies]
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
-axum = "0.7"
+axum = "0.8"
 clap = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }
@@ -22,7 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = { workspace = true }
 
 [[example]]

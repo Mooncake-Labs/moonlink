@@ -13,14 +13,14 @@ storage-fs = ["moonlink/storage-fs"]
 arrow = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
-bigdecimal = { version = "0.4.6", default-features = false, features = ["std"] }
-byteorder = "1.5.0"
+bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
+byteorder = "1.5"
 bytes = "1.0"
 chrono = { workspace = true }
 futures = { workspace = true }
 moonlink = { path = "../moonlink" }
 num-traits = { workspace = true }
-pg_escape = "0.1.1"
+pg_escape = "0.1"
 pin-project-lite = "0.2"
 postgres-replication = { workspace = true }
 serde_json = { workspace = true }
