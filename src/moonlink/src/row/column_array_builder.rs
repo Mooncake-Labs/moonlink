@@ -1234,4 +1234,238 @@ mod tests {
         assert!(field3.value(0));
         assert!(!field3.value(1));
     }
+
+    #[test]
+    fn test_column_array_builder_struct_with_list_field() {
+        use arrow::array::{ListArray, StructArray};
+
+        let struct_fields = vec![
+            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "scores",
+                DataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    DataType::Int32,
+                    true,
+                ))),
+                true,
+            )),
+        ];
+
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 3);
+
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::Array(vec![RowValue::Int32(85), RowValue::Int32(92)]),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(2),
+                RowValue::Array(vec![]),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![RowValue::Int32(3), RowValue::Null]))
+            .unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields.into()));
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let scores_column = struct_array
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        // Verify list with values, empty list, and null
+        assert_eq!(scores_column.value(0).len(), 2);
+        assert_eq!(scores_column.value(1).len(), 0);
+        assert!(scores_column.is_null(2));
+    }
+
+    #[test]
+    fn test_column_array_builder_deeply_nested_struct() {
+        use arrow::array::StructArray;
+
+        // Create 3-level nested struct
+        let level3 = DataType::Struct(
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "value",
+                DataType::Utf8,
+                true,
+            ))]
+            .into(),
+        );
+        let level2 = DataType::Struct(
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "level3", level3, true,
+            ))]
+            .into(),
+        );
+        let root = DataType::Struct(
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "level2", level2, true,
+            ))]
+            .into(),
+        );
+
+        let mut builder = ColumnArrayBuilder::new(&root, 2);
+
+        // Add nested struct and struct with null
+        builder
+            .append_value(&RowValue::Struct(vec![RowValue::Struct(vec![
+                RowValue::Struct(vec![RowValue::ByteArray(b"deep".to_vec())]),
+            ])]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![RowValue::Null]))
+            .unwrap();
+
+        let array = builder.finish(&root);
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let level2_column = struct_array
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+
+        // Verify deep nesting works and nulls are handled
+        assert!(!level2_column.is_null(0));
+        assert!(level2_column.is_null(1));
+    }
+
+    #[test]
+    fn test_column_array_builder_struct_with_mixed_nested_types() {
+        use arrow::array::{ListArray, StructArray};
+
+        let nested_struct = DataType::Struct(
+            vec![
+                Arc::new(arrow::datatypes::Field::new(
+                    "nested_id",
+                    DataType::Int32,
+                    true,
+                )),
+                Arc::new(arrow::datatypes::Field::new(
+                    "nested_value",
+                    DataType::Float64,
+                    true,
+                )),
+            ]
+            .into(),
+        );
+
+        let struct_fields = vec![
+            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
+            Arc::new(arrow::datatypes::Field::new("nested", nested_struct, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "tags",
+                DataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    DataType::Utf8,
+                    true,
+                ))),
+                true,
+            )),
+        ];
+
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 2);
+
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::Struct(vec![RowValue::Int32(100), RowValue::Float64(42.5)]),
+                RowValue::Array(vec![RowValue::ByteArray(b"tag1".to_vec())]),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(2),
+                RowValue::Null,
+                RowValue::Array(vec![RowValue::ByteArray(b"tag2".to_vec())]),
+            ]))
+            .unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields.into()));
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let nested_column = struct_array
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let tags_column = struct_array
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        // Verify mixed types: valid nested struct, null nested struct, and lists
+        assert!(!nested_column.is_null(0));
+        assert!(nested_column.is_null(1));
+        assert_eq!(tags_column.value(0).len(), 1);
+        assert_eq!(tags_column.value(1).len(), 1);
+    }
+
+    #[test]
+    fn test_column_array_builder_struct_with_partial_nulls() {
+        use arrow::array::StructArray;
+
+        let struct_fields = vec![
+            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
+            Arc::new(arrow::datatypes::Field::new("name", DataType::Utf8, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "score",
+                DataType::Float64,
+                true,
+            )),
+        ];
+
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 3);
+
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::ByteArray(b"Alice".to_vec()),
+                RowValue::Float64(95.5),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(2),
+                RowValue::Null,
+                RowValue::Float64(87.2),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(3),
+                RowValue::Null,
+                RowValue::Null,
+            ]))
+            .unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields.into()));
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let name_column = struct_array
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let score_column = struct_array
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        // Verify mixed nulls across struct fields
+        assert_eq!(name_column.value(0), "Alice");
+        assert!(name_column.is_null(1));
+        assert!(name_column.is_null(2));
+        assert_eq!(score_column.value(0), 95.5);
+        assert_eq!(score_column.value(1), 87.2);
+        assert!(score_column.is_null(2));
+    }
 }
