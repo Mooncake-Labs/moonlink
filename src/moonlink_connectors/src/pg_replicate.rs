@@ -527,15 +527,10 @@ pub async fn run_event_loop(
         tokio::select! {
             _ = status_interval.tick() => {
                 let mut confirmed_lsn: Option<u64> = None;
-                debug!("confirming an lsn...: {:?}", confirmed_lsn);
                 for rx in wal_flush_lsn_rxs.values() {
                     let lsn = *rx.borrow();
                     confirmed_lsn = Some(match confirmed_lsn {
-                        Some(v) => {
-                            let lsn = v.min(lsn);
-                            debug!("confirming more lsn...: {}", lsn);
-                            lsn
-                        }
+                        Some(v) => v.min(lsn),
                         None => lsn,
                     });
                 }
@@ -550,11 +545,9 @@ pub async fn run_event_loop(
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
                 PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
-                    debug!("adding a table...: {:?}", src_table_id);
                     sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                     wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
-                    debug!("added into wal_flush_lsn_rxs: {:?}", wal_flush_lsn_rxs.len());
                     stream.as_mut().add_table_schema(schema);
                 }
                 PostgresReplicationCommand::DropTable { src_table_id } => {

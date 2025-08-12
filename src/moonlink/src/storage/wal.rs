@@ -1240,6 +1240,7 @@ impl WalManager {
                         }
                         // if the xact is not in the xact map, it means it is closed before the iceberg snapshot (ie we are already not tracking it)
                         None => {
+                            #[cfg(debug_assertions)]
                             if let TableEvent::Commit { lsn, .. } = event {
                                 assert!(WalManager::event_already_captured_in_iceberg_snapshot(
                                     *lsn,
