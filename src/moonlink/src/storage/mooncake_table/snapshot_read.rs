@@ -86,7 +86,7 @@ impl SnapshotTableState {
                     /*filesystem_accessor*/ self.filesystem_accessor.as_ref(),
                 )
                 .await
-                .unwrap();
+                .expect("Failed to get puffin cache entry during deletion vector read operation");
             assert!(cur_evicted.is_empty());
             puffin_cache_handles.push(new_puffin_cache_handle.unwrap());
 

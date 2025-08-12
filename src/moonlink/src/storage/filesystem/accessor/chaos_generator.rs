@@ -24,7 +24,7 @@ impl ChaosGenerator {
         } else {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .expect("Failed to get system time since epoch during chaos generator initialization")
                 .as_nanos();
             nanos as u64
         };

@@ -82,7 +82,7 @@ impl ReadOutput {
                             self.filesystem_accessor.as_ref().unwrap().as_ref(),
                         )
                         .await
-                        .unwrap();
+                        .expect("Failed to get cache entry for remote data file during read operation");
                     if let Some(cache_handle) = cache_handle {
                         resolved_data_files.push(cache_handle.get_cache_filepath().to_string());
                         cache_handles.push(cache_handle);
@@ -100,7 +100,7 @@ impl ReadOutput {
                                 },
                             })
                             .await
-                            .unwrap();
+                            .expect("Failed to send evicted files to delete event during read operation");
                     }
                 }
             }

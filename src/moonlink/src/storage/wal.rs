@@ -864,7 +864,7 @@ impl WalManager {
                 result: persistence_update_result,
             })
             .await
-            .unwrap();
+            .expect("Failed to send WAL persistence update result to table notify channel");
     }
 
     // ------------------------------

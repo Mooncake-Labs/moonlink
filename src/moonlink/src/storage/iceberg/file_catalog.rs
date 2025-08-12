@@ -392,7 +392,7 @@ impl Catalog for FileCatalog {
             let cur_namespace_ident = if let Some(parent_namespace_ident) = parent {
                 let mut parent_namespace_segments = parent_namespace_ident.clone().to_vec();
                 parent_namespace_segments.push(cur_subdir.to_string());
-                NamespaceIdent::from_vec(parent_namespace_segments).unwrap()
+                NamespaceIdent::from_vec(parent_namespace_segments).expect("Failed to create namespace ident from segments during list namespaces")
             } else {
                 NamespaceIdent::new(cur_subdir.to_string())
             };
@@ -408,7 +408,7 @@ impl Catalog for FileCatalog {
                 let cur_namespace_ident = if let Some(parent_namespace_ident) = parent {
                     let mut parent_namespace_segments = parent_namespace_ident.clone().to_vec();
                     parent_namespace_segments.push(cur_subdir.to_string());
-                    NamespaceIdent::from_vec(parent_namespace_segments).unwrap()
+                    NamespaceIdent::from_vec(parent_namespace_segments).expect("Failed to create namespace ident from segments during list namespaces")
                 } else {
                     NamespaceIdent::new(cur_subdir.to_string())
                 };

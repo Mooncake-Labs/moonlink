@@ -519,16 +519,16 @@ mod tests {
         )
         .unwrap();
 
-        let tmp_dir = tempdir().expect("Failed to create temporary directory for parquet test");
+        let tmp_dir = tempdir().unwrap();
         let file_path = tmp_dir.path().join("output.parquet");
-        let file = tokio::fs::File::create(&file_path).await.expect("Failed to create file for parquet test");
+        let file = tokio::fs::File::create(&file_path).await.unwrap();
         let props = WriterProperties::builder()
             .set_compression(parquet::basic::Compression::UNCOMPRESSED)
             .build();
 
-        let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props)).expect("Failed to create parquet writer");
-        writer.write(&record_batch).await.expect("Failed to write record batch to parquet");
-        writer.close().await.expect("Failed to close parquet writer");
+        let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        writer.write(&record_batch).await.unwrap();
+        writer.close().await.unwrap();
 
         // Create moonlink row to match against, which matches the second row in the parquet file.
         let row = MoonlinkRow::new(vec![RowValue::Int32(2), RowValue::Int64(20)]);
@@ -536,7 +536,7 @@ mod tests {
         // Check cases with full row as identity property.
         assert!(
             row.equals_parquet_at_offset(
-                file_path.to_str().expect("Failed to convert file path to str"),
+                file_path.to_str().unwrap(),
                 /*offset=*/ 1,
                 &IdentityProp::FullRow
             )
@@ -544,7 +544,7 @@ mod tests {
         );
         assert!(
             !row.equals_parquet_at_offset(
-                file_path.to_str().expect("Failed to convert file path to str"),
+                file_path.to_str().unwrap(),
                 /*offset=*/ 0,
                 &IdentityProp::FullRow
             )
@@ -553,12 +553,12 @@ mod tests {
 
         let identity = IdentityProp::Keys(vec![1])
             .extract_identity_columns(row.clone())
-            .expect("Failed to extract identity columns for parquet test");
+            .unwrap();
         // Check cases with specified keys.
         assert!(
             identity
                 .equals_parquet_at_offset(
-                    file_path.to_str().expect("Failed to convert file path to str"),
+                    file_path.to_str().unwrap(),
                     /*offset=*/ 1,
                     &IdentityProp::Keys(vec![1])
                 )
@@ -567,7 +567,7 @@ mod tests {
         assert!(
             !identity
                 .equals_parquet_at_offset(
-                    file_path.to_str().expect("Failed to convert file path to str"),
+                    file_path.to_str().unwrap(),
                     /*offset=*/ 0,
                     &IdentityProp::Keys(vec![1])
                 )
