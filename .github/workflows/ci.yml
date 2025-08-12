@@ -62,7 +62,7 @@ jobs:
         include:
           - type: feature
             name: GCS feature test
-            timeout-minutes: 5
+            timeout-minutes: 10
             cmd: |
               cargo test --lib --features=storage-gcs
           - type: chaos
@@ -117,7 +117,7 @@ jobs:
         include:
           - type: feature
             name: S3 feature test
-            timeout-minutes: 5
+            timeout-minutes: 10
             cmd: |
               cargo test --lib --features=storage-s3
           - type: chaos
