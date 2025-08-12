@@ -575,8 +575,36 @@ impl WalManager {
                 self.highest_completion_lsn,
                 self.curr_file_number,
             );
-            // TODO(Paul): This could get very long and might have many commits in a single file. We can
-            // coalesce all main xacts that share the same start_file and end_file into a single state.
+
+            // now we check to merge this event and the last event in the main transaction tracker
+            // for each file, we only track the highest main commit event
+            if !self.main_transaction_tracker.is_empty() {
+                if let WalTransactionState::Commit {
+                    start_file: _,
+                    completion_lsn: _,
+                    file_end: curr_file_end,
+                } = updated_state.clone()
+                {
+                    let prev_event = self.main_transaction_tracker.last().unwrap();
+                    match prev_event {
+                        WalTransactionState::Commit {
+                            start_file: prev_start_file,
+                            ..
+                        } => {
+                            if *prev_start_file == curr_file_end {
+                                // we only need to keep the current event, as it is the highest commit event with a start_file for the present file
+                                self.main_transaction_tracker.pop().unwrap();
+                            }
+                        }
+                        _ => {
+                            debug_assert!(
+                                matches!(prev_event, WalTransactionState::Commit { .. }),
+                                "Expected a commit event in the main transaction tracker, but got {prev_event:?}"
+                            );
+                        }
+                    }
+                }
+            }
             self.main_transaction_tracker.push(updated_state);
         };
     }
