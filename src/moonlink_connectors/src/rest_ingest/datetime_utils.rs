@@ -69,7 +69,7 @@ pub fn parse_timestamp_with_timezone(
             let local_dt = tz
                 .from_local_datetime(&naive_dt)
                 .single()
-                .ok_or_else(|| format!("Ambiguous time in timezone {}", tz_str))?;
+                .ok_or_else(|| format!("Ambiguous time in timezone {tz_str}"))?;
             let utc_dt = local_dt.with_timezone(&Utc);
             let timestamp_micros = utc_dt.timestamp_micros();
             return Ok(RowValue::Int64(timestamp_micros));
