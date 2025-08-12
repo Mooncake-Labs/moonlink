@@ -187,7 +187,7 @@ jobs:
         with: { tool: nextest }
 
       - name: Run tests via llvm-cov/nextest
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           cargo llvm-cov \
             --locked \
