@@ -65,7 +65,6 @@ num-traits = { workspace = true }
 opendal = { workspace = true }
 parquet = { workspace = true }
 rand = { workspace = true }
-regex = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 roaring = { workspace = true }
 serde = { workspace = true }
@@ -86,6 +85,7 @@ mockall = "0.13"
 pico-args = "0.5"
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
 rand = "0.9"
+regex = { workspace = true }
 rstest = "0.26"
 rstest_reuse = "0.7"
 tempfile = { workspace = true }
