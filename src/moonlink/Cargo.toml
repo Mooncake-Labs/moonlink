@@ -65,6 +65,7 @@ num-traits = { workspace = true }
 opendal = { workspace = true }
 parquet = { workspace = true }
 rand = { workspace = true }
+regex = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 roaring = { workspace = true }
 serde = { workspace = true }
