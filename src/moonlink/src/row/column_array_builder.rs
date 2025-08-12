@@ -1112,22 +1112,32 @@ mod tests {
             .to_string()
             .contains("Struct field count mismatch: expected 3 fields, got 5 values"));
 
-        // Test 4: Append with NULLs explicitly provided (should succeed)
+        // Test 4: Progressive NULL pattern testing (should succeed)
+        // Row with one NULL in middle field
         builder
             .append_value(&RowValue::Struct(vec![
                 RowValue::Int32(4),
-                RowValue::Null, // Explicit NULL
+                RowValue::Null, // Explicit NULL in middle
                 RowValue::Bool(false),
             ]))
             .unwrap();
 
+        // Row with two NULLs in last two fields
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(5),
+                RowValue::Null, // NULL
+                RowValue::Null, // NULL
+            ]))
+            .unwrap();
+
         let array = builder.finish(&DataType::Struct(struct_fields.into()));
-        assert_eq!(array.len(), 2); // Only 2 successful appends
+        assert_eq!(array.len(), 3); // 3 successful appends (tests 2, 4, and 5)
 
         let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
         assert_eq!(struct_array.num_columns(), 3);
 
-        // Check field1 values
+        // Check field1 values (no nulls)
         let field1 = struct_array
             .column(0)
             .as_any()
@@ -1135,17 +1145,19 @@ mod tests {
             .unwrap();
         assert_eq!(field1.value(0), 2);
         assert_eq!(field1.value(1), 4);
+        assert_eq!(field1.value(2), 5);
 
-        // Check field2 values
+        // Check field2 values (progressive nulls)
         let field2 = struct_array
             .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(field2.value(0), "test");
-        assert!(field2.is_null(1)); // Explicit NULL
+        assert!(field2.is_null(1)); // NULL from row 2
+        assert!(field2.is_null(2)); // NULL from row 3
 
-        // Check field3 values
+        // Check field3 values (progressive nulls)
         let field3 = struct_array
             .column(2)
             .as_any()
@@ -1153,6 +1165,7 @@ mod tests {
             .unwrap();
         assert!(field3.value(0));
         assert!(!field3.value(1));
+        assert!(field3.is_null(2)); // NULL from row 3
     }
 
     #[test]
@@ -1326,66 +1339,5 @@ mod tests {
         assert!(nested_column.is_null(1));
         assert_eq!(tags_column.value(0).len(), 1);
         assert_eq!(tags_column.value(1).len(), 1);
-    }
-
-    #[test]
-    fn test_column_array_builder_struct_with_partial_nulls() {
-        use arrow::array::StructArray;
-
-        let struct_fields = vec![
-            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
-            Arc::new(arrow::datatypes::Field::new("name", DataType::Utf8, true)),
-            Arc::new(arrow::datatypes::Field::new(
-                "score",
-                DataType::Float64,
-                true,
-            )),
-        ];
-
-        let mut builder =
-            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 3);
-
-        builder
-            .append_value(&RowValue::Struct(vec![
-                RowValue::Int32(1),
-                RowValue::ByteArray(b"Alice".to_vec()),
-                RowValue::Float64(95.5),
-            ]))
-            .unwrap();
-        builder
-            .append_value(&RowValue::Struct(vec![
-                RowValue::Int32(2),
-                RowValue::Null,
-                RowValue::Float64(87.2),
-            ]))
-            .unwrap();
-        builder
-            .append_value(&RowValue::Struct(vec![
-                RowValue::Int32(3),
-                RowValue::Null,
-                RowValue::Null,
-            ]))
-            .unwrap();
-
-        let array = builder.finish(&DataType::Struct(struct_fields.into()));
-        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
-        let name_column = struct_array
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let score_column = struct_array
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-
-        // Verify mixed nulls across struct fields
-        assert_eq!(name_column.value(0), "Alice");
-        assert!(name_column.is_null(1));
-        assert!(name_column.is_null(2));
-        assert_eq!(score_column.value(0), 95.5);
-        assert_eq!(score_column.value(1), 87.2);
-        assert!(score_column.is_null(2));
     }
 }
