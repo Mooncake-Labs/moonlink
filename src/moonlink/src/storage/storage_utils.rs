@@ -1,5 +1,6 @@
 use crate::row::MoonlinkRow;
 use more_asserts as ma;
+use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -58,15 +59,15 @@ pub fn create_data_file(file_id: u64, file_path: String) -> MooncakeDataFileRef 
 }
 
 // UNDONE(UPDATE_DELETE): a better way to handle file ids
-#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash, Deserialize, Serialize)]
 pub struct FileId(pub(crate) u64);
 
 /// Unique table id.
-#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash, Deserialize, Serialize)]
 pub struct TableId(pub(crate) u32);
 
 /// A globally unique id for a file.
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Deserialize, Serialize)]
 pub struct TableUniqueFileId {
     pub(crate) table_id: TableId,
     pub(crate) file_id: FileId,
