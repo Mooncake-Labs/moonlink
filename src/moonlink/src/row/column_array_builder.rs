@@ -1169,9 +1169,10 @@ mod tests {
     }
 
     #[test]
-    fn test_column_array_builder_struct_with_list_field() {
+    fn test_struct_with_list_field() {
         use arrow::array::{ListArray, StructArray};
 
+        // Struct schema: { id: Int32, scores: List<Int32> }
         let struct_fields = vec![
             Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
             Arc::new(arrow::datatypes::Field::new(
@@ -1219,10 +1220,10 @@ mod tests {
     }
 
     #[test]
-    fn test_column_array_builder_deeply_nested_struct() {
+    fn test_deeply_nested_struct() {
         use arrow::array::StructArray;
 
-        // Create 3-level nested struct
+        // Create 3-level nested struct: { level2: { level3: { value: Utf8 } } }
         let level3 = DataType::Struct(
             vec![Arc::new(arrow::datatypes::Field::new(
                 "value",
@@ -1270,9 +1271,10 @@ mod tests {
     }
 
     #[test]
-    fn test_column_array_builder_struct_with_mixed_nested_types() {
+    fn test_struct_with_mixed_nested_types() {
         use arrow::array::{ListArray, StructArray};
 
+        // Nested struct schema: { nested_id: Int32, nested_value: Float64 }
         let nested_struct = DataType::Struct(
             vec![
                 Arc::new(arrow::datatypes::Field::new(
@@ -1289,6 +1291,7 @@ mod tests {
             .into(),
         );
 
+        // Root struct: { id: Int32, nested: Struct, tags: List<Utf8> }
         let struct_fields = vec![
             Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
             Arc::new(arrow::datatypes::Field::new("nested", nested_struct, true)),
