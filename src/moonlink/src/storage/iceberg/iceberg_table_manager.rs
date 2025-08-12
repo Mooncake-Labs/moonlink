@@ -130,7 +130,7 @@ impl IcebergTableManager {
     /// Get table identity.
     pub(super) fn get_table_ident(&self) -> TableIdent {
         TableIdent {
-            namespace: NamespaceIdent::from_strs(&self.config.namespace).unwrap(),
+            namespace: NamespaceIdent::from_strs(&self.config.namespace).expect("Failed to create namespace ident from segments during get table ident"),
             name: self.config.table_name.clone(),
         }
     }
@@ -139,14 +139,14 @@ impl IcebergTableManager {
     pub(super) fn get_unique_deletion_vector_filepath(&self) -> String {
         let location_generator =
             DefaultLocationGenerator::new(self.iceberg_table.as_ref().unwrap().metadata().clone())
-                .unwrap();
+                .expect("Failed to create default location generator for deletion vector filepath generation");
         location_generator
             .generate_location(&format!("{}-deletion-vector-v1-puffin.bin", Uuid::now_v7()))
     }
     pub(super) fn get_unique_hash_index_v1_filepath(&self) -> String {
         let location_generator =
             DefaultLocationGenerator::new(self.iceberg_table.as_ref().unwrap().metadata().clone())
-                .unwrap();
+                .expect("Failed to create default location generator for hash index v1 filepath generation");
         location_generator
             .generate_location(&format!("{}-hash-index-v1-puffin.bin", Uuid::now_v7()))
     }
@@ -215,7 +215,7 @@ impl TableManager for IcebergTableManager {
 
     async fn drop_table(&mut self) -> IcebergResult<()> {
         let table_ident = TableIdent::new(
-            NamespaceIdent::from_strs(&self.config.namespace).unwrap(),
+            NamespaceIdent::from_strs(&self.config.namespace).expect("Failed to create namespace ident from segments during drop table ident"),
             self.config.table_name.clone(),
         );
         self.catalog.drop_table(&table_ident).await

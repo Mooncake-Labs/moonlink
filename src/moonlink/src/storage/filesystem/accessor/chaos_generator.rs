@@ -21,7 +21,7 @@ impl ChaosGenerator {
         option.validate();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("Failed to get system time since epoch during chaos generator initialization")
             .as_nanos();
         let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(nanos as u64)));
 

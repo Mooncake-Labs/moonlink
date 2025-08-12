@@ -44,7 +44,7 @@ impl DeletionVector {
     /// Pre-requisite: row indices must be in ascending order.
     pub fn mark_rows_deleted(&mut self, rows: Vec<u64>) {
         let row_count = rows.len();
-        let appended_num = self.bitmap.append(rows).unwrap();
+        let appended_num = self.bitmap.append(rows).expect("Failed to append rows to deletion vector bitmap");
         assert_eq!(appended_num as usize, row_count);
     }
 
@@ -126,7 +126,7 @@ impl DeletionVector {
         let bitmap_slice =
             unsafe { std::slice::from_raw_parts_mut(ptr.add(offset), serialized_bitmap_size) };
         let mut bitmap_writer = std::io::Cursor::new(bitmap_slice);
-        self.bitmap.serialize_into(&mut bitmap_writer).unwrap();
+        self.bitmap.serialize_into(&mut bitmap_writer).expect("Failed to serialize roaring bitmap into deletion vector blob");
         offset += serialized_bitmap_size;
 
         // Calculate CRC (magic bytes + serialized bitmap).
@@ -218,7 +218,7 @@ impl DeletionVector {
             .get(MOONCAKE_DELETION_VECTOR_NUM_ROWS)
             .unwrap()
             .parse()
-            .unwrap();
+            .expect("Failed to parse max number of rows from deletion vector properties during deserialization");
 
         // Deserialize the bitmap.
         DeletionVector::deserialize_roaring_map(bitmap_data, max_num_rows)

@@ -64,7 +64,7 @@ pub(crate) async fn upload_index_file(
         .to_str()
         .unwrap()
         .to_string();
-    let location_generator = DefaultLocationGenerator::new(table.metadata().clone()).unwrap();
+    let location_generator = DefaultLocationGenerator::new(table.metadata().clone()).expect("Failed to create default location generator for index file upload during iceberg table manager");
     let remote_filepath = location_generator.generate_location(&filename);
     filesystem_accessor
         .copy_from_local_to_remote(local_index_filepath, &remote_filepath)

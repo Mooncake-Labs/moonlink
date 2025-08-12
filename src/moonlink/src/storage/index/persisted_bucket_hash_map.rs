@@ -97,8 +97,8 @@ impl IndexBlock {
         bucket_start_offset: u64,
         index_file: MooncakeDataFileRef,
     ) -> Self {
-        let file = tokio::fs::File::open(index_file.file_path()).await.unwrap();
-        let file_metadata = file.metadata().await.unwrap();
+        let file = tokio::fs::File::open(index_file.file_path()).await.expect("Failed to open index file during IndexBlock creation or loading");
+        let file_metadata = file.metadata().await.expect("Failed to get index file metadata during IndexBlock creation or loading");
         let file = file.into_std().await;
         let data = unsafe { Mmap::map(&file).unwrap() };
         Self {
@@ -133,13 +133,13 @@ impl IndexBlock {
                 .seek_bits(SeekFrom::Start(
                     (bucket_idx * metadata.bucket_bits) as u64 + self.bucket_start_offset,
                 ))
-                .unwrap();
+                .expect("Failed to seek to bucket index in index block during read_buckets operation");
             let start = reader
                 .read_unsigned_var::<u32>(metadata.bucket_bits)
-                .unwrap();
+                .expect("Failed to read start entry index for bucket in index block during read_buckets operation");
             let end = reader
                 .read_unsigned_var::<u32>(metadata.bucket_bits)
-                .unwrap();
+                .expect("Failed to read end entry index for bucket in index block during read_buckets operation");
             if start != end {
                 results.push(BucketEntry {
                     upper_hash: (*bucket_idx as u64) << metadata.hash_lower_bits,
@@ -159,13 +159,13 @@ impl IndexBlock {
     ) -> (u64, usize, usize) {
         let hash = reader
             .read_unsigned_var::<u64>(metadata.hash_lower_bits)
-            .unwrap();
+            .expect("Failed to read lower hash bits in index block during read_entry operation for GlobalIndex");
         let seg_idx = reader
             .read_unsigned_var::<u32>(metadata.seg_id_bits)
-            .unwrap();
+            .expect("Failed to read segment index in index block during read_entry operation for GlobalIndex");
         let row_idx = reader
             .read_unsigned_var::<u32>(metadata.row_id_bits)
-            .unwrap();
+            .expect("Failed to read row index in index block during read_entry operation for GlobalIndex");
         (hash, seg_idx as usize, row_idx as usize)
     }
 
@@ -239,7 +239,7 @@ impl<'a> LookupIterator<'a> {
                             + self.metadata.seg_id_bits
                             + self.metadata.row_id_bits) as u64,
                 ))
-                .unwrap();
+                .expect("Failed to seek to bucket entry start in index block during seek_to_bucket_entry_start operation for LookupIterator");
         }
     }
 
@@ -332,7 +332,7 @@ impl IndexBlockBuilder {
         let file_name = format!("index_block_{}.bin", uuid::Uuid::now_v7());
         let file_path = directory.join(&file_name);
 
-        let file = AsyncFile::create(&file_path).await.unwrap();
+        let file = AsyncFile::create(&file_path).await.expect("Failed to create index block file during IndexBlockBuilder creation or initialization");
         let entry_writer = AsyncBitWriter::endian(file, AsyncBigEndian);
 
         Self {
@@ -375,7 +375,7 @@ impl IndexBlockBuilder {
 
     /// Flush buffered entries written to disk.
     pub async fn flush(&mut self) {
-        self.entry_writer.flush().await.unwrap()
+        self.entry_writer.flush().await.expect("Failed to flush index block entry writer during IndexBlockBuilder flush operation");
     }
 
     pub async fn build(mut self, metadata: &GlobalIndex, file_id: u64) -> IndexBlock {
@@ -388,11 +388,11 @@ impl IndexBlockBuilder {
         for cur_bucket in buckets {
             let to_flush = self.entry_writer.write(metadata.bucket_bits, cur_bucket);
             if to_flush {
-                self.entry_writer.flush().await.unwrap();
+                self.entry_writer.flush().await.expect("Failed to flush index block entry writer during IndexBlockBuilder build operation for finalization");
             }
         }
         self.entry_writer.byte_align();
-        self.entry_writer.flush().await.unwrap();
+        self.entry_writer.flush().await.expect("Failed to flush index block entry writer during IndexBlockBuilder build operation for finalization");
         drop(self.entry_writer);
         IndexBlock::new(
             self.bucket_start_idx,
@@ -676,13 +676,13 @@ impl<'a> IndexBlockIterator<'a> {
         let entry_reader = bucket_reader.clone();
         bucket_reader
             .seek_bits(SeekFrom::Start(collection.bucket_start_offset))
-            .unwrap();
+            .expect("Failed to seek to bucket start offset in index block during IndexBlockIterator creation");
         let _ = bucket_reader
             .read_unsigned_var::<u32>(metadata.bucket_bits)
-            .unwrap();
+            .expect("Failed to read first bucket entry in index block during IndexBlockIterator creation");
         let current_bucket_entry_end = bucket_reader
             .read_unsigned_var::<u32>(metadata.bucket_bits)
-            .unwrap();
+            .expect("Failed to read second bucket entry in index block during IndexBlockIterator creation");
         Self {
             collection,
             metadata,
@@ -714,7 +714,7 @@ impl<'a> IndexBlockIterator<'a> {
             self.current_bucket_entry_end = self
                 .bucket_reader
                 .read_unsigned_var::<u32>(self.metadata.bucket_bits)
-                .unwrap();
+                .expect("Failed to read next bucket entry in index block during IndexBlockIterator next operation");
             self.current_upper_hash += 1 << self.metadata.hash_lower_bits;
         }
         let (lower_hash, seg_idx, row_idx) = self
@@ -853,15 +853,15 @@ impl IndexBlock {
         let mut num = 0;
         reader
             .seek_bits(SeekFrom::Start(self.bucket_start_offset))
-            .unwrap();
+            .expect("Failed to seek to bucket start offset in index block during fmt operation for IndexBlock");
         for _i in 0..self.bucket_end_idx {
             num = reader
                 .read_unsigned_var::<u32>(metadata.bucket_bits)
-                .unwrap();
+                .expect("Failed to read bucket entry in index block during fmt operation for IndexBlock");
             write!(f, "{num} ")?;
         }
         write!(f, "\n   Entries: ")?;
-        reader.seek_bits(SeekFrom::Start(0)).unwrap();
+        reader.seek_bits(SeekFrom::Start(0)).expect("Failed to seek to start of index block during fmt operation for IndexBlock to read entries");
         for _i in 0..num {
             let (hash, seg_idx, row_idx) = self.read_entry(&mut reader, metadata);
             write!(f, "\n     {hash} {seg_idx} {row_idx}")?;

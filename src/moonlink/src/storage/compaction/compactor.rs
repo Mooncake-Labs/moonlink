@@ -200,7 +200,7 @@ impl CompactionBuilder {
             .iter()
             .map(|cur_row_group| cur_row_group.num_rows() as usize)
             .sum();
-        let mut reader = builder.build().unwrap();
+        let mut reader = builder.build().expect("Failed to build parquet reader for deletion vector application during compaction");
 
         let batch_deletion_vector =
             if let Some(puffin_blob_ref) = data_file_to_compact.deletion_vector {
@@ -216,7 +216,7 @@ impl CompactionBuilder {
             }
             batch_deletion_vector
                 .apply_to_batch_with_slice(&record_batch, start_row_idx)
-                .unwrap()
+                .expect("Failed to apply deletion vector to record batch during compaction operation")
         };
 
         let mut old_start_row_idx = 0;

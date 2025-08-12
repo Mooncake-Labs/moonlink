@@ -198,7 +198,7 @@ impl ColumnStoreBuffer {
             let idx = self
                 .in_memory_batches
                 .binary_search_by_key(batch_id, |x| x.id)
-                .unwrap();
+                .expect("Failed to find batch by ID during row search by record");
             if !self.in_memory_batches[idx]
                 .batch
                 .deletions
@@ -226,7 +226,7 @@ impl ColumnStoreBuffer {
             let idx = self
                 .in_memory_batches
                 .binary_search_by_key(batch_id, |x| x.id)
-                .unwrap();
+                .expect("Failed to find batch by ID during row deletion by record operation");
             if !self.in_memory_batches[idx]
                 .batch
                 .deletions
@@ -276,7 +276,7 @@ impl ColumnStoreBuffer {
             .in_memory_batches
             .binary_search_by_key(&pos.0, |x| x.id);
         if idx.is_ok() {
-            let res = self.in_memory_batches[idx.unwrap()]
+            let res = self.in_memory_batches[idx.expect("Failed to find batch by ID during row deletion at position")]
                 .batch
                 .deletions
                 .delete_row(pos.1);
@@ -317,7 +317,7 @@ pub(super) fn create_batch_from_rows(
         .zip(schema.fields())
         .map(|(builder, field)| builder.finish(field.data_type()))
         .collect();
-    RecordBatch::try_new(Arc::clone(&schema), columns).unwrap()
+    RecordBatch::try_new(Arc::clone(&schema), columns).expect("Failed to create record batch from rows during batch creation")
 }
 
 #[cfg(test)]

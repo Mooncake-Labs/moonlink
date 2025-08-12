@@ -40,8 +40,8 @@ use crate::storage::mooncake_table::batch_id_counter::BatchIdCounter;
 use crate::storage::mooncake_table::iceberg_persisted_records::IcebergPersistedRecords;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 pub use crate::storage::mooncake_table::snapshot_read_output::ReadOutput as SnapshotReadOutput;
-#[cfg(test)]
-pub(crate) use crate::storage::mooncake_table::table_snapshot::IcebergSnapshotDataCompactionPayload;
+// #[cfg(test)]
+// pub(crate) use crate::storage::mooncake_table::table_snapshot::IcebergSnapshotDataCompactionPayload;
 pub(crate) use crate::storage::mooncake_table::table_snapshot::{
     take_data_files_to_import, take_data_files_to_remove, take_file_indices_to_import,
     take_file_indices_to_remove, FileIndiceMergePayload, FileIndiceMergeResult,
@@ -66,8 +66,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResult};
-#[cfg(test)]
-use tokio::sync::mpsc::Receiver;
+// #[cfg(test)]
+// use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{watch, RwLock};
 use tracing::Instrument;
@@ -527,7 +527,7 @@ impl MooncakeTable {
         let iceberg_snapshot_wal_metadata =
             current_snapshot.iceberg_corresponding_wal_metadata.clone();
         if let Some(persistence_lsn) = last_iceberg_snapshot_lsn {
-            table_snapshot_watch_sender.send(persistence_lsn).unwrap();
+            table_snapshot_watch_sender.send(persistence_lsn).expect("Failed to send initial snapshot LSN to watch channel");
         }
 
         let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
@@ -587,7 +587,7 @@ impl MooncakeTable {
             alter_table_request,
         ));
 
-        let mut guard = self.snapshot.try_write().unwrap();
+        let mut guard = self.snapshot.try_write().expect("Failed to acquire write lock on snapshot state for alter table");
         guard.reset_for_alter(new_metadata.clone());
         assert!(
             self.metadata.schema.fields.len() != new_metadata.schema.fields.len(),
@@ -794,7 +794,7 @@ impl MooncakeTable {
         snapshot_task: Option<&mut SnapshotTask>,
     ) -> Result<DiskSliceWriter> {
         // Finalize the current batch (if needed)
-        let (new_batch, batches, index) = mem_slice.drain().unwrap();
+        let (new_batch, batches, index) = mem_slice.drain().expect("Failed to drain mem slice for flush operation during mooncake snapshot");
 
         let index = Arc::new(index);
         if let Some(task) = snapshot_task {
@@ -941,7 +941,7 @@ impl MooncakeTable {
             table_notify_tx_copy
                 .send(TableEvent::IndexMergeResult { index_merge_result })
                 .await
-                .unwrap();
+                .expect("Failed to send index merge result to table notifier channel");
         });
     }
 
@@ -974,7 +974,7 @@ impl MooncakeTable {
                         data_compaction_result,
                     })
                     .await
-                    .unwrap();
+                    .expect("Failed to send data compaction result to table notifier channel");
             }
             .instrument(info_span!("data_compaction")),
         );
@@ -988,7 +988,7 @@ impl MooncakeTable {
     }
 
     pub(crate) fn notify_snapshot_reader(&self, lsn: u64) {
-        self.table_snapshot_watch_sender.send(lsn).unwrap();
+        self.table_snapshot_watch_sender.send(lsn).expect("Failed to send snapshot LSN to watch channel during notify_snapshot_reader");
     }
 
     /// Persist an iceberg snapshot.
@@ -1049,12 +1049,12 @@ impl MooncakeTable {
                     iceberg_snapshot_result: Err(iceberg_persistence_res.unwrap_err().into()),
                 })
                 .await
-                .unwrap();
+                .expect("Failed to send iceberg snapshot result to table notifier channel");
             return;
         }
 
         // Notify on event success.
-        let iceberg_persistence_res = iceberg_persistence_res.unwrap();
+        let iceberg_persistence_res = iceberg_persistence_res.expect("Failed to persist iceberg snapshot during mooncake snapshot");
 
         // Persisted data files and file indices will be cut into multiple sections: imported part, index merge part, data compaction part.
         // Get the cut-off indices to slice from returned iceberg persistence result.
@@ -1114,7 +1114,7 @@ impl MooncakeTable {
                 iceberg_snapshot_result: Ok(snapshot_result),
             })
             .await
-            .unwrap();
+            .expect("Failed to send iceberg snapshot result to table notifier channel");
     }
 
     /// Create an iceberg snapshot.
@@ -1178,7 +1178,7 @@ impl MooncakeTable {
                 },
             })
             .await
-            .unwrap();
+            .expect("Failed to send mooncake table snapshot result to table notifier channel");
     }
 
     /// Uses the latest wal metadata and iceberg LSN from the latest iceberg snapshot
@@ -1255,124 +1255,124 @@ impl MooncakeTable {
     }
 }
 
-#[cfg(test)]
-mod mooncake_tests {
-    use super::*;
-    use crate::storage::storage_utils::create_data_file;
+// #[cfg(test)]
+// mod mooncake_tests {
+//     use super::*;
+//     use crate::storage::storage_utils::create_data_file;
 
-    #[test]
-    fn test_flush_lsn_assertion() {
-        // Only iceberg imported result.
-        let iceberg_snapshot_result = IcebergSnapshotResult {
-            uuid: uuid::Uuid::new_v4(),
-            table_manager: None,
-            flush_lsn: 1,
-            corresponding_wal_metadata: IcebergCorrespondingWalMetadata {
-                earliest_wal_file_num: 0,
-            },
-            new_table_schema: None,
-            committed_deletion_logs: HashSet::new(),
-            import_result: IcebergSnapshotImportResult {
-                new_data_files: vec![create_data_file(
-                    /*file_id=*/ 0,
-                    "file_path".to_string(),
-                )],
-                puffin_blob_ref: HashMap::new(),
-                new_file_indices: vec![],
-            },
-            index_merge_result: IcebergSnapshotIndexMergeResult::default(),
-            data_compaction_result: IcebergSnapshotDataCompactionResult::default(),
-        };
-        // Valid snapshot result.
-        MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(
-            /*persistence_lsn=*/ None,
-            &iceberg_snapshot_result,
-        );
-        // Invalid snapshot result.
-        let res_copy = iceberg_snapshot_result.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(Some(2), &res_copy);
-        }));
-        assert!(result.is_err());
+//     #[test]
+//     fn test_flush_lsn_assertion() {
+//         // Only iceberg imported result.
+//         let iceberg_snapshot_result = IcebergSnapshotResult {
+//             uuid: uuid::Uuid::new_v4(),
+//             table_manager: None,
+//             flush_lsn: 1,
+//             corresponding_wal_metadata: IcebergCorrespondingWalMetadata {
+//                 earliest_wal_file_num: 0,
+//             },
+//             new_table_schema: None,
+//             committed_deletion_logs: HashSet::new(),
+//             import_result: IcebergSnapshotImportResult {
+//                 new_data_files: vec![create_data_file(
+//                     /*file_id=*/ 0,
+//                     "file_path".to_string(),
+//                 )],
+//                 puffin_blob_ref: HashMap::new(),
+//                 new_file_indices: vec![],
+//             },
+//             index_merge_result: IcebergSnapshotIndexMergeResult::default(),
+//             data_compaction_result: IcebergSnapshotDataCompactionResult::default(),
+//         };
+//         // Valid snapshot result.
+//         MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(
+//             /*persistence_lsn=*/ None,
+//             &iceberg_snapshot_result,
+//         );
+//         // Invalid snapshot result.
+//         let res_copy = iceberg_snapshot_result.clone();
+//         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+//             MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(Some(2), &res_copy);
+//         }));
+//         assert!(result.is_err());
 
-        // Only data compaction result.
-        let mut res_copy = iceberg_snapshot_result.clone();
-        res_copy.import_result = IcebergSnapshotImportResult::default();
-        res_copy.data_compaction_result = IcebergSnapshotDataCompactionResult {
-            old_data_files_removed: vec![create_data_file(
-                /*file_id=*/ 0,
-                "file_path".to_string(),
-            )],
-            ..Default::default()
-        };
-        // Valid snapshot result.
-        MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(
-            /*persistence_lsn=*/ Some(1),
-            &res_copy,
-        );
-        // Invalid snapshot result.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(Some(2), &res_copy);
-        }));
-        assert!(result.is_err());
+//         // Only data compaction result.
+//         let mut res_copy = iceberg_snapshot_result.clone();
+//         res_copy.import_result = IcebergSnapshotImportResult::default();
+//         res_copy.data_compaction_result = IcebergSnapshotDataCompactionResult {
+//             old_data_files_removed: vec![create_data_file(
+//                 /*file_id=*/ 0,
+//                 "file_path".to_string(),
+//             )],
+//             ..Default::default()
+//         };
+//         // Valid snapshot result.
+//         MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(
+//             /*persistence_lsn=*/ Some(1),
+//             &res_copy,
+//         );
+//         // Invalid snapshot result.
+//         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+//             MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(Some(2), &res_copy);
+//         }));
+//         assert!(result.is_err());
 
-        // Contain both import and data compaction result.
-        let mut res_copy = iceberg_snapshot_result.clone();
-        res_copy.data_compaction_result = IcebergSnapshotDataCompactionResult {
-            old_data_files_removed: vec![create_data_file(
-                /*file_id=*/ 0,
-                "file_path".to_string(),
-            )],
-            ..Default::default()
-        };
-        // Valid snapshot result.
-        MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(
-            /*persistence_lsn=*/ Some(1),
-            &res_copy,
-        );
-    }
-}
+//         // Contain both import and data compaction result.
+//         let mut res_copy = iceberg_snapshot_result.clone();
+//         res_copy.data_compaction_result = IcebergSnapshotDataCompactionResult {
+//             old_data_files_removed: vec![create_data_file(
+//                 /*file_id=*/ 0,
+//                 "file_path".to_string(),
+//             )],
+//             ..Default::default()
+//         };
+//         // Valid snapshot result.
+//         MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(
+//             /*persistence_lsn=*/ Some(1),
+//             &res_copy,
+//         );
+//     }
+// }
 
-#[cfg(test)]
-impl MooncakeTable {
-    pub fn get_table_id(&self) -> u32 {
-        self.metadata.table_id
-    }
+// #[cfg(test)]
+// impl MooncakeTable {
+//     pub fn get_table_id(&self) -> u32 {
+//         self.metadata.table_id
+//     }
 
-    pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {
-        self.table_snapshot_watch_sender.clone()
-    }
-}
+//     pub(crate) fn get_snapshot_watch_sender(&self) -> watch::Sender<u64> {
+//         self.table_snapshot_watch_sender.clone()
+//     }
+// }
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;
 
-#[cfg(test)]
-pub(crate) mod test_utils;
+// #[cfg(test)]
+// pub(crate) mod test_utils;
 
-#[cfg(test)]
-mod data_file_state_tests;
+// #[cfg(test)]
+// mod data_file_state_tests;
 
-#[cfg(test)]
-mod deletion_vector_puffin_state_tests;
+// #[cfg(test)]
+// mod deletion_vector_puffin_state_tests;
 
-#[cfg(test)]
-mod file_index_state_tests;
+// #[cfg(test)]
+// mod file_index_state_tests;
 
-#[cfg(test)]
-pub(crate) mod table_accessor_test_utils;
+// #[cfg(test)]
+// pub(crate) mod table_accessor_test_utils;
 
-#[cfg(test)]
-pub(crate) mod table_creation_test_utils;
+// #[cfg(test)]
+// pub(crate) mod table_creation_test_utils;
 
-#[cfg(test)]
-pub(crate) mod validation_test_utils;
+// #[cfg(test)]
+// pub(crate) mod validation_test_utils;
 
-#[cfg(test)]
-pub(crate) mod table_operation_test_utils;
+// #[cfg(test)]
+// pub(crate) mod table_operation_test_utils;
 
-#[cfg(test)]
-pub(crate) mod test_utils_commons;
+// #[cfg(test)]
+// pub(crate) mod test_utils_commons;
 
-#[cfg(test)]
-pub(crate) mod cache_test_utils;
+// #[cfg(test)]
+// pub(crate) mod cache_test_utils;

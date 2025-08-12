@@ -569,7 +569,7 @@ impl IcebergTableManager {
         )]);
         snapshot_properties.insert(
             MOONCAKE_WAL_METADATA.to_string(),
-            serde_json::to_string(&snapshot_payload.iceberg_corresponding_wal_metadata).unwrap(),
+            serde_json::to_string(&snapshot_payload.iceberg_corresponding_wal_metadata).expect("Failed to serialize iceberg corresponding wal metadata during snapshot sync implementation"),
         );
 
         let mut txn = Transaction::new(self.iceberg_table.as_ref().unwrap());
