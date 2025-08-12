@@ -1,4 +1,4 @@
-use crate::rest_ingest::datetime_utils::{parse_date, parse_time, parse_timestamp};
+use crate::rest_ingest::datetime_utils::{parse_date, parse_time, parse_timestamp_with_timezone};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use moonlink::row::{MoonlinkRow, RowValue};
 use serde_json::Value;
@@ -99,9 +99,9 @@ impl JsonToMoonlinkRowConverter {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
             }
-            DataType::Timestamp(TimeUnit::Microsecond, _tz) => {
+            DataType::Timestamp(TimeUnit::Microsecond, tz) => {
                 if let Some(s) = value.as_str() {
-                    parse_timestamp(s)
+                    parse_timestamp_with_timezone(s, tz.as_deref())
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
@@ -379,6 +379,68 @@ mod tests {
             + 123456;
         assert_eq!(row.values[2], RowValue::Int64(expected_micros3));
         assert_eq!(row.values[3], RowValue::Int64(expected_micros4));
+    }
+
+    #[test]
+    fn test_timezone_aware_timestamp_conversion() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp_pst",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("America/Los_Angeles".into())),
+                /*nullable=*/ false,
+            ),
+            Field::new(
+                "timestamp_est",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into())),
+                /*nullable=*/ false,
+            ),
+        ]));
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+
+        // Test naive datetime interpreted in schema timezone
+        // Use January 15 to avoid daylight saving time issues
+        let input = json!({
+            "timestamp_pst": "2024-01-15T10:30:45",
+            "timestamp_est": "2024-01-15T10:30:45",
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // 2024-01-15T10:30:45 in PST (UTC-8) should be 2024-01-15T18:30:45 UTC
+        let expected_pst = Utc
+            .with_ymd_and_hms(2024, 1, 15, 18, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+
+        // 2024-01-15T10:30:45 in EST (UTC-5) should be 2024-01-15T15:30:45 UTC
+        let expected_est = Utc
+            .with_ymd_and_hms(2024, 1, 15, 15, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+
+        assert_eq!(row.values[0], RowValue::Int64(expected_pst));
+        assert_eq!(row.values[1], RowValue::Int64(expected_est));
+
+        // Test that explicit timezone in input still takes precedence
+        let input = json!({
+            "timestamp_pst": "2024-01-15T10:30:45Z", // Explicit UTC
+            "timestamp_est": "2024-01-15T10:30:45+03:00", // Explicit +3
+        });
+        let row = converter.convert(&input).unwrap();
+
+        // Explicit UTC should be 2024-01-15T10:30:45 UTC
+        let expected_utc = Utc
+            .with_ymd_and_hms(2024, 1, 15, 10, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+
+        // Explicit +3 should be 2024-01-15T07:30:45 UTC
+        let expected_plus3 = Utc
+            .with_ymd_and_hms(2024, 1, 15, 7, 30, 45)
+            .unwrap()
+            .timestamp_micros();
+
+        assert_eq!(row.values[0], RowValue::Int64(expected_utc));
+        assert_eq!(row.values[1], RowValue::Int64(expected_plus3));
     }
 
     #[test]

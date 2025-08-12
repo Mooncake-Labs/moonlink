@@ -1,4 +1,5 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono_tz;
 use moonlink::row::RowValue;
 
 /// Parse a date string in YYYY-MM-DD format to Date32 (days since epoch)
@@ -40,6 +41,15 @@ pub fn parse_time(time_str: &str) -> Result<RowValue, String> {
 /// Parse an RFC3339/ISO8601 timestamp and normalize to UTC
 /// Follows the same behavior as pg -> moonlink: canonicalize to UTC timezone
 pub fn parse_timestamp(timestamp_str: &str) -> Result<RowValue, String> {
+    parse_timestamp_with_timezone(timestamp_str, None)
+}
+
+/// Parse an RFC3339/ISO8601 timestamp with optional schema timezone and normalize to UTC
+/// Follows the same behavior as pg -> moonlink: canonicalize to UTC timezone
+pub fn parse_timestamp_with_timezone(
+    timestamp_str: &str,
+    schema_timezone: Option<&str>,
+) -> Result<RowValue, String> {
     // First try parsing as RFC3339/ISO8601 (with timezone info)
     if let Ok(dt) = DateTime::parse_from_rfc3339(timestamp_str) {
         // Convert to UTC
@@ -48,12 +58,26 @@ pub fn parse_timestamp(timestamp_str: &str) -> Result<RowValue, String> {
         return Ok(RowValue::Int64(timestamp_micros));
     }
 
-    // If that fails, try parsing as naive datetime and treat as UTC
-    // This matches pg_replicate behavior: t.and_utc().timestamp_micros()
+    // If that fails, try parsing as naive datetime
     let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S%.f"))
         .map_err(|e| format!("Invalid timestamp format: {e}"))?;
 
+    // If schema specifies a timezone, interpret the naive datetime in that timezone
+    if let Some(tz_str) = schema_timezone {
+        if let Ok(tz) = tz_str.parse::<chrono_tz::Tz>() {
+            let local_dt = tz
+                .from_local_datetime(&naive_dt)
+                .single()
+                .ok_or_else(|| format!("Ambiguous time in timezone {}", tz_str))?;
+            let utc_dt = local_dt.with_timezone(&Utc);
+            let timestamp_micros = utc_dt.timestamp_micros();
+            return Ok(RowValue::Int64(timestamp_micros));
+        }
+    }
+
+    // Default behavior: treat naive datetime as UTC
+    // This matches pg_replicate behavior: t.and_utc().timestamp_micros()
     let timestamp_micros = naive_dt.and_utc().timestamp_micros();
     Ok(RowValue::Int64(timestamp_micros))
 }
