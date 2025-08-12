@@ -312,6 +312,7 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
                         .into_iter()
                         .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
                         .map(|row: MoonlinkRow| {
+                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
                             row.values.into_iter().next().unwrap_or(RowValue::Null)
                         })
                         .collect();
@@ -383,6 +384,7 @@ impl From<PostgresTableRow> for MoonlinkRow {
                         .into_iter()
                         .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
                         .map(|row: MoonlinkRow| {
+                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
                             row.values.into_iter().next().unwrap_or(RowValue::Null)
                         })
                         .collect();
