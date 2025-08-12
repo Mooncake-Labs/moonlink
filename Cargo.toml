@@ -3,6 +3,7 @@ members = [
     "src/moonlink",
     "src/moonlink_backend",
     "src/moonlink_connectors",
+    "src/moonlink_datafusion",
     "src/moonlink_metadata_store",
     "src/moonlink_rpc",
     "src/moonlink_service",
@@ -30,6 +31,8 @@ bitstream-io = "4.5"
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
+datafusion = "49"
+datafusion-cli = "49"
 fastbloom = "0.12.0"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15.3"
@@ -43,6 +46,7 @@ multimap = { version = "0.10", default-features = false }
 nix = { version = "0.27", default-features = false, features = ["fs"] }
 num-bigint = { version = "0.4" }
 num-traits = "0.2"
+object_store = "0.12"
 opendal = { version = "0.54", default-features = false }
 parquet = { version = "55", default-features = false, features = [
   "arrow",
@@ -61,8 +65,10 @@ smallvec = "1.15"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.47", default-features = false, features = [
+  "fs",
   "io-util",
   "macros",
+  "net",
   "rt-multi-thread",
   "signal",
   "sync",

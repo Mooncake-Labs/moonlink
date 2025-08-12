@@ -1,0 +1,20 @@
+[package]
+name = "moonlink_datafusion"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+arrow = { workspace = true }
+arrow-ipc = { workspace = true }
+async-trait = { workspace = true }
+bincode = { workspace = true }
+clap = { workspace = true }
+datafusion = { workspace = true }
+datafusion-cli = { workspace = true }
+moonlink_rpc = { path = "../moonlink_rpc" }
+object_store = { workspace = true }
+parquet = { workspace = true }
+roaring = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

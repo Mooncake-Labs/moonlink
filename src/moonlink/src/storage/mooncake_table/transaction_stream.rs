@@ -21,7 +21,7 @@ pub(super) struct TransactionStreamState {
     index_bloom_filter: BloomFilter,
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
-    flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+    pub(crate) flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
     new_record_batches: hashbrown::HashMap<u64, InMemoryBatch>,
     status: TransactionStreamStatus,
     /// Number of pending flushes for this transaction.
@@ -371,8 +371,12 @@ impl MooncakeTable {
                 disk_slice.writer_lsn = Some(commit_lsn);
             }
 
+            let should_remove = stream_state.ongoing_flush_count == 0;
+            let _ = stream_state;
+
+            self.try_set_next_flush_lsn(commit_lsn);
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
-            if stream_state.ongoing_flush_count == 0 {
+            if should_remove {
                 self.transaction_stream_states.remove(&xact_id);
             }
             return;
@@ -418,7 +422,16 @@ impl MooncakeTable {
 
         // Remap local in mem deletions to disk deletions
         for deletion in stream_state.local_deletions.iter_mut() {
-            disk_slice.remap_deletion_if_needed(deletion);
+            if let Some(RecordLocation::DiskFile(file_id, row_idx)) =
+                disk_slice.remap_deletion_if_needed(deletion)
+            {
+                for (file, disk_file_entry) in stream_state.flushed_files.iter_mut() {
+                    if file.file_id() == file_id {
+                        assert!(disk_file_entry.batch_deletion_vector.delete_row(row_idx));
+                        break;
+                    }
+                }
+            }
         }
     }
 
