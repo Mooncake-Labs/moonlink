@@ -513,7 +513,7 @@ impl TableHandlerState {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
                 self.table_maintenance_completion_tx
                     .send(Err(err.clone()))
-                    .unwrap();
+                    .expect("Failed to send data compaction completion result during table maintenance");
             }
         }
     }

@@ -123,7 +123,7 @@ pub(crate) fn get_parquet_stat_min_as_datum(
         ) => stats.min_opt().map(|val| {
             // TODO(hjiang): Add unit test.
             let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
+            Datum::decimal(value).expect("Failed to create decimal datum from i128 value")
         }),
         (
             PrimitiveType::Decimal {
@@ -134,7 +134,7 @@ pub(crate) fn get_parquet_stat_min_as_datum(
         ) => stats.min_opt().map(|val| {
             // TODO(hjiang): Add unit test.
             let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
+            Datum::decimal(value).expect("Failed to create decimal datum from i64 value")
         }),
         (PrimitiveType::Uuid, Statistics::FixedLenByteArray(stats)) => {
             let Some(bytes) = stats.min_bytes_opt() else {
@@ -147,7 +147,7 @@ pub(crate) fn get_parquet_stat_min_as_datum(
                 ));
             }
             Some(Datum::uuid(Uuid::from_bytes(
-                bytes[..16].try_into().unwrap(),
+                bytes[..16].try_into().expect("Failed to convert bytes to Uuid during parquet stat min conversion"),
             )))
         }
         (PrimitiveType::Fixed(len), Statistics::FixedLenByteArray(stat)) => {
@@ -269,7 +269,7 @@ pub(crate) fn get_parquet_stat_max_as_datum(
         ) => stats.max_opt().map(|val| {
             // TODO(hjiang): Add unit test.
             let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
+            Datum::decimal(value).expect("Failed to create decimal datum from i128 value")
         }),
         (
             PrimitiveType::Decimal {
@@ -280,7 +280,7 @@ pub(crate) fn get_parquet_stat_max_as_datum(
         ) => stats.max_opt().map(|val| {
             // TODO(hjiang): Add unit test.
             let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
+            Datum::decimal(value).expect("Failed to create decimal datum from i64 value")
         }),
         (PrimitiveType::Uuid, Statistics::FixedLenByteArray(stats)) => {
             let Some(bytes) = stats.max_bytes_opt() else {
@@ -293,7 +293,7 @@ pub(crate) fn get_parquet_stat_max_as_datum(
                 ));
             }
             Some(Datum::uuid(Uuid::from_bytes(
-                bytes[..16].try_into().unwrap(),
+                bytes[..16].try_into().expect("Failed to convert bytes to Uuid during parquet stat max conversion"),
             )))
         }
         (PrimitiveType::Fixed(len), Statistics::FixedLenByteArray(stat)) => {

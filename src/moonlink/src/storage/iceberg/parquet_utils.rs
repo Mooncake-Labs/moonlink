@@ -251,7 +251,7 @@ fn parquet_to_data_file_builder(
 async fn get_parquet_metadata(
     local_parquet_file: &str,
 ) -> IcebergResult<(ParquetMetaData, usize /*file size*/)> {
-    let file_io = FileIOBuilder::new_fs_io().build().unwrap();
+    let file_io = FileIOBuilder::new_fs_io().build().expect("Failed to create file IO builder for parquet metadata retrieval");
     let input_file = file_io.new_input(local_parquet_file)?;
     let file_metadata = input_file.metadata().await?;
     let file_size = file_metadata.size as usize;

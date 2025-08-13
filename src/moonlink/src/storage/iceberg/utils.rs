@@ -96,7 +96,7 @@ pub(crate) async fn get_or_create_iceberg_table<C: MoonlinkCatalog + ?Sized>(
     table_name: &str,
     arrow_schema: &ArrowSchema,
 ) -> IcebergResult<IcebergTable> {
-    let namespace_ident = NamespaceIdent::from_strs(namespace).unwrap();
+    let namespace_ident = NamespaceIdent::from_strs(namespace).expect("Failed to create namespace ident from segments during iceberg table creation or retrieval");
     let table_ident = TableIdent::new(namespace_ident.clone(), table_name.to_string());
     let should_create = match catalog.load_table(&table_ident).await {
         Ok(existing_table) => {
@@ -125,7 +125,7 @@ pub(crate) async fn get_table_if_exists<C: MoonlinkCatalog + ?Sized>(
     namespace: &Vec<String>,
     table_name: &str,
 ) -> IcebergResult<Option<IcebergTable>> {
-    let namespace_ident = NamespaceIdent::from_strs(namespace).unwrap();
+    let namespace_ident = NamespaceIdent::from_strs(namespace).expect("Failed to create namespace ident from segments during iceberg table retrieval or existence check");
     let table_ident = TableIdent::new(namespace_ident.clone(), table_name.to_string());
 
     let table_exists = catalog.table_exists(&table_ident).await?;

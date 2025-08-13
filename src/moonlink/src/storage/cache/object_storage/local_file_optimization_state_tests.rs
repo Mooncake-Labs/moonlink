@@ -48,7 +48,7 @@ fn create_object_storage_cache_with_local_optimization(tmp_dir: &TempDir) -> Obj
 // (3) + persist + no reference count => (2)
 #[tokio::test]
 async fn test_cache_state_3_persist_and_unreferenced_2() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
     let test_remote_file =
@@ -90,7 +90,7 @@ async fn test_cache_state_3_persist_and_unreferenced_2() {
 // (3) + persist + still reference count => (2)
 #[tokio::test]
 async fn test_cache_state_3_persist_and_referenced_3() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
@@ -123,7 +123,7 @@ async fn test_cache_state_3_persist_and_referenced_3() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for second reference");
     assert_eq!(
         cache_handle_2.as_ref().unwrap().cache_entry.cache_filepath,
         test_cache_file.to_str().unwrap().to_string()
@@ -145,7 +145,7 @@ async fn test_cache_state_3_persist_and_referenced_3() {
 // (1) + requested to read + sufficient space => (3)
 #[tokio::test]
 async fn test_cache_state_1_request_read_with_sufficient_space_3() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_remote_file =
         create_test_file(cache_file_directory.path(), TEST_REMOTE_FILENAME_1).await;
@@ -158,7 +158,7 @@ async fn test_cache_state_1_request_read_with_sufficient_space_3() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for read request with sufficient space");
     assert!(evicted_files_to_delete.is_empty());
     assert_eq!(
         cache_handle.as_ref().unwrap().cache_entry.cache_filepath,
@@ -174,7 +174,7 @@ async fn test_cache_state_1_request_read_with_sufficient_space_3() {
 // (1) + requested to read + insufficient space => (2)
 #[tokio::test]
 async fn test_cache_state_1_request_read_with_insufficient_space_3() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_remote_file =
         create_test_file(cache_file_directory.path(), TEST_REMOTE_FILENAME_1).await;
@@ -191,7 +191,7 @@ async fn test_cache_state_1_request_read_with_insufficient_space_3() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for read request with insufficient space");
     assert!(evicted_files_to_delete.is_empty());
     assert!(cache_handle.is_none());
 
@@ -204,7 +204,7 @@ async fn test_cache_state_1_request_read_with_insufficient_space_3() {
 // (2) + requested to delete => (4)
 #[tokio::test]
 async fn test_cache_state_2_request_to_delete_4() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
@@ -246,7 +246,7 @@ async fn test_cache_state_2_request_to_delete_4() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for second reference");
     assert!(evicted_files_to_delete.is_empty());
     assert_eq!(
         cache_handle.as_ref().unwrap().cache_entry.cache_filepath,
@@ -270,7 +270,7 @@ async fn test_cache_state_2_request_to_delete_4() {
 // (3) + requested to delete => (5)
 #[tokio::test]
 async fn test_cache_state_3_request_to_delete_5() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
@@ -302,7 +302,7 @@ async fn test_cache_state_3_request_to_delete_5() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for second reference count");
     assert_eq!(
         cache_handle_2.as_ref().unwrap().cache_entry.cache_filepath,
         test_cache_file.to_str().unwrap().to_string()
@@ -323,7 +323,7 @@ async fn test_cache_state_3_request_to_delete_5() {
 // (5) + usage finishes + no reference count => (4)
 #[tokio::test]
 async fn test_cache_state_5_unreference_4() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
@@ -352,7 +352,7 @@ async fn test_cache_state_5_unreference_4() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for first reference count");
     let (mut cache_handle_2, _) = cache
         .get_cache_entry(
             file_id,
@@ -360,7 +360,7 @@ async fn test_cache_state_5_unreference_4() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for second reference count");
     // Till now, the state is (3).
 
     // Delete the first cache handle.
@@ -384,7 +384,7 @@ async fn test_cache_state_5_unreference_4() {
 // (2) + new entry + sufficient space => (2)
 #[tokio::test]
 async fn test_cache_state_2_new_entry_with_sufficient_space_4() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let test_cache_file_1 =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
     let test_remote_file_1 =
@@ -446,7 +446,7 @@ async fn test_cache_state_2_new_entry_with_sufficient_space_4() {
 // (2) + new entry + insufficient space => (1)
 #[tokio::test]
 async fn test_cache_state_2_new_entry_with_insufficient_space_1() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let test_cache_file_1 =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
     let test_remote_file_1 =
@@ -503,7 +503,7 @@ async fn test_cache_state_2_new_entry_with_insufficient_space_1() {
 // (2) + requested to read + sufficient space => (3)
 #[tokio::test]
 async fn test_cache_state_2_request_to_read_sufficient_space_4() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let filesystem_accessor = FileSystemAccessor::default_for_test(&cache_file_directory);
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
@@ -545,7 +545,7 @@ async fn test_cache_state_2_request_to_read_sufficient_space_4() {
             filesystem_accessor.as_ref(),
         )
         .await
-        .unwrap();
+        .expect("Failed to get cache entry for read request with sufficient space");
     assert!(evicted_files_to_delete.is_empty());
     assert_eq!(
         cache_handle.as_ref().unwrap().cache_entry.cache_filepath,
@@ -571,7 +571,7 @@ async fn test_cache_state_2_request_to_read_sufficient_space_4() {
 /// (2) + replace with remote => (2)
 #[tokio::test]
 async fn test_cache_state_2_replace_with_remote_2() {
-    let cache_file_directory = tempdir().unwrap();
+    let cache_file_directory = tempdir().expect("Failed to create temporary directory for cache test");
     let test_cache_file =
         create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
     let test_remote_file =

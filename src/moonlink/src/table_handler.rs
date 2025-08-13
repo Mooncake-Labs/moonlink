@@ -186,7 +186,7 @@ impl TableHandler {
         while let Some(event) = event_receiver.recv().await {
             // Record event if requested.
             if let Some(replay_tx) = &event_replay_tx {
-                replay_tx.send(event.clone()).unwrap();
+                replay_tx.send(event.clone()).expect("Failed to send event to replay channel during event loop processing");
             }
 
             table_handler_state.update_table_lsns(&event);
@@ -214,7 +214,7 @@ impl TableHandler {
                         table_handler_state
                             .force_snapshot_completion_tx
                             .send(Some(Ok(/*lsn=*/ 0)))
-                            .unwrap();
+                            .expect("Failed to send force snapshot completion to channel during event loop processing");
                         continue;
                     }
 
@@ -351,7 +351,7 @@ impl TableHandler {
                         && !table_handler_state.iceberg_snapshot_ongoing
                     {
                         if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
-                            table.flush(commit_lsn).unwrap();
+                            table.flush(commit_lsn).expect("Failed to flush during periodic snapshot event processing");
                             table_handler_state.last_unflushed_commit_lsn = None;
                             table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
                             if let SpecialTableState::AlterTable { .. } =
@@ -447,7 +447,7 @@ impl TableHandler {
                                     iceberg_snapshot_payload,
                                 })
                                 .await
-                                .unwrap();
+                                .expect("Failed to send regular iceberg snapshot event to table handler event sender during event loop processing");
                         }
                     }
 
@@ -541,7 +541,7 @@ impl TableHandler {
                             event_sync_sender
                                 .flush_lsn_tx
                                 .send(iceberg_flush_lsn)
-                                .unwrap();
+                                .expect("Failed to send iceberg flush lsn during event loop processing in table handler");
                             table.set_iceberg_snapshot_res(snapshot_res);
                             table_handler_state.iceberg_snapshot_result_consumed = false;
 
@@ -640,7 +640,7 @@ impl TableHandler {
                                 event_sync_sender
                                     .wal_flush_lsn_tx
                                     .send(highest_lsn)
-                                    .unwrap();
+                                    .expect("Failed to send wal flush lsn during event loop processing in table handler");
                             }
                             table_handler_state.wal_persist_ongoing = false;
 

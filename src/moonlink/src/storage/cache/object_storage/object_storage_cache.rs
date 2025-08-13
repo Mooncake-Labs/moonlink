@@ -73,7 +73,7 @@ impl ObjectStorageCacheInternal {
                 );
                 return (false, evicted_files_to_delete);
             }
-            let (_, mut cache_entry_wrapper) = self.evictable_cache.pop_lru().unwrap();
+            let (_, mut cache_entry_wrapper) = self.evictable_cache.pop_lru().expect("Evictable cache should not be empty");
             assert_eq!(cache_entry_wrapper.reference_count, 0);
             self.cur_bytes -= cache_entry_wrapper.cache_entry.file_metadata.file_size;
 
@@ -149,7 +149,7 @@ impl ObjectStorageCacheInternal {
     /// Unreference the given cache entry.
     pub(super) fn unreference(&mut self, file_id: TableUniqueFileId) -> Vec<String> {
         let cache_entry_wrapper = self.non_evictable_cache.get_mut(&file_id);
-        let cache_entry_wrapper = cache_entry_wrapper.unwrap();
+        let cache_entry_wrapper = cache_entry_wrapper.expect("Cache entry should exist for unreference operation");
         cache_entry_wrapper.reference_count -= 1;
 
         // Aggregate cache entries to delete.
@@ -157,7 +157,7 @@ impl ObjectStorageCacheInternal {
 
         // Down-level to evictable if reference count goes away.
         if cache_entry_wrapper.reference_count == 0 {
-            let cache_entry_wrapper = self.non_evictable_cache.remove(&file_id).unwrap();
+            let cache_entry_wrapper = self.non_evictable_cache.remove(&file_id).expect("Cache entry should exist for unreference operation");
 
             // If the current entry has already been requested to delete.
             if self.evicted_entries.remove(&file_id) {
@@ -303,7 +303,7 @@ impl ObjectStorageCache {
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> Result<CacheEntry> {
         let src_pathbuf = std::path::PathBuf::from(src);
-        let suffix = src_pathbuf.extension().unwrap().to_str().unwrap();
+        let suffix = src_pathbuf.extension().unwrap().to_str().expect("Failed to get file extension from path buffer for cache entry");
         let mut dst_pathbuf = std::path::PathBuf::from(&self.config.cache_directory);
         dst_pathbuf.push(format!("{}.{}", Uuid::now_v7(), suffix));
         let dst_filepath = dst_pathbuf.to_str().unwrap().to_string();
@@ -534,9 +534,9 @@ mod tests {
         let (cache_handle, cache_to_delete) = object_storage_cache
             .get_cache_entry(unique_file_id, data_file.file_path(), filesystem_accessor)
             .await
-            .unwrap();
+            .expect("Failed to get cache entry for read request with sufficient space");
         assert!(cache_to_delete.is_empty());
-        cache_handle.unwrap()
+        cache_handle.expect("Cache handle should not be empty for read request")
     }
 
     #[tokio::test]
@@ -544,8 +544,8 @@ mod tests {
         const PARALLEL_TASK_NUM: usize = 10;
         let mut handle_futures = Vec::with_capacity(PARALLEL_TASK_NUM);
 
-        let cache_file_directory = tempdir().unwrap();
-        let remote_file_directory = tempdir().unwrap();
+        let cache_file_directory = tempdir().expect("Failed to create cache file directory for test");
+        let remote_file_directory = tempdir().expect("Failed to create remote file directory for test");
 
         let config = ObjectStorageCacheConfig {
             // Set max bytes larger than one file, but less than two files.
@@ -595,8 +595,8 @@ mod tests {
         const PARALLEL_TASK_NUM: usize = 10;
         let mut handle_futures = Vec::with_capacity(PARALLEL_TASK_NUM);
 
-        let cache_file_directory = tempdir().unwrap();
-        let remote_file_directory = tempdir().unwrap();
+        let cache_file_directory = tempdir().expect("Failed to create cache file directory for test");
+        let remote_file_directory = tempdir().expect("Failed to create remote file directory for test");
 
         let config = ObjectStorageCacheConfig {
             // Set max bytes larger than one file, but less than two files.

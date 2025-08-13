@@ -117,7 +117,7 @@ fn get_data_file_for_file_index(
             .get(MOONCAKE_HASH_INDEX_V1_CARDINALITY)
             .unwrap()
             .parse()
-            .unwrap(),
+            .expect("Failed to parse cardinality from properties during file index blob creation"),
         file_size_in_bytes: 0, // TODO(hjiang): Not necessary for puffin blob, but worth double confirm.
         column_sizes: HashMap::new(),
         value_counts: HashMap::new(),

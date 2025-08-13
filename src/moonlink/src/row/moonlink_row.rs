@@ -179,7 +179,7 @@ impl MoonlinkRow {
             IdentityProp::Keys(keys) => batch.project(keys.as_slice()),
             IdentityProp::FullRow => Ok(batch.clone()),
         }
-        .unwrap();
+        .expect("Failed to project batch for identity check at offset");
         self.equals_record_batch_at_offset_impl(&indices, offset)
     }
 
@@ -190,8 +190,8 @@ impl MoonlinkRow {
         identity: &IdentityProp,
     ) -> bool {
         assert!(self.is_extracted_identity_row(identity));
-        let file = tokio::fs::File::open(file_name).await.unwrap();
-        let stream_builder = ParquetRecordBatchStreamBuilder::new(file).await.unwrap();
+        let file = tokio::fs::File::open(file_name).await.expect("Failed to open file for parquet read at offset");
+        let stream_builder = ParquetRecordBatchStreamBuilder::new(file).await.expect("Failed to create stream builder for parquet read at offset");
         let row_groups = stream_builder.metadata().row_groups();
         let mut target_row_group = 0;
         let mut row_count: usize = 0;
@@ -213,9 +213,9 @@ impl MoonlinkRow {
             .with_batch_size(1)
             .with_projection(proj_mask.clone())
             .build()
-            .unwrap();
-        let mut batch_reader = reader.next_row_group().await.unwrap().unwrap();
-        let batch = batch_reader.next().unwrap().unwrap();
+            .expect("Failed to build parquet reader at offset for identity check");
+        let mut batch_reader = reader.next_row_group().await.expect("Failed to read next row group at offset for identity check").unwrap();
+        let batch = batch_reader.next().expect("Failed to read next batch at offset for identity check").unwrap();
         self.equals_record_batch_at_offset_impl(&batch, 0)
     }
 
@@ -384,7 +384,7 @@ mod tests {
                 Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
             ],
         )
-        .unwrap();
+        .expect("Failed to create record batch for testing");
 
         // Create moonlink row to match against, which matches the second row in the parquet file.
         let row = MoonlinkRow::new(vec![RowValue::Int32(2), RowValue::Int64(20)]);

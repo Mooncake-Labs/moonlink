@@ -24,7 +24,7 @@ pub(super) fn get_snapshot_properties(
         .additional_properties
         .get(MOONCAKE_TABLE_FLUSH_LSN)
     {
-        flush_lsn = Some(lsn.parse().unwrap());
+        flush_lsn = Some(lsn.parse().expect("Failed to parse flush LSN from snapshot summary during iceberg snapshot property retrieval"));
     }
     Ok(SnapshotProperty { flush_lsn })
 }

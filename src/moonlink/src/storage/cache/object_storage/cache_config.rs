@@ -49,7 +49,7 @@ impl ObjectStorageCacheConfig {
                 }
             }
         }
-        std::fs::create_dir_all(DEFAULT_CACHE_DIRECTORY).unwrap();
+        std::fs::create_dir_all(DEFAULT_CACHE_DIRECTORY).expect("Failed to create cache directory");
 
         Self {
             max_bytes: DEFAULT_MAX_BYTES_FOR_TEST,

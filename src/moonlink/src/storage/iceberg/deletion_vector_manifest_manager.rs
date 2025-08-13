@@ -151,7 +151,7 @@ fn get_data_file_for_deletion_vector(
             .get(DELETION_VECTOR_CADINALITY)
             .unwrap()
             .parse()
-            .unwrap(),
+            .expect("Failed to parse deletion vector cardinality from properties during deserialization"),
         file_size_in_bytes: 0, // TODO(hjiang): Not necessary for puffin blob, but worth double confirm.
         column_sizes: HashMap::new(),
         value_counts: HashMap::new(),

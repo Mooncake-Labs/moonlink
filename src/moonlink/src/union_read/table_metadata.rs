@@ -151,7 +151,7 @@ impl TableMetadata {
         for i in 0..data_files_len {
             let start = data_file_offsets[i];
             let end = data_file_offsets[i + 1];
-            let s = String::from_utf8(data[cursor + start..cursor + end].to_vec()).unwrap();
+            let s = String::from_utf8(data[cursor + start..cursor + end].to_vec()).expect("Invalid UTF-8 in data filepath data blob during decode operation");
             data_files.push(s);
         }
         if data_files_len > 0 {
@@ -164,7 +164,7 @@ impl TableMetadata {
             let start = puffin_file_offsets[i];
             let end = puffin_file_offsets[i + 1];
             let cur_puffin_filepath =
-                String::from_utf8(data[cursor + start..cursor + end].to_vec()).unwrap();
+                String::from_utf8(data[cursor + start..cursor + end].to_vec()).expect("Invalid UTF-8 in puffin filepath data blob during decode");
             puffin_files.push(cur_puffin_filepath);
         }
         if data_files_len > 0 {

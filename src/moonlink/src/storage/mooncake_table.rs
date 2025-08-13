@@ -502,7 +502,7 @@ impl MooncakeTable {
         let last_iceberg_snapshot_lsn = current_snapshot.flush_lsn;
         // TODO(Paul): Change wal manager to pick up to latest WAL file number on recovery
         if let Some(persistence_lsn) = last_iceberg_snapshot_lsn {
-            table_snapshot_watch_sender.send(persistence_lsn).unwrap();
+            table_snapshot_watch_sender.send(persistence_lsn).expect("Failed to send initial snapshot LSN to watch channel");
         }
 
         let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
@@ -564,7 +564,7 @@ impl MooncakeTable {
             alter_table_request,
         ));
 
-        let mut guard = self.snapshot.try_write().unwrap();
+        let mut guard = self.snapshot.try_write().expect("Failed to acquire write lock on snapshot state for alter table");
         guard.reset_for_alter(new_metadata.clone());
         assert!(
             self.metadata.schema.fields.len() != new_metadata.schema.fields.len(),
@@ -790,7 +790,7 @@ impl MooncakeTable {
                 );
                 event_replay_tx
                     .send(MooncakeTableEvent::FlushCompletion(table_event))
-                    .unwrap();
+                    .expect("Failed to send flush completion event to event replay channel");
             }
 
             // Perform table flush completion notification.
@@ -803,7 +803,7 @@ impl MooncakeTable {
                             flush_result: Some(Ok(disk_slice_clone)),
                         })
                         .await
-                        .unwrap();
+                        .expect("Failed to send flush result to table notify channel for successful flush");
                 }
                 Err(e) => {
                     table_notify_tx
@@ -813,7 +813,7 @@ impl MooncakeTable {
                             flush_result: Some(Err(e)),
                         })
                         .await
-                        .unwrap();
+                        .expect("Failed to send flush result to table notify channel for failed flush due to error");
                 }
             }
         });
@@ -1215,7 +1215,7 @@ impl MooncakeTable {
             table_notify_tx_copy
                 .send(TableEvent::IndexMergeResult { index_merge_result })
                 .await
-                .unwrap();
+                .expect("Failed to send index merge result to table notifier channel");
         });
     }
 
@@ -1272,7 +1272,7 @@ impl MooncakeTable {
                         data_compaction_result,
                     })
                     .await
-                    .unwrap();
+                    .expect("Failed to send data compaction result to table notifier channel");
             }
             .instrument(info_span!("data_compaction")),
         );
@@ -1325,7 +1325,7 @@ impl MooncakeTable {
                 current_snapshot: snapshot_result.current_snapshot,
             })
             .await
-            .unwrap();
+            .expect("Failed to send snapshot LSN to watch channel during notify_snapshot_reader");
     }
 
     /// Persist an iceberg snapshot.
@@ -1400,12 +1400,12 @@ impl MooncakeTable {
                     iceberg_snapshot_result: Err(iceberg_persistence_res.unwrap_err().into()),
                 })
                 .await
-                .unwrap();
+                .expect("Failed to send iceberg snapshot result to table notifier channel");
             return;
         }
 
         // Notify on event success.
-        let iceberg_persistence_res = iceberg_persistence_res.unwrap();
+        let iceberg_persistence_res = iceberg_persistence_res.expect("Failed to persist iceberg snapshot during mooncake snapshot");
 
         // Persisted data files and file indices will be cut into multiple sections: imported part, index merge part, data compaction part.
         // Get the cut-off indices to slice from returned iceberg persistence result.
@@ -1474,7 +1474,7 @@ impl MooncakeTable {
                 iceberg_snapshot_result: Ok(snapshot_result),
             })
             .await
-            .unwrap();
+            .expect("Failed to send iceberg snapshot result to table notifier channel");
     }
 
     /// Create an iceberg snapshot.

@@ -43,7 +43,7 @@ impl TableEventManager {
         self.table_event_tx
             .send(TableEvent::ForceSnapshot { lsn: Some(lsn) })
             .await
-            .unwrap();
+            .expect("Failed to send force snapshot event to table event manager");
         self.force_snapshot_completion_rx.clone()
     }
 
@@ -71,7 +71,7 @@ impl TableEventManager {
 
         // Otherwise falls back to loop until requested LSN is met.
         loop {
-            rx.changed().await.unwrap();
+            rx.changed().await.expect("Failed to change watch receiver during force snapshot synchronization loop");
             if Self::is_iceberg_snapshot_ready(&rx.borrow(), requested_lsn)? {
                 break;
             }
@@ -87,7 +87,7 @@ impl TableEventManager {
         self.table_event_tx
             .send(TableEvent::ForceRegularIndexMerge)
             .await
-            .unwrap();
+            .expect("Failed to send force regular index merge event to table event manager during index merge initiation");
         subscriber
     }
 
@@ -97,7 +97,7 @@ impl TableEventManager {
         self.table_event_tx
             .send(TableEvent::ForceRegularDataCompaction)
             .await
-            .unwrap();
+            .expect("Failed to send force regular data compaction event to table event manager during data compaction initiation");
         subscriber
     }
 
@@ -107,7 +107,7 @@ impl TableEventManager {
         self.table_event_tx
             .send(TableEvent::ForceFullMaintenance)
             .await
-            .unwrap();
+            .expect("Failed to send force full maintenance event to table event manager during full compaction initiation");
         subscriber
     }
 
@@ -117,7 +117,7 @@ impl TableEventManager {
         self.table_event_tx
             .send(TableEvent::DropTable)
             .await
-            .unwrap();
-        self.drop_table_completion_rx.take().unwrap().await.unwrap()
+            .expect("Failed to send drop table event to table event manager during drop table operation");
+        self.drop_table_completion_rx.take().unwrap().await.expect("Failed to receive drop table completion during drop table operation synchronization")
     }
 }
