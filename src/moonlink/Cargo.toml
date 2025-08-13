@@ -86,7 +86,6 @@ mockall = "0.13"
 pico-args = "0.5"
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
 rand = "0.9"
-regex = { workspace = true }
 rstest = "0.26"
 rstest_reuse = "0.7"
 tempfile = { workspace = true }

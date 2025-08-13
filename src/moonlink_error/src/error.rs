@@ -91,3 +91,60 @@ impl error::Error for ErrorStruct {
         self.source.as_ref().map(|arc| arc.as_ref().as_ref())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use regex::Regex;
+    use std::error::Error;
+    use std::io;
+
+    #[test]
+    fn test_error_struct_without_source() {
+        let error = ErrorStruct {
+            message: "Test error".to_string(),
+            status: ErrorStatus::Temporary,
+            source: None,
+            location: None,
+        };
+        assert_eq!(error.to_string(), "Test error (temporary)");
+        assert!(error.source.is_none());
+    }
+
+    #[test]
+    fn test_error_struct_with_source() {
+        let io_error = io::Error::new(io::ErrorKind::NotFound, "File not found");
+        let error = ErrorStruct {
+            message: "Test error".to_string(),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(io_error.into())),
+            location: None,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Test error (permanent), source: File not found"
+        );
+        assert!(error.source.is_some());
+
+        // Test accessing structured error information
+        let source = error.source().unwrap();
+        let io_err = source.downcast_ref::<io::Error>().unwrap();
+        assert_eq!(io_err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(io_err.to_string(), "File not found");
+    }
+
+    #[test]
+    fn test_error_struct_new_with_location() {
+        // ErrorStruct::new will automatically capture the location where the error is raised
+        let error = ErrorStruct::new("Test error".to_string(), ErrorStatus::Temporary);
+        assert!(error.location.is_some());
+        let location_str = error.to_string();
+
+        assert!(location_str.contains("Test error (temporary) at"));
+        assert!(location_str.contains("error.rs:"));
+
+        // Check the location matches the pattern error.rs:number:number
+        let re_pattern = Regex::new(r"error\.rs:\d+:\d+").unwrap();
+        assert!(re_pattern.is_match(&location_str));
+    }
+}

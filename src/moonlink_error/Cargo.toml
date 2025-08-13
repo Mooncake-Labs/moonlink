@@ -7,3 +7,6 @@ license = { workspace = true }
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+regex = { workspace = true }
