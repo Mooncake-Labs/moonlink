@@ -1,10 +1,11 @@
 /// Table handler state manages table event process states.
 use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::DataCompactionResult;
-use crate::storage::mooncake_table::MaintenanceOption;
-use crate::storage::mooncake_table::SnapshotOption;
+use crate::storage::snapshot_options::MaintenanceOption;
+use crate::storage::snapshot_options::SnapshotOption;
 use crate::table_notify::TableEvent;
 use crate::Result;
+use more_asserts as ma;
 use tokio::sync::{broadcast, watch};
 use tracing::error;
 
@@ -213,6 +214,7 @@ impl TableHandlerState {
         SnapshotOption {
             uuid,
             force_create,
+            dump_snapshot: false,
             skip_iceberg_snapshot: self.iceberg_snapshot_ongoing,
             index_merge_option: self.get_index_merge_maintenance_option(),
             data_compaction_option: self.get_data_compaction_maintenance_option(),
@@ -396,7 +398,7 @@ impl TableHandlerState {
             alter_table_lsn, ..
         } = self.special_table_state
         {
-            assert!(iceberg_snapshot_lsn <= alter_table_lsn);
+            ma::assert_le!(iceberg_snapshot_lsn, alter_table_lsn);
             iceberg_snapshot_lsn == alter_table_lsn
         } else {
             false

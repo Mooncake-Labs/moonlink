@@ -45,7 +45,7 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::validation_test_utils::*;
 use crate::storage::mooncake_table::Snapshot;
-use crate::storage::mooncake_table::SnapshotOption;
+use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::MooncakeTable;
 use crate::table_notify::TableEvent;
 use crate::FileSystemAccessor;

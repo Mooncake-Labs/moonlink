@@ -3,6 +3,7 @@ use ahash::AHasher;
 use arrow::array::Array;
 use arrow::datatypes::Field;
 use arrow::record_batch::RecordBatch;
+use more_asserts as ma;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::ProjectionMask;
 use serde::{Deserialize, Serialize};
@@ -29,105 +30,139 @@ impl MoonlinkRow {
         }
     }
 
+    // Helper closure to compare a value with a column at offset
+    fn value_matches_column(value: &RowValue, column: &arrow::array::ArrayRef, idx: usize) -> bool {
+        match value {
+            RowValue::Int32(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::Int32Array>() {
+                    array.value(idx) == *v
+                } else {
+                    false
+                }
+            }
+            RowValue::Int64(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::Int64Array>() {
+                    array.value(idx) == *v
+                } else {
+                    false
+                }
+            }
+            RowValue::Float32(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::Float32Array>() {
+                    array.value(idx) == *v
+                } else {
+                    false
+                }
+            }
+            RowValue::Float64(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::Float64Array>() {
+                    array.value(idx) == *v
+                } else {
+                    false
+                }
+            }
+            RowValue::Decimal(v) => {
+                if let Some(array) = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::Decimal128Array>()
+                {
+                    array.value(idx) == *v
+                } else {
+                    false
+                }
+            }
+            RowValue::Bool(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::BooleanArray>() {
+                    array.value(idx) == *v
+                } else {
+                    false
+                }
+            }
+            RowValue::ByteArray(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::BinaryArray>() {
+                    array.value(idx) == v.as_slice()
+                } else if let Some(array) =
+                    column.as_any().downcast_ref::<arrow::array::StringArray>()
+                {
+                    array.value(idx).as_bytes() == v.as_slice()
+                } else {
+                    false
+                }
+            }
+            RowValue::FixedLenByteArray(v) => {
+                if let Some(array) = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                {
+                    array.value(idx) == v.as_slice()
+                } else {
+                    false
+                }
+            }
+            RowValue::Array(v) => {
+                let child_opt: Option<arrow::array::ArrayRef> = if let Some(array) =
+                    column.as_any().downcast_ref::<arrow::array::ListArray>()
+                {
+                    if array.is_null(idx) {
+                        None
+                    } else {
+                        Some(array.value(idx))
+                    }
+                } else if let Some(array) = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::LargeListArray>()
+                {
+                    if array.is_null(idx) {
+                        None
+                    } else {
+                        Some(array.value(idx))
+                    }
+                } else if let Some(array) = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::FixedSizeListArray>()
+                {
+                    if array.is_null(idx) {
+                        None
+                    } else {
+                        Some(array.value(idx))
+                    }
+                } else {
+                    panic!(
+                        "Failed to parse column into supported Arrow list type. Got: {:?}",
+                        column.data_type()
+                    );
+                };
+
+                if let Some(child) = child_opt {
+                    if child.len() != v.len() {
+                        return false;
+                    }
+                    for (i, ev) in v.iter().enumerate() {
+                        if !Self::value_matches_column(ev, &child, i) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            RowValue::Struct(_) => {
+                panic!("Struct not supported");
+            }
+            RowValue::Null => column.is_null(idx),
+        }
+    }
+
     /// Check whether the `offset`-th record batch matches the current moonlink row.
     /// The `batch` here has been projected.
     fn equals_record_batch_at_offset_impl(&self, batch: &RecordBatch, offset: usize) -> bool {
-        if offset >= batch.num_rows() {
-            panic!("Offset is out of bounds");
-        }
-
-        // Helper closure to compare a value with a column at offset
-        let value_matches_column = |value: &RowValue, column: &arrow::array::ArrayRef| -> bool {
-            match value {
-                RowValue::Int32(v) => {
-                    if let Some(array) = column.as_any().downcast_ref::<arrow::array::Int32Array>()
-                    {
-                        array.value(offset) == *v
-                    } else {
-                        false
-                    }
-                }
-                RowValue::Int64(v) => {
-                    if let Some(array) = column.as_any().downcast_ref::<arrow::array::Int64Array>()
-                    {
-                        array.value(offset) == *v
-                    } else {
-                        false
-                    }
-                }
-                RowValue::Float32(v) => {
-                    if let Some(array) =
-                        column.as_any().downcast_ref::<arrow::array::Float32Array>()
-                    {
-                        array.value(offset) == *v
-                    } else {
-                        false
-                    }
-                }
-                RowValue::Float64(v) => {
-                    if let Some(array) =
-                        column.as_any().downcast_ref::<arrow::array::Float64Array>()
-                    {
-                        array.value(offset) == *v
-                    } else {
-                        false
-                    }
-                }
-                RowValue::Decimal(v) => {
-                    if let Some(array) = column
-                        .as_any()
-                        .downcast_ref::<arrow::array::Decimal128Array>()
-                    {
-                        array.value(offset) == *v
-                    } else {
-                        false
-                    }
-                }
-                RowValue::Bool(v) => {
-                    if let Some(array) =
-                        column.as_any().downcast_ref::<arrow::array::BooleanArray>()
-                    {
-                        array.value(offset) == *v
-                    } else {
-                        false
-                    }
-                }
-                RowValue::ByteArray(v) => {
-                    if let Some(array) = column.as_any().downcast_ref::<arrow::array::BinaryArray>()
-                    {
-                        array.value(offset) == v.as_slice()
-                    } else if let Some(array) =
-                        column.as_any().downcast_ref::<arrow::array::StringArray>()
-                    {
-                        array.value(offset).as_bytes() == v.as_slice()
-                    } else {
-                        false
-                    }
-                }
-                RowValue::FixedLenByteArray(v) => {
-                    if let Some(array) = column
-                        .as_any()
-                        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-                    {
-                        array.value(offset) == v.as_slice()
-                    } else {
-                        false
-                    }
-                }
-                RowValue::Array(_) => {
-                    panic!("Array not supported");
-                }
-                RowValue::Struct(_) => {
-                    panic!("Struct not supported");
-                }
-                RowValue::Null => column.is_null(offset),
-            }
-        };
+        ma::assert_lt!(offset, batch.num_rows());
 
         self.values
             .iter()
             .zip(batch.columns())
-            .all(|(value, column)| value_matches_column(value, column))
+            .all(|(value, column)| Self::value_matches_column(value, column, offset))
     }
 
     /// Check whether the `offset`-th of the given record batch matches the current moonlink row.
@@ -382,11 +417,98 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_equals_record_batch_at_offset_array_type() {
+        use arrow_array::types::{Int32Type, Int64Type};
+        use arrow_array::{ListArray, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+
+        // Schema：id: List<Int32>, age: List<Int64>
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "id",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::Int32,
+                    /*nullable=*/ true,
+                ))),
+                /*nullable=*/ true,
+            ),
+            Field::new(
+                "age",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::Int64,
+                    /*nullable=*/ true,
+                ))),
+                /*nullable=*/ true,
+            ),
+        ]));
+
+        // two ListArray
+        // row0: id=[1,2], age=[10,20]
+        // row1: id=[2],   age=[20]
+        let id_col = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(2)]),
+        ]));
+        let age_col = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+            Some(vec![Some(10), Some(20)]),
+            Some(vec![Some(20)]),
+        ]));
+
+        let batch = RecordBatch::try_new(schema, vec![id_col, age_col]).unwrap();
+
+        // for row0（offset=0）
+        let row0 = MoonlinkRow::new(vec![
+            RowValue::Array(vec![RowValue::Int32(1), RowValue::Int32(2)]),
+            RowValue::Array(vec![RowValue::Int64(10), RowValue::Int64(20)]),
+        ]);
+        assert!(row0.equals_record_batch_at_offset_impl(&batch, 0));
+        assert!(row0.equals_record_batch_at_offset(&batch, 0, &IdentityProp::FullRow));
+
+        // Use the age column as the identity (Keys([1])) → row0 age = [10,20]
+        let row0_age_only = IdentityProp::Keys(vec![1])
+            .extract_identity_columns(row0.clone())
+            .unwrap();
+        assert!(row0_age_only.equals_record_batch_at_offset(
+            &batch,
+            /*offset=*/ 0,
+            &IdentityProp::Keys(vec![1])
+        ));
+
+        // for row1（offset=1）
+        let row1 = MoonlinkRow::new(vec![
+            RowValue::Array(vec![RowValue::Int32(2)]),
+            RowValue::Array(vec![RowValue::Int64(20)]),
+        ]);
+        assert!(row1.equals_record_batch_at_offset_impl(&batch, 1));
+        assert!(row1.equals_record_batch_at_offset(&batch, 1, &IdentityProp::FullRow));
+
+        // Use the age column as the identity (Keys([1])) → row1 age = [20]
+        let row1_age_only = IdentityProp::Keys(vec![1])
+            .extract_identity_columns(row1.clone())
+            .unwrap();
+        assert!(row1_age_only.equals_record_batch_at_offset(
+            &batch,
+            /*offset=*/ 1,
+            &IdentityProp::Keys(vec![1])
+        ));
+    }
+
     #[tokio::test]
     async fn test_equals_parquet_at_offset() {
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int32, false),
-            arrow::datatypes::Field::new("age", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new(
+                "id",
+                arrow::datatypes::DataType::Int32,
+                /*nullable=*/ false,
+            ),
+            arrow::datatypes::Field::new(
+                "age",
+                arrow::datatypes::DataType::Int64,
+                /*nullable=*/ false,
+            ),
         ]));
         let record_batch = RecordBatch::try_new(
             schema.clone(),

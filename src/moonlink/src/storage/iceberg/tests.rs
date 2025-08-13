@@ -25,8 +25,6 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::validation_test_utils::*;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
-use crate::storage::mooncake_table::MaintenanceOption;
-use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::mooncake_table::{
     IcebergSnapshotDataCompactionPayload, IcebergSnapshotImportPayload,
     IcebergSnapshotIndexMergePayload,
@@ -34,6 +32,8 @@ use crate::storage::mooncake_table::{
 use crate::storage::mooncake_table_config::DiskSliceWriterConfig;
 use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::mooncake_table_config::MooncakeTableConfig;
+use crate::storage::snapshot_options::MaintenanceOption;
+use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::storage_utils;
 use crate::storage::storage_utils::create_data_file;
 use crate::storage::storage_utils::FileId;
@@ -288,6 +288,7 @@ async fn test_skip_iceberg_snapshot() {
     assert!(table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: false,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::BestEffort,
         data_compaction_option: MaintenanceOption::BestEffort,

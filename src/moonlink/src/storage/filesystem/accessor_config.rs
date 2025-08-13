@@ -160,7 +160,7 @@ mod tests {
     fn test_deserialize_accessor_config_with_only_storage_config() {
         let input = json!({
             "storage_config": {
-                "FileSystem": {
+                "fs": {
                     "root_directory": "/tmp"
                 }
             }
@@ -186,7 +186,7 @@ mod tests {
     fn test_deserialize_retry_config() {
         let input = json!({
             "storage_config": {
-                "FileSystem": {
+                "fs": {
                     "root_directory": "/tmp"
                 },
             },

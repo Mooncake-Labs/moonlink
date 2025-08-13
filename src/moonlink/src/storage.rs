@@ -9,6 +9,7 @@ pub(crate) mod mooncake_table;
 pub mod mooncake_table_config;
 pub(crate) mod parquet_utils;
 pub(crate) mod path_utils;
+pub(crate) mod snapshot_options;
 pub(crate) mod storage_utils;
 pub(super) mod timer;
 pub(crate) mod wal;

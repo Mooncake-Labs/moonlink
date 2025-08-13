@@ -80,7 +80,7 @@ impl ColumnStoreBuffer {
         let current_batch_builder = schema
             .fields()
             .iter()
-            .map(|field| ColumnArrayBuilder::new(field.data_type(), max_rows_per_buffer, false))
+            .map(|field| ColumnArrayBuilder::new(field.data_type(), max_rows_per_buffer))
             .collect();
 
         // Get the initial batch ID from the counter
@@ -141,8 +141,11 @@ impl ColumnStoreBuffer {
             .iter_mut()
             .zip(self.schema.fields())
             .map(|(builder, field)| {
-                // Finish the builder to get an array
-                Arc::new(builder.finish(field.data_type())) as ArrayRef
+                let finished = std::mem::replace(
+                    builder,
+                    ColumnArrayBuilder::new(field.data_type(), self.max_rows_per_buffer),
+                );
+                Arc::new(finished.finish(field.data_type())) as ArrayRef
             })
             .collect();
 
@@ -294,16 +297,10 @@ pub(super) fn create_batch_from_rows(
     schema: Arc<Schema>,
     deletions: &BatchDeletionVector,
 ) -> RecordBatch {
-    let mut builders: Vec<Box<ColumnArrayBuilder>> = schema
+    let mut builders: Vec<ColumnArrayBuilder> = schema
         .fields()
         .iter()
-        .map(|field| {
-            Box::new(ColumnArrayBuilder::new(
-                field.data_type(),
-                rows.len(),
-                false,
-            ))
-        })
+        .map(|field| ColumnArrayBuilder::new(field.data_type(), rows.len()))
         .collect();
     for (i, row) in rows.iter().enumerate() {
         if !deletions.is_deleted(i) {
@@ -314,7 +311,7 @@ pub(super) fn create_batch_from_rows(
         }
     }
     let columns: Vec<ArrayRef> = builders
-        .iter_mut()
+        .into_iter()
         .zip(schema.fields())
         .map(|(builder, field)| builder.finish(field.data_type()))
         .collect();

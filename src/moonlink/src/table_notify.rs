@@ -7,6 +7,7 @@ use crate::storage::mooncake_table::FileIndiceMergeResult;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::IcebergSnapshotResult;
 
+use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::wal::WalPersistenceUpdateResult;
 use crate::Result;
 
@@ -144,6 +145,8 @@ pub enum TableEvent {
         data_compaction_payload: DataCompactionMaintenanceStatus,
         /// Evicted files to delete.
         evicted_files_to_delete: EvictedFiles,
+        /// Optional snapshot dump.
+        current_snapshot: Option<MooncakeSnapshot>,
     },
     /// Regular iceberg persistence.
     RegularIcebergSnapshot {

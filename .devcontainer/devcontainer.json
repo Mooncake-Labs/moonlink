@@ -3,9 +3,18 @@
     "service": "devcontainer",
     "workspaceFolder": "/workspaces/moonlink",
     "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {},
         "ghcr.io/robbert229/devcontainer-features/postgresql-client": {
             "version": "17"
         }
     },
-    "postCreateCommand": "./.devcontainer/setup.sh"
+    "postCreateCommand": "./.devcontainer/setup.sh",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "eamodio.gitlens",
+                "rust-lang.rust-analyzer"
+            ]
+        }
+    }
 }

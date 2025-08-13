@@ -9,10 +9,11 @@
 /// - persisted table LSN: the largest LSN where all updates have been persisted into iceberg
 ///   Suppose we have two tables, table-A has persisted all updated into iceberg; with table-B taking new updates. persisted table LSN for table-A grows with table-B.
 use crate::event_sync::EventSyncSender;
+use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::AlterTableRequest;
-use crate::storage::mooncake_table::MaintenanceOption;
-use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
+use crate::storage::snapshot_options::MaintenanceOption;
+use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_handler_timer::TableHandlerTimer;
 use crate::table_notify::TableEvent;
@@ -46,13 +47,16 @@ impl TableHandler {
         event_sync_sender: EventSyncSender,
         mut table_handler_timer: TableHandlerTimer,
         replication_lsn_rx: watch::Receiver<u64>,
-        event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
+        handler_event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
+        table_event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
     ) -> Self {
         // Create channel for events
         let (event_sender, event_receiver) = mpsc::channel(100);
 
-        // Create channel for internal control events.
+        // Register channel for internal control events.
         table.register_table_notify(event_sender.clone()).await;
+        // Register channel for mooncake table events replay.
+        table.register_event_replay_tx(table_event_replay_tx);
 
         // Spawn the task to notify periodical events.
         let table_handler_event_sender = event_sender.clone();
@@ -93,7 +97,7 @@ impl TableHandler {
                     event_sync_sender,
                     event_receiver,
                     replication_lsn_rx,
-                    event_replay_tx,
+                    handler_event_replay_tx,
                     table,
                 )
                 .await;
@@ -317,6 +321,7 @@ impl TableHandler {
                     assert!(table.create_snapshot(SnapshotOption {
                         uuid: uuid::Uuid::new_v4(),
                         force_create: true,
+                        dump_snapshot: false,
                         skip_iceberg_snapshot: true,
                         index_merge_option: MaintenanceOption::Skip,
                         data_compaction_option: MaintenanceOption::Skip,
@@ -406,6 +411,7 @@ impl TableHandler {
                     data_compaction_payload,
                     file_indice_merge_payload,
                     evicted_files_to_delete,
+                    current_snapshot: _,
                 } => {
                     // Spawn a detached best-effort task to delete evicted object storage cache.
                     start_task_to_delete_evicted(evicted_files_to_delete.files);
@@ -666,7 +672,7 @@ impl TableHandler {
                         panic!("Fatal flush error: {e:?}");
                     }
                     None => {
-                        error!("flush result is none");
+                        debug!("flush result is none");
                     }
                 },
                 // ==============================

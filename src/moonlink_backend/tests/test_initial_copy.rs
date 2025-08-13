@@ -48,8 +48,8 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
                 None, /* input_schema */
-                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();
@@ -120,8 +120,8 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
                 None, /* input_schema */
-                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();
@@ -185,8 +185,8 @@ mod tests {
                     TABLE_ID,
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
+                    table_config,
                     None, /* input_schema */
-                    &table_config,
                 )
                 .await
                 .unwrap();
@@ -259,8 +259,8 @@ mod tests {
                     TABLE_ID,
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
+                    table_config,
                     None, /* input_schema */
-                    &table_config,
                 )
                 .await
                 .unwrap();
@@ -364,8 +364,8 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
                 None, /* input_schema */
-                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();
@@ -439,8 +439,8 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
                 None, /* input_schema */
-                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();
@@ -518,8 +518,8 @@ mod tests {
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
                 None, /* input_schema */
-                &guard.get_serialized_table_config(),
             )
             .await
             .unwrap();

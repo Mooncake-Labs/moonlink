@@ -125,6 +125,7 @@ pub async fn build_table_components(
         table_handler_timers,
         replication_state.subscribe(),
         /*event_replay_tx=*/ None,
+        /*table_event_replay_tx=*/ None,
     )
     .await;
     let flush_lsn_rx = event_sync_receiver.flush_lsn_rx.clone();

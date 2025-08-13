@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub enum StorageConfig {
     #[cfg(feature = "storage-fs")]
+    #[serde(rename = "fs")]
     FileSystem {
         root_directory: String,
         // Used for atomic write operation: write files to a temporary directory and rename.
@@ -17,6 +18,7 @@ pub enum StorageConfig {
         atomic_write_dir: Option<String>,
     },
     #[cfg(feature = "storage-s3")]
+    #[serde(rename = "s3")]
     S3 {
         access_key_id: String,
         secret_access_key: String,
@@ -26,6 +28,7 @@ pub enum StorageConfig {
         endpoint: Option<String>,
     },
     #[cfg(feature = "storage-gcs")]
+    #[serde(rename = "gcs")]
     Gcs {
         /// GCS project.
         project: String,
@@ -159,7 +162,7 @@ mod tests {
     fn test_deserialize_storage_config_with_only_necessary() {
         let json = r#"
         {
-            "Gcs": {
+            "gcs": {
                 "project": "test-project",
                 "region": "us-west1",
                 "bucket": "test-bucket",

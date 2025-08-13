@@ -125,6 +125,7 @@ impl TestEnvironment {
             table_handler_timer,
             replication_rx.clone(),
             /*event_replay_tx=*/ None,
+            /*table_event_replay_tx=*/ None,
         )
         .await;
         let table_event_manager =

@@ -5,6 +5,8 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::test_utils::{append_rows, test_row, test_table, TestContext};
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
+use crate::storage::snapshot_options::MaintenanceOption;
+use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::table_handler::table_handler_state::MaintenanceProcessStatus;
 use crate::table_handler::table_handler_state::TableHandlerState;
@@ -1934,6 +1936,7 @@ async fn test_iceberg_snapshot_blocked_by_ongoing_flushes() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
@@ -1971,6 +1974,7 @@ async fn test_iceberg_snapshot_blocked_by_ongoing_flushes() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
@@ -2035,6 +2039,7 @@ async fn test_out_of_order_flush_completion_with_iceberg_snapshots() -> Result<(
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
@@ -2184,6 +2189,7 @@ async fn test_streaming_batch_id_mismatch_with_data_compaction() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true, // Skip iceberg to focus on the mooncake issue
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::ForceRegular, // Trigger data compaction
@@ -2254,6 +2260,7 @@ async fn test_streaming_empty_batch_filtering() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::ForceRegular,
@@ -2308,6 +2315,7 @@ async fn test_batch_id_removal_assertion_direct() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip, // No compaction to avoid other issues
@@ -2385,6 +2393,7 @@ async fn test_puffin_deletion_blob_inconsistency_assertion() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::ForceRegular, // Force data compaction
@@ -2446,6 +2455,7 @@ async fn test_stream_commit_with_ongoing_flush_deletion_remapping() -> Result<()
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
@@ -2494,6 +2504,7 @@ async fn test_deletion_align_with_batch() -> Result<()> {
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
@@ -2597,6 +2608,132 @@ async fn test_disk_slice_write_failure() -> Result<()> {
             panic!("Expected FlushResult as first event, but got: {flush_result:?}");
         }
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_streaming_deletion_remap_sets_batch_deletion_vector() {
+    let context = TestContext::new("streaming_deletion_remap_sets_batch_deletion_vector");
+    let mut table = test_table(
+        &context,
+        "streaming_deletion_remap_sets_batch_deletion_vector",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let flush_lsn = 1u64;
+
+    // Append two rows into the streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row1.clone(), xact_id).unwrap();
+    table.append_in_stream_batch(row2.clone(), xact_id).unwrap();
+
+    // Begin the stream flush (drains mem slice into stream_state.new_record_batches and adds a mem index)
+    let disk_slice = flush_stream_and_sync_no_apply(
+        &mut table,
+        &mut event_completion_rx,
+        xact_id,
+        Some(flush_lsn),
+    )
+    .await
+    .expect("Disk slice should be present");
+
+    // Delete a row that belongs to the now-drained mem batches (it will be recorded as MemoryBatch)
+    table.delete_in_stream_batch(row2.clone(), xact_id).await;
+
+    // Apply the stream flush result BEFORE committing the transaction.
+    // This must remap the MemoryBatch deletion into the new disk file and set the batch deletion vector.
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Assert the in-memory stream state's flushed file deletion vector reflects the delete BEFORE commit.
+    {
+        let stream_state = table
+            .transaction_stream_states
+            .get(&xact_id)
+            .expect("stream state should exist");
+        let total_deleted: usize = stream_state
+            .flushed_files
+            .values()
+            .map(|entry| entry.batch_deletion_vector.get_num_rows_deleted())
+            .sum();
+        assert_eq!(
+            total_deleted, 1,
+            "expected exactly one deleted row in batch deletion vector before commit"
+        );
+    }
+
+    // Now commit the streaming transaction.
+    table
+        .commit_transaction_stream_impl(xact_id, flush_lsn + 1)
+        .unwrap();
+
+    // Create a snapshot and verify only the non-deleted row remains.
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    let mut snapshot = table.snapshot.write().await;
+    let SnapshotReadOutput {
+        data_file_paths,
+        puffin_cache_handles,
+        position_deletes,
+        deletion_vectors,
+        ..
+    } = snapshot.request_read().await.unwrap();
+
+    verify_files_and_deletions(
+        get_data_files_for_read(&data_file_paths).as_slice(),
+        get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+        position_deletes,
+        deletion_vectors,
+        &[1],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_streaming_commit_before_flush_finishes_sets_flush_lsn() -> Result<()> {
+    let context = TestContext::new("streaming_commit_before_flush_finishes_sets_flush_lsn");
+    let mut table = test_table(
+        &context,
+        "streaming_commit_before_flush_finishes_sets_flush_lsn",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1u32;
+    let commit_lsn = 100u64;
+
+    // Append a row to streaming mem slice
+    let row = test_row(1, "A", 20);
+    table.append_in_stream_batch(row, xact_id)?;
+
+    // Begin a streaming flush WITHOUT a writer LSN to simulate a periodic flush before commit
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
+            .await
+            .expect("Disk slice should be present");
+
+    // Commit the transaction while the flush is still pending
+    table
+        .commit_transaction_stream_impl(xact_id, commit_lsn)
+        .unwrap();
+
+    // Apply the flush after commit; this should set next flush LSN to commit_lsn
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Create a snapshot to integrate the flush LSN into the current snapshot state
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Verify the snapshot's flush LSN is set to the commit LSN
+    let snapshot = table.snapshot.write().await;
+    let status = snapshot.get_table_snapshot_states().unwrap();
+    assert_eq!(status.flush_lsn, Some(commit_lsn));
 
     Ok(())
 }

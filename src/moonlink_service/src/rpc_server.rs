@@ -87,17 +87,17 @@ where
                 table_id,
                 src,
                 src_uri,
+                table_config,
             } => {
                 // Use default mooncake config, and local filesystem for storage layer.
-                let serialized_table_config = "{}";
                 backend
                     .create_table(
                         database_id,
                         table_id,
                         src,
                         src_uri,
+                        table_config,
                         None, /* input_schema */
-                        serialized_table_config,
                     )
                     .await
                     .unwrap();

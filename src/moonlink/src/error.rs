@@ -4,6 +4,7 @@ use parquet::errors::ParquetError;
 use std::error;
 use std::fmt;
 use std::io;
+use std::panic::Location;
 use std::result;
 use std::sync::Arc;
 use thiserror::Error;
@@ -30,14 +31,25 @@ impl fmt::Display for ErrorStatus {
 /// Custom error struct for moonlink
 #[derive(Clone, Debug)]
 pub struct ErrorStruct {
-    pub message: String,
-    pub status: ErrorStatus,
-    pub source: Option<Arc<anyhow::Error>>,
+    message: String,
+    status: ErrorStatus,
+    source: Option<Arc<anyhow::Error>>,
+    location: Option<&'static Location<'static>>,
 }
 
 impl fmt::Display for ErrorStruct {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.message, self.status)?;
+
+        if let Some(location) = &self.location {
+            write!(
+                f,
+                " at {}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )?;
+        }
 
         if let Some(source) = &self.source {
             write!(f, ", source: {source}")?;
@@ -48,6 +60,17 @@ impl fmt::Display for ErrorStruct {
 }
 
 impl ErrorStruct {
+    /// Creates a new ErrorStruct with the provided location.
+    #[track_caller]
+    pub fn new(message: String, status: ErrorStatus) -> Self {
+        Self {
+            message,
+            status,
+            source: None,
+            location: Some(Location::caller()),
+        }
+    }
+
     /// Sets the source error for this error struct.
     ///
     /// # Panics
@@ -119,16 +142,19 @@ pub enum Error {
 pub type Result<T> = result::Result<T, Error>;
 
 impl From<watch::error::RecvError> for Error {
+    #[track_caller]
     fn from(source: watch::error::RecvError) -> Self {
         Error::WatchChannelRecvError(ErrorStruct {
             message: format!("Watch channel receiver error: {source}"),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<ArrowError> for Error {
+    #[track_caller]
     fn from(source: ArrowError) -> Self {
         let status = match source {
             ArrowError::IoError(_, _) => ErrorStatus::Temporary,
@@ -141,11 +167,13 @@ impl From<ArrowError> for Error {
             message: format!("Arrow error: {source}"),
             status,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<IcebergError> for Error {
+    #[track_caller]
     fn from(source: IcebergError) -> Self {
         let status = match source.kind() {
             iceberg::ErrorKind::CatalogCommitConflicts | iceberg::ErrorKind::Unexpected => {
@@ -160,11 +188,13 @@ impl From<IcebergError> for Error {
             message: format!("Iceberg error: {source}"),
             status,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<io::Error> for Error {
+    #[track_caller]
     fn from(source: io::Error) -> Self {
         let status = match source.kind() {
             io::ErrorKind::TimedOut
@@ -186,11 +216,13 @@ impl From<io::Error> for Error {
             message: format!("IO error: {source}"),
             status,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<opendal::Error> for Error {
+    #[track_caller]
     fn from(source: opendal::Error) -> Self {
         let status = match source.kind() {
             opendal::ErrorKind::RateLimited | opendal::ErrorKind::Unexpected => {
@@ -205,21 +237,25 @@ impl From<opendal::Error> for Error {
             message: format!("OpenDAL error: {source}"),
             status,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<tokio::task::JoinError> for Error {
+    #[track_caller]
     fn from(source: tokio::task::JoinError) -> Self {
         Error::JoinError(ErrorStruct {
             message: format!("Join error: {source}"),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<ParquetError> for Error {
+    #[track_caller]
     fn from(source: ParquetError) -> Self {
         let status = match source {
             ParquetError::EOF(_) | ParquetError::NeedMoreData(_) => ErrorStatus::Temporary,
@@ -232,11 +268,13 @@ impl From<ParquetError> for Error {
             message: format!("Parquet error: {source}"),
             status,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
 
 impl From<serde_json::Error> for Error {
+    #[track_caller]
     fn from(source: serde_json::Error) -> Self {
         let status = match source.classify() {
             serde_json::error::Category::Io => ErrorStatus::Temporary,
@@ -249,6 +287,7 @@ impl From<serde_json::Error> for Error {
             message: format!("JSON serialization/deserialization error: {source}"),
             status,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
         })
     }
 }
@@ -256,6 +295,7 @@ impl From<serde_json::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
     use std::error::Error;
     use std::io;
 
@@ -265,6 +305,7 @@ mod tests {
             message: "Test error".to_string(),
             status: ErrorStatus::Temporary,
             source: None,
+            location: None,
         };
         assert_eq!(error.to_string(), "Test error (temporary)");
         assert!(error.source.is_none());
@@ -277,6 +318,7 @@ mod tests {
             message: "Test error".to_string(),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(io_error.into())),
+            location: None,
         };
         assert_eq!(
             error.to_string(),
@@ -289,5 +331,20 @@ mod tests {
         let io_err = source.downcast_ref::<io::Error>().unwrap();
         assert_eq!(io_err.kind(), io::ErrorKind::NotFound);
         assert_eq!(io_err.to_string(), "File not found");
+    }
+
+    #[test]
+    fn test_error_struct_new_with_location() {
+        // ErrorStruct::new will automatically capture the location where the error is raised
+        let error = ErrorStruct::new("Test error".to_string(), ErrorStatus::Temporary);
+        assert!(error.location.is_some());
+        let location_str = error.to_string();
+
+        assert!(location_str.contains("Test error (temporary) at"));
+        assert!(location_str.contains("error.rs:"));
+
+        // Check the location matches the pattern error.rs:number:number
+        let re_pattern = Regex::new(r"error\.rs:\d+:\d+").unwrap();
+        assert!(re_pattern.is_match(&location_str));
     }
 }

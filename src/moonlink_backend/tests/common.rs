@@ -338,8 +338,8 @@ async fn setup_backend(
                 TABLE_ID,
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
+                get_serialized_table_config(&temp_dir),
                 None, /* input_schema */
-                &get_serialized_table_config(&temp_dir),
             )
             .await
             .unwrap();
@@ -390,8 +390,8 @@ pub async fn smoke_create_and_insert(
             TABLE_ID,
             "public.test".to_string(),
             uri.to_string(),
+            get_serialized_table_config(tmp_dir),
             None, /* input_schema */
-            &get_serialized_table_config(tmp_dir),
         )
         .await
         .unwrap();

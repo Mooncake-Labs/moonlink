@@ -8,9 +8,11 @@ use crate::storage::io_utils;
 use crate::storage::mooncake_table::disk_slice::DiskSliceWriter;
 use crate::storage::mooncake_table::{
     AlterTableRequest, DataCompactionPayload, DataCompactionResult, FileIndiceMergePayload,
-    FileIndiceMergeResult, IcebergSnapshotPayload, IcebergSnapshotResult, MaintenanceOption,
-    SnapshotOption, TableMetadata as MooncakeTableMetadata,
+    FileIndiceMergeResult, IcebergSnapshotPayload, IcebergSnapshotResult,
+    TableMetadata as MooncakeTableMetadata,
 };
+use crate::storage::snapshot_options::MaintenanceOption;
+use crate::storage::snapshot_options::SnapshotOption;
 use crate::table_notify::{
     DataCompactionMaintenanceStatus, IndexMergeMaintenanceStatus, TableEvent,
 };
@@ -186,6 +188,7 @@ pub(crate) async fn perform_index_merge_for_test(
     assert!(table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::BestEffort,
         data_compaction_option: MaintenanceOption::Skip,
@@ -218,6 +221,7 @@ pub(crate) async fn perform_data_compaction_for_test(
     assert!(table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::BestEffort,
@@ -251,6 +255,7 @@ pub(crate) async fn sync_mooncake_snapshot(
     if let TableEvent::MooncakeTableSnapshotResult {
         lsn,
         uuid: _,
+        current_snapshot: _,
         iceberg_snapshot_payload,
         file_indice_merge_payload,
         data_compaction_payload,
@@ -319,6 +324,7 @@ pub(crate) async fn create_mooncake_snapshot_for_test(
     let mooncake_snapshot_created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         data_compaction_option: MaintenanceOption::BestEffort,
         index_merge_option: MaintenanceOption::BestEffort,
@@ -370,6 +376,7 @@ async fn sync_mooncake_snapshot_and_create_new_by_iceberg_payload(
     assert!(table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: true,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
@@ -415,6 +422,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
     let force_snapshot_option = SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::BestEffort,
@@ -465,6 +473,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
     assert!(table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::BestEffort,
@@ -482,6 +491,7 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
     let force_snapshot_option = SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::BestEffort,
         data_compaction_option: MaintenanceOption::BestEffort,
@@ -520,6 +530,7 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
     assert!(table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
+        dump_snapshot: false,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::BestEffort,
         data_compaction_option: MaintenanceOption::BestEffort,

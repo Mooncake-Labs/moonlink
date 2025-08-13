@@ -1,580 +1,377 @@
-use crate::error::Error;
+use crate::error::Result;
 use crate::row::RowValue;
 use arrow::array::builder::{
     BinaryBuilder, BooleanBuilder, NullBufferBuilder, PrimitiveBuilder, StringBuilder,
-    StructBuilder,
 };
 use arrow::array::types::{Decimal128Type, Float32Type, Float64Type, Int32Type, Int64Type};
-use arrow::array::{ArrayBuilder, ArrayRef, FixedSizeBinaryBuilder, ListArray};
+use arrow::array::{ArrayBuilder, ArrayRef, FixedSizeBinaryBuilder, ListArray, StructArray};
 use arrow::buffer::OffsetBuffer;
-use arrow::compute::kernels::cast;
-use arrow::datatypes::DataType;
-use std::mem::take;
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, FieldRef};
+use arrow::error::ArrowError;
 use std::sync::Arc;
 
-pub(crate) struct ArrayBuilderHelper {
-    offset_builder: Vec<i32>,
-    null_builder: NullBufferBuilder,
+/// Helper for building list arrays recursively
+pub(crate) struct ListBuilderHelper {
+    field: FieldRef,
+    /// Tracks the starting position of each list element in the values array.
+    /// The last offset always points to the total length of values.
+    offsets: Vec<i32>,
+    nulls: NullBufferBuilder,
+    inner: Box<ColumnArrayBuilder>,
+    len: usize,
 }
 
-impl ArrayBuilderHelper {
-    fn push(&mut self, value: i32) {
-        self.offset_builder.push(value);
-        self.null_builder.append_non_null();
+impl ListBuilderHelper {
+    pub fn with_capacity(field: FieldRef, capacity: usize) -> Self {
+        Self {
+            inner: Box::new(ColumnArrayBuilder::new(field.data_type(), 0)),
+            field,
+            offsets: Vec::with_capacity(capacity + 1),
+            nulls: NullBufferBuilder::new(capacity),
+            len: 0,
+        }
     }
-    fn push_null(&mut self) {
-        self.offset_builder
-            .push(self.offset_builder.last().copied().unwrap_or(0));
-        self.null_builder.append_null();
+
+    pub fn append_items(&mut self, items: &[RowValue]) -> Result<()> {
+        self.offsets.push(self.inner.len() as i32);
+        for it in items {
+            self.inner.append_value(it)?;
+        }
+        self.nulls.append_non_null();
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn append_null(&mut self) {
+        let cur = *self.offsets.last().unwrap_or(&0);
+        self.offsets.push(cur); // keeps child length unchanged
+        self.nulls.append_null();
+        self.len += 1;
+    }
+
+    pub fn finish(mut self) -> ArrayRef {
+        let values = self.inner.finish(self.field.data_type());
+        self.offsets.push(values.len() as i32); // closing offset
+        Arc::new(ListArray::new(
+            self.field,
+            OffsetBuffer::new(self.offsets.into()),
+            values,
+            self.nulls.finish(),
+        ))
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
     }
 }
+
+/// Helper for building struct recursively
+pub(crate) struct StructBuilderHelper {
+    fields: Vec<(FieldRef, ColumnArrayBuilder)>,
+    nulls: NullBufferBuilder,
+    len: usize,
+}
+
+impl StructBuilderHelper {
+    pub fn with_capacity(fields: &arrow::datatypes::Fields, capacity: usize) -> Self {
+        let mut children = Vec::with_capacity(fields.len());
+        for f in fields.iter() {
+            children.push((f.clone(), ColumnArrayBuilder::new(f.data_type(), capacity)));
+        }
+        Self {
+            fields: children,
+            nulls: NullBufferBuilder::new(capacity),
+            len: 0,
+        }
+    }
+
+    /// Appends a struct with the given field values.
+    /// The number of values must match the number of fields exactly.
+    pub fn append_values(&mut self, vals: &[RowValue]) -> Result<()> {
+        if vals.len() != self.fields.len() {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Struct field count mismatch: expected {} fields, got {} values",
+                self.fields.len(),
+                vals.len()
+            ))
+            .into());
+        }
+        for (i, (_f, child)) in self.fields.iter_mut().enumerate() {
+            child.append_value(&vals[i])?;
+        }
+        self.nulls.append_non_null();
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn append_null(&mut self) -> Result<()> {
+        for (_f, child) in self.fields.iter_mut() {
+            child.append_value(&RowValue::Null)?;
+        }
+        self.nulls.append_null();
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> ArrayRef {
+        let mut arrays = Vec::with_capacity(self.fields.len());
+        let mut schema_fields = Vec::with_capacity(self.fields.len());
+        for (f, b) in self.fields.drain(..) {
+            schema_fields.push(f.clone());
+            arrays.push(b.finish(f.data_type()));
+        }
+        let validity = self.nulls.finish();
+        if schema_fields.is_empty() {
+            Arc::new(StructArray::new_empty_fields(self.len, validity))
+        } else {
+            Arc::new(StructArray::new(schema_fields.into(), arrays, validity))
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
 /// A column array builder that can handle different types
 pub(crate) enum ColumnArrayBuilder {
-    Boolean(BooleanBuilder, Option<ArrayBuilderHelper>),
-    Int32(PrimitiveBuilder<Int32Type>, Option<ArrayBuilderHelper>),
-    Int64(PrimitiveBuilder<Int64Type>, Option<ArrayBuilderHelper>),
-    Float32(PrimitiveBuilder<Float32Type>, Option<ArrayBuilderHelper>),
-    Float64(PrimitiveBuilder<Float64Type>, Option<ArrayBuilderHelper>),
-    Decimal128(PrimitiveBuilder<Decimal128Type>, Option<ArrayBuilderHelper>),
-    Utf8(StringBuilder, Option<ArrayBuilderHelper>),
-    FixedSizeBinary(FixedSizeBinaryBuilder, Option<ArrayBuilderHelper>),
-    Binary(BinaryBuilder, Option<ArrayBuilderHelper>),
-    Struct(StructBuilder, Option<ArrayBuilderHelper>),
+    // Primitive leaves
+    Boolean(BooleanBuilder),
+    Int32(PrimitiveBuilder<Int32Type>),
+    Int64(PrimitiveBuilder<Int64Type>),
+    Float32(PrimitiveBuilder<Float32Type>),
+    Float64(PrimitiveBuilder<Float64Type>),
+    Decimal128(PrimitiveBuilder<Decimal128Type>),
+    Utf8(StringBuilder),
+    FixedSizeBinary(FixedSizeBinaryBuilder),
+    Binary(BinaryBuilder),
+
+    // Composite nodes (recursive)
+    List(ListBuilderHelper),
+    Struct(StructBuilderHelper),
 }
 
 impl ColumnArrayBuilder {
     /// Create a new column array builder for a specific data type
-    pub(crate) fn new(data_type: &DataType, capacity: usize, is_list: bool) -> Self {
-        let array_builder = if is_list {
-            Some(ArrayBuilderHelper {
-                offset_builder: Vec::with_capacity(capacity),
-                null_builder: NullBufferBuilder::new(capacity),
-            })
-        } else {
-            None
-        };
-        match data_type {
-            DataType::Boolean => {
-                ColumnArrayBuilder::Boolean(BooleanBuilder::with_capacity(capacity), array_builder)
+    pub(crate) fn new(dt: &DataType, capacity: usize) -> Self {
+        match dt {
+            DataType::Boolean => Self::Boolean(BooleanBuilder::with_capacity(capacity)),
+            DataType::Int16 | DataType::Int32 | DataType::Date32 => {
+                Self::Int32(PrimitiveBuilder::<Int32Type>::with_capacity(capacity))
             }
-            DataType::Int16 | DataType::Int32 | DataType::Date32 => ColumnArrayBuilder::Int32(
-                PrimitiveBuilder::<Int32Type>::with_capacity(capacity),
-                array_builder,
-            ),
             DataType::Timestamp(_, _) | DataType::Int64 | DataType::Time64(_) => {
-                ColumnArrayBuilder::Int64(
-                    PrimitiveBuilder::<Int64Type>::with_capacity(capacity),
-                    array_builder,
-                )
+                Self::Int64(PrimitiveBuilder::<Int64Type>::with_capacity(capacity))
             }
-            DataType::Float32 => ColumnArrayBuilder::Float32(
-                PrimitiveBuilder::<Float32Type>::with_capacity(capacity),
-                array_builder,
-            ),
-            DataType::Float64 => ColumnArrayBuilder::Float64(
-                PrimitiveBuilder::<Float64Type>::with_capacity(capacity),
-                array_builder,
-            ),
-            DataType::Utf8 => ColumnArrayBuilder::Utf8(
-                StringBuilder::with_capacity(capacity, capacity * 10),
-                array_builder,
-            ),
-            DataType::FixedSizeBinary(_size) => {
-                assert_eq!(*_size, 16);
-                ColumnArrayBuilder::FixedSizeBinary(
-                    FixedSizeBinaryBuilder::with_capacity(capacity, 16),
-                    array_builder,
-                )
+            DataType::Float32 => {
+                Self::Float32(PrimitiveBuilder::<Float32Type>::with_capacity(capacity))
             }
-            DataType::Decimal128(precision, scale) => ColumnArrayBuilder::Decimal128(
-                PrimitiveBuilder::<Decimal128Type>::with_capacity(capacity)
+            DataType::Float64 => {
+                Self::Float64(PrimitiveBuilder::<Float64Type>::with_capacity(capacity))
+            }
+            DataType::Decimal128(precision, scale) => {
+                let b = PrimitiveBuilder::<Decimal128Type>::with_capacity(capacity)
                     .with_precision_and_scale(*precision, *scale)
                     .expect(
                         "Failed to create Decimal128Type with precision {precision} and {scale}",
-                    ),
-                array_builder,
-            ),
-            DataType::Binary => ColumnArrayBuilder::Binary(
-                BinaryBuilder::with_capacity(capacity, capacity * 10),
-                array_builder,
-            ),
-            DataType::List(inner) => ColumnArrayBuilder::new(inner.data_type(), capacity, true),
-            DataType::Struct(fields) => ColumnArrayBuilder::Struct(
-                StructBuilder::from_fields(fields.clone(), capacity),
-                array_builder,
-            ),
-            _ => panic!("data type: {data_type:?}"),
+                    );
+                Self::Decimal128(b)
+            }
+            DataType::Utf8 => Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 8)),
+            DataType::FixedSizeBinary(n) => {
+                Self::FixedSizeBinary(FixedSizeBinaryBuilder::with_capacity(capacity, *n))
+            }
+            DataType::Binary => Self::Binary(BinaryBuilder::with_capacity(capacity, capacity * 8)),
+            DataType::List(child) => {
+                Self::List(ListBuilderHelper::with_capacity(child.clone(), capacity))
+            }
+            DataType::Struct(fields) => {
+                ColumnArrayBuilder::Struct(StructBuilderHelper::with_capacity(fields, capacity))
+            }
+            other => panic!("unsupported type in builder: {other:?}"),
         }
-    }
-
-    fn append_value_to_struct_field(
-        builder: &mut StructBuilder,
-        i: usize,
-        value: &RowValue,
-    ) -> Result<(), Error> {
-        if let Some(bool_builder) = builder.field_builder::<BooleanBuilder>(i) {
-            match value {
-                RowValue::Bool(v) => bool_builder.append_value(*v),
-                RowValue::Null => bool_builder.append_null(),
-                _ => unreachable!("Bool expected from well-typed input, but get {:?}", value),
-            }
-        } else if let Some(int32_builder) = builder.field_builder::<PrimitiveBuilder<Int32Type>>(i)
-        {
-            match value {
-                RowValue::Int32(v) => int32_builder.append_value(*v),
-                RowValue::Null => int32_builder.append_null(),
-                _ => unreachable!("Int32 expected from well-typed input, but get {:?}", value),
-            }
-        } else if let Some(int64_builder) = builder.field_builder::<PrimitiveBuilder<Int64Type>>(i)
-        {
-            match value {
-                RowValue::Int64(v) => int64_builder.append_value(*v),
-                RowValue::Null => int64_builder.append_null(),
-                _ => unreachable!("Int64 expected from well-typed input, but get {:?}", value),
-            }
-        } else if let Some(float32_builder) =
-            builder.field_builder::<PrimitiveBuilder<Float32Type>>(i)
-        {
-            match value {
-                RowValue::Float32(v) => float32_builder.append_value(*v),
-                RowValue::Null => float32_builder.append_null(),
-                _ => unreachable!(
-                    "Float32 expected from well-typed input, but get {:?}",
-                    value
-                ),
-            }
-        } else if let Some(float64_builder) =
-            builder.field_builder::<PrimitiveBuilder<Float64Type>>(i)
-        {
-            match value {
-                RowValue::Float64(v) => float64_builder.append_value(*v),
-                RowValue::Null => float64_builder.append_null(),
-                _ => unreachable!(
-                    "Float64 expected from well-typed input, but get {:?}",
-                    value
-                ),
-            }
-        } else if let Some(decimal_builder) =
-            builder.field_builder::<PrimitiveBuilder<Decimal128Type>>(i)
-        {
-            match value {
-                RowValue::Decimal(v) => decimal_builder.append_value(*v),
-                RowValue::Null => decimal_builder.append_null(),
-                _ => unreachable!(
-                    "Decimal128 expected from well-typed input, but get {:?}",
-                    value
-                ),
-            }
-        } else if let Some(string_builder) = builder.field_builder::<StringBuilder>(i) {
-            match value {
-                RowValue::ByteArray(v) => {
-                    string_builder.append_value(unsafe { std::str::from_utf8_unchecked(v) })
-                }
-                RowValue::Null => string_builder.append_null(),
-                _ => unreachable!(
-                    "ByteArray expected from well-typed input, but get {:?}",
-                    value
-                ),
-            }
-        } else if let Some(fixed_builder) = builder.field_builder::<FixedSizeBinaryBuilder>(i) {
-            match value {
-                RowValue::FixedLenByteArray(v) => fixed_builder.append_value(v)?,
-                RowValue::Null => fixed_builder.append_null(),
-                _ => unreachable!(
-                    "FixedLenByteArray expected from well-typed input, but get {:?}",
-                    value
-                ),
-            }
-        } else if let Some(binary_builder) = builder.field_builder::<BinaryBuilder>(i) {
-            match value {
-                RowValue::ByteArray(v) => binary_builder.append_value(v),
-                RowValue::Null => binary_builder.append_null(),
-                _ => unreachable!(
-                    "ByteArray expected from well-typed input, but get {:?}",
-                    value
-                ),
-            }
-        } else {
-            // TODO: handle nested struct and list
-            unreachable!("Unsupported field type in struct - only primitive types are supported")
-        }
-        Ok(())
     }
 
     /// Append a value to this builder
-    pub(crate) fn append_value(&mut self, value: &RowValue) -> Result<(), Error> {
-        match self {
-            ColumnArrayBuilder::Boolean(builder, array_helper) => {
-                match value {
-                    RowValue::Bool(v) => builder.append_value(*v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::Bool(v) => builder.append_value(*v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "Bool expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!("Bool expected from well-typed input, but get {:?}", value),
-                };
+    pub(crate) fn append_value(&mut self, v: &RowValue) -> Result<()> {
+        match (self, v) {
+            // ===== leaves
+            (Self::Boolean(b), RowValue::Bool(x)) => {
+                b.append_value(*x);
                 Ok(())
             }
-            ColumnArrayBuilder::Int32(builder, array_helper) => {
-                match value {
-                    RowValue::Int32(v) => builder.append_value(*v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::Int32(v) => builder.append_value(*v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "Int32 expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!("Int32 expected from well-typed input, but get {:?}", value),
-                };
+            (Self::Boolean(b), RowValue::Null) => {
+                b.append_null();
                 Ok(())
             }
-            ColumnArrayBuilder::Int64(builder, array_helper) => {
-                match value {
-                    RowValue::Int64(v) => builder.append_value(*v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::Int64(v) => builder.append_value(*v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "Int64 expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!("Int64 expected from well-typed input, but get {:?}", value),
-                };
+
+            (Self::Int32(b), RowValue::Int32(x)) => {
+                b.append_value(*x);
                 Ok(())
             }
-            ColumnArrayBuilder::Float32(builder, array_helper) => {
-                match value {
-                    RowValue::Float32(v) => builder.append_value(*v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::Float32(v) => builder.append_value(*v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "Float32 expected from well-typed input, but get {:?}",
-                                    value
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!(
-                        "Float32 expected from well-typed input, but get {:?}",
-                        value
-                    ),
-                };
+            (Self::Int32(b), RowValue::Null) => {
+                b.append_null();
                 Ok(())
             }
-            ColumnArrayBuilder::Float64(builder, array_helper) => {
-                match value {
-                    RowValue::Float64(v) => builder.append_value(*v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::Float64(v) => builder.append_value(*v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "Float64 expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!(
-                        "Float64 expected from well-typed input, but get {:?}",
-                        value
-                    ),
-                };
+
+            (Self::Int64(b), RowValue::Int64(x)) => {
+                b.append_value(*x);
                 Ok(())
             }
-            ColumnArrayBuilder::Decimal128(builder, array_helper) => {
-                match value {
-                    RowValue::Decimal(v) => builder.append_value(*v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::Decimal(v) => builder.append_value(*v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "Decimal128 expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!(
-                        "Decimal128 expected from well-typed input, but get {:?}",
-                        value
-                    ),
-                };
+            (Self::Int64(b), RowValue::Null) => {
+                b.append_null();
                 Ok(())
             }
-            ColumnArrayBuilder::Utf8(builder, array_helper) => {
-                match value {
-                    RowValue::ByteArray(v) => {
-                        builder.append_value(unsafe { std::str::from_utf8_unchecked(v) })
-                    }
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::ByteArray(v) => builder
-                                    .append_value(unsafe { std::str::from_utf8_unchecked(v) }),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "ByteArray expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!(
-                        "ByteArray expected from well-typed input, but get {:?}",
-                        value
-                    ),
-                };
+
+            (Self::Float32(b), RowValue::Float32(x)) => {
+                b.append_value(*x);
                 Ok(())
             }
-            ColumnArrayBuilder::FixedSizeBinary(builder, array_helper) => {
-                match value {
-                    RowValue::FixedLenByteArray(v) => builder.append_value(v)?,
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::FixedLenByteArray(v) => builder.append_value(v)?,
-                                RowValue::Null => builder.append_null(),
-                                _ => {
-                                    unreachable!("FixedLenByteArray expected from well-typed input, but get {:?}", v[i])
-                                }
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!(
-                        "FixedLenByteArray expected from well-typed input, but get {:?}",
-                        value
-                    ),
-                };
+            (Self::Float32(b), RowValue::Null) => {
+                b.append_null();
                 Ok(())
             }
-            ColumnArrayBuilder::Binary(builder, array_helper) => {
-                match value {
-                    RowValue::ByteArray(v) => builder.append_value(v),
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for i in 0..v.len() {
-                            match &v[i] {
-                                RowValue::ByteArray(v) => builder.append_value(v),
-                                RowValue::Null => builder.append_null(),
-                                _ => unreachable!(
-                                    "ByteArray expected from well-typed input, but get {:?}",
-                                    v[i]
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-                    _ => unreachable!(
-                        "ByteArray expected from well-typed input, but get {:?}",
-                        value
-                    ),
-                };
+
+            (Self::Float64(b), RowValue::Float64(x)) => {
+                b.append_value(*x);
                 Ok(())
             }
-            ColumnArrayBuilder::Struct(builder, array_helper) => {
-                match value {
-                    RowValue::Struct(fields) => {
-                        for (i, field) in fields.iter().enumerate().take(builder.num_fields()) {
-                            Self::append_value_to_struct_field(builder, i, field)?;
-                        }
-                        builder.append(true);
-                    }
-                    RowValue::Array(v) => {
-                        array_helper.as_mut().unwrap().push(builder.len() as i32);
-                        for item in v {
-                            match item {
-                                RowValue::Struct(fields) => {
-                                    for (i, field) in
-                                        fields.iter().enumerate().take(builder.num_fields())
-                                    {
-                                        Self::append_value_to_struct_field(builder, i, field)?;
-                                    }
-                                    builder.append(true);
-                                }
-                                RowValue::Null => {
-                                    for i in 0..builder.num_fields() {
-                                        Self::append_value_to_struct_field(
-                                            builder,
-                                            i,
-                                            &RowValue::Null,
-                                        )?;
-                                    }
-                                    builder.append(false);
-                                }
-                                _ => unreachable!(
-                                    "Struct expected from well-typed input, but get {:?}",
-                                    item
-                                ),
-                            }
-                        }
-                    }
-                    RowValue::Null => {
-                        if let Some(helper) = array_helper.as_mut() {
-                            helper.push_null();
-                        } else {
-                            for i in 0..builder.num_fields() {
-                                Self::append_value_to_struct_field(builder, i, &RowValue::Null)?;
-                            }
-                            builder.append(false);
-                        }
-                    }
-                    _ => unreachable!("Struct expected from well-typed input, but get {:?}", value),
-                };
+            (Self::Float64(b), RowValue::Null) => {
+                b.append_null();
                 Ok(())
             }
+
+            (Self::Decimal128(b), RowValue::Decimal(x)) => {
+                b.append_value(*x);
+                Ok(())
+            }
+            (Self::Decimal128(b), RowValue::Null) => {
+                b.append_null();
+                Ok(())
+            }
+
+            (Self::Utf8(b), RowValue::ByteArray(bytes)) => {
+                let s = String::from_utf8(bytes.clone())?;
+                b.append_value(&s);
+                Ok(())
+            }
+            (Self::Utf8(b), RowValue::Null) => {
+                b.append_null();
+                Ok(())
+            }
+
+            (Self::FixedSizeBinary(b), RowValue::FixedLenByteArray(x)) => {
+                b.append_value(*x)?;
+                Ok(())
+            }
+            (Self::FixedSizeBinary(b), RowValue::Null) => {
+                b.append_null();
+                Ok(())
+            }
+
+            (Self::Binary(b), RowValue::ByteArray(x)) => {
+                b.append_value(x);
+                Ok(())
+            }
+            (Self::Binary(b), RowValue::Null) => {
+                b.append_null();
+                Ok(())
+            }
+
+            // ===== lists (recursive)
+            (Self::List(b), RowValue::Array(items)) => {
+                b.append_items(items)?;
+                Ok(())
+            }
+            (Self::List(b), RowValue::Null) => {
+                // push same offset -> empty list; mark null element
+                b.append_null();
+                Ok(())
+            }
+
+            // ===== structs (recursive)
+            (Self::Struct(b), RowValue::Struct(vals)) => {
+                b.append_values(vals)?;
+                Ok(())
+            }
+            (Self::Struct(b), RowValue::Null) => {
+                // null struct: append null to each child field to keep lengths aligned
+                b.append_null()?;
+                Ok(())
+            }
+
+            // ===== list-of-any (Array inside a non-List builder)
+            (b @ Self::Boolean(_), RowValue::Array(_))
+            | (b @ Self::Int32(_), RowValue::Array(_))
+            | (b @ Self::Int64(_), RowValue::Array(_))
+            | (b @ Self::Float32(_), RowValue::Array(_))
+            | (b @ Self::Float64(_), RowValue::Array(_))
+            | (b @ Self::Decimal128(_), RowValue::Array(_))
+            | (b @ Self::Utf8(_), RowValue::Array(_))
+            | (b @ Self::FixedSizeBinary(_), RowValue::Array(_))
+            | (b @ Self::Binary(_), RowValue::Array(_)) => {
+                Err(ArrowError::InvalidArgumentError(format!(
+                    "Got RowValue::Array for non-list builder: {:?}",
+                    std::mem::discriminant(b)
+                ))
+                .into())
+            }
+
+            // Type mismatch
+            (b, other) => Err(ArrowError::InvalidArgumentError(format!(
+                "Type mismatch: builder={:?}, value={:?}",
+                std::mem::discriminant(b),
+                other
+            ))
+            .into()),
         }
     }
+
+    /// Returns the number of elements in the array
+    fn len(&self) -> usize {
+        match self {
+            Self::List(b) => b.len(),
+            Self::Struct(b) => b.len(),
+            Self::Boolean(b) => b.len(),
+            Self::Int32(b) => b.len(),
+            Self::Int64(b) => b.len(),
+            Self::Float32(b) => b.len(),
+            Self::Float64(b) => b.len(),
+            Self::Decimal128(b) => b.len(),
+            Self::Utf8(b) => b.len(),
+            Self::FixedSizeBinary(b) => b.len(),
+            Self::Binary(b) => b.len(),
+        }
+    }
+
     /// Finish building and return the array
-    pub(crate) fn finish(&mut self, logical_type: &DataType) -> ArrayRef {
-        let (array, array_helper): (ArrayRef, &mut Option<ArrayBuilderHelper>) = match self {
-            ColumnArrayBuilder::Boolean(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
+    pub(crate) fn finish(self, logical_type: &DataType) -> ArrayRef {
+        match self {
+            Self::Boolean(mut b) => Arc::new(b.finish()),
+            Self::Int32(mut b) => {
+                let arr: ArrayRef = Arc::new(b.finish());
+                match logical_type {
+                    DataType::Date32 => cast(&arr, logical_type).unwrap(),
+                    _ => arr,
+                }
             }
-            ColumnArrayBuilder::Int32(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
+            Self::Int64(mut b) => {
+                let arr: ArrayRef = Arc::new(b.finish());
+                match logical_type {
+                    DataType::Timestamp(_, _) | DataType::Time64(_) => {
+                        cast(&arr, logical_type).unwrap()
+                    }
+                    _ => arr,
+                }
             }
-            ColumnArrayBuilder::Int64(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::Float32(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::Float64(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::Decimal128(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::Utf8(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::FixedSizeBinary(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::Binary(builder, array_helper) => {
-                (Arc::new(builder.finish()), array_helper)
-            }
-            ColumnArrayBuilder::Struct(helper, array_helper) => {
-                (Arc::new(helper.finish()), array_helper)
-            }
-        };
-        if let Some(helper) = array_helper.as_mut() {
-            let mut offset_array = take(&mut helper.offset_builder);
-            offset_array.push(array.len() as i32);
-            let null_array = helper.null_builder.finish();
-            let inner_field = match logical_type {
-                DataType::List(inner) => inner,
-                _ => panic!("List expected from well-typed input"),
-            };
-            let list_array = ListArray::new(
-                inner_field.clone(),
-                OffsetBuffer::new(offset_array.into()),
-                array,
-                null_array,
-            );
-            Arc::new(list_array)
-        } else {
-            cast(&array, logical_type).unwrap_or_else(|_| {
-                panic!(
-                    "Fail to cast to correct type in ColumnArrayBuilder::finish for {logical_type:?}"
-                )
-            })
+            Self::Float32(mut b) => Arc::new(b.finish()),
+            Self::Float64(mut b) => Arc::new(b.finish()),
+            Self::Decimal128(mut b) => Arc::new(b.finish()),
+            Self::Utf8(mut b) => Arc::new(b.finish()),
+            Self::FixedSizeBinary(mut b) => Arc::new(b.finish()),
+            Self::Binary(mut b) => Arc::new(b.finish()),
+            Self::List(h) => h.finish(),
+            Self::Struct(h) => h.finish(),
         }
     }
 }
@@ -590,11 +387,7 @@ mod tests {
     #[test]
     fn test_column_array_builder() {
         // Test Int32 type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Int32,
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, /*capacity=*/ 2);
         builder.append_value(&RowValue::Int32(1)).unwrap();
         builder.append_value(&RowValue::Int32(2)).unwrap();
         let array = builder.finish(&DataType::Int32);
@@ -604,11 +397,7 @@ mod tests {
         assert_eq!(int32_array.value(1), 2);
 
         // Test Int64 type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Int64,
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Int64, /*capacity=*/ 2);
         builder.append_value(&RowValue::Int64(100)).unwrap();
         builder.append_value(&RowValue::Int64(200)).unwrap();
         let array = builder.finish(&DataType::Int64);
@@ -618,11 +407,7 @@ mod tests {
         assert_eq!(int64_array.value(1), 200);
 
         // Test Float32 type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Float32,
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Float32, /*capacity=*/ 2);
         builder
             .append_value(&RowValue::Float32(std::f32::consts::PI))
             .unwrap();
@@ -636,11 +421,7 @@ mod tests {
         assert!((float32_array.value(1) - std::f32::consts::E).abs() < 0.0001);
 
         // Test Float64 type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Float64,
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Float64, /*capacity=*/ 2);
         builder
             .append_value(&RowValue::Float64(std::f64::consts::PI))
             .unwrap();
@@ -654,11 +435,7 @@ mod tests {
         assert!((float64_array.value(1) - std::f64::consts::E).abs() < 0.00001);
 
         // Test Boolean type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Boolean,
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Boolean, /*capacity=*/ 2);
         builder.append_value(&RowValue::Bool(true)).unwrap();
         builder.append_value(&RowValue::Bool(false)).unwrap();
         let array = builder.finish(&DataType::Boolean);
@@ -668,11 +445,7 @@ mod tests {
         assert!(!bool_array.value(1));
 
         // Test Utf8 (ByteArray) type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Utf8,
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Utf8, /*capacity=*/ 2);
         builder
             .append_value(&RowValue::ByteArray("hello".as_bytes().to_vec()))
             .unwrap();
@@ -686,11 +459,8 @@ mod tests {
         assert_eq!(string_array.value(1), "world");
 
         // Test FixedSizeBinary type
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::FixedSizeBinary(16),
-            /*capacity=*/ 2,
-            /*is_list=*/ false,
-        );
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::FixedSizeBinary(16), /*capacity=*/ 2);
         let bytes1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let bytes2 = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
         builder
@@ -709,11 +479,7 @@ mod tests {
         assert_eq!(binary_array.value(1), bytes2);
 
         // Test null values
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Int32,
-            /*capacity=*/ 3,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, /*capacity=*/ 3);
         builder.append_value(&RowValue::Int32(1)).unwrap();
         builder.append_value(&RowValue::Null).unwrap();
         builder.append_value(&RowValue::Int32(3)).unwrap();
@@ -725,11 +491,7 @@ mod tests {
         assert_eq!(int32_array.value(2), 3);
 
         // Test using null values directly from RowValue::Null
-        let mut builder = ColumnArrayBuilder::new(
-            &DataType::Int32,
-            /*capacity=*/ 3,
-            /*is_list=*/ false,
-        );
+        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, /*capacity=*/ 3);
         builder.append_value(&RowValue::Int32(1)).unwrap();
         builder.append_value(&RowValue::Null).unwrap();
         builder.append_value(&RowValue::Int32(3)).unwrap();
@@ -751,7 +513,6 @@ mod tests {
                 /*nullable=*/ true,
             ))),
             /*capacity=*/ 2,
-            /*is_list=*/ true,
         );
 
         // Add a list of integers [1, 2, 3]
@@ -822,7 +583,6 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(
             &DataType::Struct(struct_fields.clone().into()),
             /*capacity=*/ 2,
-            /*is_list=*/ false,
         );
 
         // Add a struct with values
@@ -898,7 +658,6 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(
             &DataType::Struct(struct_fields.clone().into()),
             /*capacity=*/ 3,
-            /*is_list=*/ false,
         );
 
         // Add struct with all values
@@ -1003,7 +762,6 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(
             &DataType::Struct(struct_fields.clone().into()),
             /*capacity=*/ 1,
-            /*is_list=*/ false,
         );
 
         // Add struct with all types
@@ -1126,7 +884,6 @@ mod tests {
                 /*nullable=*/ true,
             ))),
             /*capacity=*/ 2,
-            /*is_list=*/ true,
         );
 
         // Add a list of structs
@@ -1244,7 +1001,6 @@ mod tests {
         let mut builder = ColumnArrayBuilder::new(
             &DataType::Struct(struct_fields.clone()),
             /*capacity=*/ 3,
-            /*is_list=*/ false,
         );
 
         // Add empty structs
@@ -1266,5 +1022,325 @@ mod tests {
         assert!(!struct_array.is_null(0));
         assert!(!struct_array.is_null(1));
         assert!(struct_array.is_null(2));
+    }
+
+    #[test]
+    fn test_column_array_builder_error_cases() {
+        // Test type mismatch error - trying to append string to int32 builder
+        let mut builder = ColumnArrayBuilder::new(&DataType::Int32, /*capacity=*/ 1);
+        let result = builder.append_value(&RowValue::ByteArray(b"not_an_int".to_vec()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+
+        // Test appending array to non-list builder
+        let mut builder = ColumnArrayBuilder::new(&DataType::Boolean, /*capacity=*/ 1);
+        let result = builder.append_value(&RowValue::Array(vec![RowValue::Bool(true)]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Got RowValue::Array for non-list builder"));
+
+        // Test appending wrong type to float builder
+        let mut builder = ColumnArrayBuilder::new(&DataType::Float32, /*capacity=*/ 1);
+        let result = builder.append_value(&RowValue::Int32(42));
+        assert!(result.is_err());
+
+        // Test appending struct to primitive builder
+        let mut builder = ColumnArrayBuilder::new(&DataType::Int64, /*capacity=*/ 1);
+        let result = builder.append_value(&RowValue::Struct(vec![RowValue::Int64(100)]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_column_array_builder_struct_field_length_mismatch() {
+        // Test struct with 3 fields
+        let struct_fields = vec![
+            Arc::new(arrow::datatypes::Field::new(
+                "field1",
+                DataType::Int32,
+                /*nullable=*/ true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                "field2",
+                DataType::Utf8,
+                /*nullable=*/ true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                "field3",
+                DataType::Boolean,
+                /*nullable=*/ true,
+            )),
+        ];
+
+        let mut builder = ColumnArrayBuilder::new(
+            &DataType::Struct(struct_fields.clone().into()),
+            /*capacity=*/ 2,
+        );
+
+        // Test 1: Append with fewer values than fields (should error)
+        let result = builder.append_value(&RowValue::Struct(vec![
+            RowValue::Int32(1),
+            // field2 and field3 missing
+        ]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Struct field count mismatch: expected 3 fields, got 1 values"));
+
+        // Test 2: Append with exact number of values (should succeed)
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(2),
+                RowValue::ByteArray(b"test".to_vec()),
+                RowValue::Bool(true),
+            ]))
+            .unwrap();
+
+        // Test 3: Append with more values than fields (should error)
+        let result = builder.append_value(&RowValue::Struct(vec![
+            RowValue::Int32(3),
+            RowValue::ByteArray(b"extra".to_vec()),
+            RowValue::Bool(false),
+            RowValue::Int32(999),                     // Extra value
+            RowValue::ByteArray(b"ignored".to_vec()), // Extra value
+        ]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Struct field count mismatch: expected 3 fields, got 5 values"));
+
+        // Test 4: Progressive NULL pattern testing (should succeed)
+        // Row with one NULL in middle field
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(4),
+                RowValue::Null, // Explicit NULL in middle
+                RowValue::Bool(false),
+            ]))
+            .unwrap();
+
+        // Row with two NULLs in last two fields
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(5),
+                RowValue::Null, // NULL
+                RowValue::Null, // NULL
+            ]))
+            .unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields.into()));
+        assert_eq!(array.len(), 3); // 3 successful appends (tests 2, 4, and 5)
+
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(struct_array.num_columns(), 3);
+
+        // Check field1 values (no nulls)
+        let field1 = struct_array
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(field1.value(0), 2);
+        assert_eq!(field1.value(1), 4);
+        assert_eq!(field1.value(2), 5);
+
+        // Check field2 values (progressive nulls)
+        let field2 = struct_array
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(field2.value(0), "test");
+        assert!(field2.is_null(1)); // NULL from row 2
+        assert!(field2.is_null(2)); // NULL from row 3
+
+        // Check field3 values (progressive nulls)
+        let field3 = struct_array
+            .column(2)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(field3.value(0));
+        assert!(!field3.value(1));
+        assert!(field3.is_null(2)); // NULL from row 3
+    }
+
+    #[test]
+    fn test_struct_with_list_field() {
+        use arrow::array::{ListArray, StructArray};
+
+        // Struct schema: { id: Int32, scores: List<Int32> }
+        let struct_fields = vec![
+            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "scores",
+                DataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    DataType::Int32,
+                    true,
+                ))),
+                true,
+            )),
+        ];
+
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 3);
+
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::Array(vec![RowValue::Int32(85), RowValue::Int32(92)]),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(2),
+                RowValue::Array(vec![]),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![RowValue::Int32(3), RowValue::Null]))
+            .unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields.into()));
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let scores_column = struct_array
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        // Verify list with values, empty list, and null
+        assert_eq!(scores_column.value(0).len(), 2);
+        assert_eq!(scores_column.value(1).len(), 0);
+        assert!(scores_column.is_null(2));
+    }
+
+    #[test]
+    fn test_deeply_nested_struct() {
+        use arrow::array::StructArray;
+
+        // Create 3-level nested struct: { level2: { level3: { value: Utf8 } } }
+        let level3 = DataType::Struct(
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "value",
+                DataType::Utf8,
+                true,
+            ))]
+            .into(),
+        );
+        let level2 = DataType::Struct(
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "level3", level3, true,
+            ))]
+            .into(),
+        );
+        let root = DataType::Struct(
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "level2", level2, true,
+            ))]
+            .into(),
+        );
+
+        let mut builder = ColumnArrayBuilder::new(&root, 2);
+
+        // Add nested struct and struct with null
+        builder
+            .append_value(&RowValue::Struct(vec![RowValue::Struct(vec![
+                RowValue::Struct(vec![RowValue::ByteArray(b"deep".to_vec())]),
+            ])]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![RowValue::Null]))
+            .unwrap();
+
+        let array = builder.finish(&root);
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let level2_column = struct_array
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+
+        // Verify deep nesting works and nulls are handled
+        assert!(!level2_column.is_null(0));
+        assert!(level2_column.is_null(1));
+    }
+
+    #[test]
+    fn test_struct_with_mixed_nested_types() {
+        use arrow::array::{ListArray, StructArray};
+
+        // Nested struct schema: { nested_id: Int32, nested_value: Float64 }
+        let nested_struct = DataType::Struct(
+            vec![
+                Arc::new(arrow::datatypes::Field::new(
+                    "nested_id",
+                    DataType::Int32,
+                    true,
+                )),
+                Arc::new(arrow::datatypes::Field::new(
+                    "nested_value",
+                    DataType::Float64,
+                    true,
+                )),
+            ]
+            .into(),
+        );
+
+        // Root struct: { id: Int32, nested: Struct, tags: List<Utf8> }
+        let struct_fields = vec![
+            Arc::new(arrow::datatypes::Field::new("id", DataType::Int32, true)),
+            Arc::new(arrow::datatypes::Field::new("nested", nested_struct, true)),
+            Arc::new(arrow::datatypes::Field::new(
+                "tags",
+                DataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    DataType::Utf8,
+                    true,
+                ))),
+                true,
+            )),
+        ];
+
+        let mut builder =
+            ColumnArrayBuilder::new(&DataType::Struct(struct_fields.clone().into()), 2);
+
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::Struct(vec![RowValue::Int32(100), RowValue::Float64(42.5)]),
+                RowValue::Array(vec![RowValue::ByteArray(b"tag1".to_vec())]),
+            ]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Struct(vec![
+                RowValue::Int32(2),
+                RowValue::Null,
+                RowValue::Array(vec![RowValue::ByteArray(b"tag2".to_vec())]),
+            ]))
+            .unwrap();
+
+        let array = builder.finish(&DataType::Struct(struct_fields.into()));
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let nested_column = struct_array
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let tags_column = struct_array
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        // Verify mixed types: valid nested struct, null nested struct, and lists
+        assert!(!nested_column.is_null(0));
+        assert!(nested_column.is_null(1));
+        assert_eq!(tags_column.value(0).len(), 1);
+        assert_eq!(tags_column.value(1).len(), 1);
     }
 }
