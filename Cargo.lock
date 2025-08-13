@@ -4382,7 +4382,6 @@ name = "moonlink_rpc"
 version = "0.0.1"
 dependencies = [
  "bincode",
- "moonlink",
  "moonlink_error",
  "paste",
  "serde",

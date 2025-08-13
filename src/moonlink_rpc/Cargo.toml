@@ -6,7 +6,6 @@ license = "MIT"
 
 [dependencies]
 bincode = { workspace = true }
-moonlink = { path = "../moonlink" }
 moonlink_error = { path = "../moonlink_error" }
 paste = { workspace = true }
 serde = { workspace = true }
