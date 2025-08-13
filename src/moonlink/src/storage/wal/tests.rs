@@ -359,8 +359,12 @@ async fn test_wal_recovery_basic() {
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // Recover events using flat stream
+    let wal_metadata =
+        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
+            .await
+            .unwrap();
     let recovered_events =
-        get_table_events_vector_recovery(wal.get_file_system_accessor(), 0).await;
+        get_table_events_vector_recovery(wal.get_file_system_accessor(), &wal_metadata).await;
 
     assert_ingestion_events_vectors_equal(&recovered_events, &expected_events);
 }

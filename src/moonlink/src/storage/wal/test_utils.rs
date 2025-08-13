@@ -2,7 +2,7 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::mooncake_table::test_utils::test_row;
 use crate::storage::wal::{WalEvent, WalManager};
 use crate::table_notify::TableEvent;
-use crate::{Result, WalConfig};
+use crate::{PersistentWalMetadata, Result, WalConfig};
 use futures::StreamExt;
 use std::sync::Arc;
 
@@ -211,11 +211,11 @@ pub fn assert_wal_events_does_not_contain(
 
 pub async fn get_table_events_vector_recovery(
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
-    start_file_name: u64,
+    wal_metadata: &PersistentWalMetadata,
 ) -> Vec<TableEvent> {
     // Recover events using flat stream
     let mut recovered_events = Vec::new();
-    let mut stream = WalManager::recover_flushed_wals_flat(file_system_accessor, start_file_name);
+    let mut stream = WalManager::recover_flushed_wals_flat(file_system_accessor, wal_metadata);
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => recovered_events.push(event),

@@ -1070,30 +1070,31 @@ impl WalManager {
         }
     }
 
-    /// Recover the flushed WALs from the file system. Start file number and begin_from_lsn are
-    /// both inclusive.
-    #[allow(dead_code)]
+    /// Recover the flushed WALs from the file system.
     fn recover_flushed_wals(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
-        start_file_number: u64,
+        wal_persistence_metadata: &PersistentWalMetadata,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<TableEvent>>> + Send>> {
+        if wal_persistence_metadata.live_wal_files_tracker.is_empty() {
+            return Box::pin(stream::empty());
+        }
+        let start_file_number = wal_persistence_metadata
+            .live_wal_files_tracker
+            .first()
+            .unwrap()
+            .file_number;
+        let end_file_number = wal_persistence_metadata
+            .live_wal_files_tracker
+            .last()
+            .unwrap()
+            .file_number;
         Box::pin(stream::unfold(start_file_number, move |file_number| {
             let file_system_accessor = file_system_accessor.clone();
             async move {
                 let file_name = WalManager::get_file_name(file_number);
-                let exists = file_system_accessor.object_exists(&file_name).await;
-                match exists {
-                    Ok(exists) => {
-                        // If file not found, we have reached the end of the WAL files
-                        if !exists {
-                            return None;
-                        }
-                    }
-                    Err(e) => {
-                        return Some((Err(e), file_number + 1));
-                    }
+                if file_number > end_file_number {
+                    return None;
                 }
-
                 match file_system_accessor.read_object(&file_name).await {
                     Ok(bytes) => {
                         let wal_events: Vec<WalEvent> = match serde_json::from_slice(&bytes) {
@@ -1112,14 +1113,12 @@ impl WalManager {
         }))
     }
 
-    /// Recover the flushed WALs from the file system as a flat stream. Start file number and
-    /// begin_from_lsn are both inclusive.
-    #[allow(dead_code)]
+    /// Recover the flushed WALs from the file system as a flat stream.
     pub fn recover_flushed_wals_flat(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
-        start_file_number: u64,
+        wal_persistence_metadata: &PersistentWalMetadata,
     ) -> Pin<Box<dyn Stream<Item = Result<TableEvent>> + Send>> {
-        WalManager::recover_flushed_wals(file_system_accessor, start_file_number)
+        WalManager::recover_flushed_wals(file_system_accessor, wal_persistence_metadata)
             .flat_map(|result| match result {
                 Ok(events) => stream::iter(events.into_iter().map(Ok).collect::<Vec<_>>()),
                 Err(e) => stream::iter(vec![Err(e)]),
@@ -1127,79 +1126,8 @@ impl WalManager {
             .boxed()
     }
 
-    #[allow(dead_code)]
-    pub async fn get_xact_map_from_wal_events(
-        mut wal_events: Pin<Box<dyn Stream<Item = Result<TableEvent>> + Send>>,
-    ) -> HashMap<u32, WalTransactionState> {
-        let mut xact_map = HashMap::new();
-        while let Some(event_result) = wal_events.next().await {
-            match event_result {
-                Ok(TableEvent::Commit {
-                    xact_id: Some(xact_id),
-                    lsn,
-                    ..
-                }) => {
-                    xact_map.insert(
-                        xact_id,
-                        WalTransactionState::Commit {
-                            start_file: 0,
-                            completion_lsn: lsn,
-                            file_end: 0,
-                        },
-                    );
-                }
-                Ok(TableEvent::StreamAbort { xact_id, .. }) => {
-                    xact_map.insert(
-                        xact_id,
-                        WalTransactionState::Abort {
-                            start_file: 0,
-                            completion_lsn: 0,
-                            file_end: 0,
-                        },
-                    );
-                }
-                Ok(TableEvent::Append { xact_id, .. }) | Ok(TableEvent::Delete { xact_id, .. }) => {
-                    if let Some(xact_id) = xact_id {
-                        xact_map.insert(xact_id, WalTransactionState::Open { start_file: 0 });
-                    }
-                }
-                _ => {}
-            }
-        }
-        xact_map
-    }
-
-    /// Returns true if the streaming xact event should be applied before the source replay lsn.
-    /// Takes in an xact_map which contains the states of each streaming xact by the end of the WAL.
-    #[allow(dead_code)]
-    fn streaming_xact_event_should_be_applied_before_source_replay(
-        xact_id: u32,
-        xact_map: &HashMap<u32, WalTransactionState>,
-        source_replay_lsn: u64,
-    ) -> bool {
-        // expect the xact id to be in the xact map
-        let xact_state = xact_map
-            .get(&xact_id)
-            .expect("xact id should always be found in xact map tracking final lsns");
-        match xact_state {
-            WalTransactionState::Commit { completion_lsn, .. } => {
-                // check if the completion lsn is before the source replay lsn
-                *completion_lsn < source_replay_lsn
-            }
-            WalTransactionState::Abort { .. } => {
-                // no-op
-                false
-            }
-            WalTransactionState::Open { .. } => {
-                // if still open, it means postgres will replay this event because we have not yet flushed it in the WAL
-                false
-            }
-        }
-    }
-
     /// Returns true if the lsn is before the last iceberg snapshot lsn.
     /// Assumes that there is no last iceberg snapshot lsn if the option is None.
-    #[allow(dead_code)]
     fn event_already_captured_in_iceberg_snapshot(
         lsn: u64,
         last_iceberg_snapshot_lsn: Option<u64>,
@@ -1287,13 +1215,12 @@ impl WalManager {
         if starting_wal.is_none() {
             return Ok(());
         }
-        let starting_wal_file_number = starting_wal.unwrap().file_number;
 
         let active_xacts = persistent_wal_metadata.get_active_transactions().clone();
 
         let mut wal_events_stream = WalManager::recover_flushed_wals_flat(
             wal_file_accessor.clone(),
-            starting_wal_file_number,
+            &persistent_wal_metadata,
         );
 
         while let Some(table_event) = wal_events_stream.next().await {

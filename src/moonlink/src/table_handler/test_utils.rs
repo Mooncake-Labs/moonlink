@@ -450,13 +450,13 @@ impl TestEnvironment {
 
     // Recover wal events locally by reading from the wal filesystem and finding the lowest file number
     // TODO(Paul): Rework these when implementing object storage WAL
-    pub async fn get_wal_events_with_start_file_number(
+    pub async fn get_wal_events_with_metadata(
         &self,
-        start_file_num: u64,
+        wal_metadata: &PersistentWalMetadata,
     ) -> Vec<TableEvent> {
         let wal_events_stream = WalManager::recover_flushed_wals_flat(
             self.wal_filesystem_accessor.clone(),
-            start_file_num,
+            wal_metadata,
         );
         let wal_events_vec = wal_events_stream
             .collect::<Vec<Result<TableEvent>>>()
@@ -473,24 +473,6 @@ impl TestEnvironment {
         wal_events_vec
     }
 
-    pub async fn get_wal_events_inferring_lowest_file_number(&self) -> Vec<TableEvent> {
-        let lowest_file_number = self.infer_lowest_wal_file_number().await.unwrap();
-        self.get_wal_events_with_start_file_number(lowest_file_number)
-            .await
-    }
-
-    /// Infers the lowest file number by looking at all remaining files in the WAL directory.
-    pub async fn check_wal_events_inferring_lowest_file_number(
-        &self,
-        should_contain_table_events: &[TableEvent],
-        should_not_contain_table_events: &[TableEvent],
-    ) {
-        let wal_events = self.get_wal_events_inferring_lowest_file_number().await;
-
-        assert_wal_events_contains(&wal_events, should_contain_table_events);
-        assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
-    }
-
     pub async fn get_latest_wal_metadata(&self) -> Option<PersistentWalMetadata> {
         WalManager::recover_from_persistent_wal_metadata(self.wal_filesystem_accessor.clone()).await
     }
@@ -501,7 +483,6 @@ impl TestEnvironment {
         should_contain_table_events: &[TableEvent],
         should_not_contain_table_events: &[TableEvent],
     ) {
-        let live_wal_files_tracker = wal_metadata.get_live_wal_files_tracker();
         if wal_metadata.get_live_wal_files_tracker().is_empty() {
             assert!(
                 should_contain_table_events.is_empty(),
@@ -510,11 +491,7 @@ impl TestEnvironment {
             return;
         }
 
-        let start_file_number = live_wal_files_tracker.first().unwrap().file_number;
-
-        let wal_events = self
-            .get_wal_events_with_start_file_number(start_file_number)
-            .await;
+        let wal_events = self.get_wal_events_with_metadata(wal_metadata).await;
 
         assert_wal_events_contains(&wal_events, should_contain_table_events);
         assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
@@ -588,6 +565,21 @@ impl TestEnvironment {
             lowest_file_number_from_fs, lowest_file_number_from_metadata,
             "lowest file number from fs and metadata should be the same"
         );
+
+        let highest_file_number_from_metadata =
+            active_wal_files.last().map(|file| file.file_number);
+        if let Some(highest_file_number_from_metadata) = highest_file_number_from_metadata {
+            // check if the metadata is empty
+            let file_name = WalManager::get_file_name(highest_file_number_from_metadata + 1);
+            assert!(
+                !self
+                    .wal_filesystem_accessor
+                    .object_exists(&file_name)
+                    .await
+                    .unwrap(),
+                "file {file_name} should not exist as it is out of range of the active wal files"
+            );
+        };
 
         for file in active_wal_files {
             assert!(

@@ -1727,7 +1727,9 @@ async fn test_wal_persists_events() {
 
     env.force_wal_persistence(1).await;
 
-    env.check_wal_events_inferring_lowest_file_number(&expected_events, &[])
+    let wal_metadata = env.get_latest_wal_metadata().await.unwrap();
+
+    env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &[])
         .await;
 }
 
@@ -1761,7 +1763,9 @@ async fn test_wal_truncates_events_after_snapshot() {
 
     env.force_wal_persistence(2).await;
 
-    env.check_wal_events_inferring_lowest_file_number(&expected_events, &not_expected_events)
+    let wal_metadata = env.get_latest_wal_metadata().await.unwrap();
+
+    env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &not_expected_events)
         .await;
 }
 
@@ -1806,7 +1810,9 @@ async fn test_wal_keeps_multiple_streaming_xacts() {
     env.force_wal_persistence(7).await;
 
     // we should be keeping all WAL after the flush at LSN 2 because we have a streaming xact that is not committed
-    env.check_wal_events_inferring_lowest_file_number(&expected_events, &not_expected_events)
+    let wal_metadata = env.get_latest_wal_metadata().await.unwrap();
+
+    env.check_wal_events_from_metadata(&wal_metadata, &expected_events, &not_expected_events)
         .await;
 }
 
