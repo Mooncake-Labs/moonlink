@@ -861,10 +861,12 @@ mod tests {
 
     #[test]
     fn test_postgres_composite_to_moonlink_row() {
-        // Test nested composite and array field in composite
         let postgres_table_row = PostgresTableRow(TableRow {
             values: vec![
                 Cell::I32(1),
+                // Structure:
+                // - Outer composite: {id: i32, tags: Array<String>, nested: NestedComposite}
+                //   - Nested composite: {value: f32, scores: Array<i32>}
                 Cell::Composite(vec![
                     Cell::I32(100),
                     Cell::Array(ArrayCell::String(vec![
@@ -925,10 +927,12 @@ mod tests {
 
     #[test]
     fn test_postgres_array_of_composites_to_moonlink_row() {
-        // Test array of composite types
         let postgres_table_row = PostgresTableRow(TableRow {
             values: vec![
                 Cell::I32(1),
+                // Structure:
+                // - Array of UserComposite: [UserComposite, null, UserComposite]
+                //   - UserComposite: {id: i32, name: String, active: bool}
                 Cell::Array(ArrayCell::Composite(vec![
                     Some(vec![
                         Cell::I32(100),
