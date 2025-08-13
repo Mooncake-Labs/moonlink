@@ -309,7 +309,7 @@ impl MooncakeTable {
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
-            .expect("stream state not found for xact_id: {xact_id}");
+            .expect("Stream state not found for xact_id: {xact_id}");
 
         stream_state.status = TransactionStreamStatus::Aborted;
 
