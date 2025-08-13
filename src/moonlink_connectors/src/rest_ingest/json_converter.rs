@@ -16,8 +16,8 @@ pub enum JsonToMoonlinkRowError {
     InvalidValue(String),
     #[error("serde json error: {0}")]
     SerdeJson(#[from] serde_json::Error),
-    #[error("unsupported data type: {0}")]
-    UnsupportedDataType(String),
+    #[error("Unsupported data type {0} in field {1}")]
+    UnsupportedDataType(String, String),
 }
 
 pub struct JsonToMoonlinkRowConverter {
@@ -118,9 +118,12 @@ impl JsonToMoonlinkRowConverter {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
             }
-            DataType::Decimal256(_precision, _scale) => Err(
-                JsonToMoonlinkRowError::UnsupportedDataType(field.name().clone()),
-            ),
+            DataType::Decimal256(_precision, _scale) => {
+                Err(JsonToMoonlinkRowError::UnsupportedDataType(
+                    "Decimal256".to_string(),
+                    field.name().clone(),
+                ))
+            }
             _ => Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone())),
         }
     }
@@ -147,16 +150,11 @@ mod tests {
     }
 
     fn make_schema_with_decimal256() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("is_active", DataType::Boolean, false),
-            Field::new("score", DataType::Float64, false),
-            Field::new("id_int64", DataType::Int64, false),
-            Field::new("score_float32", DataType::Float32, false),
-            Field::new("decimal128", DataType::Decimal128(5, 2), false),
-            Field::new("decimal256", DataType::Decimal256(38, 10), false),
-        ]))
+        Arc::new(Schema::new(vec![Field::new(
+            "decimal256",
+            DataType::Decimal256(38, 10),
+            false,
+        )]))
     }
 
     fn make_datetime_schema() -> Arc<Schema> {
@@ -349,18 +347,14 @@ mod tests {
         let schema = make_schema_with_decimal256();
         let converter = JsonToMoonlinkRowConverter::new(schema);
         let input = json!({
-            "id": 42,
-            "name": "moonlink",
-            "is_active": true,
-            "score": 100.0,
-            "id_int64": 123,
-            "score_float32": 100.0,
-            "decimal128": "123.45",
             "decimal256": "9876.5432"
         });
         let err = converter.convert(&input).unwrap_err();
         match err {
-            JsonToMoonlinkRowError::UnsupportedDataType(f) => assert_eq!(f, "decimal256"),
+            JsonToMoonlinkRowError::UnsupportedDataType(f, e) => {
+                assert_eq!(f, "Decimal256");
+                assert_eq!(e, "decimal256");
+            }
             _ => panic!("unexpected error: {err:?}"),
         }
     }
