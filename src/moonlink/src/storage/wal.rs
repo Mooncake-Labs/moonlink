@@ -166,6 +166,7 @@ impl WalEvent {
             WalEvent::StreamAbort { xact_id } => TableEvent::StreamAbort {
                 xact_id,
                 is_recovery: false,
+                closes_incomplete_wal_transaction: false,
             },
             WalEvent::StreamFlush { xact_id } => TableEvent::StreamFlush {
                 xact_id,
@@ -234,7 +235,7 @@ impl WalTransactionState {
         // the xact has a known completion lsn by the iceberg snapshot lsn,
         // so it is captured in the iceberg snapshot
         if let Some((completion_lsn, completion_file_number)) = completion_lsn_and_file {
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, test))]
             {
                 // here we do the check for consistency
                 if let Some(iceberg_snapshot_wal_file_num) = lowest_file_kept {
@@ -277,36 +278,27 @@ impl WalTransactionState {
     }
 }
 
+/// Metadata for the WAL that is persisted to the file system.
+/// This is used as the single source of truth for any persistent WAL upon recovery.
+/// It is meant to be persisted after a new WAL log file is flushed, and before any deletion of unused WAL log files, as this
+/// file captures all these changes.
+/// This captures the state of [WalManager] at the time of persistence.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistentWalMetadata {
+    /// The file number of the next WAL log file to be flushed.
+    /// Note that this is usually the file number of the last flushed WAL log file + 1,
+    /// unless the WAL is completely empty, in which case it is 0.
     curr_file_number: u64,
+    /// The highest completion LSN of all completed transactions in the WAL that is persisted.
     highest_completion_lsn: u64,
+    /// The list of all live WAL log files that are persisted.
     live_wal_files_tracker: Vec<WalFileInfo>,
+    /// The list of all active transactions in the WAL that is persisted.
     active_transactions: HashMap<u32, WalTransactionState>,
+    /// The list of all main transactions in the WAL that is persisted.
     main_transaction_tracker: Vec<WalTransactionState>,
+    /// The LSN of the last iceberg snapshot that was persisted just before the WAL was persisted.
     iceberg_snapshot_lsn: Option<u64>,
-}
-
-impl std::fmt::Debug for PersistentWalMetadata {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PersistentWalMetadata")
-            .field("curr_file_number", &self.curr_file_number)
-            .field("highest_completion_lsn", &self.highest_completion_lsn)
-            .field("iceberg_snapshot_lsn", &self.iceberg_snapshot_lsn)
-            .field(
-                "live wal files tracker number",
-                &self.live_wal_files_tracker.len(),
-            )
-            .field(
-                "active transactions number",
-                &self.active_transactions.len(),
-            )
-            .field(
-                "main transaction tracker number",
-                &self.main_transaction_tracker.len(),
-            )
-            .finish()
-    }
 }
 
 impl PersistentWalMetadata {
@@ -353,34 +345,16 @@ impl PersistentWalMetadata {
     }
 }
 
+/// Used to prepare all the information needed to update the persisted WAL.
+/// This is prepared synchronously before being passed to the a background task.
+/// Upon completion of the background task, the [WalManager] will be updated with
+/// the information contained in this struct.
 #[derive(Clone, PartialEq)]
 pub struct PreparePersistentUpdate {
     persistent_wal_metadata: PersistentWalMetadata,
     files_to_delete: Vec<WalFileInfo>,
     accompanying_iceberg_snapshot_lsn: Option<u64>,
     files_to_persist: Option<(Vec<WalEvent>, WalFileInfo)>,
-}
-
-impl std::fmt::Debug for PreparePersistentUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (files_to_persist_num, wal_file_info) =
-            if let Some((files_to_persist, wal_file_info)) = &self.files_to_persist {
-                (files_to_persist.len(), Some(wal_file_info.clone()))
-            } else {
-                (0, None)
-            };
-
-        f.debug_struct("PreparePersistentUpdate")
-            .field("persistent_wal_metadata", &self.persistent_wal_metadata)
-            .field(
-                "accompanying_iceberg_snapshot_lsn",
-                &self.accompanying_iceberg_snapshot_lsn,
-            )
-            .field("files to delete number", &self.files_to_delete.len())
-            .field("files to persist number", &files_to_persist_num)
-            .field("wal file info", &wal_file_info)
-            .finish()
-    }
 }
 
 impl PreparePersistentUpdate {
@@ -949,7 +923,7 @@ impl WalManager {
             );
         }
 
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, test))]
         {
             assert_eq!(
                 self.live_wal_files_tracker,
@@ -1240,7 +1214,7 @@ impl WalManager {
                         }
                         // if the xact is not in the xact map, it means it is closed before the iceberg snapshot (ie we are already not tracking it)
                         None => {
-                            #[cfg(debug_assertions)]
+                            #[cfg(any(debug_assertions, test))]
                             if let TableEvent::Commit { lsn, .. } = event {
                                 assert!(WalManager::event_already_captured_in_iceberg_snapshot(
                                     *lsn,
@@ -1251,14 +1225,9 @@ impl WalManager {
                         }
                     }
                 } else {
-                    // Main xact - if it is > than the iceberg snapshot lsn, it is not yet in the iceberg snapshot
-                    let already_captured_in_iceberg_snapshot =
-                        if let Some(last_iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
-                            *lsn <= last_iceberg_snapshot_lsn
-                        } else {
-                            // if no last iceberg snapshot lsn, means there is no iceberg snapshot
-                            false
-                        };
+                    // Main xact - if it is <= the iceberg snapshot lsn, it is already captured in the iceberg snapshot
+                    let already_captured_in_iceberg_snapshot = last_iceberg_snapshot_lsn.is_some()
+                        && *lsn <= last_iceberg_snapshot_lsn.unwrap();
                     // in the main xact, if the lsn is <= the lsn of the highest commit, it means the transaction has committed
                     let is_completed_transaction = *lsn <= highest_committed_lsn;
                     !already_captured_in_iceberg_snapshot && is_completed_transaction
@@ -1272,17 +1241,15 @@ impl WalManager {
         }
     }
 
-    #[tracing::instrument(name = "replay_recovery_from_wal")]
+    /// note that in recovery this is always called before we start replication,
+    /// so WAL events get sent to the sink before we get replay events from the source itself,
+    /// thus ensuring that we still receive events in the correct order
     pub async fn replay_recovery_from_wal(
         event_sender_clone: Sender<TableEvent>,
         persistent_wal_metadata: Option<PersistentWalMetadata>,
         wal_file_accessor: Arc<dyn BaseFileSystemAccess>,
         last_iceberg_snapshot_lsn: Option<u64>,
     ) -> Result<()> {
-        // replay the WAL up till the source replay lsn
-        // note that in recovery this is always called before we start replication,
-        // so WAL events get sent to the sink before we get replay events from the source itself,
-        // thus ensuring that we still receive events in the correct order
         if persistent_wal_metadata.is_none() {
             return Ok(());
         }
@@ -1326,6 +1293,7 @@ impl WalManager {
                     .send(TableEvent::StreamAbort {
                         xact_id,
                         is_recovery: false,
+                        closes_incomplete_wal_transaction: true,
                     })
                     .await
                     .expect("failed to send StreamAbort event to closed xact during recovery");
@@ -1343,6 +1311,50 @@ impl WalManager {
             );
 
         Ok(())
+    }
+}
+
+impl std::fmt::Debug for PersistentWalMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistentWalMetadata")
+            .field("curr_file_number", &self.curr_file_number)
+            .field("highest_completion_lsn", &self.highest_completion_lsn)
+            .field("iceberg_snapshot_lsn", &self.iceberg_snapshot_lsn)
+            .field(
+                "live wal files tracker number",
+                &self.live_wal_files_tracker.len(),
+            )
+            .field(
+                "active transactions number",
+                &self.active_transactions.len(),
+            )
+            .field(
+                "main transaction tracker number",
+                &self.main_transaction_tracker.len(),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PreparePersistentUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (files_to_persist_num, wal_file_info) =
+            if let Some((files_to_persist, wal_file_info)) = &self.files_to_persist {
+                (files_to_persist.len(), Some(wal_file_info.clone()))
+            } else {
+                (0, None)
+            };
+
+        f.debug_struct("PreparePersistentUpdate")
+            .field("persistent_wal_metadata", &self.persistent_wal_metadata)
+            .field(
+                "accompanying_iceberg_snapshot_lsn",
+                &self.accompanying_iceberg_snapshot_lsn,
+            )
+            .field("files to delete number", &self.files_to_delete.len())
+            .field("files to persist number", &files_to_persist_num)
+            .field("wal file info", &wal_file_info)
+            .finish()
     }
 }
 

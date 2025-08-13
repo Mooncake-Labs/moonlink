@@ -306,16 +306,10 @@ impl MooncakeTable {
         }
 
         // Record abortion in snapshot task so we can remove any uncommitted deletions
-        let stream_state = self.transaction_stream_states.get_mut(&xact_id);
-
-        let stream_state = match stream_state {
-            Some(stream_state) => stream_state,
-            None => {
-                // this is the case where a stream abort is sent by moonlink during recovery
-                // to close any unclosed transactions in the WAL that existed before crash.
-                return;
-            }
-        };
+        let stream_state = self
+            .transaction_stream_states
+            .get_mut(&xact_id)
+            .expect("stream state not found for xact_id: {xact_id}");
 
         stream_state.status = TransactionStreamStatus::Aborted;
 

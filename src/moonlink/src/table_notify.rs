@@ -87,9 +87,13 @@ pub enum TableEvent {
         is_recovery: bool,
     },
     /// Abort current stream with given xact_id
+    /// If closes incomplete wal transaction is true, then this is being used during recovery
+    /// to close any incomplete transactions in the WAL that are now discarded as we will replay them from the source instead.
+    /// Note that in this case, is_recovery will be set to false as we want the event to be persisted into the WAL.
     StreamAbort {
         xact_id: u32,
         is_recovery: bool,
+        closes_incomplete_wal_transaction: bool,
     },
     /// ==============================
     /// Test events

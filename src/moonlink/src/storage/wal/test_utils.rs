@@ -310,6 +310,7 @@ pub fn add_new_example_stream_abort_event(
     let event = TableEvent::StreamAbort {
         xact_id,
         is_recovery: false,
+        closes_incomplete_wal_transaction: false,
     };
     wal.push(&event);
     expected_events.push(event);

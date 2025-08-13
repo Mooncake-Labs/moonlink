@@ -805,8 +805,15 @@ impl TableHandler {
                 )
                 .await;
             }
-            TableEvent::StreamAbort { xact_id, .. } => {
-                table.abort_in_stream_batch(xact_id);
+            TableEvent::StreamAbort {
+                xact_id,
+                closes_incomplete_wal_transaction,
+                ..
+            } => {
+                // If we are closing a transaction that is part of the WAL recovery process, then we do not need to process it, but just push it in to the WAL.
+                if !closes_incomplete_wal_transaction {
+                    table.abort_in_stream_batch(xact_id);
+                }
             }
             TableEvent::CommitFlush { lsn, xact_id, .. } => {
                 Self::commit_and_attempt_flush(

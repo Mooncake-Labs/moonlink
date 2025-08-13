@@ -252,12 +252,14 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
     }
 
     /// Gracefully shutdown a replication connection by its URI.
-    pub fn shutdown_connection(&mut self, uri: &str, drop_publication_and_replication: bool) {
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    pub fn shutdown_connection(&mut self, uri: &str, postgres_drop_all: bool) {
         // Clean up completed shutdown handles first
         self.cleanup_completed_shutdowns();
 
         if let Some(conn) = self.connections.remove(uri) {
-            let shutdown_handle = conn.shutdown(drop_publication_and_replication);
+            let shutdown_handle = conn.shutdown(postgres_drop_all);
             self.shutdown_handles.push(shutdown_handle);
             self.table_info.retain(|_, (u, _)| u != uri);
         }

@@ -285,6 +285,7 @@ impl TestEnvironment {
         let event = TableEvent::StreamAbort {
             xact_id,
             is_recovery: false,
+            closes_incomplete_wal_transaction: false,
         };
         self.send_event(event.clone()).await;
         event

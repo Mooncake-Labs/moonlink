@@ -169,7 +169,7 @@ pub fn ids_from_state(read_state: &ReadState) -> HashSet<i64> {
         .collect()
 }
 
-#[allow(dead_code)]
+/// Extract counts for possibly non-unique primary-key IDs referenced in `read_state`.
 pub fn nonunique_ids_from_state(read_state: &ReadState) -> HashMap<i64, u64> {
     let (files, _, _, _) = decode_read_state_for_testing(read_state);
     files
@@ -252,6 +252,8 @@ pub async fn assert_scan_ids_eq(
 
 /// Assert that scanning at `lsn` yields exactly `expected_counts` occurrences per ID.
 /// Blocks until the snapshot is created.
+/// This is useful for testing cases where the same ID could be inserted multiple times, or
+/// for testing de-duplication correctness.
 #[allow(dead_code)]
 pub async fn assert_scan_nonunique_ids_eq(
     backend: &MoonlinkBackend<DatabaseId, TableId>,

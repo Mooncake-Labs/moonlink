@@ -133,13 +133,15 @@ impl PostgresConnection {
         Ok(())
     }
 
+    #[must_use]
     /// Perform initial copy of existing table data
+    /// Returns true if initial copy was performed, false otherwise.
     pub async fn perform_initial_copy(
         &self,
         schema: &TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
-    ) -> Result<()> {
+    ) -> Result<(bool)> {
         let src_table_id = schema.src_table_id;
         // Create a dedicated source for the copy
         let mut copy_source = PostgresSource::new(&self.uri, None, None, false).await?;
@@ -187,14 +189,14 @@ impl PostgresConnection {
                     error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
                 }
             });
+            Ok(true)
         } else {
             // If there are no rows to copy, we still need to add the table to publication.
             copy_source
                 .add_table_to_publication(&schema.table_name)
                 .await?;
+            Ok(false)
         }
-
-        Ok(())
     }
 
     pub fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
@@ -402,13 +404,19 @@ impl PostgresConnection {
         .await?;
 
         // Perform initial copy
-        self.perform_initial_copy(
-            &table_schema,
-            table_resources.event_sender.clone(),
-            is_recovery,
-        )
-        .await?;
+        let initial_copy_performed = self
+            .perform_initial_copy(
+                &table_schema,
+                table_resources.event_sender.clone(),
+                is_recovery,
+            )
+            .await?;
+
         if is_recovery {
+            assert!(
+                !initial_copy_performed,
+                "initial copy should not be performed during recovery"
+            );
             debug!(
                 "Performing recovery for table with ID {:?}",
                 table_schema.src_table_id
@@ -461,8 +469,10 @@ impl PostgresConnection {
     }
 
     /// Shutdown PostgreSQL replication
-    pub async fn shutdown(&mut self, drop_publication_and_replication: bool) -> Result<()> {
-        if drop_publication_and_replication {
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    pub async fn shutdown(&mut self, drop_all: bool) -> Result<()> {
+        if drop_all {
             self.drop_publication().await?;
             self.drop_replication_slot().await?;
         }

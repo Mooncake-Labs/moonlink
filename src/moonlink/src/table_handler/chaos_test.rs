@@ -489,6 +489,7 @@ impl ChaosState {
                 ChaosEvent::create_table_events(vec![TableEvent::StreamAbort {
                     xact_id,
                     is_recovery: false,
+                    closes_incomplete_wal_transaction: false,
                 }])
             }
             EventKind::EndWithFlush => {

@@ -43,9 +43,11 @@ impl SourceType {
         }
     }
 
-    async fn finalize(&mut self, drop_publication_and_replication: bool) -> Result<()> {
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    async fn finalize(&mut self, postgres_drop_all: bool) -> Result<()> {
         match self {
-            SourceType::Postgres(conn) => conn.shutdown(drop_publication_and_replication).await,
+            SourceType::Postgres(conn) => conn.shutdown(postgres_drop_all).await,
             SourceType::RestApi(_) => Ok(()),
         }
     }
@@ -299,7 +301,11 @@ impl ReplicationConnection {
         Ok(())
     }
 
-    pub fn shutdown(mut self, drop_publication_and_replication: bool) -> JoinHandle<Result<()>> {
+    /// Shuts down the replication event loop and finalizes the source connection.
+    ///
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    pub fn shutdown(mut self, postgres_drop_all: bool) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
@@ -313,9 +319,7 @@ impl ReplicationConnection {
             }
 
             // Finalize the source connection
-            self.source
-                .finalize(drop_publication_and_replication)
-                .await?;
+            self.source.finalize(postgres_drop_all).await?;
 
             debug!("replication connection shutdown complete");
             Ok(())
