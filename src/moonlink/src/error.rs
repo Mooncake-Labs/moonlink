@@ -31,10 +31,10 @@ impl fmt::Display for ErrorStatus {
 /// Custom error struct for moonlink
 #[derive(Clone, Debug)]
 pub struct ErrorStruct {
-    message: String,
-    status: ErrorStatus,
-    source: Option<Arc<anyhow::Error>>,
-    location: Option<&'static Location<'static>>,
+    pub message: String,
+    pub status: ErrorStatus,
+    pub source: Option<Arc<anyhow::Error>>,
+    pub location: Option<&'static Location<'static>>,
 }
 
 impl fmt::Display for ErrorStruct {
