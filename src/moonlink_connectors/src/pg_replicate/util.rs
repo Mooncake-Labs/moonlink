@@ -308,6 +308,7 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
             .into_iter()
             .map(|v| {
                 v.map(|cells| {
+                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
                     let struct_values: Vec<RowValue> = cells
                         .into_iter()
                         .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
@@ -380,6 +381,7 @@ impl From<PostgresTableRow> for MoonlinkRow {
                     values.push(RowValue::Array(convert_array_cell(value)));
                 }
                 Cell::Composite(value) => {
+                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
                     let struct_values: Vec<RowValue> = value
                         .into_iter()
                         .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())

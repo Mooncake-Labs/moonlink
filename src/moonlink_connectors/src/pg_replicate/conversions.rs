@@ -31,6 +31,8 @@ pub enum Cell {
     Json(serde_json::Value),
     Bytes(Vec<u8>),
     Array(ArrayCell),
+    /// Represents a PostgreSQL composite type (custom type with multiple fields)
+    /// Each Cell in the Vec represents one field of the composite type
     Composite(Vec<Cell>),
 }
 
@@ -53,5 +55,10 @@ pub enum ArrayCell {
     Uuid(Vec<Option<Uuid>>),
     Json(Vec<Option<serde_json::Value>>),
     Bytes(Vec<Option<Vec<u8>>>),
+    /// Represents an array of PostgreSQL composite types
+    /// Vec<Option<Vec<Cell>>> structure:
+    /// - Outer Vec: array elements
+    /// - Option: nullable array elements (None = null element)
+    /// - Inner Vec<Cell>: composite type fields for each element
     Composite(Vec<Option<Vec<Cell>>>),
 }

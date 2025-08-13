@@ -351,6 +351,7 @@ impl TextFormatConverter {
                         }
                         Kind::Array(_) => {
                             // TODO: Multi-dimensional arrays not yet implemented
+                            // TODO: Need to print out the unsupported type (included in error type)
                             Err(FromTextError::InvalidConversion())
                         }
                         _ => Err(FromTextError::InvalidConversion()),
