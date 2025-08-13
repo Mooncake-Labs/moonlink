@@ -4249,6 +4249,7 @@ dependencies = [
  "lru",
  "memmap2",
  "mockall",
+ "moonlink_error",
  "more-asserts",
  "multimap",
  "num-bigint",
@@ -4350,6 +4351,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moonlink_error"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "thiserror 2.0.14",
+]
+
+[[package]]
 name = "moonlink_metadata_store"
 version = "0.0.1"
 dependencies = [
@@ -4374,6 +4383,7 @@ version = "0.0.1"
 dependencies = [
  "bincode",
  "moonlink",
+ "moonlink_error",
  "paste",
  "serde",
  "thiserror 2.0.14",

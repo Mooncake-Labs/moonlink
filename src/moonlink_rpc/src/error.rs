@@ -1,4 +1,4 @@
-use moonlink::error::{ErrorStatus, ErrorStruct};
+use moonlink_error::{ErrorStatus, ErrorStruct};
 use std::io;
 use std::panic::Location;
 use std::result;

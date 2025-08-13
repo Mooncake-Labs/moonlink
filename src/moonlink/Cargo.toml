@@ -58,6 +58,7 @@ iceberg = { workspace = true }
 itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"
+moonlink_error = { path = "../moonlink_error" }
 more-asserts = { workspace = true }
 multimap = { workspace = true }
 num-bigint = { workspace = true }
