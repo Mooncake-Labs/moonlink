@@ -209,11 +209,8 @@ pub enum TableEvent {
     PeriodicalWalPersistenceUpdateResult {
         result: Result<WalPersistenceUpdateResult>,
     },
-    FlushResult {
-        // Transaction ID
-        xact_id: Option<u32>,
-        /// Result for mem slice flush.
-        flush_result: Option<Result<DiskSliceWriter>>,
+    FinishRecovery {
+        highest_completion_lsn: u64,
     },
 }
 

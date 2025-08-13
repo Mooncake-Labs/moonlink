@@ -329,8 +329,9 @@ impl Sink {
                                     xact_id,
                                     is_recovery: false,
                                     closes_incomplete_wal_transaction: false,
-                                })
-                                .await
+                                },
+                            )
+                            .await
                             {
                                 warn!(error = ?e, "failed to send stream abort event");
                             }
