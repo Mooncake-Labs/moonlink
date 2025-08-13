@@ -140,7 +140,11 @@ fn postgres_type_to_arrow_type(
                     )
                 })
                 .collect();
-            Field::new_struct(name, fields, nullable)
+            let mut field = Field::new_struct(name, fields, nullable);
+            let mut metadata = HashMap::new();
+            metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
+            field.with_metadata(metadata)
         }
         Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
         _ => {
@@ -572,7 +576,45 @@ mod tests {
                     modifier: 0,
                     nullable: true,
                 },
-                // TODO(hjiang): Add composite type handling.
+                // PostgreSQL type: CREATE TYPE point AS (x int4, y int4);
+                // Column type: point
+                // Arrow type: Struct {x: Int32, y: Int32}
+                ColumnSchema {
+                    name: "point_field".to_string(),
+                    typ: Type::new(
+                        "point".to_string(),
+                        0, // OID doesn't matter for this test
+                        Kind::Composite(vec![
+                            tokio_postgres::types::Field::new("x".to_string(), Type::INT4), // x coordinate
+                            tokio_postgres::types::Field::new("y".to_string(), Type::INT4), // y coordinate
+                        ]),
+                        "public".to_string(),
+                    ),
+                    modifier: 0,
+                    nullable: true,
+                },
+                // PostgreSQL type: CREATE TYPE point AS (x int4, y int4);
+                // Column type: point[]
+                // Arrow type: List<Struct {x: Int32, y: Int32}>
+                ColumnSchema {
+                    name: "point_array_field".to_string(),
+                    typ: Type::new(
+                        "point_array".to_string(),
+                        0, // OID doesn't matter for this test
+                        Kind::Array(Type::new(
+                            "point".to_string(),
+                            0, // OID doesn't matter for this test
+                            Kind::Composite(vec![
+                                tokio_postgres::types::Field::new("x".to_string(), Type::INT4), // x coordinate
+                                tokio_postgres::types::Field::new("y".to_string(), Type::INT4), // y coordinate
+                            ]),
+                            "public".to_string(),
+                        )),
+                        "public".to_string(),
+                    ),
+                    modifier: 0,
+                    nullable: true,
+                },
             ],
             lookup_key: LookupKey::Key {
                 name: "uuid_field".to_string(),
@@ -581,7 +623,7 @@ mod tests {
         };
 
         let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema);
-        assert_eq!(arrow_schema.fields().len(), 23);
+        assert_eq!(arrow_schema.fields().len(), 25);
 
         assert_eq!(arrow_schema.field(0).name(), "bool_field");
         assert_eq!(arrow_schema.field(0).data_type(), &DataType::Boolean);
@@ -681,6 +723,18 @@ mod tests {
             &DataType::List(expected_field.into()),
         );
 
+        assert_eq!(arrow_schema.field(23).name(), "point_field");
+        assert!(matches!(
+            arrow_schema.field(23).data_type(),
+            DataType::Struct(_)
+        ));
+
+        assert_eq!(arrow_schema.field(24).name(), "point_array_field");
+        assert!(matches!(
+            arrow_schema.field(24).data_type(),
+            DataType::List(_)
+        ));
+
         // Check identity property.
         assert_eq!(identity, IdentityProp::Keys(vec![17]));
 
@@ -711,13 +765,20 @@ mod tests {
             (21, "oid_field"),
             (22, "bool_array_field.element"),
             (23, "bool_array_field"),
+            (24, "point_field.x"),
+            (25, "point_field.y"),
+            (26, "point_field"),
+            (27, "point_array_field.element.x"),
+            (28, "point_array_field.element.y"),
+            (29, "point_array_field.element"),
+            (30, "point_array_field"),
         ] {
             assert_eq!(
                 iceberg_arrow.name_by_field_id(field_id).unwrap(),
                 expected_name
             );
         }
-        assert!(iceberg_arrow.name_by_field_id(24).is_none());
+        assert!(iceberg_arrow.name_by_field_id(31).is_none());
     }
 
     #[test]
