@@ -235,7 +235,7 @@ impl MoonlinkRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum IdentityProp {
     SinglePrimitiveKey(usize),
     Keys(Vec<usize>),

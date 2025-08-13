@@ -26,7 +26,7 @@ macro_rules! rpcs {
 
 rpcs! {
     create_snapshot(database_id: u32, table_id: u32, lsn: u64) -> ();
-    create_table(database_id: u32, table_id: u32, src: String, src_uri: String) -> ();
+    create_table(database_id: u32, table_id: u32, src: String, src_uri: String, table_config: String) -> ();
     drop_table(database_id: u32, table_id: u32) -> ();
     get_table_schema(database_id: u32, table_id: u32) -> Vec<u8>;
     list_tables() -> Vec<Table>;

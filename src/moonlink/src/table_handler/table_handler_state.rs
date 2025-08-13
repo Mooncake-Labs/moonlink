@@ -5,6 +5,7 @@ use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::table_notify::TableEvent;
 use crate::Result;
+use more_asserts as ma;
 use tokio::sync::{broadcast, watch};
 use tracing::error;
 
@@ -398,7 +399,7 @@ impl TableHandlerState {
             alter_table_lsn, ..
         } = self.special_table_state
         {
-            assert!(iceberg_snapshot_lsn <= alter_table_lsn);
+            ma::assert_le!(iceberg_snapshot_lsn, alter_table_lsn);
             iceberg_snapshot_lsn == alter_table_lsn
         } else {
             false

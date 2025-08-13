@@ -116,7 +116,7 @@ impl Default for IcebergPersistenceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct MooncakeTableConfig {
     /// Number of batch records which decides when to flush records from MemSlice to disk.
     pub mem_slice_size: usize,

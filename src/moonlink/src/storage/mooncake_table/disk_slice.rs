@@ -47,7 +47,7 @@ pub struct DiskSliceWriter {
     // a mapping of old record locations to new record locations
     // this is used to remap deletions on the disk slice
     batch_id_to_idx: HashMap<u64, usize>,
-    row_offset_mapping: Vec<Vec<Option<(usize, usize)>>>,
+    pub row_offset_mapping: Vec<Vec<Option<(usize, usize)>>>,
 
     new_index: Option<FileIndex>,
 
@@ -264,6 +264,13 @@ impl DiskSliceWriter {
         let list = self
             .old_index
             .remap_into_vec(&self.batch_id_to_idx, &self.row_offset_mapping);
+        assert_eq!(
+            list.len(),
+            self.files
+                .iter()
+                .map(|(_, attrs)| attrs.row_num)
+                .sum::<usize>()
+        );
         let file_id =
             get_unique_file_id_for_flush(self.table_auto_incr_id as u64, self.files.len() as u64);
         let mut index_builder = GlobalIndexBuilder::new();

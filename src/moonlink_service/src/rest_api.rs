@@ -166,7 +166,6 @@ async fn create_table(
     };
 
     let arrow_schema = Schema::new(fields);
-    let serialized_table_config = "{}"; // Use default config
 
     // Create table in backend
     match state
@@ -176,8 +175,8 @@ async fn create_table(
             payload.table_id,
             table_name.clone(),
             REST_API_URI.to_string(),
+            "{}".to_string(),
             Some(arrow_schema),
-            serialized_table_config,
         )
         .await
     {

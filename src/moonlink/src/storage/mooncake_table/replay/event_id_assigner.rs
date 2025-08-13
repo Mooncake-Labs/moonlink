@@ -1,11 +1,18 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+/// Class which assigns monotonically increasing id for background events.
+pub(crate) struct EventIdAssigner {
+    counter: Arc<AtomicU64>,
+}
 
-/// Global, process-wide counter.
-static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+impl EventIdAssigner {
+    pub(crate) fn new() -> Self {
+        Self {
+            counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
 
-/// Get the next unique, monotonically increasing ID.
-#[inline]
-pub fn get_next_event_id() -> u64 {
-    // Returns the previous value; since we start at 1, returned IDs are 1,2,3,...
-    NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed)
+    pub(crate) fn get_next_event_id(&self) -> u64 {
+        self.counter.fetch_add(1, Ordering::SeqCst)
+    }
 }

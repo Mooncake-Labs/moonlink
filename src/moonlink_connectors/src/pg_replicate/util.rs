@@ -140,7 +140,11 @@ fn postgres_type_to_arrow_type(
                     )
                 })
                 .collect();
-            Field::new_struct(name, fields, nullable)
+            let mut field = Field::new_struct(name, fields, nullable);
+            let mut metadata = HashMap::new();
+            metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
+            field.with_metadata(metadata)
         }
         Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
         _ => {
@@ -304,6 +308,24 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
+        ArrayCell::Composite(values) => values
+            .into_iter()
+            .map(|v| {
+                v.map(|cells| {
+                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
+                    let struct_values: Vec<RowValue> = cells
+                        .into_iter()
+                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
+                        .map(|row: MoonlinkRow| {
+                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
+                            row.values.into_iter().next().unwrap_or(RowValue::Null)
+                        })
+                        .collect();
+                    RowValue::Struct(struct_values)
+                })
+                .unwrap_or(RowValue::Null)
+            })
+            .collect(),
     }
 }
 
@@ -361,6 +383,18 @@ impl From<PostgresTableRow> for MoonlinkRow {
                 }
                 Cell::Array(value) => {
                     values.push(RowValue::Array(convert_array_cell(value)));
+                }
+                Cell::Composite(value) => {
+                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
+                    let struct_values: Vec<RowValue> = value
+                        .into_iter()
+                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
+                        .map(|row: MoonlinkRow| {
+                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
+                            row.values.into_iter().next().unwrap_or(RowValue::Null)
+                        })
+                        .collect();
+                    values.push(RowValue::Struct(struct_values));
                 }
                 Cell::Numeric(value) => {
                     match value {
@@ -542,7 +576,74 @@ mod tests {
                     modifier: 0,
                     nullable: true,
                 },
-                // TODO(hjiang): Add composite type handling.
+                // PostgreSQL type: CREATE TYPE point AS (x int4, y int4);
+                // Column type: point
+                // Arrow type: Struct {x: Int32, y: Int32}
+                ColumnSchema {
+                    name: "point_field".to_string(),
+                    typ: Type::new(
+                        "point".to_string(),
+                        0, // OID doesn't matter for this test
+                        Kind::Composite(vec![
+                            tokio_postgres::types::Field::new("x".to_string(), Type::INT4), // x coordinate
+                            tokio_postgres::types::Field::new("y".to_string(), Type::INT4), // y coordinate
+                        ]),
+                        "public".to_string(),
+                    ),
+                    modifier: 0,
+                    nullable: true,
+                },
+                // PostgreSQL type: CREATE TYPE point AS (x int4, y int4);
+                // Column type: point[]
+                // Arrow type: List<Struct {x: Int32, y: Int32}>
+                ColumnSchema {
+                    name: "point_array_field".to_string(),
+                    typ: Type::new(
+                        "point_array".to_string(),
+                        0, // OID doesn't matter for this test
+                        Kind::Array(Type::new(
+                            "point".to_string(),
+                            0, // OID doesn't matter for this test
+                            Kind::Composite(vec![
+                                tokio_postgres::types::Field::new("x".to_string(), Type::INT4), // x coordinate
+                                tokio_postgres::types::Field::new("y".to_string(), Type::INT4), // y coordinate
+                            ]),
+                            "public".to_string(),
+                        )),
+                        "public".to_string(),
+                    ),
+                    modifier: 0,
+                    nullable: true,
+                },
+                // CREATE TYPE point AS (x int4, y int4);
+                // CREATE TYPE rectangle AS (top_left point);
+                //
+                // Column type: rectangle
+                // Arrow type: Struct {
+                //   top_left:  Struct { x: Int32, y: Int32 },
+                // }
+                ColumnSchema {
+                    name: "rectangle_field".to_string(),
+                    typ: Type::new(
+                        "rectangle".to_string(),
+                        0, // OID doesn't matter for this test
+                        Kind::Composite(vec![tokio_postgres::types::Field::new(
+                            "top_left".to_string(),
+                            Type::new(
+                                "point".to_string(),
+                                0, // OID doesn't matter for this test
+                                Kind::Composite(vec![
+                                    tokio_postgres::types::Field::new("x".to_string(), Type::INT4), // x coordinate
+                                    tokio_postgres::types::Field::new("y".to_string(), Type::INT4), // y coordinate
+                                ]),
+                                "public".to_string(),
+                            ),
+                        )]),
+                        "public".to_string(),
+                    ),
+                    modifier: 0,
+                    nullable: true,
+                },
             ],
             lookup_key: LookupKey::Key {
                 name: "uuid_field".to_string(),
@@ -551,7 +652,7 @@ mod tests {
         };
 
         let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema);
-        assert_eq!(arrow_schema.fields().len(), 23);
+        assert_eq!(arrow_schema.fields().len(), 26);
 
         assert_eq!(arrow_schema.field(0).name(), "bool_field");
         assert_eq!(arrow_schema.field(0).data_type(), &DataType::Boolean);
@@ -651,6 +752,24 @@ mod tests {
             &DataType::List(expected_field.into()),
         );
 
+        assert_eq!(arrow_schema.field(23).name(), "point_field");
+        assert!(matches!(
+            arrow_schema.field(23).data_type(),
+            DataType::Struct(_)
+        ));
+
+        assert_eq!(arrow_schema.field(24).name(), "point_array_field");
+        assert!(matches!(
+            arrow_schema.field(24).data_type(),
+            DataType::List(_)
+        ));
+
+        assert_eq!(arrow_schema.field(25).name(), "rectangle_field");
+        assert!(matches!(
+            arrow_schema.field(25).data_type(),
+            DataType::Struct(_)
+        ));
+
         // Check identity property.
         assert_eq!(identity, IdentityProp::Keys(vec![17]));
 
@@ -681,13 +800,26 @@ mod tests {
             (21, "oid_field"),
             (22, "bool_array_field.element"),
             (23, "bool_array_field"),
+            (24, "point_field.x"),
+            (25, "point_field.y"),
+            (26, "point_field"),
+            (27, "point_array_field.element.x"),
+            (28, "point_array_field.element.y"),
+            (29, "point_array_field.element"),
+            (30, "point_array_field"),
+            (31, "rectangle_field.top_left.x"),
+            (32, "rectangle_field.top_left.y"),
+            (33, "rectangle_field.top_left"),
+            (34, "rectangle_field"),
         ] {
             assert_eq!(
                 iceberg_arrow.name_by_field_id(field_id).unwrap(),
-                expected_name
+                expected_name,
+                "field id {} mismatch",
+                field_id,
             );
         }
-        assert!(iceberg_arrow.name_by_field_id(24).is_none());
+        assert!(iceberg_arrow.name_by_field_id(35).is_none());
     }
 
     #[test]
@@ -766,6 +898,134 @@ mod tests {
         } else {
             panic!("Expected fixed length byte array");
         };
+    }
+
+    #[test]
+    fn test_postgres_composite_to_moonlink_row() {
+        let postgres_table_row = PostgresTableRow(TableRow {
+            values: vec![
+                Cell::I32(1),
+                // Structure:
+                // - Outer composite: {id: i32, tags: Array<String>, nested: NestedComposite}
+                //   - Nested composite: {value: f32, scores: Array<i32>}
+                Cell::Composite(vec![
+                    Cell::I32(100),
+                    Cell::Array(ArrayCell::String(vec![
+                        Some("tag1".to_string()),
+                        Some("tag2".to_string()),
+                    ])),
+                    Cell::Composite(vec![
+                        Cell::F32(3.5),
+                        Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), None])),
+                    ]),
+                ]),
+            ],
+        });
+
+        let moonlink_row: MoonlinkRow = postgres_table_row.into();
+        assert_eq!(moonlink_row.values.len(), 2);
+        assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
+
+        // Check the outer composite/struct field
+        match &moonlink_row.values[1] {
+            RowValue::Struct(outer_fields) => {
+                assert_eq!(outer_fields.len(), 3);
+                assert_eq!(outer_fields[0], RowValue::Int32(100));
+
+                // Check array within struct
+                match &outer_fields[1] {
+                    RowValue::Array(tags) => {
+                        assert_eq!(tags.len(), 2);
+                        assert_eq!(tags[0], RowValue::ByteArray("tag1".as_bytes().to_vec()));
+                        assert_eq!(tags[1], RowValue::ByteArray("tag2".as_bytes().to_vec()));
+                    }
+                    _ => panic!("Expected array in struct"),
+                }
+
+                // Check nested struct within struct
+                match &outer_fields[2] {
+                    RowValue::Struct(inner_fields) => {
+                        assert_eq!(inner_fields.len(), 2);
+                        assert_eq!(inner_fields[0], RowValue::Float32(3.5));
+
+                        // Check array within nested struct
+                        match &inner_fields[1] {
+                            RowValue::Array(scores) => {
+                                assert_eq!(scores.len(), 3);
+                                assert_eq!(scores[0], RowValue::Int32(10));
+                                assert_eq!(scores[1], RowValue::Int32(20));
+                                assert_eq!(scores[2], RowValue::Null);
+                            }
+                            _ => panic!("Expected array in nested struct"),
+                        }
+                    }
+                    _ => panic!("Expected nested struct"),
+                }
+            }
+            _ => panic!("Expected struct"),
+        }
+    }
+
+    #[test]
+    fn test_postgres_array_of_composites_to_moonlink_row() {
+        let postgres_table_row = PostgresTableRow(TableRow {
+            values: vec![
+                Cell::I32(1),
+                // Structure:
+                // - Array of UserComposite: [UserComposite, null, UserComposite]
+                //   - UserComposite: {id: i32, name: String, active: bool}
+                Cell::Array(ArrayCell::Composite(vec![
+                    Some(vec![
+                        Cell::I32(100),
+                        Cell::String("alice".to_string()),
+                        Cell::Bool(true),
+                    ]),
+                    None, // null composite
+                    Some(vec![
+                        Cell::I32(200),
+                        Cell::String("bob".to_string()),
+                        Cell::Bool(false),
+                    ]),
+                ])),
+            ],
+        });
+
+        let moonlink_row: MoonlinkRow = postgres_table_row.into();
+        assert_eq!(moonlink_row.values.len(), 2);
+        assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
+
+        // Check the array of composites
+        match &moonlink_row.values[1] {
+            RowValue::Array(structs) => {
+                assert_eq!(structs.len(), 3);
+
+                // First struct
+                match &structs[0] {
+                    RowValue::Struct(fields) => {
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[0], RowValue::Int32(100));
+                        assert_eq!(fields[1], RowValue::ByteArray("alice".as_bytes().to_vec()));
+                        assert_eq!(fields[2], RowValue::Bool(true));
+                    }
+                    _ => panic!("Expected struct in array"),
+                }
+
+                // Second is null
+                assert_eq!(structs[1], RowValue::Null);
+
+                // Third struct
+                match &structs[2] {
+                    RowValue::Struct(fields) => {
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[0], RowValue::Int32(200));
+                        assert_eq!(fields[1], RowValue::ByteArray("bob".as_bytes().to_vec()));
+                        assert_eq!(fields[2], RowValue::Bool(false));
+                    }
+                    _ => panic!("Expected struct in array"),
+                }
+            }
+            _ => panic!("Expected array"),
+        }
     }
 
     #[test]

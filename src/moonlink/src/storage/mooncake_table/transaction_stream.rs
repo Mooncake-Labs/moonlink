@@ -463,6 +463,19 @@ impl MooncakeTable {
     }
 
     pub fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
+        // Record events for flush initiation.
+        let flush_event_id = self.event_id_assigner.get_next_event_id();
+        if let Some(event_replay_tx) = &self.event_replay_tx {
+            let table_event = replay_events::create_flush_event_initiation(
+                flush_event_id,
+                /*xact_id=*/ Some(xact_id),
+                lsn,
+            );
+            event_replay_tx
+                .send(MooncakeTableEvent::FlushInitiation(table_event))
+                .unwrap();
+        }
+
         // Temporarily remove to drop reference to self
         let mut stream_state = self
             .transaction_stream_states
@@ -475,7 +488,12 @@ impl MooncakeTable {
 
         stream_state.ongoing_flush_count += 1;
 
-        self.flush_disk_slice(&mut disk_slice, table_notify_tx, Some(xact_id));
+        self.flush_disk_slice(
+            &mut disk_slice,
+            table_notify_tx,
+            Some(xact_id),
+            flush_event_id,
+        );
 
         // Add back stream state
         self.transaction_stream_states.insert(xact_id, stream_state);
@@ -484,6 +502,15 @@ impl MooncakeTable {
     }
 
     pub fn commit_transaction_stream_impl(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
+        // Record events for commit.
+        if let Some(event_replay_tx) = &self.event_replay_tx {
+            let table_event = replay_events::create_commit_event(lsn, Some(xact_id));
+            event_replay_tx
+                .send(MooncakeTableEvent::Commit(table_event))
+                .unwrap();
+        }
+
+        // Perform commit operation.
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
@@ -498,6 +525,14 @@ impl MooncakeTable {
                     data: batch.batch.data.clone(),
                     deletions: batch.batch.deletions.clone(),
                 },
+            );
+            assert!(
+                self.next_snapshot_task
+                    .flushing_batch_lsn_map
+                    .insert(batch.id, lsn)
+                    .is_none(),
+                "batch id {} already in flushing_batch_lsn_map",
+                batch.id
             );
         }
         stream_state
@@ -522,7 +557,7 @@ impl MooncakeTable {
                 .iter()
                 .map(|ptr| ptr.arc_ptr()),
         );
-        assert!(lsn >= self.next_snapshot_task.commit_lsn_baseline);
+        ma::assert_ge!(lsn, self.next_snapshot_task.commit_lsn_baseline);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
 
         // We update our delete records with the last lsn of the transaction
@@ -586,7 +621,7 @@ impl SnapshotTableState {
                 TransactionStreamOutput::Commit(commit) => {
                     // Integrate files into current snapshot and import into object storage cache.
                     for (file, mut disk_file_entry) in commit.flushed_files.into_iter() {
-                        task.disk_file_lsn_map
+                        task.new_disk_file_lsn_map
                             .insert(file.file_id(), commit.commit_lsn);
 
                         // Import data files into cache.

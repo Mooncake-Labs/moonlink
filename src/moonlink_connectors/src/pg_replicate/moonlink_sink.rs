@@ -9,7 +9,7 @@ use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{error::TrySendError, Sender};
 use tokio::sync::watch;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, warn};
@@ -36,6 +36,16 @@ pub struct Sink {
 }
 
 impl Sink {
+    async fn send_table_event(
+        event_sender: &Sender<TableEvent>,
+        event: TableEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<TableEvent>> {
+        match event_sender.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(event)) => event_sender.send(event).await,
+            Err(TrySendError::Closed(event)) => Err(tokio::sync::mpsc::error::SendError(event)),
+        }
+    }
     pub fn new(replication_state: Arc<ReplicationState>) -> Self {
         Self {
             event_senders: HashMap::new(),
@@ -143,13 +153,15 @@ impl Sink {
                         }
                     }
                     if let Some(event_sender) = event_sender {
-                        if let Err(e) = event_sender
-                            .send(TableEvent::Commit {
+                        if let Err(e) = Self::send_table_event(
+                            &event_sender,
+                            TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
                                 is_recovery: false,
-                            })
-                            .await
+                            },
+                        )
+                        .await
                         {
                             warn!(error = ?e, "failed to send commit event");
                         }
@@ -175,13 +187,15 @@ impl Sink {
                             }
                         }
                         if let Some(event_sender) = event_sender {
-                            if let Err(e) = event_sender
-                                .send(TableEvent::Commit {
+                            if let Err(e) = Self::send_table_event(
+                                &event_sender,
+                                TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
                                     is_recovery: false,
-                                })
-                                .await
+                                },
+                            )
+                            .await
                             {
                                 warn!(error = ?e, "failed to send stream commit event");
                             }
@@ -196,15 +210,17 @@ impl Sink {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
-                    if let Err(e) = event_sender
-                        .send(TableEvent::Append {
+                    if let Err(e) = Self::send_table_event(
+                        &event_sender,
+                        TableEvent::Append {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
                             is_copied: false,
                             is_recovery: false,
-                        })
-                        .await
+                        },
+                    )
+                    .await
                     {
                         warn!(error = ?e, "failed to send append event");
                     }
@@ -223,26 +239,30 @@ impl Sink {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
-                    if let Err(e) = event_sender
-                        .send(TableEvent::Delete {
+                    if let Err(e) = Self::send_table_event(
+                        &event_sender,
+                        TableEvent::Delete {
                             row: PostgresTableRow(old_table_row.unwrap()).into(),
                             lsn: final_lsn,
                             xact_id,
                             is_recovery: false,
-                        })
-                        .await
+                        },
+                    )
+                    .await
                     {
                         warn!(error = ?e, "failed to send delete event");
                     }
-                    if let Err(e) = event_sender
-                        .send(TableEvent::Append {
+                    if let Err(e) = Self::send_table_event(
+                        &event_sender,
+                        TableEvent::Append {
                             row: PostgresTableRow(new_table_row).into(),
                             lsn: final_lsn,
                             xact_id,
                             is_copied: false,
                             is_recovery: false,
-                        })
-                        .await
+                        },
+                    )
+                    .await
                     {
                         warn!(error = ?e, "failed to send append event");
                     }
@@ -252,14 +272,16 @@ impl Sink {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
-                    if let Err(e) = event_sender
-                        .send(TableEvent::Delete {
+                    if let Err(e) = Self::send_table_event(
+                        &event_sender,
+                        TableEvent::Delete {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
                             is_recovery: false,
-                        })
-                        .await
+                        },
+                    )
+                    .await
                     {
                         warn!(error = ?e, "failed to send delete event");
                     }
@@ -301,8 +323,9 @@ impl Sink {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(event_sender) = event_sender {
-                            if let Err(e) = event_sender
-                                .send(TableEvent::StreamAbort {
+                            if let Err(e) = Self::send_table_event(
+                                &event_sender,
+                                TableEvent::StreamAbort {
                                     xact_id,
                                     is_recovery: false,
                                     closes_incomplete_wal_transaction: false,

@@ -153,7 +153,7 @@ impl MemIndex {
                 .into_iter()
                 .filter_map(|v| remap(v.hash, &v.location))
                 .collect(),
-            MemIndex::FullRow(map) => map.iter().filter_map(|(k, v)| remap(*k, v)).collect(),
+            MemIndex::FullRow(map) => map.flat_iter().filter_map(|(k, v)| remap(*k, v)).collect(),
         }
     }
 }

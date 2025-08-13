@@ -1,4 +1,5 @@
 use crate::row::MoonlinkRow;
+use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
 use crate::storage::mooncake_table::DataCompactionPayload;
 use crate::storage::mooncake_table::DataCompactionResult;
 use crate::storage::mooncake_table::DiskSliceWriter;
@@ -94,6 +95,14 @@ pub enum TableEvent {
         xact_id: u32,
         is_recovery: bool,
         closes_incomplete_wal_transaction: bool,
+    },
+    FlushResult {
+        // Background event id.
+        id: BackgroundEventId,
+        // Transaction ID
+        xact_id: Option<u32>,
+        /// Result for mem slice flush.
+        flush_result: Option<Result<DiskSliceWriter>>,
     },
     /// ==============================
     /// Test events
@@ -199,9 +208,6 @@ pub enum TableEvent {
     /// Periodic persist and truncate wal completes.
     PeriodicalWalPersistenceUpdateResult {
         result: Result<WalPersistenceUpdateResult>,
-    },
-    FinishRecovery {
-        highest_completion_lsn: u64,
     },
     FlushResult {
         // Transaction ID

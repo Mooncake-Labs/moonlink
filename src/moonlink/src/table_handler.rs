@@ -28,6 +28,8 @@ use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
 };
 
+const MAX_BUFFERED_TABLE_EVENTS: usize = 32_768;
+
 /// Handler for table operations
 pub struct TableHandler {
     /// Handle to periodical events.
@@ -51,7 +53,7 @@ impl TableHandler {
         table_event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
     ) -> Self {
         // Create channel for events
-        let (event_sender, event_receiver) = mpsc::channel(100);
+        let (event_sender, event_receiver) = mpsc::channel(MAX_BUFFERED_TABLE_EVENTS);
 
         // Register channel for internal control events.
         table.register_table_notify(event_sender.clone()).await;
@@ -683,6 +685,7 @@ impl TableHandler {
                         .unwrap();
                 }
                 TableEvent::FlushResult {
+                    id: _,
                     xact_id,
                     flush_result,
                 } => match flush_result {
@@ -698,7 +701,7 @@ impl TableHandler {
                         panic!("Fatal flush error: {e:?}");
                     }
                     None => {
-                        error!("flush result is none");
+                        debug!("flush result is none");
                     }
                 },
                 // ==============================
@@ -930,4 +933,12 @@ mod failure_tests;
 
 #[cfg(test)]
 #[cfg(feature = "chaos-test")]
+mod chaos_table_metadata;
+
+#[cfg(test)]
+#[cfg(feature = "chaos-test")]
 mod chaos_test;
+
+#[cfg(test)]
+#[cfg(feature = "chaos-test")]
+mod chaos_replay;

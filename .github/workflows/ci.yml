@@ -107,6 +107,16 @@ jobs:
         run: |
           ${{ matrix.cmd }}
 
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn
+
   # ──────────────────────── 3 · S3 test (feature, chaos) ───────────────────
   s3_test:
     name: S3 tests (feature, chaos)
@@ -128,6 +138,15 @@ jobs:
               RUST_BACKTRACE=1 cargo test test_s3_chaos --features=chaos-test,storage-s3 -p moonlink -- --nocapture
     steps:
       - uses: actions/checkout@v4
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
 
       # ─────────────────────── Start Fake S3 Server ──────────────────────────
       - name: Start Fake S3 Server
@@ -163,6 +182,16 @@ jobs:
         run: |
           ${{ matrix.cmd }}
 
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn
+
   # ───────────────────────── 4 · TEST & COVERAGE ────────────────────────────
   coverage:
     name: Unit Tests + Coverage (llvm-cov + nextest)
@@ -180,6 +209,11 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
 
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-llvm-cov }
@@ -228,10 +262,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
       - name: Start chaos test
         timeout-minutes: 10
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_on_local_fs --features=chaos-test -p moonlink -- --nocapture
+
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn
 
   # ───────────── 6 · Chaos test with local fs optimization ─────────────
   chaos_test_with_local_fs_optimization:
@@ -246,6 +299,16 @@ jobs:
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_local_system_optimization_chaos --features=chaos-test -p moonlink -- --nocapture
 
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn
+
   # ───────────── 7 · Chaos test with chaos injection ─────────────
   chaos_test_with_chaos_injection:
     name: Chaos test with chaos injection
@@ -254,10 +317,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
       - name: Start chaos test
         timeout-minutes: 10
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_injection --features=chaos-test -p moonlink -- --nocapture
+
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn
 
   # ───────────── 8 · Chaos test for disk slice write ─────────────
   disk_slice_write_with_chaos:
@@ -267,7 +349,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
       - name: Start chaos test
         timeout-minutes: 10
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_disk_slice_chaos --features=chaos-test -p moonlink -- --nocapture
+
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn

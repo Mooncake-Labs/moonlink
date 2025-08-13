@@ -124,7 +124,7 @@ mod tests {
                 },
                 "iceberg": {
                     "storage_config": {
-                        "FileSystem": {
+                        "fs": {
                             "root_directory": "/tmp"
                         }
                     }
@@ -163,7 +163,7 @@ mod tests {
                 },
                 "iceberg": {
                     "storage_config": {
-                        "Gcs": {
+                        "gcs": {
                             "project": "gcs-proj",
                             "region": "us-west1",
                             "bucket": "moonlink",
@@ -211,7 +211,7 @@ mod tests {
                 },
                 "iceberg": {
                     "storage_config": {
-                        "S3": {
+                        "s3": {
                             "region": "us-west1",
                             "bucket": "moonlink",
                             "access_key_id": "access-key",

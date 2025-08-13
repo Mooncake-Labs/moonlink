@@ -176,6 +176,23 @@ pub(crate) fn create_test_table_metadata(
     create_test_table_metadata_with_config(local_table_directory, config)
 }
 
+/// Test util function to create mooncake table with the provided config and identity.
+#[cfg(feature = "chaos-test")]
+pub(crate) fn create_test_table_metadata_with_config_and_identity(
+    local_table_directory: String,
+    mooncake_table_config: MooncakeTableConfig,
+    identity: RowIdentity,
+) -> Arc<MooncakeTableMetadata> {
+    Arc::new(MooncakeTableMetadata {
+        name: ICEBERG_TEST_TABLE.to_string(),
+        table_id: 0,
+        schema: create_test_arrow_schema(),
+        config: mooncake_table_config,
+        path: std::path::PathBuf::from(local_table_directory),
+        identity,
+    })
+}
+
 /// Test util function to create mooncake table metadata with mooncake table config.
 pub(crate) fn create_test_table_metadata_with_config(
     local_table_directory: String,
@@ -189,6 +206,20 @@ pub(crate) fn create_test_table_metadata_with_config(
         path: std::path::PathBuf::from(local_table_directory),
         identity: RowIdentity::FullRow,
     })
+}
+
+/// Test util function to get random row identity.
+#[cfg(feature = "chaos-test")]
+pub(crate) fn get_random_identity(random_seed: u64) -> RowIdentity {
+    use rand::{seq::IndexedRandom, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(random_seed);
+
+    let identities = [
+        RowIdentity::SinglePrimitiveKey(0),
+        RowIdentity::Keys(vec![0]),
+        RowIdentity::FullRow,
+    ];
+    identities.choose(&mut rng).unwrap().clone()
 }
 
 /// Test util function to create disk slice write option.
@@ -222,11 +253,12 @@ pub(crate) fn create_disk_slice_write_option(
 pub(crate) fn create_test_table_metadata_disable_flush(
     local_table_directory: String,
     disk_slice_write_config: DiskSliceWriterConfig,
+    identity: RowIdentity,
 ) -> Arc<MooncakeTableMetadata> {
     let mut config = MooncakeTableConfig::new(local_table_directory.clone());
     config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
     config.disk_slice_writer_config = disk_slice_write_config;
-    create_test_table_metadata_with_config(local_table_directory, config)
+    create_test_table_metadata_with_config_and_identity(local_table_directory, config, identity)
 }
 
 /// Test util function to create mooncake table metadata, with (1) index merge enabled whenever there're two index blocks; and (2) flush at commit is disabled.
@@ -234,6 +266,7 @@ pub(crate) fn create_test_table_metadata_disable_flush(
 pub(crate) fn create_test_table_metadata_with_index_merge_disable_flush(
     local_table_directory: String,
     disk_slice_write_config: DiskSliceWriterConfig,
+    identity: RowIdentity,
 ) -> Arc<MooncakeTableMetadata> {
     let file_index_config = FileIndexMergeConfig {
         min_file_indices_to_merge: 2,
@@ -244,7 +277,7 @@ pub(crate) fn create_test_table_metadata_with_index_merge_disable_flush(
     config.disk_slice_writer_config = disk_slice_write_config;
     config.file_index_config = file_index_config;
     config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
-    create_test_table_metadata_with_config(local_table_directory, config)
+    create_test_table_metadata_with_config_and_identity(local_table_directory, config, identity)
 }
 
 /// Test util function to create mooncake table metadata, with (1) data compaction enabled whenever there're two index blocks; and (2) flush at commit is disabled.
@@ -252,6 +285,7 @@ pub(crate) fn create_test_table_metadata_with_index_merge_disable_flush(
 pub(crate) fn create_test_table_metadata_with_data_compaction_disable_flush(
     local_table_directory: String,
     disk_slice_write_config: DiskSliceWriterConfig,
+    identity: RowIdentity,
 ) -> Arc<MooncakeTableMetadata> {
     let data_compaction_config = DataCompactionConfig {
         min_data_file_to_compact: 2,
@@ -263,7 +297,7 @@ pub(crate) fn create_test_table_metadata_with_data_compaction_disable_flush(
     config.disk_slice_writer_config = disk_slice_write_config;
     config.data_compaction_config = data_compaction_config;
     config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
-    create_test_table_metadata_with_config(local_table_directory, config)
+    create_test_table_metadata_with_config_and_identity(local_table_directory, config, identity)
 }
 
 /// Util function to create mooncake table and iceberg table manager; object storage cache will be created internally.

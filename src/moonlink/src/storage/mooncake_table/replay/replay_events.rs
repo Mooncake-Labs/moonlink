@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::row::MoonlinkRow;
 use crate::storage::compaction::table_compaction::SingleFileToCompact;
 use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
-use crate::storage::mooncake_table::replay::event_id_assigner::get_next_event_id;
+use crate::storage::mooncake_table::replay::event_id_assigner::EventIdAssigner;
 use crate::storage::mooncake_table::table_snapshot::IcebergSnapshotDataCompactionPayload;
 use crate::storage::mooncake_table::{
     DataCompactionPayload, FileIndiceMergePayload, IcebergSnapshotImportPayload,
@@ -72,6 +72,8 @@ pub struct FlushEventInitiation {
 pub struct FlushEventCompletion {
     /// Unique event id, assigned globally.
     pub id: BackgroundEventId,
+    /// flushed file ids.
+    pub file_ids: Vec<FileId>,
 }
 
 /// =====================
@@ -271,24 +273,29 @@ pub fn create_abort_event(xact_id: u32) -> AbortEvent {
 }
 /// Create flush events.
 pub fn create_flush_event_initiation(
+    event_id: u64,
     xact_id: Option<u32>,
     lsn: Option<u64>,
 ) -> FlushEventInitiation {
     FlushEventInitiation {
-        id: get_next_event_id(),
+        id: event_id,
         xact_id,
         lsn,
     }
 }
-pub fn create_flush_event_completion(id: BackgroundEventId) -> FlushEventCompletion {
-    FlushEventCompletion { id }
+pub fn create_flush_event_completion(
+    id: BackgroundEventId,
+    file_ids: Vec<FileId>,
+) -> FlushEventCompletion {
+    FlushEventCompletion { id, file_ids }
 }
 /// Create mooncake snapshot events.
 pub fn create_mooncake_snapshot_event_initiation(
+    event_id: u64,
     option: SnapshotOption,
 ) -> MooncakeSnapshotEventInitiation {
     MooncakeSnapshotEventInitiation {
-        id: get_next_event_id(),
+        id: event_id,
         option,
     }
 }
@@ -392,10 +399,11 @@ pub fn get_iceberg_data_compaction_payload(
     }
 }
 pub fn create_iceberg_snapshot_event_initiation(
+    event_id: u64,
     payload: &IcebergSnapshotPayload,
 ) -> IcebergSnapshotEventInitiation {
     IcebergSnapshotEventInitiation {
-        id: get_next_event_id(),
+        id: event_id,
         flush_lsn: payload.flush_lsn,
         committed_deletion_logs: payload.committed_deletion_logs.clone(),
         import_payload: get_iceberg_snapshot_import_payload(&payload.import_payload),
@@ -412,10 +420,11 @@ pub fn create_iceberg_snapshot_event_completion(
 }
 /// Create index merge events.
 pub fn create_index_merge_event_initiation(
+    event_id: u64,
     payload: &FileIndiceMergePayload,
 ) -> IndexMergeEventInitiation {
     IndexMergeEventInitiation {
-        id: get_next_event_id(),
+        id: event_id,
         index_merge_payload: payload
             .file_indices
             .iter()
@@ -450,10 +459,11 @@ pub fn get_file_compaction_payload(
     }
 }
 pub fn create_data_compaction_event_initiation(
+    event_id: u64,
     payload: &DataCompactionPayload,
 ) -> DataCompactionEventInitiation {
     DataCompactionEventInitiation {
-        id: get_next_event_id(),
+        id: event_id,
         data_files: payload
             .disk_files
             .iter()

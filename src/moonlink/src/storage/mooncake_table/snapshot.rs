@@ -678,7 +678,7 @@ impl SnapshotTableState {
             for (file, file_attrs) in slice.output_files().iter() {
                 ma::assert_gt!(file_attrs.file_size, 0);
                 assert!(task
-                    .disk_file_lsn_map
+                    .new_disk_file_lsn_map
                     .insert(file.file_id(), write_lsn)
                     .is_none());
                 let unique_file_id = self.get_table_unique_file_id(file.file_id());
@@ -711,17 +711,9 @@ impl SnapshotTableState {
                     .is_none());
             }
 
-            // remap deletions written *after* this slice’s LSN
-            // We set to write_lsn - 1 to maintain consistency with deletion LSNs from the streaming case.
-            // In the case a streaming transaction commits before flush, we assign disk_slice.writer_lsn = commit_lsn.
-            // The corresponding deletions have lsn = commit_lsn - 1, so we need >= write_lsn - 1
-            // to ensure these deletions get remapped from memory to disk locations.
-            // Use wrapping_sub(1) for the special initial copy case where write_lsn is 0. In this case we still want to remap the deletion log.
-            let cut = self
-                .committed_deletion_log
-                .partition_point(|d| d.lsn < write_lsn.wrapping_sub(1));
-
-            for deletion in self.committed_deletion_log[cut..].iter_mut() {
+            // If a committed deletion still points to a MemoryBatch that is being flushed
+            // in this slice, remap it to the corresponding DiskFile location and apply it.
+            for deletion in self.committed_deletion_log.iter_mut() {
                 if let Some(RecordLocation::DiskFile(file_id, row_idx)) =
                     slice.remap_deletion_if_needed(deletion)
                 {
@@ -767,12 +759,18 @@ impl SnapshotTableState {
         deletions: &[RawDeletionRecord],
         index_lookup_result: Vec<RecordLocation>,
         file_id_to_lsn: &HashMap<FileId, u64>,
+        batch_id_to_lsn: &HashMap<u64, u64>,
     ) -> Vec<ProcessedDeletionRecord> {
         let mut candidates: Vec<RecordLocation> = index_lookup_result
             .into_iter()
             .filter(|loc| {
                 !self.is_deleted(loc)
-                    && Self::is_visible(loc, file_id_to_lsn, deletions.first().unwrap().lsn)
+                    && Self::is_visible(
+                        loc,
+                        file_id_to_lsn,
+                        batch_id_to_lsn,
+                        deletions.first().unwrap().lsn,
+                    )
             })
             .collect();
         // This optimization is important when working with table without primary key.
@@ -844,9 +842,17 @@ impl SnapshotTableState {
         }
     }
 
-    fn is_visible(loc: &RecordLocation, file_id_to_lsn: &HashMap<FileId, u64>, lsn: u64) -> bool {
+    fn is_visible(
+        loc: &RecordLocation,
+        file_id_to_lsn: &HashMap<FileId, u64>,
+        batch_id_to_lsn: &HashMap<u64, u64>,
+        lsn: u64,
+    ) -> bool {
         match loc {
-            RecordLocation::MemoryBatch(_, _) => true,
+            RecordLocation::MemoryBatch(batch_id, _) => {
+                batch_id_to_lsn.get(batch_id).is_none()
+                    || batch_id_to_lsn.get(batch_id).unwrap() <= &lsn
+            }
             RecordLocation::DiskFile(file_id, _) => {
                 file_id_to_lsn.get(file_id).is_none()
                     || file_id_to_lsn.get(file_id).unwrap() <= &lsn
@@ -996,7 +1002,8 @@ impl SnapshotTableState {
                 .match_deletions_with_identical_key_and_lsn(
                     deletions,
                     lookup_result,
-                    &task.disk_file_lsn_map,
+                    &task.new_disk_file_lsn_map,
+                    &task.flushing_batch_lsn_map,
                 )
                 .await;
             self.add_processed_deletion(processed_deletions, task.commit_lsn_baseline);
