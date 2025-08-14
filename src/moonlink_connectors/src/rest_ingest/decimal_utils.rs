@@ -35,6 +35,8 @@ pub enum DecimalConversionError {
     },
     #[error("Decimal value is invalid: {value})")]
     InvalidValue { value: String },
+    #[error("Decimal scale is unsupported: {value})")]
+    UnsupportedScale { value: String },
     #[error("Decimal mantissa overflow: {mantissa}, error: {err_msg}")]
     Overflow { mantissa: String, err_msg: String },
 }
@@ -70,7 +72,12 @@ pub fn convert_decimal_to_row_value(
                 parsed_scale: decimal_scale,
             })?;
 
-    // let integer_digits_limit = precision - scale;
+    // TODO: block the scale if it is negative
+    if scale <= 0 {
+        return Err(DecimalConversionError::UnsupportedScale {
+            value: value.to_string(),
+        });
+    }
 
     if actual_decimal_precision > precision {
         return Err(DecimalConversionError::PrecisionOutOfRange {
@@ -186,16 +193,10 @@ mod tests {
         let scale = -2;
         let err = convert_decimal_to_row_value(negative_scale_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::ScaleOutOfRange {
-                value,
-                expected_scale,
-                actual_scale,
-            } => {
+            DecimalConversionError::UnsupportedScale { value } => {
                 assert_eq!(value, negative_scale_value.to_string());
-                assert_eq!(expected_scale, scale);
-                assert_eq!(actual_scale, 2);
             }
-            _ => panic!("Expected a ScaleOutOfRange error, but got a different variant: {err:?}"),
+            _ => panic!("Expected an UnsupportedScale error, but got a different variant: {err:?}"),
         }
     }
 
