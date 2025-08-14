@@ -595,7 +595,7 @@ pub async fn run_event_loop(
                         if let Some(SchemaChangeRequest(src_table_id)) = res {
                             let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
                             sink.alter_table(src_table_id, &table_schema).await;
-                            stream.as_mut().add_table_schema(table_schema);
+                            stream.as_mut().update_table_schema(table_schema);
                         }
                     }
                 }
