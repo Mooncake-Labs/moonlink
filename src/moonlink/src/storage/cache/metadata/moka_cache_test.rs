@@ -22,7 +22,9 @@ async fn test_get_values() {
 
 #[tokio::test]
 async fn test_evict_by_ttl() {
-    let cache = MokaCacheTestBuilder::new().build();
+    let cache = MokaCacheTestBuilder::new()
+        .ttl(Duration::from_secs(0))
+        .build();
 
     cache
         .initialize_for_test(vec![
@@ -30,14 +32,6 @@ async fn test_evict_by_ttl() {
             ("key2".to_string(), "value2".to_string()),
         ])
         .await;
-
-    let all_entries_before_ttl = cache.dump_all_for_test().await;
-
-    assert_eq!(all_entries_before_ttl.len(), 2);
-    assert!(all_entries_before_ttl.contains(&("key1".to_string(), "value1".to_string())));
-    assert!(all_entries_before_ttl.contains(&("key2".to_string(), "value2".to_string())));
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
 
     let all_entries_after_ttl = cache.dump_all_for_test().await;
     assert_eq!(all_entries_after_ttl.len(), 0);

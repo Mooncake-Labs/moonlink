@@ -10,8 +10,13 @@ impl MokaCacheTestBuilder {
     pub fn new() -> Self {
         Self {
             max_size: 2,
-            ttl: Duration::from_secs(3),
+            ttl: Duration::from_secs(60 * 60), // 1 hour
         }
+    }
+
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
     }
 
     pub fn build<K, V>(self) -> MokaCache<K, V>
