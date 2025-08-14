@@ -147,8 +147,23 @@ impl MoonlinkRow {
                     false
                 }
             }
-            RowValue::Struct(_) => {
-                panic!("Struct not supported");
+            RowValue::Struct(v) => {
+                if let Some(array) = column.as_any().downcast_ref::<arrow::array::StructArray>() {
+                    if array.is_null(idx) {
+                        return false;
+                    }
+                    if v.len() != array.num_columns() {
+                        return false;
+                    }
+                    for (i, ev) in v.iter().enumerate() {
+                        if !Self::value_matches_column(ev, array.column(i), idx) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
             }
             RowValue::Null => column.is_null(idx),
         }
@@ -573,5 +588,283 @@ mod tests {
                 )
                 .await
         );
+    }
+
+    #[test]
+    fn test_equals_record_batch_at_offset_struct_type() {
+        use arrow_array::{RecordBatch, StructArray};
+        use arrow_schema::{DataType, Field, Schema};
+
+        // Schema: id: Int32, info: Struct{name: Utf8, age: Int64}
+        let info_struct_fields = vec![
+            Field::new("name", DataType::Utf8, /*nullable=*/ true),
+            Field::new("age", DataType::Int64, /*nullable=*/ true),
+        ];
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, /*nullable=*/ false),
+            Field::new(
+                "info",
+                DataType::Struct(info_struct_fields.clone().into()),
+                /*nullable=*/ true,
+            ),
+        ]));
+
+        // Create StructArray for the info column
+        let name_array = Arc::new(arrow_array::StringArray::from(vec![
+            Some("Alice"),
+            Some("Bob"),
+            Some("Charlie"),
+        ]));
+        let age_array = Arc::new(Int64Array::from(vec![Some(25), Some(30), Some(35)]));
+
+        let info_struct_array = Arc::new(StructArray::new(
+            info_struct_fields.into(),
+            vec![name_array, age_array],
+            None, // no nulls
+        ));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3])), info_struct_array],
+        )
+        .unwrap();
+
+        // Test row0 (offset=0): id=1, info={name="Alice", age=25}
+        let row0 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Struct(vec![
+                RowValue::ByteArray(b"Alice".to_vec()),
+                RowValue::Int64(25),
+            ]),
+        ]);
+        assert!(row0.equals_record_batch_at_offset_impl(&batch, 0));
+        assert!(row0.equals_record_batch_at_offset(&batch, 0, &IdentityProp::FullRow));
+
+        // Test row1 (offset=1): id=2, info={name="Bob", age=30}
+        let row1 = MoonlinkRow::new(vec![
+            RowValue::Int32(2),
+            RowValue::Struct(vec![
+                RowValue::ByteArray(b"Bob".to_vec()),
+                RowValue::Int64(30),
+            ]),
+        ]);
+        assert!(row1.equals_record_batch_at_offset_impl(&batch, 1));
+        assert!(row1.equals_record_batch_at_offset(&batch, 1, &IdentityProp::FullRow));
+
+        // Test row2 (offset=2): id=3, info={name="Charlie", age=35}
+        let row2 = MoonlinkRow::new(vec![
+            RowValue::Int32(3),
+            RowValue::Struct(vec![
+                RowValue::ByteArray(b"Charlie".to_vec()),
+                RowValue::Int64(35),
+            ]),
+        ]);
+        assert!(row2.equals_record_batch_at_offset_impl(&batch, 2));
+        assert!(row2.equals_record_batch_at_offset(&batch, 2, &IdentityProp::FullRow));
+
+        // Test using only the id column as identity (Keys([0]))
+        let row0_id_only = IdentityProp::Keys(vec![0])
+            .extract_identity_columns(row0.clone())
+            .unwrap();
+        assert!(row0_id_only.equals_record_batch_at_offset(
+            &batch,
+            /*offset=*/ 0,
+            &IdentityProp::Keys(vec![0])
+        ));
+
+        // Test using only the info column as identity (Keys([1]))
+        let row0_info_only = IdentityProp::Keys(vec![1])
+            .extract_identity_columns(row0.clone())
+            .unwrap();
+        assert!(row0_info_only.equals_record_batch_at_offset(
+            &batch,
+            /*offset=*/ 0,
+            &IdentityProp::Keys(vec![1])
+        ));
+    }
+
+    #[test]
+    fn test_equals_record_batch_at_offset_nested_struct() {
+        use arrow::array::{Int32Array, StructArray};
+        use arrow::datatypes::DataType;
+        use arrow::datatypes::Schema;
+        use std::sync::Arc;
+
+        // Schema: id: Int32, nested: Struct{level2: Struct{value: Utf8}}
+        let level3_field = Field::new("value", DataType::Utf8, /*nullable=*/ true);
+        let level2_fields = vec![Field::new(
+            "level3",
+            DataType::Struct(vec![level3_field.clone()].into()),
+            /*nullable=*/ true,
+        )];
+        let root_fields = vec![
+            Field::new("id", DataType::Int32, /*nullable=*/ false),
+            Field::new(
+                "nested",
+                DataType::Struct(level2_fields.clone().into()),
+                /*nullable=*/ true,
+            ),
+        ];
+
+        let schema = Arc::new(Schema::new(root_fields));
+
+        // Create nested StructArray
+        let value_array = Arc::new(arrow_array::StringArray::from(vec![Some("deep_value")]));
+        let level3_struct = Arc::new(StructArray::new(
+            vec![level3_field].into(),
+            vec![value_array],
+            None,
+        ));
+        let level2_struct = Arc::new(StructArray::new(
+            level2_fields.clone().into(),
+            vec![level3_struct],
+            None,
+        ));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1])), level2_struct],
+        )
+        .unwrap();
+
+        // Test nested struct: id=1, nested={level2={level3={value="deep_value"}}}
+        let row = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Struct(vec![RowValue::Struct(vec![RowValue::Struct(vec![
+                RowValue::ByteArray(b"deep_value".to_vec()),
+            ])])]),
+        ]);
+
+        assert!(row.equals_record_batch_at_offset_impl(&batch, 0));
+        assert!(row.equals_record_batch_at_offset(&batch, 0, &IdentityProp::FullRow));
+    }
+
+    #[test]
+    fn test_equals_record_batch_at_offset_struct_with_nulls() {
+        use arrow::array::{Int32Array, Int64Array, StructArray};
+        use arrow::datatypes::DataType;
+        use arrow::datatypes::Schema;
+        use std::sync::Arc;
+
+        // Schema: id: Int32, info: Struct{name: Utf8, age: Int64}
+        let info_struct_fields = vec![
+            Field::new("name", DataType::Utf8, /*nullable=*/ true),
+            Field::new("age", DataType::Int64, /*nullable=*/ true),
+        ];
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, /*nullable=*/ false),
+            Field::new(
+                "info",
+                DataType::Struct(info_struct_fields.clone().into()),
+                /*nullable=*/ true,
+            ),
+        ]));
+
+        // Create StructArray with nulls
+        let name_array = Arc::new(arrow_array::StringArray::from(vec![
+            Some("Alice"),
+            None, // null name
+        ]));
+        let age_array = Arc::new(Int64Array::from(vec![Some(25), Some(30)]));
+
+        let info_struct_array = Arc::new(StructArray::new(
+            info_struct_fields.into(),
+            vec![name_array, age_array],
+            None, // no struct-level nulls
+        ));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1, 2])), info_struct_array],
+        )
+        .unwrap();
+
+        // Test row0 (offset=0): id=1, info={name="Alice", age=25}
+        let row0 = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Struct(vec![
+                RowValue::ByteArray(b"Alice".to_vec()),
+                RowValue::Int64(25),
+            ]),
+        ]);
+        assert!(row0.equals_record_batch_at_offset_impl(&batch, 0));
+
+        // Test row1 (offset=1): id=2, info={name=null, age=30}
+        let row1 = MoonlinkRow::new(vec![
+            RowValue::Int32(2),
+            RowValue::Struct(vec![RowValue::Null, RowValue::Int64(30)]),
+        ]);
+        assert!(row1.equals_record_batch_at_offset_impl(&batch, 1));
+    }
+
+    #[test]
+    fn test_equals_record_batch_at_offset_struct_mismatch() {
+        use arrow::array::{Int32Array, Int64Array, StructArray};
+        use arrow::datatypes::DataType;
+        use arrow::datatypes::Schema;
+        use std::sync::Arc;
+
+        // Schema: id: Int32, info: Struct{name: Utf8, age: Int64}
+        let info_struct_fields = vec![
+            Field::new("name", DataType::Utf8, /*nullable=*/ true),
+            Field::new("age", DataType::Int64, /*nullable=*/ true),
+        ];
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, /*nullable=*/ false),
+            Field::new(
+                "info",
+                DataType::Struct(info_struct_fields.clone().into()),
+                /*nullable=*/ true,
+            ),
+        ]));
+
+        // Create StructArray
+        let name_array = Arc::new(arrow_array::StringArray::from(vec![Some("Alice")]));
+        let age_array = Arc::new(Int64Array::from(vec![Some(25)]));
+
+        let info_struct_array = Arc::new(StructArray::new(
+            info_struct_fields.into(),
+            vec![name_array, age_array],
+            None,
+        ));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1])), info_struct_array],
+        )
+        .unwrap();
+
+        // Test struct with wrong number of fields
+        let row_wrong_fields = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Struct(vec![
+                RowValue::ByteArray(b"Alice".to_vec()),
+                // Missing age field
+            ]),
+        ]);
+        assert!(!row_wrong_fields.equals_record_batch_at_offset_impl(&batch, 0));
+
+        // Test struct with wrong field value
+        let row_wrong_value = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Struct(vec![
+                RowValue::ByteArray(b"Alice".to_vec()),
+                RowValue::Int64(26), // Wrong age
+            ]),
+        ]);
+        assert!(!row_wrong_value.equals_record_batch_at_offset_impl(&batch, 0));
+
+        // Test struct with wrong field type
+        let row_wrong_type = MoonlinkRow::new(vec![
+            RowValue::Int32(1),
+            RowValue::Struct(vec![
+                RowValue::Int32(25), // Wrong type for name
+                RowValue::Int64(25),
+            ]),
+        ]);
+        assert!(!row_wrong_type.equals_record_batch_at_offset_impl(&batch, 0));
     }
 }
