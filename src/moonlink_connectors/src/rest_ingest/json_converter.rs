@@ -192,7 +192,7 @@ mod tests {
             "decimal128": "123.45",
         });
         let row = converter.convert(&input).unwrap();
-        assert_eq!(row.values.len(), 7); // Updated to include decimal128 field
+        assert_eq!(row.values.len(), 7);
         assert_eq!(row.values[0], RowValue::Int32(42));
         assert_eq!(row.values[1], RowValue::ByteArray(b"moonlink".to_vec()));
         assert_eq!(row.values[2], RowValue::Bool(true));
