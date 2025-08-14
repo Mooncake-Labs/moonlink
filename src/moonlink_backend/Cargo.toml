@@ -20,6 +20,7 @@ arrow-schema = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
 moonlink = { path = "../moonlink", features = ["test-utils"] }
 moonlink_connectors = { path = "../moonlink_connectors" }
+moonlink_error = { path = "../moonlink_error" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 more-asserts = { workspace = true }
 nix = { workspace = true }

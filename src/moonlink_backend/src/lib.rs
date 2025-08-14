@@ -5,7 +5,6 @@ pub mod mooncake_table_id;
 mod recovery_utils;
 pub mod table_config;
 pub mod table_status;
-
 use arrow_schema::Schema;
 pub use error::{Error, Result};
 use mooncake_table_id::MooncakeTableId;
@@ -17,6 +16,7 @@ pub use moonlink_connectors::rest_ingest::rest_source::{
 use moonlink_connectors::ReplicationManager;
 pub use moonlink_connectors::REST_API_URI;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
+use std::panic::Location;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -346,6 +346,13 @@ impl MoonlinkBackend {
             .expect("event api sender not initialized")
             .send(request)
             .await
-            .map_err(|e| Error::MoonlinkConnectorError { source: e.into() })
+            .map_err(|e| {
+                Error::MoonlinkConnectorError(ErrorStruct {
+                    message: format!("Event request send error: {e}"),
+                    status: ErrorStatus::Temporary,
+                    source: Some(Arc::new(e.into())),
+                    location: Some(Location::caller()),
+                })
+            })
     }
 }

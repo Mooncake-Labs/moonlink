@@ -4269,6 +4269,7 @@ dependencies = [
  "iceberg",
  "moonlink",
  "moonlink_connectors",
+ "moonlink_error",
  "moonlink_metadata_store",
  "more-asserts",
  "nix 0.30.1",
