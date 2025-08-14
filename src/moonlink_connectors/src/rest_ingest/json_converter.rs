@@ -190,6 +190,43 @@ mod tests {
         ]))
     }
 
+    fn make_list_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "int_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                false,
+            ),
+            Field::new(
+                "string_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+                false,
+            ),
+            Field::new(
+                "bool_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Boolean, false))),
+                false,
+            ),
+            Field::new(
+                "float_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, false))),
+                false,
+            ),
+        ]))
+    }
+
+    fn make_nested_list_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "nested_list",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                false,
+            ))),
+            false,
+        )]))
+    }
+
     #[test]
     fn test_successful_conversion() {
         let schema = make_schema();
@@ -639,5 +676,112 @@ mod tests {
         // 2024-02-29T23:59:59.999999Z = 1709251199999999 microseconds since epoch
         assert_eq!(row.values[2], RowValue::Int64(1709251199999999));
         assert_eq!(row.values[3], RowValue::Int64(1709251199999999));
+    }
+
+    #[test]
+    fn test_list_conversion_success() {
+        let int_values = vec![1, 2, 3, 42];
+        let string_values = vec!["hello", "world", "moonlink"];
+        let bool_values = vec![true, false, true];
+        let float_values = vec![1.1, 2.2, 3.14];
+
+        let schema = make_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list": int_values,
+            "string_list": string_values,
+            "bool_list": bool_values,
+            "float_list": float_values
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 4);
+
+        // Check int_list
+        assert_eq!(
+            row.values[0],
+            RowValue::Array(int_values.into_iter().map(RowValue::Int32).collect())
+        );
+
+        // Check string_list
+        assert_eq!(
+            row.values[1],
+            RowValue::Array(
+                string_values
+                    .into_iter()
+                    .map(|s| RowValue::ByteArray(s.as_bytes().to_vec()))
+                    .collect()
+            )
+        );
+
+        // Check bool_list
+        assert_eq!(
+            row.values[2],
+            RowValue::Array(bool_values.into_iter().map(RowValue::Bool).collect())
+        );
+
+        // Check float_list
+        assert_eq!(
+            row.values[3],
+            RowValue::Array(float_values.into_iter().map(RowValue::Float64).collect())
+        );
+    }
+
+    #[test]
+    fn test_nested_list_conversion() {
+        let nested_values = vec![vec![1, 2], vec![3, 4, 5], vec![]];
+
+        let schema = make_nested_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "nested_list": nested_values
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 1);
+
+        assert_eq!(
+            row.values[0],
+            RowValue::Array(
+                nested_values
+                    .into_iter()
+                    .map(|inner_vec| RowValue::Array(
+                        inner_vec.into_iter().map(RowValue::Int32).collect()
+                    ))
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn test_list_type_mismatch_non_array() {
+        let schema = make_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list": "not_an_array",
+            "string_list": [],
+            "bool_list": [],
+            "float_list": []
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "int_list"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_element_type_mismatch() {
+        let schema = make_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list": [1, "not_an_int", 3],
+            "string_list": [],
+            "bool_list": [],
+            "float_list": []
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "item"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
     }
 }
