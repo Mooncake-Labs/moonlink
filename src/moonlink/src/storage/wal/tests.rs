@@ -2,6 +2,7 @@ use crate::storage::mooncake_table::test_utils::TestContext;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::test_utils::*;
 use crate::storage::wal::WalManager;
+use crate::storage::wal::{PersistentWalMetadata, WalTransactionState};
 use crate::WalConfig;
 use crate::{assert_wal_file_does_not_exist, assert_wal_file_exists, assert_wal_logs_equal};
 
@@ -362,4 +363,152 @@ async fn test_wal_recovery_basic() {
         get_table_events_vector_recovery(wal.get_file_system_accessor(), 0).await;
 
     assert_ingestion_events_vectors_equal(&recovered_events, &expected_events);
+}
+
+#[tokio::test]
+async fn test_main_tracker_merges_multiple_subset_commits_in_same_file() {
+    let context = TestContext::new("wal_main_tracker_merge_subset");
+    let wal_config =
+        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(&wal_config);
+
+    // Create two main commits in the same file (file 0). Only the highest LSN subset commit should remain.
+    add_new_example_append_event(100, None, &mut wal, &mut Vec::new());
+    add_new_example_commit_event(101, None, &mut wal, &mut Vec::new());
+    // Another main txn entirely within the same file 0
+    add_new_example_append_event(102, None, &mut wal, &mut Vec::new());
+    add_new_example_commit_event(103, None, &mut wal, &mut Vec::new());
+
+    wal.do_wal_persistence_update_for_test(None).await.unwrap();
+
+    // Read persisted metadata and verify the invariant
+    let metadata: PersistentWalMetadata =
+        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
+            .await
+            .expect("metadata should exist");
+
+    let main = metadata.get_main_transaction_tracker();
+    // Only one subset commit for file 0 should remain
+    assert_eq!(
+        main.len(),
+        1,
+        "expected exactly one main commit tracked for file 0"
+    );
+    match &main[0] {
+        WalTransactionState::Commit {
+            start_file,
+            completion_lsn,
+            file_end,
+        } => {
+            assert_eq!((*start_file, *file_end), (0, 0));
+            assert_eq!(*completion_lsn, 103);
+        }
+        other => panic!("unexpected main tracker state: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_main_tracker_allows_one_spanning_and_one_subset_per_file() {
+    let context = TestContext::new("wal_main_tracker_spanning_and_subset");
+    let wal_config =
+        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(&wal_config);
+
+    // File 0: start a main txn but do not commit yet
+    add_new_example_append_event(100, None, &mut wal, &mut Vec::new());
+    wal.do_wal_persistence_update_for_test(None).await.unwrap(); // advances to file 1
+
+    // File 1: first, commit the spanning txn (start 0 -> end 1)
+    add_new_example_commit_event(101, None, &mut wal, &mut Vec::new());
+    // Then, create a new main txn entirely within file 1 and commit it
+    add_new_example_append_event(102, None, &mut wal, &mut Vec::new());
+    add_new_example_commit_event(103, None, &mut wal, &mut Vec::new());
+
+    wal.do_wal_persistence_update_for_test(None).await.unwrap();
+
+    let metadata: PersistentWalMetadata =
+        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
+            .await
+            .expect("metadata should exist");
+
+    let main = metadata.get_main_transaction_tracker();
+    assert_eq!(main.len(), 2, "expected two commits tracked in total");
+
+    match &main[0] {
+        WalTransactionState::Commit {
+            start_file,
+            completion_lsn,
+            file_end,
+        } => {
+            assert_eq!((*start_file, *file_end), (0, 1));
+            assert_eq!(*completion_lsn, 101);
+        }
+        other => panic!("unexpected main tracker state[0]: {other:?}"),
+    }
+
+    match &main[1] {
+        WalTransactionState::Commit {
+            start_file,
+            completion_lsn,
+            file_end,
+        } => {
+            assert_eq!((*start_file, *file_end), (1, 1));
+            assert_eq!(*completion_lsn, 103);
+        }
+        other => panic!("unexpected main tracker state[1]: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_main_tracker_keeps_highest_subset_commit_per_file() {
+    let context = TestContext::new("wal_main_tracker_highest_subset");
+    let wal_config =
+        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let mut wal = WalManager::new(&wal_config);
+
+    // File 0: start main txn but don't commit yet, then persist
+    add_new_example_append_event(100, None, &mut wal, &mut Vec::new());
+    wal.do_wal_persistence_update_for_test(None).await.unwrap(); // now file 1
+
+    // In file 1: first, commit the spanning txn 0->1
+    add_new_example_commit_event(101, None, &mut wal, &mut Vec::new());
+    // Then, multiple subset commits in file 1 – only the highest should be kept
+    add_new_example_append_event(102, None, &mut wal, &mut Vec::new());
+    add_new_example_commit_event(103, None, &mut wal, &mut Vec::new());
+    add_new_example_append_event(104, None, &mut wal, &mut Vec::new());
+    add_new_example_commit_event(105, None, &mut wal, &mut Vec::new());
+
+    wal.do_wal_persistence_update_for_test(None).await.unwrap();
+
+    let metadata: PersistentWalMetadata =
+        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
+            .await
+            .expect("metadata should exist");
+
+    let main = metadata.get_main_transaction_tracker();
+    assert_eq!(main.len(), 2, "expected two commits tracked in total");
+
+    match &main[0] {
+        WalTransactionState::Commit {
+            start_file,
+            completion_lsn,
+            file_end,
+        } => {
+            assert_eq!((*start_file, *file_end), (0, 1));
+            assert_eq!(*completion_lsn, 101);
+        }
+        other => panic!("unexpected main tracker state[0]: {other:?}"),
+    }
+
+    match &main[1] {
+        WalTransactionState::Commit {
+            start_file,
+            completion_lsn,
+            file_end,
+        } => {
+            assert_eq!((*start_file, *file_end), (1, 1));
+            assert_eq!(*completion_lsn, 105);
+        }
+        other => panic!("unexpected main tracker state[1]: {other:?}"),
+    }
 }
