@@ -3,6 +3,7 @@ use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::test_utils::*;
 use crate::storage::wal::WalManager;
 use crate::storage::wal::{PersistentWalMetadata, WalTransactionState};
+use crate::TableEvent;
 use crate::WalConfig;
 use crate::{assert_wal_file_does_not_exist, assert_wal_file_exists, assert_wal_logs_equal};
 
@@ -515,4 +516,92 @@ async fn test_main_tracker_keeps_highest_subset_commit_per_file() {
         }
         other => panic!("unexpected main tracker state[1]: {other:?}"),
     }
+}
+
+/// Motivation:
+/// The WAL persistence sequence is: persist file -> persist metadata -> truncate old files
+/// (see wal_persist_truncate_async). If a crash happens after persisting a WAL file but
+/// before metadata is updated, the WAL directory can contain more events than what the
+/// metadata describes. Recovery must treat metadata as the source of truth to avoid
+/// reapplying untracked events (which could cause duplication or order violations).
+/// This test simulates that crash window and asserts that recovery only replays events
+/// referenced by persisted metadata.
+#[tokio::test]
+async fn test_recovery_uses_metadata_as_source_of_truth_when_file_persisted_but_metadata_not() {
+    // Scenario:
+    // - First round: persist file 0 and metadata
+    // - Second round: persist file 1 only (simulate crash before metadata/truncation)
+    // Expectation: recovery should only replay events tracked by metadata (i.e., file 0),
+    // ignoring events from file 1 that are not yet referenced in metadata.
+
+    let context = TestContext::new("wal_recovery_metadata_source_of_truth");
+    let wal_config =
+        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+
+    // Create initial WAL with a batch of events and persist (writes file 0 + metadata)
+    let (mut wal, expected_events_file0) = create_test_wal(wal_config).await;
+    wal.do_wal_persistence_update_for_test(None).await.unwrap();
+
+    // Prepare a second batch and simulate crash after persisting the file but before metadata
+    // Add some events to be flushed to file 1
+    let mut _unused = Vec::new();
+    add_new_example_append_event(200, None, &mut wal, &mut _unused);
+    add_new_example_commit_event(201, None, &mut wal, &mut _unused);
+
+    // Extract next file to persist (file 1) without updating metadata/tracking
+    let (wal_events_file1, wal_file_info_file1) = wal
+        .extract_next_persistence_file()
+        .expect("expected next persistence file (file 1)");
+
+    // Persist the WAL file directly, simulating a crash before metadata persistence
+    WalManager::persist_new_wal_file(
+        wal.get_file_system_accessor(),
+        &wal_events_file1,
+        &wal_file_info_file1,
+    )
+    .await
+    .unwrap();
+
+    // Metadata on disk should still reflect only file 0
+    let metadata = WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
+        .await
+        .expect("metadata should exist for file 0");
+
+    // Now perform recovery using the metadata as source of truth
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<TableEvent>(100);
+    WalManager::replay_recovery_from_wal(
+        tx,
+        Some(metadata.clone()),
+        wal.get_file_system_accessor(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Collect replayed events (excluding the FinishRecovery signal) and verify they match file 0
+    let mut replayed_events: Vec<TableEvent> = Vec::new();
+    let mut saw_finish_recovery = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            TableEvent::FinishRecovery {
+                highest_completion_lsn,
+            } => {
+                assert_eq!(
+                    highest_completion_lsn,
+                    metadata.get_highest_completion_lsn(),
+                    "FinishRecovery should report highest LSN from metadata"
+                );
+                saw_finish_recovery = true;
+            }
+            other => replayed_events.push(other),
+        }
+    }
+
+    assert!(
+        saw_finish_recovery,
+        "expected a FinishRecovery event to be emitted"
+    );
+
+    // Ensure only metadata-tracked events were replayed (i.e., exactly file 0's events)
+    assert_ingestion_events_vectors_equal(&replayed_events, &expected_events_file0);
 }
