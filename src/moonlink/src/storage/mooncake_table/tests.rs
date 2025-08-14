@@ -2740,3 +2740,57 @@ async fn test_streaming_commit_before_flush_finishes_sets_flush_lsn() -> Result<
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_two_deletes_same_key_after_flush() -> Result<()> {
+    let context = TestContext::new("test_two_deletes_same_key_after_flush");
+    let mut table = test_table(
+        &context,
+        "test_two_deletes_same_key_after_flush",
+        IdentityProp::SinglePrimitiveKey(0),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // write row 1 and flush
+    let row1 = test_row(1, "A", 20);
+    table.append(row1.clone()).unwrap();
+    table.commit(100);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 100)
+        .await
+        .unwrap();
+
+    // update and insert row 1 and flush
+    let row1_updated = test_row(1, "B", 21);
+    table.delete(row1.clone(), 101).await;
+    table.append(row1_updated.clone()).unwrap();
+    table.commit(102);
+    let _ = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 102)
+        .await
+        .unwrap();
+
+    table.delete(row1.clone(), 103).await;
+    table.commit(104);
+    // Create a snapshot and verify only the non-deleted row remains.
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    let mut snapshot = table.snapshot.write().await;
+    let SnapshotReadOutput {
+        data_file_paths,
+        puffin_cache_handles,
+        position_deletes,
+        deletion_vectors,
+        ..
+    } = snapshot.request_read().await.unwrap();
+
+    verify_files_and_deletions(
+        get_data_files_for_read(&data_file_paths).as_slice(),
+        get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+        position_deletes,
+        deletion_vectors,
+        &[],
+    )
+    .await;
+    Ok(())
+}
