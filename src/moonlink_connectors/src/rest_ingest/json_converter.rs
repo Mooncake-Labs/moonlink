@@ -124,6 +124,18 @@ impl JsonToMoonlinkRowConverter {
                     field.name().clone(),
                 ))
             }
+            DataType::List(child_field) => {
+                if let Some(array) = value.as_array() {
+                    let mut converted_elements = Vec::with_capacity(array.len());
+                    for ele in array {
+                        let converted_element = Self::convert_value(child_field, ele)?;
+                        converted_elements.push(converted_element);
+                    }
+                    Ok(RowValue::Array(converted_elements))
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
             _ => Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone())),
         }
     }
