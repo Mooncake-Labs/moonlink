@@ -1,6 +1,7 @@
-use bigdecimal::num_bigint::BigInt;
+use bigdecimal::num_bigint::{BigInt, TryFromBigIntError};
 use bigdecimal::BigDecimal;
 use moonlink::row::RowValue;
+use num_traits::Signed;
 use std::convert::TryInto;
 use std::str::FromStr;
 use thiserror::Error;
@@ -15,16 +16,22 @@ pub enum DecimalConversionError {
     #[error("Decimal normalization scale failed (value: {value}, parsed scale: {parsed_scale})")]
     NormalizationScale { value: String, parsed_scale: i64 },
     #[error("Decimal precision exceeds the specified precision (value: {value}, expected ≤ {expected_precision}, actual {actual_precision})")]
-    PrecisionExceeds {
+    PrecisionOutOfRange {
         value: String,
         expected_precision: u8,
         actual_precision: u8,
     },
     #[error("Decimal scale exceeds the specified scale (value: {value}, expected ≤ {expected_scale}, actual {actual_scale})")]
-    ScaleExceeds {
+    ScaleOutOfRange {
         value: String,
         expected_scale: i8,
         actual_scale: i8,
+    },
+    #[error("Decimal integer part exceeds the specified length (value: {value}, expected ≤ {expected_len}, actual {actual_len})")]
+    IntegerPartOutOfRange {
+        value: String,
+        expected_len: i8,
+        actual_len: i8,
     },
     #[error("Decimal value is invalid: {value})")]
     InvalidValue { value: String },
@@ -32,21 +39,6 @@ pub enum DecimalConversionError {
     Overflow { mantissa: String, err_msg: String },
 }
 
-/*
-Convert a decimal string to an **unscaled** integer (`RowValue::Decimal`)
-under schema precision `p` (max total digits) and scale `s` (max fractional).
-
-Rules:
-- Up to `p` digits (sign excluded) and up to `s` fractional digits accepted.
-- If fractional digits < `s`, normalize by zero-padding to `s`.
-- Store as `mantissa = value * 10^s` (no rounding).
-
-Examples (`p=10, s=4`):
-- "123" → 1230000   (123.0000)
-- "123.45" → 1234500 (123.4500)
-- "-123.45" → -1234500 (-123.4500)
-- "2.333" with `s=2` → error
-*/
 pub fn convert_decimal_to_row_value(
     value: &str,
     precision: u8,
@@ -58,7 +50,7 @@ pub fn convert_decimal_to_row_value(
         })?;
     let (mut decimal_mantissa, decimal_scale) = decimal.as_bigint_and_exponent();
     // Consider the negative sign
-    let decimal_precision = if decimal_mantissa < BigInt::from(0) {
+    let decimal_precision = if decimal_mantissa.is_negative() {
         decimal_mantissa.to_string().len() - 1
     } else {
         decimal_mantissa.to_string().len()
@@ -78,8 +70,10 @@ pub fn convert_decimal_to_row_value(
                 parsed_scale: decimal_scale,
             })?;
 
+    // let integer_digits_limit = precision - scale;
+
     if actual_decimal_precision > precision {
-        return Err(DecimalConversionError::PrecisionExceeds {
+        return Err(DecimalConversionError::PrecisionOutOfRange {
             value: value.to_string(),
             expected_precision: precision,
             actual_precision: actual_decimal_precision,
@@ -87,22 +81,38 @@ pub fn convert_decimal_to_row_value(
     }
 
     if actual_decimal_scale > scale {
-        return Err(DecimalConversionError::ScaleExceeds {
+        return Err(DecimalConversionError::ScaleOutOfRange {
             value: value.to_string(),
             expected_scale: scale,
             actual_scale: actual_decimal_scale,
         });
     }
 
-    // add the missing 0s to the decimal mantissa
-    decimal_mantissa *= BigInt::from(10).pow((scale - actual_decimal_scale).max(0) as u32);
+    let max_integer_len = precision as i8 - scale;
+    let actual_integer_len = actual_decimal_precision as i8 - actual_decimal_scale;
 
-    let actual_decimal_mantissa: i128 = (&decimal_mantissa).try_into().map_err(
-        |e: bigdecimal::num_bigint::TryFromBigIntError<()>| DecimalConversionError::Overflow {
-            mantissa: decimal_mantissa.to_string(),
-            err_msg: e.to_string(),
-        },
-    )?;
+    if actual_integer_len > max_integer_len {
+        return Err(DecimalConversionError::IntegerPartOutOfRange {
+            value: value.to_string(),
+            expected_len: max_integer_len,
+            actual_len: actual_integer_len,
+        });
+    }
+
+    if scale - actual_decimal_scale > 0 {
+        // add the missing 0s to the decimal mantissa
+        decimal_mantissa *= BigInt::from(10).pow((scale - actual_decimal_scale) as u32);
+    }
+
+    let actual_decimal_mantissa: i128 =
+        (&decimal_mantissa)
+            .try_into()
+            .map_err(
+                |e: TryFromBigIntError<()>| DecimalConversionError::Overflow {
+                    mantissa: decimal_mantissa.to_string(),
+                    err_msg: e.to_string(),
+                },
+            )?;
     Ok(RowValue::Decimal(actual_decimal_mantissa))
 }
 
@@ -110,16 +120,9 @@ pub fn convert_decimal_to_row_value(
 mod tests {
     use super::*;
 
-    /*
-    In this test, we are testing the error cases of the `convert_decimal_to_row_value` function.
-    - InvalidValue: when the decimal string is invalid.
-    - PrecisionExceeds: when the decimal string exceeds the precision.
-    - ScaleExceeds: when the decimal string exceeds the scale.
-    - Overflow: when the decimal string exceeds the i128 range.
-    */
-
     #[test]
-    fn test_convert_decimal_to_row_value_invalid_value() {
+    fn test_convert_decimal_invalid_value_error() {
+        // Testing invalid decimal string format (double dots)
         let invalid_value = "123..45";
         let precision = 5;
         let scale = 2;
@@ -130,12 +133,18 @@ mod tests {
             }
             _ => panic!("Expected an InvalidValue error, but got a different variant: {err:?}"),
         }
+    }
 
+    #[test]
+    fn test_convert_decimal_precision_out_of_range_error() {
+        // Testing decimal precision exceeding the specified limit (7 digits > 5 precision)
         let precision_exceeding_value = "123.4567";
+        let precision = 5;
+        let scale = 2;
         let err =
             convert_decimal_to_row_value(precision_exceeding_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::PrecisionExceeds {
+            DecimalConversionError::PrecisionOutOfRange {
                 value,
                 expected_precision,
                 actual_precision,
@@ -144,16 +153,22 @@ mod tests {
                 assert_eq!(expected_precision, precision);
                 assert_eq!(actual_precision, 7);
             }
-            _ => panic!("Expected a PrecisionExceeds error, but got a different variant: {err:?}"),
+            _ => {
+                panic!("Expected a PrecisionOutOfRange error, but got a different variant: {err:?}")
+            }
         }
+    }
 
+    #[test]
+    fn test_convert_decimal_scale_out_of_range_error() {
+        // Testing decimal scale exceeding the specified limit (4 fractional digits > 3 scale)
         let scale_exceeding_value = "123.4567";
         let precision = 8;
         let scale = 3;
         let err =
             convert_decimal_to_row_value(scale_exceeding_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::ScaleExceeds {
+            DecimalConversionError::ScaleOutOfRange {
                 value,
                 expected_scale,
                 actual_scale,
@@ -162,15 +177,16 @@ mod tests {
                 assert_eq!(expected_scale, scale);
                 assert_eq!(actual_scale, 4);
             }
-            _ => panic!("Expected a ScaleExceeds error, but got a different variant: {err:?}"),
+            _ => panic!("Expected a ScaleOutOfRange error, but got a different variant: {err:?}"),
         }
 
-        let negative_scale_value = "123.45";
+        // Testing negative scale with positive fractional digits (2 fractional digits > -2 scale)
+        let negative_scale_value = "-123.45";
         let precision = 5;
         let scale = -2;
         let err = convert_decimal_to_row_value(negative_scale_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::ScaleExceeds {
+            DecimalConversionError::ScaleOutOfRange {
                 value,
                 expected_scale,
                 actual_scale,
@@ -179,17 +195,82 @@ mod tests {
                 assert_eq!(expected_scale, scale);
                 assert_eq!(actual_scale, 2);
             }
-            _ => panic!("Expected a ScaleExceeds error, but got a different variant: {err:?}"),
+            _ => panic!("Expected a ScaleOutOfRange error, but got a different variant: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_decimal_integer_part_out_of_range_error() {
+        // Testing integer part exceeding the allowed length (3 integer digits > 2 allowed)
+        // With precision=5, scale=3: max integer digits = 5-3 = 2, but "123" has 3 digits
+        let integer_part_exceeding_value = "123.4";
+        let precision = 5;
+        let scale = 3;
+        let err = convert_decimal_to_row_value(integer_part_exceeding_value, precision, scale)
+            .unwrap_err();
+        match err {
+            DecimalConversionError::IntegerPartOutOfRange {
+                value,
+                expected_len,
+                actual_len,
+            } => {
+                assert_eq!(value, integer_part_exceeding_value.to_string());
+                assert_eq!(expected_len, 2);
+                assert_eq!(actual_len, 3);
+            }
+            _ => panic!(
+                "Expected an IntegerPartOutOfRange error, but got a different variant: {err:?}"
+            ),
         }
 
+        // Testing negative value with integer part exceeding the allowed length
+        // Sign is not counted towards precision, so "-123" still has 3 integer digits
+        let integer_part_exceeding_negative_value = "-123.4";
+        let precision = 5;
+        let scale = 3;
+        let err =
+            convert_decimal_to_row_value(integer_part_exceeding_negative_value, precision, scale)
+                .unwrap_err();
+        match err {
+            DecimalConversionError::IntegerPartOutOfRange {
+                value,
+                expected_len,
+                actual_len,
+            } => {
+                assert_eq!(value, integer_part_exceeding_negative_value.to_string());
+                assert_eq!(expected_len, 2);
+                assert_eq!(actual_len, 3);
+            }
+            _ => panic!(
+                "Expected an IntegerPartOutOfRange error, but got a different variant: {err:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_convert_decimal_overflow_error() {
+        // Testing mantissa overflow when the normalized decimal exceeds i128 range
         let overflow_value = "1234567890123456789012345678901234567.789";
         let precision = 40;
         let scale = 3;
         let err = convert_decimal_to_row_value(overflow_value, precision, scale).unwrap_err();
-
         match err {
             DecimalConversionError::Overflow { mantissa, err_msg } => {
                 assert_eq!(mantissa, "1234567890123456789012345678901234567789");
+                assert!(err_msg.contains("out of range")); // Ensure the error message contains means it is out of range
+            }
+            _ => panic!("Expected an Overflow error, but got a different variant: {err:?}"),
+        }
+
+        // Testing negative mantissa overflow when the normalized decimal exceeds i128 range
+        let overflow_negative_value = "-1234567890123456789012345678901234567.789";
+        let precision = 40;
+        let scale = 3;
+        let err =
+            convert_decimal_to_row_value(overflow_negative_value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::Overflow { mantissa, err_msg } => {
+                assert_eq!(mantissa, "-1234567890123456789012345678901234567789");
                 assert!(err_msg.contains("out of range")); // Ensure the error message contains means it is out of range
             }
             _ => panic!("Expected an Overflow error, but got a different variant: {err:?}"),
@@ -204,17 +285,17 @@ mod tests {
         let result = convert_decimal_to_row_value(valid_value_1, precision, scale).unwrap();
         assert_eq!(result, RowValue::Decimal(12345));
 
-        let valid_value_2 = "123.4";
+        let valid_value_2 = "12.4";
         let precision = 5;
         let scale = 3;
         let result = convert_decimal_to_row_value(valid_value_2, precision, scale).unwrap();
-        assert_eq!(result, RowValue::Decimal(123400));
+        assert_eq!(result, RowValue::Decimal(12400));
 
-        let valid_negative_value = "-123.4";
+        let valid_negative_value = "-12.4";
         let precision = 5;
         let scale = 3;
         let result = convert_decimal_to_row_value(valid_negative_value, precision, scale).unwrap();
-        assert_eq!(result, RowValue::Decimal(-123400));
+        assert_eq!(result, RowValue::Decimal(-12400));
 
         let large_scale_value = "123456789012345678901234567890123456.789";
         let precision = 39;
