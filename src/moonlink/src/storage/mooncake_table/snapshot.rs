@@ -820,7 +820,7 @@ impl SnapshotTableState {
                 .map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc))
                 .collect(),
             Ordering::Less => {
-                panic!("find less than expected candidates to deletions {deletions:?}")
+                panic!("find less than expected candidates to deletions {deletions:?}, candidates: {candidates:?}, batch_id_to_lsn: {batch_id_to_lsn:?}, file_id_to_lsn: {file_id_to_lsn:?}")
             }
             Ordering::Greater => {
                 let mut processed_deletions = Vec::new();
@@ -1004,7 +1004,7 @@ impl SnapshotTableState {
             }
         });
         self.add_processed_deletion(already_processed, task.commit_lsn_baseline);
-        new_deletions.sort_by_key(|deletion| deletion.lookup_key);
+        new_deletions.sort_by(|a, b| a.lookup_key.cmp(&b.lookup_key).then(a.lsn.cmp(&b.lsn)));
         if new_deletions.is_empty() {
             return;
         }

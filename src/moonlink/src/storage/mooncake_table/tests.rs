@@ -2782,7 +2782,7 @@ async fn test_two_deletes_same_key_after_flush() -> Result<()> {
 
     table.delete(row1.clone(), 103).await;
     table.commit(104);
-    // Create a snapshot and verify only the non-deleted row remains.
+    // Create a snapshot and verify all the rows are deleted.
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
 
     let mut snapshot = table.snapshot.write().await;
