@@ -4,7 +4,7 @@ use crate::storage::cache::metadata::base_cache::MetadataCacheTrait;
 use crate::storage::cache::metadata::test_utils::MokaCacheTestBuilder;
 
 #[tokio::test]
-async fn test_it_can_get_values() {
+async fn test_get_values() {
     let cache = MokaCacheTestBuilder::new().build();
 
     cache
@@ -21,7 +21,7 @@ async fn test_it_can_get_values() {
 }
 
 #[tokio::test]
-async fn test_it_will_evict_by_ttl() {
+async fn test_evict_by_ttl() {
     let cache = MokaCacheTestBuilder::new().build();
 
     cache
@@ -44,7 +44,7 @@ async fn test_it_will_evict_by_ttl() {
 }
 
 #[tokio::test]
-async fn test_it_can_put_values() {
+async fn test_put_values() {
     let cache = MokaCacheTestBuilder::new().build();
 
     cache.put("key1".to_string(), "value1".to_string()).await;
@@ -58,7 +58,7 @@ async fn test_it_can_put_values() {
 }
 
 #[tokio::test]
-async fn test_it_can_replace_entry_when_max_size_exceeds() {
+async fn test_replace_entry_when_max_size_exceeds() {
     let cache = MokaCacheTestBuilder::new().build();
 
     cache
@@ -79,7 +79,7 @@ async fn test_it_can_replace_entry_when_max_size_exceeds() {
 }
 
 #[tokio::test]
-async fn test_it_can_evict_value() {
+async fn test_evict_value() {
     let cache = MokaCacheTestBuilder::new().build();
 
     cache
@@ -99,7 +99,7 @@ async fn test_it_can_evict_value() {
 }
 
 #[tokio::test]
-async fn test_it_can_clear_all_values() {
+async fn test_clear_all_values() {
     let cache = MokaCacheTestBuilder::new().build();
 
     cache
