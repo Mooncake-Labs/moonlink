@@ -683,7 +683,7 @@ mod tests {
         let int_values = vec![1, 2, 3, 42];
         let string_values = vec!["hello", "world", "moonlink"];
         let bool_values = vec![true, false, true];
-        let float_values = vec![1.1, 2.2, 3.14];
+        let float_values = vec![1.1, 2.2, 3.3];
 
         let schema = make_list_schema();
         let converter = JsonToMoonlinkRowConverter::new(schema);
