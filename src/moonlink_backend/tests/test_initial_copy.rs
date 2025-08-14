@@ -178,7 +178,7 @@ mod tests {
         // Start create_table without awaiting so we can modify data during copy
         let backend_clone = Arc::clone(&backend);
         let table_config = guard.get_serialized_table_config();
-        tokio::spawn(async move {
+        let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
                     guard.database_id,
@@ -203,6 +203,7 @@ mod tests {
             .unwrap();
 
         let lsn = current_wal_lsn(&initial_client).await;
+        create_handle.await.unwrap();
         let ids = ids_from_state(
             &backend
                 .scan_table(guard.database_id, TABLE_ID, Some(lsn))
