@@ -6,6 +6,28 @@ use crate::storage::cache::metadata::{
 use async_trait::async_trait;
 use moka::future::Cache;
 
+/// A wrapper around [`moka::future::Cache`] providing async cache operations.
+///
+/// # Eviction Policy
+/// Uses a **size-based eviction** policy: when the cache reaches its `max_size`,
+/// the **least recently inserted** entries are evicted according to Moka's internal policy.
+///
+/// # Consistency Guarantee
+/// `MokaCache` provides **strong consistency** for individual operations:
+/// `get`, `put`, `evict`, and `clear` are atomic for a single entry.
+/// However, operations are **not transactional** across multiple entries.
+///
+/// # Supported Features
+/// - **TTL (time-to-live)**: entries expire after a fixed duration since insertion.
+/// - **Max size**: limits the number of entries (or total weight if using a custom weigher).
+/// - **Asynchronous operations**: all API methods are `async`.
+///
+/// # Example
+/// ```rust
+/// let config = MetadataCacheConfig::new(100, Duration::from_secs(60));
+/// let cache: MokaCache<String, String> = MokaCache::new(config);
+/// cache.put("key".to_string(), "value".to_string()).await;
+/// ```
 pub struct MokaCache<K, V> {
     cache: Cache<K, V>,
 }
