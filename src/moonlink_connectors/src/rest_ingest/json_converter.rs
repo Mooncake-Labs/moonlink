@@ -18,6 +18,8 @@ pub enum JsonToMoonlinkRowError {
     SerdeJson(#[from] serde_json::Error),
     #[error("Unsupported data type {0} in field {1}")]
     UnsupportedDataType(String, String),
+    #[error("invalid value for field: {0} with cause: {1}")]
+    InvalidValueWithCause(String, Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub struct JsonToMoonlinkRowConverter {
@@ -112,8 +114,12 @@ impl JsonToMoonlinkRowConverter {
             }
             DataType::Decimal128(precision, scale) => {
                 if let Some(s) = value.as_str() {
-                    convert_decimal_to_row_value(s, *precision, *scale)
-                        .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                    convert_decimal_to_row_value(s, *precision, *scale).map_err(|e| {
+                        JsonToMoonlinkRowError::InvalidValueWithCause(
+                            field.name().clone(),
+                            Box::new(e),
+                        )
+                    })
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -163,7 +169,10 @@ impl JsonToMoonlinkRowConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rest_ingest::decimal_utils::DecimalConversionError;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use bigdecimal::num_bigint::TryFromBigIntError;
+    use bigdecimal::ParseBigDecimalError::ParseInt;
     use chrono::{NaiveDate, TimeZone, Utc};
     use serde_json::json;
     use std::sync::Arc;
@@ -178,6 +187,14 @@ mod tests {
             Field::new("score_float32", DataType::Float32, false),
             Field::new("decimal128", DataType::Decimal128(5, 2), false),
         ]))
+    }
+
+    fn make_schema_with_decimal128_overflow() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "decimal128",
+            DataType::Decimal128(40, 3),
+            false,
+        )]))
     }
 
     fn make_schema_with_decimal256() -> Arc<Schema> {
@@ -385,7 +402,92 @@ mod tests {
         });
         let err = converter.convert(&input).unwrap_err();
         match err {
-            JsonToMoonlinkRowError::InvalidValue(f) => assert_eq!(f, "decimal128"),
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Failed to downcast source_err to DecimalConversionError");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::PrecisionOutOfRange {
+                        value,
+                        expected_precision,
+                        actual_precision,
+                    } => {
+                        assert_eq!(*value, "12333.456");
+                        assert_eq!(*expected_precision, 5);
+                        assert_eq!(*actual_precision, 8);
+                    }
+                    _ => panic!("Expected PrecisionOutOfRange, but got another DecimalConversionError: {decimal_conversion_err:?}"),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_conversion_integer_part_out_of_range_error() {
+        let schema = make_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 42,
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "decimal128": "1235.4",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Failed to downcast source_err to DecimalConversionError");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::IntegerPartOutOfRange {
+                        value,
+                        expected_len,
+                        actual_len,
+                    } => {
+                        assert_eq!(*value, "1235.4");
+                        assert_eq!(*expected_len, 3);
+                        assert_eq!(*actual_len, 4);
+                    }
+                    _ => panic!("Expected IntegerPartOutOfRange, but got another DecimalConversionError: {decimal_conversion_err:?}"),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_conversion_overflow() {
+        let schema = make_schema_with_decimal128_overflow();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "decimal128": "1234567890123456789012345678901234567.789"
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Failed to downcast source_err to DecimalConversionError");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::Overflow { mantissa, error } => {
+                        assert_eq!(mantissa, "1234567890123456789012345678901234567789");
+                        assert!(error.is::<TryFromBigIntError<()>>());
+                    }
+                    _ => panic!(
+                        "Expected Overflow, but got another DecimalConversionError: {decimal_conversion_err:?}"
+                    ),
+                }
+            }
             _ => panic!("unexpected error: {err:?}"),
         }
     }
@@ -405,7 +507,25 @@ mod tests {
         });
         let err = converter.convert(&input).unwrap_err();
         match err {
-            JsonToMoonlinkRowError::InvalidValue(f) => assert_eq!(f, "decimal128"),
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Failed to downcast source_err to DecimalConversionError");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::InvalidValue { value, error } => {
+                        assert_eq!(*value, "not_a_decimal");
+                        let parse_big_decimal_err = error
+                            .downcast_ref::<bigdecimal::ParseBigDecimalError>()
+                            .expect("Failed to downcast source_err to ParseBigDecimalError");
+                        assert!(matches!(parse_big_decimal_err, ParseInt { .. }));
+                    }
+                    _ => panic!(
+                        "Expected InvalidValue, but got another DecimalConversionError: {decimal_conversion_err:?}"
+                    ),
+                }
+            }
             _ => panic!("unexpected error: {err:?}"),
         }
     }
