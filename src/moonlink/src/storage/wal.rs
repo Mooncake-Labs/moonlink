@@ -41,6 +41,7 @@ impl WalConfig {
     }
 
     /// Create WAL config with provided accessor (root must be bucket/root path).
+    #[allow(dead_code)]
     pub fn new(accessor_config: AccessorConfig, mooncake_table_id: &str) -> WalConfig {
         Self {
             accessor_config,
@@ -54,15 +55,6 @@ impl WalConfig {
 
     pub fn get_mooncake_table_id(&self) -> &str {
         &self.mooncake_table_id
-    }
-}
-
-const DEFAULT_MOONCAKE_TABLE_ID: &str = "default_mooncake_table_id";
-const DEFAULT_BASE_PATH: &str = "tmp/default_wal_dir";
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        Self::default_wal_config_local(DEFAULT_MOONCAKE_TABLE_ID, Path::new(DEFAULT_BASE_PATH))
     }
 }
 
