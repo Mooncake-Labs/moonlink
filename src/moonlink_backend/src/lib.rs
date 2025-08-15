@@ -346,13 +346,6 @@ impl MoonlinkBackend {
             .expect("event api sender not initialized")
             .send(request)
             .await
-            .map_err(|e| {
-                Error::MoonlinkConnectorError(ErrorStruct {
-                    message: format!("Event request send error: {e}"),
-                    status: ErrorStatus::Temporary,
-                    source: Some(Arc::new(e.into())),
-                    location: Some(Location::caller()),
-                })
-            })
+            .map_err(Error::from)
     }
 }
