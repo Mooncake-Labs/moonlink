@@ -388,7 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn test_decimal_conversion_invalid_precision() {
+    /* Test to ensure that decimal conversion fails when precision is out of range
+     * decimal128: Decimal128(precision=8, scale=2)
+     * "1234567.89" => digits=9 (> precision=8), scale=2 (OK) → violates precision only
+     */
+    fn test_decimal_conversion_precision_out_of_range() {
         let schema = make_schema();
         let converter = JsonToMoonlinkRowConverter::new(schema);
         let input = json!({
