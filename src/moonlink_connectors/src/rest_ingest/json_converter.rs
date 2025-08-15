@@ -406,7 +406,7 @@ mod tests {
                 assert_eq!(f, "decimal128");
                 let decimal_conversion_err = e
                     .downcast_ref::<DecimalConversionError>()
-                    .expect("Failed to downcast source_err to DecimalConversionError");
+                    .expect("Expected DecimalConversionError, got different error type");
 
                 match decimal_conversion_err {
                     DecimalConversionError::PrecisionOutOfRange {
