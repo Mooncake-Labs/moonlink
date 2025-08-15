@@ -28,7 +28,6 @@ use iceberg::io::FileIOBuilder;
 use iceberg::io::FileRead;
 use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::{mpsc, watch};
@@ -65,7 +64,7 @@ pub struct TestEnvironment {
     last_commit_tx: watch::Sender<u64>,
     snapshot_lsn_tx: watch::Sender<u64>,
     pub(crate) wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
-    wal_filesystem_path: String,
+    pub(crate) wal_config: WalConfig,
     pub(crate) force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
     pub(crate) wal_flush_lsn_rx: watch::Receiver<u64>,
     pub(crate) table_event_manager: TableEventManager,
@@ -111,11 +110,9 @@ impl TestEnvironment {
         let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
 
         // TODO(Paul): Change this default when we support object storage for WAL
-        let default_wal_config =
-            WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
-        let wal_filesystem_path = default_wal_config.get_accessor_config().get_root_path();
+        let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
-            default_wal_config.get_accessor_config().clone(),
+            wal_config.get_accessor_config().clone(),
         ));
         let table_handler_timer = create_table_handler_timers();
 
@@ -140,7 +137,7 @@ impl TestEnvironment {
             last_commit_tx,
             snapshot_lsn_tx,
             wal_filesystem_accessor,
-            wal_filesystem_path,
+            wal_config,
             force_snapshot_completion_rx,
             wal_flush_lsn_rx,
             table_event_manager,
@@ -416,38 +413,6 @@ impl TestEnvironment {
         }
     }
 
-    // TODO(Paul): Rework these when implementing object storage WAL
-    /// Infers the lowest file number by looking at all remaining files in the WAL directory.
-    pub async fn infer_lowest_wal_file_number(&self) -> Option<u64> {
-        let mut files = tokio::fs::read_dir(PathBuf::from(&self.wal_filesystem_path))
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Failed to read wal filesystem path: {}",
-                    self.wal_filesystem_path
-                )
-            });
-        let mut lowest = u64::MAX;
-
-        while let Some(file) = files.next_entry().await.unwrap() {
-            debug!("file: {:?}", file);
-            let path = file.path();
-            let file_name = path.file_name()?.to_str()?;
-
-            // skip metadata file
-            if file_name == WalManager::get_metadata_file_name() {
-                continue;
-            }
-
-            if let Some(num_str) = file_name.strip_prefix("wal_")?.strip_suffix(".json") {
-                if let Ok(num) = num_str.parse::<u64>() {
-                    lowest = lowest.min(num);
-                }
-            }
-        }
-        (lowest != u64::MAX).then_some(lowest)
-    }
-
     // Recover wal events locally by reading from the wal filesystem and finding the lowest file number
     // TODO(Paul): Rework these when implementing object storage WAL
     pub async fn get_wal_events_with_metadata(
@@ -474,7 +439,11 @@ impl TestEnvironment {
     }
 
     pub async fn get_latest_wal_metadata(&self) -> Option<PersistentWalMetadata> {
-        WalManager::recover_from_persistent_wal_metadata(self.wal_filesystem_accessor.clone()).await
+        WalManager::recover_from_persistent_wal_metadata(
+            self.wal_filesystem_accessor.clone(),
+            self.wal_config.clone(),
+        )
+        .await
     }
 
     pub async fn check_wal_events_from_metadata(
@@ -558,32 +527,46 @@ impl TestEnvironment {
         // Check consistency between files
         let active_wal_files = metadata.get_live_wal_files_tracker();
 
-        let lowest_file_number_from_fs = self.infer_lowest_wal_file_number().await;
-        let lowest_file_number_from_metadata =
-            active_wal_files.first().map(|file| file.file_number);
-        assert_eq!(
-            lowest_file_number_from_fs, lowest_file_number_from_metadata,
-            "lowest file number from fs and metadata should be the same"
-        );
-
         let highest_file_number_from_metadata =
             active_wal_files.last().map(|file| file.file_number);
         if let Some(highest_file_number_from_metadata) = highest_file_number_from_metadata {
             // check if the metadata is empty
-            let file_name = WalManager::get_file_name(highest_file_number_from_metadata + 1);
+            let file_number = highest_file_number_from_metadata + 1;
             assert!(
-                !self
-                    .wal_filesystem_accessor
-                    .object_exists(&file_name)
-                    .await
-                    .unwrap(),
-                "file {file_name} should not exist as it is out of range of the active wal files"
+                !wal_file_exists(
+                    file_number,
+                    self.wal_filesystem_accessor.clone(),
+                    &self.wal_config
+                )
+                .await,
+                "file {file_number} should not exist as it is out of range of the active wal files",
             );
         };
 
+        let lowest_file_number_from_metadata =
+            active_wal_files.first().map(|file| file.file_number);
+        if let Some(lowest_file_number_from_metadata) = lowest_file_number_from_metadata {
+            if lowest_file_number_from_metadata > 0 {
+                let file_number = lowest_file_number_from_metadata - 1;
+                assert!(!wal_file_exists(
+                    file_number,
+                    self.wal_filesystem_accessor.clone(),
+                    &self.wal_config
+                )
+                .await,
+                "file {file_number} should not exist as it is out of range of the active wal files",
+            );
+            }
+        }
+
         for file in active_wal_files {
             assert!(
-                wal_file_exists(self.wal_filesystem_accessor.clone(), file.file_number).await,
+                wal_file_exists(
+                    file.file_number,
+                    self.wal_filesystem_accessor.clone(),
+                    &self.wal_config
+                )
+                .await,
                 "file {file_number} should exist",
                 file_number = file.file_number
             );

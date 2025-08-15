@@ -15,11 +15,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-pub const DEFAULT_WAL_FOLDER: &str = "wal";
+pub const DEFAULT_WAL_FOLDER: &str = "_wal";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WalConfig {
     accessor_config: AccessorConfig,
+    mooncake_table_id: String,
 }
 
 impl WalConfig {
@@ -29,22 +30,39 @@ impl WalConfig {
     /// within moonlink.
     pub fn default_wal_config_local(mooncake_table_id: &str, base_path: &Path) -> WalConfig {
         let wal_storage_config = StorageConfig::FileSystem {
-            root_directory: base_path
-                .join(DEFAULT_WAL_FOLDER)
-                .join(mooncake_table_id)
-                .to_str()
-                .unwrap()
-                .to_string(),
+            root_directory: base_path.to_str().unwrap().to_string(),
             // TODO(paul): evaluate atomic write option.
             atomic_write_dir: None,
         };
         Self {
             accessor_config: AccessorConfig::new_with_storage_config(wal_storage_config),
+            mooncake_table_id: mooncake_table_id.to_string(),
+        }
+    }
+
+    /// Create WAL config with provided accessor (root must be bucket/root path).
+    pub fn new(accessor_config: AccessorConfig, mooncake_table_id: &str) -> WalConfig {
+        Self {
+            accessor_config,
+            mooncake_table_id: mooncake_table_id.to_string(),
         }
     }
 
     pub fn get_accessor_config(&self) -> &AccessorConfig {
         &self.accessor_config
+    }
+
+    pub fn get_mooncake_table_id(&self) -> &str {
+        &self.mooncake_table_id
+    }
+}
+
+const DEFAULT_MOONCAKE_TABLE_ID: &str = "default_mooncake_table_id";
+const DEFAULT_BASE_PATH: &str = "tmp/default_wal_dir";
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self::default_wal_config_local(DEFAULT_MOONCAKE_TABLE_ID, Path::new(DEFAULT_BASE_PATH))
     }
 }
 
@@ -299,6 +317,8 @@ pub struct PersistentWalMetadata {
     main_transaction_tracker: Vec<WalTransactionState>,
     /// The LSN of the last iceberg snapshot that was persisted just before the WAL was persisted.
     iceberg_snapshot_lsn: Option<u64>,
+    /// The mooncake table ID for this WAL.
+    mooncake_table_id: String,
 }
 
 impl PersistentWalMetadata {
@@ -309,6 +329,7 @@ impl PersistentWalMetadata {
         active_transactions: HashMap<u32, WalTransactionState>,
         main_transaction_tracker: Vec<WalTransactionState>,
         iceberg_snapshot_lsn: Option<u64>,
+        mooncake_table_id: String,
     ) -> Self {
         Self {
             curr_file_number,
@@ -317,6 +338,7 @@ impl PersistentWalMetadata {
             active_transactions,
             main_transaction_tracker,
             iceberg_snapshot_lsn,
+            mooncake_table_id,
         }
     }
 
@@ -342,6 +364,10 @@ impl PersistentWalMetadata {
 
     pub fn get_iceberg_snapshot_lsn(&self) -> Option<u64> {
         self.iceberg_snapshot_lsn
+    }
+
+    pub fn get_mooncake_table_id(&self) -> &str {
+        &self.mooncake_table_id
     }
 }
 
@@ -402,12 +428,13 @@ pub struct WalManager {
     main_transaction_tracker: Vec<WalTransactionState>,
 
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    wal_config: WalConfig,
 }
 
 impl WalManager {
     pub fn new(config: &WalConfig) -> Self {
         // TODO(Paul): Add a more robust constructor when implementing recovery
-        let accessor_config = config.accessor_config.clone();
+        let accessor_config = config.get_accessor_config().clone();
         Self {
             in_mem_buf: Vec::new(),
             highest_completion_lsn: 0,
@@ -417,21 +444,40 @@ impl WalManager {
             main_transaction_tracker: Vec::new(),
             // TODO(Paul): Implement object storage
             file_system_accessor: create_filesystem_accessor(accessor_config),
+            wal_config: config.clone(),
         }
     }
 
-    pub fn get_file_name(file_number: u64) -> String {
-        format!("wal_{file_number}.json")
+    pub fn get_wal_file_path_for_mooncake_table(
+        file_number: u64,
+        mooncake_table_id: &str,
+    ) -> String {
+        format!("{DEFAULT_WAL_FOLDER}/{mooncake_table_id}/wal_{file_number}.json")
     }
 
-    pub fn get_metadata_file_name() -> String {
-        "metadata_wal.json".to_string()
+    pub fn get_wal_file_path(&self, file_number: u64) -> String {
+        Self::get_wal_file_path_for_mooncake_table(
+            file_number,
+            self.wal_config.get_mooncake_table_id(),
+        )
+    }
+
+    /// Static helper to compute metadata file name for a given mooncake table id.
+    pub fn get_metadata_file_path_for_mooncake_table(mooncake_table_id: &str) -> String {
+        format!("{DEFAULT_WAL_FOLDER}/{mooncake_table_id}/metadata_wal.json")
+    }
+
+    pub fn get_metadata_file_path(&self) -> String {
+        Self::get_metadata_file_path_for_mooncake_table(self.wal_config.get_mooncake_table_id())
     }
 
     pub fn get_file_system_accessor(&self) -> Arc<dyn BaseFileSystemAccess> {
         self.file_system_accessor.clone()
     }
 
+    pub fn get_mooncake_table_id(&self) -> &str {
+        self.wal_config.get_mooncake_table_id()
+    }
     pub fn get_highest_completion_lsn(&self) -> u64 {
         self.highest_completion_lsn
     }
@@ -753,6 +799,7 @@ impl WalManager {
             cleanedup_xacts,
             cleanedup_main_xacts,
             iceberg_snapshot_lsn,
+            self.wal_config.get_mooncake_table_id().to_string(),
         )
     }
 
@@ -796,10 +843,16 @@ impl WalManager {
     pub async fn delete_files(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_file_numbers: &[WalFileInfo],
+        mooncake_table_id: &str,
     ) -> Result<()> {
         let file_names = wal_file_numbers
             .iter()
-            .map(|wal_file_info| WalManager::get_file_name(wal_file_info.file_number))
+            .map(|wal_file_info| {
+                WalManager::get_wal_file_path_for_mooncake_table(
+                    wal_file_info.file_number,
+                    mooncake_table_id,
+                )
+            })
             .collect::<Vec<String>>();
         let delete_futures = file_names
             .iter()
@@ -812,17 +865,21 @@ impl WalManager {
     }
 
     /// Persist a series of wal events to the file system.
-    /// Should be called asynchronously using the most recent wal data extracted form the
+    /// Should be called as part of an asynchronous job using the most recent wal data extracted form the
     /// in-memory buffer.
     pub async fn persist_new_wal_file(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_to_persist: &Vec<WalEvent>,
         wal_file_info: &WalFileInfo,
+        mooncake_table_id: &str,
     ) -> Result<()> {
         if !wal_to_persist.is_empty() {
             let wal_json = serde_json::to_vec(&wal_to_persist)?;
 
-            let wal_file_path = WalManager::get_file_name(wal_file_info.file_number);
+            let wal_file_path = WalManager::get_wal_file_path_for_mooncake_table(
+                wal_file_info.file_number,
+                mooncake_table_id,
+            );
             file_system_accessor
                 .write_object(&wal_file_path, wal_json)
                 .await?;
@@ -834,7 +891,9 @@ impl WalManager {
         persistent_wal_metadata: &PersistentWalMetadata,
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<()> {
-        let metadata_file_name = WalManager::get_metadata_file_name();
+        let metadata_file_name = WalManager::get_metadata_file_path_for_mooncake_table(
+            persistent_wal_metadata.get_mooncake_table_id(),
+        );
         let metadata_bytes = serde_json::to_vec(&persistent_wal_metadata).unwrap();
         file_system_accessor
             .write_object(&metadata_file_name, metadata_bytes)
@@ -846,12 +905,17 @@ impl WalManager {
     /// It persists any new events in the WAL, and deletes any old WAL files following an iceberg snapshot.
     ///
     /// iceberg snapshot info is None only if there has not been an iceberg snapshot yet.
+    /// TODO(Paul): Rename to persistent update async.
     pub async fn wal_persist_truncate_async(
         uuid: uuid::Uuid,
         prepare_persistent_update: PreparePersistentUpdate,
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         table_notify: Sender<TableEvent>,
     ) {
+        let mooncake_table_id = prepare_persistent_update
+            .persistent_wal_metadata
+            .get_mooncake_table_id();
+
         // Execute WAL operations
         let result = async {
             let file_system_accessor_persist = file_system_accessor.clone();
@@ -865,6 +929,7 @@ impl WalManager {
                     file_system_accessor_persist.clone(),
                     wal_events,
                     wal_file_info,
+                    mooncake_table_id,
                 )
                 .await?;
             }
@@ -881,6 +946,7 @@ impl WalManager {
                 WalManager::delete_files(
                     file_system_accessor_persist,
                     &prepare_persistent_update.files_to_delete,
+                    mooncake_table_id,
                 )
                 .await?;
             }
@@ -1025,19 +1091,24 @@ impl WalManager {
     // Drop WAL files
     // ------------------------------
     /// Drops all WAL files by removing the entire WAL directory for this table.
+    /// TODO(Paul): This should be reworked for object storage.
     pub async fn drop_wal(&mut self) -> Result<()> {
-        self.file_system_accessor.remove_directory("").await?;
+        self.file_system_accessor
+            .remove_directory(DEFAULT_WAL_FOLDER)
+            .await?;
         Ok(())
     }
 
     // ------------------------------
     // Recovery
     // ------------------------------
-    #[allow(dead_code)]
     pub async fn recover_from_persistent_wal_metadata(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+        wal_config: WalConfig,
     ) -> Option<PersistentWalMetadata> {
-        let metadata_file_name = WalManager::get_metadata_file_name();
+        let metadata_file_name = WalManager::get_metadata_file_path_for_mooncake_table(
+            wal_config.get_mooncake_table_id(),
+        );
         if !file_system_accessor
             .object_exists(&metadata_file_name)
             .await
@@ -1054,11 +1125,18 @@ impl WalManager {
         Some(serde_json::from_slice(&metadata_bytes).expect("failed to parse wal metadata"))
     }
 
-    #[allow(dead_code)]
     pub fn from_persistent_wal_metadata(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         persistent_wal_metadata: PersistentWalMetadata,
+        wal_config: WalConfig,
     ) -> Self {
+        // Validate that the mooncake_table_id in the config matches the one in metadata
+        assert_eq!(
+            wal_config.get_mooncake_table_id(),
+            persistent_wal_metadata.get_mooncake_table_id(),
+            "WalConfig mooncake_table_id must match PersistentWalMetadata mooncake_table_id"
+        );
+
         Self {
             in_mem_buf: Vec::new(),
             highest_completion_lsn: persistent_wal_metadata.highest_completion_lsn,
@@ -1067,17 +1145,15 @@ impl WalManager {
             active_transactions: persistent_wal_metadata.active_transactions,
             main_transaction_tracker: persistent_wal_metadata.main_transaction_tracker,
             file_system_accessor,
+            wal_config,
         }
     }
 
-    /// Recover the flushed WALs from the file system.
-    fn recover_flushed_wals(
+    /// Recover the flushed WALs from the file system as a stream of vectors of table events.
+    pub fn recover_flushed_wals(
         file_system_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_persistence_metadata: &PersistentWalMetadata,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<TableEvent>>> + Send>> {
-        if wal_persistence_metadata.live_wal_files_tracker.is_empty() {
-            return Box::pin(stream::empty());
-        }
         let start_file_number = wal_persistence_metadata
             .live_wal_files_tracker
             .first()
@@ -1088,10 +1164,15 @@ impl WalManager {
             .last()
             .unwrap()
             .file_number;
+        let mooncake_table_id = wal_persistence_metadata.get_mooncake_table_id().to_string();
         Box::pin(stream::unfold(start_file_number, move |file_number| {
             let file_system_accessor = file_system_accessor.clone();
+            let mooncake_table_id = mooncake_table_id.clone();
             async move {
-                let file_name = WalManager::get_file_name(file_number);
+                let file_name = WalManager::get_wal_file_path_for_mooncake_table(
+                    file_number,
+                    &mooncake_table_id,
+                );
                 if file_number > end_file_number {
                     return None;
                 }

@@ -100,8 +100,11 @@ pub async fn build_table_components(
 
     let wal_persistence_metadata = {
         if is_recovery {
-            let recovered_wal_metadata =
-                WalManager::recover_from_persistent_wal_metadata(wal_file_accessor.clone()).await;
+            let recovered_wal_metadata = WalManager::recover_from_persistent_wal_metadata(
+                wal_file_accessor.clone(),
+                wal_config.clone(),
+            )
+            .await;
             recovered_wal_metadata
         } else {
             None
@@ -112,6 +115,7 @@ pub async fn build_table_components(
         WalManager::from_persistent_wal_metadata(
             wal_file_accessor.clone(),
             wal_persistence_metadata,
+            wal_config.clone(),
         )
     } else {
         WalManager::new(&wal_config)

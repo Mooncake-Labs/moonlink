@@ -451,6 +451,8 @@ pub struct MooncakeTable {
 impl MooncakeTable {
     /// foreground functions
     ///
+    /// Note that wal manager is constructed outside of the constructor as
+    /// it may be recovered from persistent wal metadata.
     /// TODO(hjiang): Provide a struct to hold all parameters.
     #[allow(clippy::too_many_arguments)]
     pub async fn new(

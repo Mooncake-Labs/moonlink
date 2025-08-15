@@ -49,7 +49,6 @@ impl WalManager {
 
 // ================================================
 // Helper functions for WAL file manipulation
-// TODO(Paul): Rework these when implementing object storage WAL
 // ================================================
 
 pub async fn extract_file_contents(
@@ -63,10 +62,16 @@ pub async fn extract_file_contents(
 pub async fn get_wal_logs_from_files(
     file_ids: &[u64],
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    wal_config: &WalConfig,
 ) -> Vec<WalEvent> {
     let file_paths = file_ids
         .iter()
-        .map(|id| WalManager::get_file_name(*id))
+        .map(|id| {
+            WalManager::get_wal_file_path_for_mooncake_table(
+                *id,
+                wal_config.get_mooncake_table_id(),
+            )
+        })
         .collect::<Vec<String>>();
     let mut wal_events = Vec::new();
     for file_path in file_paths {
@@ -77,10 +82,14 @@ pub async fn get_wal_logs_from_files(
 }
 
 pub async fn wal_file_exists(
-    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
     file_number: u64,
+    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    wal_config: &WalConfig,
 ) -> bool {
-    let file_name = WalManager::get_file_name(file_number);
+    let file_name = WalManager::get_wal_file_path_for_mooncake_table(
+        file_number,
+        wal_config.get_mooncake_table_id(),
+    );
     file_system_accessor
         .object_exists(&file_name)
         .await
@@ -318,10 +327,14 @@ pub fn add_new_example_stream_abort_event(
 
 #[macro_export]
 macro_rules! assert_wal_file_exists {
-    ($file_system_accessor:expr, $file_number:expr) => {
+    ($file_number:expr, $file_system_accessor:expr, $wal_config:expr) => {
         assert!(
-            $crate::storage::wal::test_utils::wal_file_exists($file_system_accessor, $file_number)
-                .await,
+            $crate::storage::wal::test_utils::wal_file_exists(
+                $file_number,
+                $file_system_accessor,
+                $wal_config
+            )
+            .await,
             "File {} should exist",
             $file_number
         );
@@ -330,10 +343,14 @@ macro_rules! assert_wal_file_exists {
 
 #[macro_export]
 macro_rules! assert_wal_file_does_not_exist {
-    ($file_system_accessor:expr, $file_number:expr) => {
+    ($file_number:expr, $file_system_accessor:expr, $wal_config:expr) => {
         assert!(
-            !$crate::storage::wal::test_utils::wal_file_exists($file_system_accessor, $file_number)
-                .await,
+            !$crate::storage::wal::test_utils::wal_file_exists(
+                $file_number,
+                $file_system_accessor,
+                $wal_config
+            )
+            .await,
             "File {} should not exist",
             $file_number
         );
@@ -342,10 +359,11 @@ macro_rules! assert_wal_file_does_not_exist {
 
 #[macro_export]
 macro_rules! assert_wal_logs_equal {
-    ($file_ids:expr, $file_system_accessor:expr, $expected_events:expr) => {
+    ($file_ids:expr, $expected_events:expr, $file_system_accessor:expr, $wal_config:expr) => {
         let wal_events = $crate::storage::wal::test_utils::get_wal_logs_from_files(
             $file_ids,
             $file_system_accessor.clone(),
+            $wal_config,
         )
         .await;
         assert_eq!(wal_events, $expected_events);

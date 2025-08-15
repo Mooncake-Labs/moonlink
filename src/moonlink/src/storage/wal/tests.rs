@@ -12,16 +12,21 @@ async fn test_wal_insert_persist_files() {
     let context = TestContext::new("wal_persist");
     let wal_config =
         WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
-    let (mut wal, expected_events) = create_test_wal(wal_config).await;
+    let (mut wal, expected_events) = create_test_wal(wal_config.clone()).await;
 
     // Persist and verify file number
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // Check file exists and has content
-    assert_wal_file_exists!(wal.get_file_system_accessor(), 0);
+    assert_wal_file_exists!(0, wal.get_file_system_accessor(), &wal_config);
 
     let expected_wal_events = convert_to_wal_events_vector(&expected_events);
-    assert_wal_logs_equal!(&[0], wal.get_file_system_accessor(), expected_wal_events);
+    assert_wal_logs_equal!(
+        &[0],
+        expected_wal_events,
+        wal.get_file_system_accessor(),
+        &wal_config
+    );
 }
 
 #[tokio::test]
@@ -35,7 +40,7 @@ async fn test_wal_empty_persist() {
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // No file should be created for empty WAL
-    assert!(!wal_file_exists(wal.get_file_system_accessor(), 0).await);
+    assert!(!wal_file_exists(0, wal.get_file_system_accessor(), &wal_config).await);
 }
 
 #[tokio::test]
@@ -56,8 +61,13 @@ async fn test_wal_file_numbering_sequence() {
     // Second loop: check file existence and contents
     for i in 0..3 {
         let expected_wal_events = convert_to_wal_events_vector(&events[i as usize..=(i as usize)]);
-        assert_wal_file_exists!(wal.get_file_system_accessor(), i);
-        assert_wal_logs_equal!(&[i], wal.get_file_system_accessor(), expected_wal_events);
+        assert_wal_file_exists!(i, wal.get_file_system_accessor(), &wal_config);
+        assert_wal_logs_equal!(
+            &[i],
+            expected_wal_events,
+            wal.get_file_system_accessor(),
+            &wal_config
+        );
     }
 }
 
@@ -91,15 +101,20 @@ async fn test_wal_truncation_deletes_files() {
 
     // Verify files 0, 1, 2 are deleted
     for i in 0..3 {
-        assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), i);
+        assert_wal_file_does_not_exist!(i, wal.get_file_system_accessor(), &wal_config);
     }
 
     // Verify files 3, 4 still exist and contain correct content
     for i in 3..5 {
-        assert_wal_file_exists!(wal.get_file_system_accessor(), i);
+        assert_wal_file_exists!(i, wal.get_file_system_accessor(), &wal_config);
 
         let expected_events = convert_to_wal_events_vector(&events[i as usize..=(i as usize)]);
-        assert_wal_logs_equal!(&[i], wal.get_file_system_accessor(), expected_events);
+        assert_wal_logs_equal!(
+            &[i],
+            expected_events,
+            wal.get_file_system_accessor(),
+            &wal_config
+        );
     }
 }
 
@@ -136,8 +151,8 @@ async fn test_wal_truncation_deletes_all_files() {
         .unwrap(); // Higher than any LSN
 
     // check that the files are deleted
-    assert!(!wal_file_exists(wal.get_file_system_accessor(), 0).await);
-    assert!(!wal_file_exists(wal.get_file_system_accessor(), 1).await);
+    assert!(!wal_file_exists(0, wal.get_file_system_accessor(), &wal_config).await);
+    assert!(!wal_file_exists(1, wal.get_file_system_accessor(), &wal_config).await);
 }
 
 // ------------------------------------------------------------
@@ -164,7 +179,12 @@ async fn test_wal_truncate_incomplete_main_xact() {
         .unwrap();
 
     let expected_events = convert_to_wal_events_vector(&events);
-    assert_wal_logs_equal!(&[0], wal.get_file_system_accessor(), expected_events);
+    assert_wal_logs_equal!(
+        &[0],
+        expected_events,
+        wal.get_file_system_accessor(),
+        &wal_config
+    );
 }
 
 #[tokio::test]
@@ -197,12 +217,17 @@ async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
         .unwrap();
 
     // verify the first and second file are deleted
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 1);
-    assert_wal_file_exists!(wal.get_file_system_accessor(), 2);
+    assert_wal_file_does_not_exist!(0, wal.get_file_system_accessor(), &wal_config);
+    assert_wal_file_does_not_exist!(1, wal.get_file_system_accessor(), &wal_config);
+    assert_wal_file_exists!(2, wal.get_file_system_accessor(), &wal_config);
 
     let expected_events = convert_to_wal_events_vector(&events[6..]);
-    assert_wal_logs_equal!(&[2], wal.get_file_system_accessor(), expected_events);
+    assert_wal_logs_equal!(
+        &[2],
+        expected_events,
+        wal.get_file_system_accessor(),
+        &wal_config
+    );
 }
 
 #[tokio::test]
@@ -240,11 +265,16 @@ async fn test_wal_truncate_main_and_streaming_xact_interleave() {
         .unwrap();
 
     // we should only have file 1, 2 and 3
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
-    assert_wal_file_exists!(wal.get_file_system_accessor(), 1);
+    assert_wal_file_does_not_exist!(0, wal.get_file_system_accessor(), &wal_config);
+    assert_wal_file_exists!(1, wal.get_file_system_accessor(), &wal_config);
 
     let expected_events = convert_to_wal_events_vector(&events[1..]);
-    assert_wal_logs_equal!(&[1, 2, 3], wal.get_file_system_accessor(), expected_events);
+    assert_wal_logs_equal!(
+        &[1, 2, 3],
+        expected_events,
+        wal.get_file_system_accessor(),
+        &wal_config
+    );
 }
 
 #[tokio::test]
@@ -296,15 +326,20 @@ async fn test_wal_multiple_interleaved_truncations() {
     // main: 100 -> 101, 102 -> 103
 
     // we should only  have file 2 and 3
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 1);
+    assert_wal_file_does_not_exist!(0, wal.get_file_system_accessor(), &wal_config);
+    assert_wal_file_does_not_exist!(1, wal.get_file_system_accessor(), &wal_config);
 
-    assert_wal_file_exists!(wal.get_file_system_accessor(), 2);
-    assert_wal_file_exists!(wal.get_file_system_accessor(), 3);
+    assert_wal_file_exists!(2, wal.get_file_system_accessor(), &wal_config);
+    assert_wal_file_exists!(3, wal.get_file_system_accessor(), &wal_config);
 
     // truncate up to the main xact
     let expected_events = convert_to_wal_events_vector(&events[6..]);
-    assert_wal_logs_equal!(&[2, 3], wal.get_file_system_accessor(), expected_events);
+    assert_wal_logs_equal!(
+        &[2, 3],
+        expected_events,
+        wal.get_file_system_accessor(),
+        &wal_config
+    );
 }
 
 #[tokio::test]
@@ -339,14 +374,19 @@ async fn test_wal_stream_abort() {
         .unwrap();
 
     // we should only  have file 2 (abort should 'complete' transaction 1)
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 0);
-    assert_wal_file_does_not_exist!(wal.get_file_system_accessor(), 1);
+    assert_wal_file_does_not_exist!(0, wal.get_file_system_accessor(), &wal_config);
+    assert_wal_file_does_not_exist!(1, wal.get_file_system_accessor(), &wal_config);
 
-    assert_wal_file_exists!(wal.get_file_system_accessor(), 2);
+    assert_wal_file_exists!(2, wal.get_file_system_accessor(), &wal_config);
 
     // truncate up to the main xact
     let expected_events = convert_to_wal_events_vector(&events[5..]);
-    assert_wal_logs_equal!(&[2], wal.get_file_system_accessor(), expected_events);
+    assert_wal_logs_equal!(
+        &[2],
+        expected_events,
+        wal.get_file_system_accessor(),
+        &wal_config
+    );
 }
 
 #[tokio::test]
@@ -354,16 +394,18 @@ async fn test_wal_recovery_basic() {
     let context = TestContext::new("wal_recovery_basic");
     let wal_config =
         WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
-    let (mut wal, expected_events) = create_test_wal(wal_config).await;
+    let (mut wal, expected_events) = create_test_wal(wal_config.clone()).await;
 
     // Persist the events first
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // Recover events using flat stream
-    let wal_metadata =
-        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
-            .await
-            .unwrap();
+    let wal_metadata = WalManager::recover_from_persistent_wal_metadata(
+        wal.get_file_system_accessor(),
+        wal_config.clone(),
+    )
+    .await
+    .unwrap();
     let recovered_events =
         get_table_events_vector_recovery(wal.get_file_system_accessor(), &wal_metadata).await;
 
@@ -387,10 +429,12 @@ async fn test_main_tracker_merges_multiple_subset_commits_in_same_file() {
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // Read persisted metadata and verify the invariant
-    let metadata: PersistentWalMetadata =
-        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
-            .await
-            .expect("metadata should exist");
+    let metadata: PersistentWalMetadata = WalManager::recover_from_persistent_wal_metadata(
+        wal.get_file_system_accessor(),
+        wal_config.clone(),
+    )
+    .await
+    .expect("metadata should exist");
 
     let main = metadata.get_main_transaction_tracker();
     // Only one subset commit for file 0 should remain
@@ -431,10 +475,12 @@ async fn test_main_tracker_allows_one_spanning_and_one_subset_per_file() {
 
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
-    let metadata: PersistentWalMetadata =
-        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
-            .await
-            .expect("metadata should exist");
+    let metadata: PersistentWalMetadata = WalManager::recover_from_persistent_wal_metadata(
+        wal.get_file_system_accessor(),
+        wal_config.clone(),
+    )
+    .await
+    .expect("metadata should exist");
 
     let main = metadata.get_main_transaction_tracker();
     assert_eq!(main.len(), 2, "expected two commits tracked in total");
@@ -485,10 +531,12 @@ async fn test_main_tracker_keeps_highest_subset_commit_per_file() {
 
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
-    let metadata: PersistentWalMetadata =
-        WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
-            .await
-            .expect("metadata should exist");
+    let metadata: PersistentWalMetadata = WalManager::recover_from_persistent_wal_metadata(
+        wal.get_file_system_accessor(),
+        wal_config.clone(),
+    )
+    .await
+    .expect("metadata should exist");
 
     let main = metadata.get_main_transaction_tracker();
     assert_eq!(main.len(), 2, "expected two commits tracked in total");
@@ -539,7 +587,7 @@ async fn test_recovery_uses_metadata_as_source_of_truth_when_file_persisted_but_
         WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
 
     // Create initial WAL with a batch of events and persist (writes file 0 + metadata)
-    let (mut wal, expected_events_file0) = create_test_wal(wal_config).await;
+    let (mut wal, expected_events_file0) = create_test_wal(wal_config.clone()).await;
     wal.do_wal_persistence_update_for_test(None).await.unwrap();
 
     // Prepare a second batch and simulate crash after persisting the file but before metadata
@@ -558,14 +606,18 @@ async fn test_recovery_uses_metadata_as_source_of_truth_when_file_persisted_but_
         wal.get_file_system_accessor(),
         &wal_events_file1,
         &wal_file_info_file1,
+        wal_config.get_mooncake_table_id(),
     )
     .await
     .unwrap();
 
     // Metadata on disk should still reflect only file 0
-    let metadata = WalManager::recover_from_persistent_wal_metadata(wal.get_file_system_accessor())
-        .await
-        .expect("metadata should exist for file 0");
+    let metadata = WalManager::recover_from_persistent_wal_metadata(
+        wal.get_file_system_accessor(),
+        wal_config.clone(),
+    )
+    .await
+    .expect("metadata should exist for file 0");
 
     // Now perform recovery using the metadata as source of truth
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TableEvent>(100);
