@@ -291,6 +291,7 @@ impl MoonlinkBackend {
 
     /// Wait for the WAL flush LSN to reach the requested LSN. Note that WAL flush LSN will update
     /// up till the latest commit that has been persisted in to the WAL.
+    #[cfg(feature = "test-utils")]
     pub async fn wait_for_wal_flush(&self, schema: String, table: String, lsn: u64) -> Result<()> {
         let mut manager = self.replication_manager.write().await;
         let mooncake_table_id = MooncakeTableId { schema, table };

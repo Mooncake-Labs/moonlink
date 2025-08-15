@@ -8,6 +8,7 @@ license = { workspace = true }
 default = ["storage-fs"]
 
 profiling = ["console-subscriber"]
+test-utils = []
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]

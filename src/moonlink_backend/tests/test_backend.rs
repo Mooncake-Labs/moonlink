@@ -353,6 +353,7 @@ mod tests {
     }
 
     /// Multiple failures and recovery from just the WAL
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_only() {
@@ -437,6 +438,7 @@ mod tests {
     }
 
     /// Tests recovery when postgres replay LSN is running behind WAL and we have to de-duplicate events.
+    #[cfg(feature = "test-utils")]
     #[rstest]
     #[case::no_iceberg_snapshot(false)]
     #[case::with_iceberg_snapshot(true)]
@@ -560,6 +562,7 @@ mod tests {
 
     /// Tests recovery when postgres has events that were created
     /// when the backend was not running.
+    #[cfg(feature = "test-utils")]
     #[rstest]
     #[case::no_iceberg_snapshot(false)]
     #[case::with_iceberg_snapshot(true)]
@@ -649,6 +652,7 @@ mod tests {
     /// Multiple failures and recovery interleaving WAL and iceberg snapshot
     /// Tests case where WAL and iceberg snapshot have captured the same events
     /// and case when WAL has captured more events than the iceberg snapshot
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_and_iceberg_snapshot() {
@@ -750,6 +754,7 @@ mod tests {
     }
 
     /// Test scenario: perform a few requests on non-existent databases and tables, make sure error is correctly propagated.
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_on_non_existent_table() {
