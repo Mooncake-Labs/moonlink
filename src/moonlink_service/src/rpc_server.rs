@@ -14,7 +14,7 @@ use tracing::info;
 
 /// Start the Unix socket RPC server and serve requests until the task is aborted.
 pub async fn start_unix_server(
-    backend: Arc<MoonlinkBackend<u32, u32>>,
+    backend: Arc<MoonlinkBackend>,
     socket_path: std::path::PathBuf,
 ) -> Result<()> {
     if fs::metadata(&socket_path).await.is_ok() {
@@ -46,12 +46,7 @@ pub async fn start_unix_server(
 }
 
 /// Start the TCP socket RPC server and serve requests until the task is aborted.
-///
-/// TODO(hjiang): Better error handling.
-pub async fn start_tcp_server(
-    backend: Arc<MoonlinkBackend<u32, u32>>,
-    addr: SocketAddr,
-) -> Result<()> {
+pub async fn start_tcp_server(backend: Arc<MoonlinkBackend>, addr: SocketAddr) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("Moonlink RPC server listening on TCP: {}", addr);
 
@@ -74,7 +69,7 @@ pub async fn start_tcp_server(
     }
 }
 
-async fn handle_stream<S>(backend: Arc<MoonlinkBackend<u32, u32>>, mut stream: S) -> Result<()>
+async fn handle_stream<S>(backend: Arc<MoonlinkBackend>, mut stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -82,20 +77,13 @@ where
     loop {
         let request = read(&mut stream).await?;
         match request {
-            Request::CreateSnapshot {
-                database_id,
-                table_id,
-                lsn,
-            } => {
-                backend
-                    .create_snapshot(database_id, table_id, lsn)
-                    .await
-                    .unwrap();
+            Request::CreateSnapshot { schema, table, lsn } => {
+                backend.create_snapshot(schema, table, lsn).await.unwrap();
                 write(&mut stream, &()).await?;
             }
             Request::CreateTable {
-                database_id,
-                table_id,
+                schema,
+                table,
                 src,
                 src_uri,
                 table_config,
@@ -103,8 +91,8 @@ where
                 // Use default mooncake config, and local filesystem for storage layer.
                 backend
                     .create_table(
-                        database_id,
-                        table_id,
+                        schema,
+                        table,
                         src,
                         src_uri,
                         table_config,
@@ -114,18 +102,12 @@ where
                     .unwrap();
                 write(&mut stream, &()).await?;
             }
-            Request::DropTable {
-                database_id,
-                table_id,
-            } => {
-                backend.drop_table(database_id, table_id).await;
+            Request::DropTable { schema, table } => {
+                backend.drop_table(schema, table).await;
                 write(&mut stream, &()).await?;
             }
-            Request::GetTableSchema {
-                database_id,
-                table_id,
-            } => {
-                let schema = backend.get_table_schema(database_id, table_id).await?;
+            Request::GetTableSchema { schema, table } => {
+                let schema = backend.get_table_schema(schema, table).await?;
                 let writer = StreamWriter::try_new(vec![], &schema)?;
                 let data = writer.into_inner()?;
                 write(&mut stream, &data).await?;
@@ -135,8 +117,8 @@ where
                 let tables: Vec<Table> = tables
                     .into_iter()
                     .map(|table| Table {
-                        database_id: table.database_id,
-                        table_id: table.table_id,
+                        schema: table.schema,
+                        table: table.table,
                         commit_lsn: table.commit_lsn,
                         flush_lsn: table.flush_lsn,
                         iceberg_warehouse_location: table.iceberg_warehouse_location,
@@ -145,33 +127,23 @@ where
                 write(&mut stream, &tables).await?;
             }
             Request::OptimizeTable {
-                database_id,
-                table_id,
+                schema,
+                table,
                 mode,
             } => {
-                backend
-                    .optimize_table(database_id, table_id, &mode)
-                    .await
-                    .unwrap();
+                backend.optimize_table(schema, table, &mode).await.unwrap();
                 write(&mut stream, &()).await?;
             }
-            Request::ScanTableBegin {
-                database_id,
-                table_id,
-                lsn,
-            } => {
+            Request::ScanTableBegin { schema, table, lsn } => {
                 let state = backend
-                    .scan_table(database_id, table_id, Some(lsn))
+                    .scan_table(schema.to_string(), table.to_string(), Some(lsn))
                     .await
                     .unwrap();
                 write(&mut stream, &state.data).await?;
-                assert!(map.insert((database_id, table_id), state).is_none());
+                assert!(map.insert((schema, table), state).is_none());
             }
-            Request::ScanTableEnd {
-                database_id,
-                table_id,
-            } => {
-                assert!(map.remove(&(database_id, table_id)).is_some());
+            Request::ScanTableEnd { schema, table } => {
+                assert!(map.remove(&(schema, table)).is_some());
                 write(&mut stream, &()).await?;
             }
         }

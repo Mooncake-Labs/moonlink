@@ -6,7 +6,7 @@ use crate::pg_replicate::{
 };
 use moonlink::TableEvent;
 use postgres_replication::protocol::Column as ReplicationColumn;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
@@ -17,7 +17,12 @@ use tracing::{debug, warn};
 #[derive(Default)]
 struct TransactionState {
     final_lsn: u64,
-    touched_tables: HashSet<SrcTableId>,
+    /// Distinct tables touched in this transaction/stream, in first-touch order.
+    touched_tables: Vec<SrcTableId>,
+    /// Tracks the last table touched within
+    /// this transaction/stream to avoid redundant inserts into `touched_tables` when consecutive rows
+    /// target the same table.
+    last_touched_table: Option<SrcTableId>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -33,6 +38,12 @@ pub struct Sink {
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
     relation_cache: HashMap<SrcTableId, Vec<ColumnInfo>>,
+    /// Cached sender for the last table used on the hot path.
+    /// Avoids a HashMap lookup when consecutive rows target the same table.
+    cached_event_sender: Option<(SrcTableId, Sender<TableEvent>)>,
+    /// Streaming hot-path cache of the last processed (xid, table_id, lsn).
+    /// Skips streaming state lookup when the next row has the same xid and table.
+    streaming_last_key: Option<(u32, SrcTableId, u64)>,
 }
 
 impl Sink {
@@ -53,10 +64,13 @@ impl Sink {
             streaming_transactions_state: HashMap::new(),
             transaction_state: TransactionState {
                 final_lsn: 0,
-                touched_tables: HashSet::new(),
+                touched_tables: Vec::new(),
+                last_touched_table: None,
             },
             replication_state,
             relation_cache: HashMap::new(),
+            cached_event_sender: None,
+            streaming_last_key: None,
         }
     }
 }
@@ -87,6 +101,11 @@ impl Sink {
     pub fn drop_table(&mut self, src_table_id: SrcTableId) {
         self.event_senders.remove(&src_table_id).unwrap();
         self.commit_lsn_txs.remove(&src_table_id).unwrap();
+        if let Some((cached_id, _)) = &self.cached_event_sender {
+            if *cached_id == src_table_id {
+                self.cached_event_sender = None;
+            }
+        }
     }
 
     pub async fn alter_table(&mut self, src_table_id: SrcTableId, table_schema: &TableSchema) {
@@ -115,19 +134,48 @@ impl Sink {
     }
     /// Get final lsn for the current transaction.
     fn get_final_lsn(&mut self, table_id: SrcTableId, xact_id: Option<u32>) -> u64 {
-        if let Some(xid) = xact_id {
-            self.streaming_transactions_state
-                .entry(xid)
-                .or_default()
-                .touched_tables
-                .insert(table_id);
-            self.streaming_transactions_state
-                .get(&xid)
-                .unwrap()
-                .final_lsn
+        match xact_id {
+            Some(xid) => {
+                if let Some((last_xid, last_table, cached_lsn)) = self.streaming_last_key {
+                    if last_xid == xid && last_table == table_id {
+                        return cached_lsn;
+                    }
+                }
+                let state = self.streaming_transactions_state.entry(xid).or_default();
+                if state.last_touched_table != Some(table_id) {
+                    if !state.touched_tables.contains(&table_id) {
+                        state.touched_tables.push(table_id);
+                    }
+                    state.last_touched_table = Some(table_id);
+                }
+                let lsn = state.final_lsn;
+                self.streaming_last_key = Some((xid, table_id, lsn));
+                lsn
+            }
+            None => {
+                if self.transaction_state.last_touched_table != Some(table_id) {
+                    if !self.transaction_state.touched_tables.contains(&table_id) {
+                        self.transaction_state.touched_tables.push(table_id);
+                    }
+                    self.transaction_state.last_touched_table = Some(table_id);
+                }
+                self.transaction_state.final_lsn
+            }
+        }
+    }
+
+    fn get_event_sender_for(&mut self, table_id: SrcTableId) -> Option<&Sender<TableEvent>> {
+        if let Some((cached_id, _)) = &self.cached_event_sender {
+            if *cached_id == table_id {
+                return self.cached_event_sender.as_ref().map(|(_, s)| s);
+            }
+        }
+        let sender = self.event_senders.get(&table_id).cloned();
+        if let Some(sender) = sender {
+            self.cached_event_sender = Some((table_id, sender));
+            self.cached_event_sender.as_ref().map(|(_, s)| s)
         } else {
-            self.transaction_state.touched_tables.insert(table_id);
-            self.transaction_state.final_lsn
+            None
         }
     }
 
@@ -139,6 +187,8 @@ impl Sink {
             CdcEvent::Begin(begin_body) => {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
                 self.transaction_state.final_lsn = begin_body.final_lsn();
+                self.transaction_state.last_touched_table = None;
+                self.streaming_last_key = None;
             }
             CdcEvent::StreamStart(stream_start_body) => {
                 debug!(stream_id = stream_start_body.xid(), "stream start");
@@ -146,7 +196,7 @@ impl Sink {
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 for table_id in &self.transaction_state.touched_tables {
-                    let event_sender = self.event_senders.get(table_id).cloned();
+                    let event_sender = self.event_senders.get(table_id);
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
                         if let Err(e) = commit_lsn_tx.send(commit_body.end_lsn()) {
                             warn!(error = ?e, "failed to send commit lsn");
@@ -154,7 +204,7 @@ impl Sink {
                     }
                     if let Some(event_sender) = event_sender {
                         if let Err(e) = Self::send_table_event(
-                            &event_sender,
+                            event_sender,
                             TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
@@ -168,6 +218,8 @@ impl Sink {
                     }
                 }
                 self.transaction_state.touched_tables.clear();
+                self.transaction_state.last_touched_table = None;
+                self.streaming_last_key = None;
                 self.replication_state
                     .mark(PgLsn::from(commit_body.end_lsn()));
             }
@@ -180,7 +232,7 @@ impl Sink {
                 );
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
-                        let event_sender = self.event_senders.get(table_id).cloned();
+                        let event_sender = self.event_senders.get(table_id);
                         if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
                             if let Err(e) = commit_lsn_tx.send(stream_commit_body.end_lsn()) {
                                 warn!(error = ?e, "failed to send stream commit lsn");
@@ -188,7 +240,7 @@ impl Sink {
                         }
                         if let Some(event_sender) = event_sender {
                             if let Err(e) = Self::send_table_event(
-                                &event_sender,
+                                event_sender,
                                 TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
@@ -203,15 +255,15 @@ impl Sink {
                     }
                     self.streaming_transactions_state.remove(&xact_id);
                 }
+                self.streaming_last_key = None;
                 self.replication_state
                     .mark(PgLsn::from(stream_commit_body.end_lsn()));
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                let event_sender = self.event_senders.get(&table_id).cloned();
-                if let Some(event_sender) = event_sender {
+                if let Some(event_sender) = self.get_event_sender_for(table_id) {
                     if let Err(e) = Self::send_table_event(
-                        &event_sender,
+                        event_sender,
                         TableEvent::Append {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
@@ -224,23 +276,13 @@ impl Sink {
                     {
                         warn!(error = ?e, "failed to send append event");
                     }
-                    if let Some(xid) = xact_id {
-                        self.streaming_transactions_state
-                            .entry(xid)
-                            .or_default()
-                            .touched_tables
-                            .insert(table_id);
-                    } else {
-                        self.transaction_state.touched_tables.insert(table_id);
-                    }
                 }
             }
             CdcEvent::Update((table_id, old_table_row, new_table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                let event_sender = self.event_senders.get(&table_id).cloned();
-                if let Some(event_sender) = event_sender {
+                if let Some(event_sender) = self.get_event_sender_for(table_id) {
                     if let Err(e) = Self::send_table_event(
-                        &event_sender,
+                        event_sender,
                         TableEvent::Delete {
                             row: PostgresTableRow(old_table_row.unwrap()).into(),
                             lsn: final_lsn,
@@ -253,7 +295,7 @@ impl Sink {
                         warn!(error = ?e, "failed to send delete event");
                     }
                     if let Err(e) = Self::send_table_event(
-                        &event_sender,
+                        event_sender,
                         TableEvent::Append {
                             row: PostgresTableRow(new_table_row).into(),
                             lsn: final_lsn,
@@ -270,10 +312,9 @@ impl Sink {
             }
             CdcEvent::Delete((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                let event_sender = self.event_senders.get(&table_id).cloned();
-                if let Some(event_sender) = event_sender {
+                if let Some(event_sender) = self.get_event_sender_for(table_id) {
                     if let Err(e) = Self::send_table_event(
-                        &event_sender,
+                        event_sender,
                         TableEvent::Delete {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
@@ -321,10 +362,9 @@ impl Sink {
                 warn!(xact_id, "stream transaction aborted");
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
-                        let event_sender = self.event_senders.get(table_id).cloned();
-                        if let Some(event_sender) = event_sender {
+                        if let Some(event_sender) = self.event_senders.get(table_id) {
                             if let Err(e) = Self::send_table_event(
-                                &event_sender,
+                                event_sender,
                                 TableEvent::StreamAbort {
                                     xact_id,
                                     is_recovery: false,
@@ -339,8 +379,341 @@ impl Sink {
                     }
                 }
                 self.streaming_transactions_state.remove(&xact_id);
+                self.streaming_last_key = None;
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pg_replicate::conversions::table_row::TableRow;
+    use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableName};
+    use tokio::sync::{mpsc, watch};
+    use tokio_postgres::types::Type;
+
+    fn make_table_schema(src_table_id: SrcTableId) -> TableSchema {
+        TableSchema {
+            table_name: TableName {
+                schema: "public".into(),
+                name: format!("t_{src_table_id}"),
+            },
+            src_table_id,
+            column_schemas: vec![ColumnSchema {
+                name: "id".into(),
+                typ: Type::INT4,
+                modifier: 0,
+                nullable: false,
+            }],
+            lookup_key: LookupKey::FullRow,
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_path_streaming_caches_and_dedupes() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        // Setup one table with event sender and commit lsn channel
+        let table_id: SrcTableId = 1;
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(64);
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        let schema = make_table_schema(table_id);
+        sink.add_table(table_id, tx, commit_tx, &schema);
+
+        // Many inserts for the same (xid, table) pair
+        let xid = Some(42u32);
+        let rows = 10usize;
+        for _ in 0..rows {
+            let _ = sink
+                .process_cdc_event(CdcEvent::Insert((
+                    table_id,
+                    TableRow { values: vec![] },
+                    xid,
+                )))
+                .await
+                .unwrap();
+        }
+
+        // Verify we only touched the table once in the streaming transaction state
+        let state = sink
+            .streaming_transactions_state
+            .get(&xid.unwrap())
+            .expect("streaming state present");
+        assert_eq!(state.touched_tables, vec![table_id]);
+        assert_eq!(state.last_touched_table, Some(table_id));
+
+        // Verify micro-cache captured the last (xid, table)
+        assert_eq!(sink.streaming_last_key, Some((xid.unwrap(), table_id, 0)));
+
+        // Verify all Append events were emitted
+        let mut append_count = 0;
+        for _ in 0..rows {
+            match rx.recv().await.expect("event") {
+                TableEvent::Append { .. } => append_count += 1,
+                ev => panic!("unexpected event: {ev:?}"),
+            }
+        }
+        assert_eq!(append_count, rows);
+    }
+
+    #[tokio::test]
+    async fn hot_path_non_streaming_vec_dedupe_across_tables() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        // Two tables
+        let a: SrcTableId = 11;
+        let b: SrcTableId = 12;
+        let (tx_a, mut rx_a) = mpsc::channel::<TableEvent>(8);
+        let (tx_b, mut rx_b) = mpsc::channel::<TableEvent>(8);
+        let (commit_tx_a, _rx_a) = watch::channel::<u64>(0);
+        let (commit_tx_b, _rx_b) = watch::channel::<u64>(0);
+        sink.add_table(a, tx_a, commit_tx_a, &make_table_schema(a));
+        sink.add_table(b, tx_b, commit_tx_b, &make_table_schema(b));
+
+        // Many inserts into A then into B within the same non-streaming transaction
+        for _ in 0..5 {
+            let _ = sink
+                .process_cdc_event(CdcEvent::Insert((a, TableRow { values: vec![] }, None)))
+                .await
+                .unwrap();
+        }
+        for _ in 0..7 {
+            let _ = sink
+                .process_cdc_event(CdcEvent::Insert((b, TableRow { values: vec![] }, None)))
+                .await
+                .unwrap();
+        }
+
+        // Touched tables deduped: should contain both a and b exactly once
+        assert_eq!(sink.transaction_state.touched_tables, vec![a, b]);
+        assert_eq!(sink.transaction_state.last_touched_table, Some(b));
+
+        // Drain a few events to ensure they were emitted to each table
+        for _ in 0..5 {
+            matches!(rx_a.recv().await.unwrap(), TableEvent::Append { .. });
+        }
+        for _ in 0..7 {
+            matches!(rx_b.recv().await.unwrap(), TableEvent::Append { .. });
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_sender_cleared_on_drop_table() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        let table_id: SrcTableId = 21;
+        let (tx, _rx) = mpsc::channel::<TableEvent>(4);
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
+
+        // Populate sender cache
+        let _ = sink.get_event_sender_for(table_id);
+        assert!(sink.cached_event_sender.is_some());
+
+        // Drop table clears cache
+        sink.drop_table(table_id);
+        assert!(sink.cached_event_sender.is_none());
+    }
+
+    #[tokio::test]
+    async fn interleaved_streams_do_not_use_stale_cache() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        let table_id: SrcTableId = 31;
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(16);
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
+
+        let xid1 = Some(100u32);
+        let xid2 = Some(200u32);
+
+        // First insert with xid1 establishes cache
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((
+                table_id,
+                TableRow { values: vec![] },
+                xid1,
+            )))
+            .await
+            .unwrap();
+        assert_eq!(sink.streaming_last_key, Some((xid1.unwrap(), table_id, 0)));
+        // Insert with xid2 must not use xid1 cache; updates cache to xid2
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((
+                table_id,
+                TableRow { values: vec![] },
+                xid2,
+            )))
+            .await
+            .unwrap();
+        assert_eq!(sink.streaming_last_key, Some((xid2.unwrap(), table_id, 0)));
+        // Back to xid1 updates cache back to xid1
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((
+                table_id,
+                TableRow { values: vec![] },
+                xid1,
+            )))
+            .await
+            .unwrap();
+        assert_eq!(sink.streaming_last_key, Some((xid1.unwrap(), table_id, 0)));
+
+        // Drain events to avoid channel overflow
+        for _ in 0..3 {
+            matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
+        }
+
+        // Both xids have independent touched_tables containing table_id exactly once
+        assert_eq!(
+            sink.streaming_transactions_state
+                .get(&xid1.unwrap())
+                .map(|s| s.touched_tables.clone()),
+            Some(vec![table_id])
+        );
+        assert_eq!(
+            sink.streaming_transactions_state
+                .get(&xid2.unwrap())
+                .map(|s| s.touched_tables.clone()),
+            Some(vec![table_id])
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_updates_on_table_change_same_xid() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        let a: SrcTableId = 41;
+        let b: SrcTableId = 42;
+        let (tx_a, mut rx_a) = mpsc::channel::<TableEvent>(8);
+        let (tx_b, mut rx_b) = mpsc::channel::<TableEvent>(8);
+        let (commit_tx_a, _rx_a) = watch::channel::<u64>(0);
+        let (commit_tx_b, _rx_b) = watch::channel::<u64>(0);
+        sink.add_table(a, tx_a, commit_tx_a, &make_table_schema(a));
+        sink.add_table(b, tx_b, commit_tx_b, &make_table_schema(b));
+
+        let xid = Some(777u32);
+        // A then B under same xid
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((a, TableRow { values: vec![] }, xid)))
+            .await
+            .unwrap();
+        assert_eq!(sink.streaming_last_key, Some((xid.unwrap(), a, 0)));
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((b, TableRow { values: vec![] }, xid)))
+            .await
+            .unwrap();
+        assert_eq!(sink.streaming_last_key, Some((xid.unwrap(), b, 0)));
+
+        // Dedup holds each table once
+        let state = sink
+            .streaming_transactions_state
+            .get(&xid.unwrap())
+            .expect("state");
+        assert_eq!(state.touched_tables, vec![a, b]);
+        assert_eq!(state.last_touched_table, Some(b));
+
+        // Drain events
+        matches!(rx_a.recv().await.unwrap(), TableEvent::Append { .. });
+        matches!(rx_b.recv().await.unwrap(), TableEvent::Append { .. });
+    }
+
+    #[tokio::test]
+    async fn sender_cache_persists_across_xid_and_stream_like_boundaries() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        let table_id: SrcTableId = 51;
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
+
+        let xid1 = Some(1u32);
+        let xid2 = Some(2u32);
+
+        // First insert populates sender cache
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((
+                table_id,
+                TableRow { values: vec![] },
+                xid1,
+            )))
+            .await
+            .unwrap();
+        assert!(sink.cached_event_sender.is_some());
+
+        // Simulate a chunk boundary by doing nothing; next insert with different xid should reuse sender cache
+        let _ = sink
+            .process_cdc_event(CdcEvent::Insert((
+                table_id,
+                TableRow { values: vec![] },
+                xid2,
+            )))
+            .await
+            .unwrap();
+        assert!(sink.cached_event_sender.is_some());
+
+        // Drain events
+        for _ in 0..2 {
+            matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
+        }
+    }
+
+    #[tokio::test]
+    async fn non_streaming_state_resets_between_transactions() {
+        let replication_state = ReplicationState::new();
+        let mut sink = Sink::new(replication_state);
+
+        let table_id: SrcTableId = 61;
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
+
+        // First transaction: several inserts (non-streaming)
+        for _ in 0..3 {
+            let _ = sink
+                .process_cdc_event(CdcEvent::Insert((
+                    table_id,
+                    TableRow { values: vec![] },
+                    None,
+                )))
+                .await
+                .unwrap();
+        }
+        assert_eq!(sink.transaction_state.touched_tables, vec![table_id]);
+        assert_eq!(sink.transaction_state.last_touched_table, Some(table_id));
+        assert!(sink.cached_event_sender.is_some());
+        for _ in 0..3 {
+            matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
+        }
+
+        // Simulate commit boundary: reset non-streaming state
+        sink.transaction_state.touched_tables.clear();
+        sink.transaction_state.last_touched_table = None;
+
+        // Second transaction: inserts again, should behave like fresh state
+        for _ in 0..2 {
+            let _ = sink
+                .process_cdc_event(CdcEvent::Insert((
+                    table_id,
+                    TableRow { values: vec![] },
+                    None,
+                )))
+                .await
+                .unwrap();
+        }
+        assert_eq!(sink.transaction_state.touched_tables, vec![table_id]);
+        assert_eq!(sink.transaction_state.last_touched_table, Some(table_id));
+        // Sender cache should remain usable across transactions
+        assert!(sink.cached_event_sender.is_some());
+        for _ in 0..2 {
+            matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
+        }
     }
 }

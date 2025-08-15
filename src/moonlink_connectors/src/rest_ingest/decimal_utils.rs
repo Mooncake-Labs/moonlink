@@ -3,18 +3,26 @@ use bigdecimal::BigDecimal;
 use moonlink::row::RowValue;
 use num_traits::Signed;
 use std::convert::TryInto;
+use std::num::TryFromIntError;
 use std::str::FromStr;
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum DecimalConversionError {
-    #[error("Decimal normalization precision failed (value: {value}, parsed precision: {parsed_precision})")]
+    #[error("Decimal normalization precision failed (value: {value}, parsed precision: {parsed_precision}, err: {error})")]
     NormalizationPrecision {
         value: String,
         parsed_precision: usize,
+        #[source]
+        error: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("Decimal normalization scale failed (value: {value}, parsed scale: {parsed_scale})")]
-    NormalizationScale { value: String, parsed_scale: i64 },
+    #[error("Decimal normalization scale failed (value: {value}, parsed scale: {parsed_scale}, err: {error})")]
+    NormalizationScale {
+        value: String,
+        parsed_scale: i64,
+        #[source]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("Decimal precision exceeds the specified precision (value: {value}, expected ≤ {expected_precision}, actual {actual_precision})")]
     PrecisionOutOfRange {
         value: String,
@@ -33,12 +41,20 @@ pub enum DecimalConversionError {
         expected_len: i8,
         actual_len: i8,
     },
-    #[error("Decimal value is invalid: {value})")]
-    InvalidValue { value: String },
+    #[error("Decimal value is invalid: {value}, err: {error}")]
+    InvalidValue {
+        value: String,
+        #[source]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("Decimal scale is unsupported: {value})")]
     UnsupportedScale { value: String },
-    #[error("Decimal mantissa overflow: {mantissa}, error: {err_msg}")]
-    Overflow { mantissa: String, err_msg: String },
+    #[error("Decimal mantissa overflow: {mantissa}, error: {error}")]
+    Overflow {
+        mantissa: String,
+        #[source]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 pub fn convert_decimal_to_row_value(
@@ -46,10 +62,12 @@ pub fn convert_decimal_to_row_value(
     precision: u8,
     scale: i8,
 ) -> Result<RowValue, DecimalConversionError> {
-    let decimal =
-        BigDecimal::from_str(value).map_err(|_| DecimalConversionError::InvalidValue {
+    let decimal = BigDecimal::from_str(value).map_err(|e: bigdecimal::ParseBigDecimalError| {
+        DecimalConversionError::InvalidValue {
             value: value.to_string(),
-        })?;
+            error: Box::new(e),
+        }
+    })?;
     let (mut decimal_mantissa, decimal_scale) = decimal.as_bigint_and_exponent();
     // Consider the negative sign
     let decimal_precision = if decimal_mantissa.is_negative() {
@@ -58,19 +76,21 @@ pub fn convert_decimal_to_row_value(
         decimal_mantissa.to_string().len()
     };
 
-    let actual_decimal_precision: u8 = decimal_precision.try_into().map_err(|_| {
-        DecimalConversionError::NormalizationPrecision {
+    let actual_decimal_precision: u8 =
+        decimal_precision.try_into().map_err(|e: TryFromIntError| {
+            DecimalConversionError::NormalizationPrecision {
+                value: value.to_string(),
+                parsed_precision: decimal_precision,
+                error: Box::new(e),
+            }
+        })?;
+    let actual_decimal_scale: i8 = decimal_scale.try_into().map_err(|e: TryFromIntError| {
+        DecimalConversionError::NormalizationScale {
             value: value.to_string(),
-            parsed_precision: decimal_precision,
+            parsed_scale: decimal_scale,
+            error: Box::new(e),
         }
     })?;
-    let actual_decimal_scale: i8 =
-        decimal_scale
-            .try_into()
-            .map_err(|_| DecimalConversionError::NormalizationScale {
-                value: value.to_string(),
-                parsed_scale: decimal_scale,
-            })?;
 
     // TODO: block the scale if it is negative
     if scale <= 0 {
@@ -117,7 +137,7 @@ pub fn convert_decimal_to_row_value(
             .map_err(
                 |e: TryFromBigIntError<()>| DecimalConversionError::Overflow {
                     mantissa: decimal_mantissa.to_string(),
-                    err_msg: e.to_string(),
+                    error: Box::new(e),
                 },
             )?;
     Ok(RowValue::Decimal(actual_decimal_mantissa))
@@ -135,8 +155,9 @@ mod tests {
         let scale = 2;
         let err = convert_decimal_to_row_value(invalid_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::InvalidValue { value } => {
+            DecimalConversionError::InvalidValue { value, error } => {
                 assert_eq!(value, invalid_value.to_string());
+                assert!(error.to_string().contains("invalid digit found in string"));
             }
             _ => panic!("Expected an InvalidValue error, but got a different variant: {err:?}"),
         }
@@ -256,9 +277,12 @@ mod tests {
         let scale = 3;
         let err = convert_decimal_to_row_value(overflow_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::Overflow { mantissa, err_msg } => {
+            DecimalConversionError::Overflow { mantissa, error } => {
                 assert_eq!(mantissa, "1234567890123456789012345678901234567789");
-                assert!(err_msg.contains("out of range")); // Ensure the error message contains means it is out of range
+                assert!(
+                    error.is::<TryFromBigIntError<()>>(),
+                    "The source error of Overflow should be TryFromBigIntError"
+                );
             }
             _ => panic!("Expected an Overflow error, but got a different variant: {err:?}"),
         }
@@ -270,9 +294,12 @@ mod tests {
         let err =
             convert_decimal_to_row_value(overflow_negative_value, precision, scale).unwrap_err();
         match err {
-            DecimalConversionError::Overflow { mantissa, err_msg } => {
+            DecimalConversionError::Overflow { mantissa, error } => {
                 assert_eq!(mantissa, "-1234567890123456789012345678901234567789");
-                assert!(err_msg.contains("out of range")); // Ensure the error message contains means it is out of range
+                assert!(
+                    error.is::<TryFromBigIntError<()>>(),
+                    "The source error of Overflow should be TryFromBigIntError"
+                );
             }
             _ => panic!("Expected an Overflow error, but got a different variant: {err:?}"),
         }

@@ -4323,6 +4323,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-replication",
  "serde_json",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.14",
  "tokio",

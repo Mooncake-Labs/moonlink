@@ -1,0 +1,53 @@
+name: Label community PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label PRs from external contributors
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const labelName = 'community';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request;
+
+            const prNumber = pr.number;
+            const author = pr.user.login;
+            const assoc = pr.author_association; // OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIMER, NONE
+            const existing = new Set((pr.labels || []).map(l => l.name));
+
+            core.info(`PR #${prNumber} by @${author}, author_association=${assoc}`);
+            core.info(`Existing labels: ${Array.from(existing).join(', ') || '(none)'}`);
+
+            // Internal authors shouldn't get "community"
+            const isInternal = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(assoc);
+            if (isInternal) {
+              core.info('Internal author; not adding label.');
+              return;
+            }
+
+            // External contributors: add the label if not present
+            if (existing.has(labelName)) {
+              core.info(`"${labelName}" already present; nothing to do.`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: prNumber,
+              labels: [labelName],
+            });
+            core.info(`Added label "${labelName}" to PR #${prNumber}.`);

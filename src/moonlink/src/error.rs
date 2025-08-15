@@ -21,26 +21,18 @@ pub enum Error {
     #[error("{0}")]
     Parquet(ErrorStruct),
 
-    #[error("Transaction {0} not found")]
-    TransactionNotFound(u32),
-
     #[error("{0}")]
     WatchChannelRecvError(ErrorStruct),
-
-    #[error("Tokio join error: {0}. This typically occurs when a spawned task fails to complete successfully. Check the task's execution or panic status for more details.")]
-    TokioJoinError(String),
 
     #[error("{0}")]
     IcebergError(ErrorStruct),
 
+    // TODO(hjiang): Improve error propagation.
     #[error("Iceberg error: {0}")]
     IcebergMessage(String),
 
     #[error("{0}")]
     OpenDal(ErrorStruct),
-
-    #[error("UTF-8 conversion error: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
 
     #[error("{0}")]
     JoinError(ErrorStruct),
@@ -199,5 +191,50 @@ impl From<serde_json::Error> for Error {
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller()),
         })
+    }
+}
+
+impl From<std::string::FromUtf8Error> for Error {
+    #[track_caller]
+    fn from(source: std::string::FromUtf8Error) -> Self {
+        let status = ErrorStatus::Permanent;
+
+        Error::Json(ErrorStruct {
+            message: format!("UTF8 conversion error: {source}"),
+            status,
+            source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test util functions to create error.
+    fn create_source_error() -> Result<()> {
+        std::fs::File::open("/some/non/existent/file")?;
+        Ok(())
+    }
+    fn propagate_error() -> Result<()> {
+        create_source_error()?;
+        Ok(())
+    }
+    fn another_propagate_error() -> Result<()> {
+        propagate_error()?;
+        Ok(())
+    }
+
+    /// Test location information is kept for the very source error.
+    #[test]
+    fn test_error_propagation_with_source() {
+        let io_error = another_propagate_error().unwrap_err();
+        if let Error::Io(ref inner) = io_error {
+            let loc = inner.location.unwrap();
+            assert_eq!(loc.file(), "src/moonlink/src/error.rs");
+            assert_eq!(loc.line(), 217);
+            assert_eq!(loc.column(), 9);
+        }
     }
 }

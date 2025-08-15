@@ -5,7 +5,6 @@ use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::{MetadataStoreTrait, TableMetadataEntry};
 
 use std::collections::HashSet;
-use std::hash::Hash;
 
 /// Backend related attributes used for recovery.
 pub(crate) struct BackendAttributes {
@@ -14,29 +13,14 @@ pub(crate) struct BackendAttributes {
 }
 
 /// Recovery the given table.
-async fn recover_table<D, T>(
+async fn recover_table(
     metadata_entry: TableMetadataEntry,
-    replication_manager: &mut ReplicationManager<MooncakeTableId<D, T>>,
+    replication_manager: &mut ReplicationManager<MooncakeTableId>,
     read_state_filepath_remap: ReadStateFilepathRemap,
-) -> Result<()>
-where
-    D: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
-    T: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
-{
-    // TODO(hjiang): Store schema and table string in [`MooncakeTableId`].
+) -> Result<()> {
     let mooncake_table_id = MooncakeTableId {
-        database_id: D::from(
-            metadata_entry
-                .schema
-                .parse()
-                .unwrap_or_else(|_| panic!("not a valid value: {}", metadata_entry.schema)),
-        ),
-        table_id: T::from(
-            metadata_entry
-                .table
-                .parse()
-                .unwrap_or_else(|_| panic!("not a valid value: {}", metadata_entry.table)),
-        ),
+        schema: metadata_entry.schema,
+        table: metadata_entry.table,
     };
     replication_manager
         .add_table(
@@ -54,16 +38,12 @@ where
 /// Load persisted metadata, and return recovered metadata storage clients.
 ///
 /// TODO(hjiang): Parallelize all IO operations.
-pub(super) async fn recover_all_tables<D, T>(
+pub(super) async fn recover_all_tables(
     backend_attributes: BackendAttributes,
     metadata_store_accessor: &dyn MetadataStoreTrait,
     read_state_filepath_remap: ReadStateFilepathRemap,
-    replication_manager: &mut ReplicationManager<MooncakeTableId<D, T>>,
-) -> Result<()>
-where
-    D: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
-    T: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
-{
+    replication_manager: &mut ReplicationManager<MooncakeTableId>,
+) -> Result<()> {
     let mut unique_uris = HashSet::<String>::new();
 
     // Skep-1: check metadata store table existence, skip if not.

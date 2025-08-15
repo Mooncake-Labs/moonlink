@@ -3,7 +3,8 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::{
-        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, SRC_URI, TABLE_ID,
+        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, SCHEMA, SRC_URI,
+        TABLE,
     };
     use serial_test::serial;
     use std::collections::HashSet;
@@ -44,8 +45,8 @@ mod tests {
         // Register the table - this kicks off *initial copy* in the background
         backend
             .create_table(
-                guard.database_id,
-                TABLE_ID,
+                SCHEMA.to_string(),
+                TABLE.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
@@ -64,7 +65,11 @@ mod tests {
 
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn_after_insert))
+                .scan_table(
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
+                    Some(lsn_after_insert),
+                )
                 .await
                 .unwrap(),
         );
@@ -76,7 +81,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -116,8 +123,8 @@ mod tests {
         // Register the table - this kicks off *initial copy* in the background
         backend
             .create_table(
-                guard.database_id,
-                TABLE_ID,
+                SCHEMA.to_string(),
+                TABLE.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
@@ -133,7 +140,11 @@ mod tests {
 
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn_after_insert))
+                .scan_table(
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
+                    Some(lsn_after_insert),
+                )
                 .await
                 .unwrap(),
         );
@@ -146,7 +157,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -181,8 +194,8 @@ mod tests {
         let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
-                    guard.database_id,
-                    TABLE_ID,
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
                     table_config,
@@ -206,7 +219,7 @@ mod tests {
         create_handle.await.unwrap();
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(SCHEMA.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         );
@@ -221,7 +234,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -256,8 +271,8 @@ mod tests {
         let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
-                    guard.database_id,
-                    TABLE_ID,
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
                     table_config,
@@ -308,7 +323,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(SCHEMA.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         );
@@ -324,7 +339,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -361,8 +378,8 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         backend_clone
             .create_table(
-                guard.database_id,
-                TABLE_ID,
+                SCHEMA.to_string(),
+                TABLE.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
@@ -390,7 +407,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(SCHEMA.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -405,7 +422,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -436,8 +455,8 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         backend_clone
             .create_table(
-                guard.database_id,
-                TABLE_ID,
+                SCHEMA.to_string(),
+                TABLE.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
@@ -459,7 +478,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(SCHEMA.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -475,7 +494,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 
     /// A kitchen-sink stress test that:
@@ -515,8 +536,8 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         backend_clone
             .create_table(
-                guard.database_id,
-                TABLE_ID,
+                SCHEMA.to_string(),
+                TABLE.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
@@ -579,7 +600,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let observed_ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(SCHEMA.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -618,6 +639,8 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
     }
 }

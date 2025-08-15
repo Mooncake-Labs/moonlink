@@ -372,3 +372,62 @@ jobs:
           path: /tmp/chaos_test_*
           retention-days: 3
           if-no-files-found: warn
+
+  # ───────────── 9 · PostgreSQL Integration Tests ─────────────
+  postgres_tests:
+    name: PostgreSQL Integration Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..10}; do
+            if pg_isready -h localhost -p 5432 -U postgres; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+
+      - name: Configure PostgreSQL for logical replication
+        run: |
+          PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'logical';"
+          PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT pg_reload_conf();"
+
+      - name: Run PostgreSQL integration tests
+        timeout-minutes: 10
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          cargo test --package moonlink_connectors --lib --features connector-pg
+          cargo test --package moonlink_metadata_store --tests --features metadata-postgres

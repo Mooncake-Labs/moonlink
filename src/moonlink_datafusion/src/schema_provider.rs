@@ -8,12 +8,12 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub(crate) struct MooncakeSchemaProvider {
     uri: String,
-    database_id: u32,
+    schema: String,
 }
 
 impl MooncakeSchemaProvider {
-    pub(crate) fn new(uri: String, database_id: u32) -> Self {
-        Self { uri, database_id }
+    pub(crate) fn new(uri: String, schema: String) -> Self {
+        Self { uri, schema }
     }
 }
 
@@ -27,11 +27,10 @@ impl SchemaProvider for MooncakeSchemaProvider {
         unimplemented!()
     }
 
-    async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        let Ok(table_id) = name.parse() else {
-            return Ok(None);
-        };
-        let res = MooncakeTableProvider::try_new(&self.uri, self.database_id, table_id, 0).await;
+    async fn table(&self, table: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
+        let res =
+            MooncakeTableProvider::try_new(&self.uri, self.schema.clone(), table.to_string(), 0)
+                .await;
         let Ok(table) = res else {
             return Ok(None);
         };

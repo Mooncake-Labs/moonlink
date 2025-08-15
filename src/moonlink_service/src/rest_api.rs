@@ -18,11 +18,11 @@ use tracing::{debug, error, info};
 #[derive(Clone)]
 pub struct ApiState {
     /// Reference to the backend for table operations
-    pub backend: Arc<moonlink_backend::MoonlinkBackend<u32, u32>>,
+    pub backend: Arc<moonlink_backend::MoonlinkBackend>,
 }
 
 impl ApiState {
-    pub fn new(backend: Arc<moonlink_backend::MoonlinkBackend<u32, u32>>) -> Self {
+    pub fn new(backend: Arc<moonlink_backend::MoonlinkBackend>) -> Self {
         Self { backend }
     }
 }
@@ -30,8 +30,8 @@ impl ApiState {
 /// Request structure for table creation
 #[derive(Debug, Deserialize)]
 pub struct CreateTableRequest {
-    pub database_id: u32,
-    pub table_id: u32,
+    pub schema_name: String,
+    pub table_name: String,
     pub schema: Vec<FieldSchema>,
 }
 
@@ -49,8 +49,7 @@ pub struct CreateTableResponse {
     pub status: String,
     pub message: String,
     pub table_name: String,
-    pub database_id: u32,
-    pub table_id: u32,
+    pub schema: String,
 }
 
 /// Request structure for data ingestion
@@ -88,8 +87,8 @@ pub struct HealthResponse {
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health_check))
-        .route("/tables/:table", post(create_table))
-        .route("/ingest/:table", post(ingest_data))
+        .route("/tables/{table}", post(create_table))
+        .route("/ingest/{table}", post(ingest_data))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -171,8 +170,8 @@ async fn create_table(
     match state
         .backend
         .create_table(
-            payload.database_id,
-            payload.table_id,
+            payload.schema_name.clone(),
+            payload.table_name.clone(),
             table_name.clone(),
             REST_API_URI.to_string(),
             "{}".to_string(),
@@ -183,14 +182,13 @@ async fn create_table(
         Ok(()) => {
             info!(
                 "Successfully created table '{}' with ID {}:{}",
-                table_name, payload.database_id, payload.table_id
+                table_name, payload.schema_name, payload.table_name,
             );
             Ok(Json(CreateTableResponse {
                 status: "success".to_string(),
                 message: "Table created successfully".to_string(),
                 table_name,
-                database_id: payload.database_id,
-                table_id: payload.table_id,
+                schema: payload.schema_name.clone(),
             }))
         }
         Err(e) => {

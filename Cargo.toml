@@ -33,9 +33,9 @@ clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 datafusion = "49"
 datafusion-cli = "49"
-fastbloom = "0.12.0"
+fastbloom = "0.12"
 futures = { version = "0.3", default-features = false }
-hashbrown = "0.15.3"
+hashbrown = "0.15"
 iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "17e4351a4a4d52c8d33f7f791384bae467186cd7", default-features = false, features = [
   "storage-fs",
 ] }

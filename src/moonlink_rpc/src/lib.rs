@@ -25,14 +25,14 @@ macro_rules! rpcs {
 }
 
 rpcs! {
-    create_snapshot(database_id: u32, table_id: u32, lsn: u64) -> ();
-    create_table(database_id: u32, table_id: u32, src: String, src_uri: String, table_config: String) -> ();
-    drop_table(database_id: u32, table_id: u32) -> ();
-    get_table_schema(database_id: u32, table_id: u32) -> Vec<u8>;
+    create_snapshot(schema: String, table: String, lsn: u64) -> ();
+    create_table(schema: String, table: String, src: String, src_uri: String, table_config: String) -> ();
+    drop_table(schema: String, table: String) -> ();
+    get_table_schema(schema: String, table: String) -> Vec<u8>;
     list_tables() -> Vec<Table>;
-    optimize_table(database_id: u32, table_id: u32, mode: String) -> ();
-    scan_table_begin(database_id: u32, table_id: u32, lsn: u64) -> Vec<u8>;
-    scan_table_end(database_id: u32, table_id: u32) -> ();
+    optimize_table(schema: String, table: String, mode: String) -> ();
+    scan_table_begin(schema: String, table: String, lsn: u64) -> Vec<u8>;
+    scan_table_end(schema: String, table: String) -> ();
 }
 
 pub async fn write<W: AsyncWrite + Unpin, S: Serialize>(writer: &mut W, data: &S) -> Result<()> {
@@ -56,8 +56,8 @@ const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Table {
-    pub database_id: u32,
-    pub table_id: u32,
+    pub schema: String,
+    pub table: String,
     pub commit_lsn: u64,
     pub flush_lsn: Option<u64>,
     pub iceberg_warehouse_location: String,

@@ -608,3 +608,6 @@ pub async fn run_event_loop(
     debug!("replication event loop stopped");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

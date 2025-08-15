@@ -312,15 +312,8 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
             .into_iter()
             .map(|v| {
                 v.map(|cells| {
-                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
-                    let struct_values: Vec<RowValue> = cells
-                        .into_iter()
-                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
-                        .map(|row: MoonlinkRow| {
-                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
-                            row.values.into_iter().next().unwrap_or(RowValue::Null)
-                        })
-                        .collect();
+                    let struct_values: Vec<RowValue> =
+                        cells.into_iter().map(|cell| cell.into()).collect();
                     RowValue::Struct(struct_values)
                 })
                 .unwrap_or(RowValue::Null)
@@ -329,91 +322,57 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
     }
 }
 
-impl From<PostgresTableRow> for MoonlinkRow {
-    fn from(row: PostgresTableRow) -> Self {
-        let mut values = Vec::with_capacity(row.0.values.len());
-        for cell in row.0.values {
-            match cell {
-                Cell::I16(value) => {
-                    values.push(RowValue::Int32(value as i32));
-                }
-                Cell::I32(value) => {
-                    values.push(RowValue::Int32(value));
-                }
-                Cell::U32(value) => {
-                    values.push(RowValue::Int32(value as i32));
-                }
-                Cell::I64(value) => {
-                    values.push(RowValue::Int64(value));
-                }
-                Cell::F32(value) => {
-                    values.push(RowValue::Float32(value));
-                }
-                Cell::F64(value) => {
-                    values.push(RowValue::Float64(value));
-                }
-                Cell::Bool(value) => {
-                    values.push(RowValue::Bool(value));
-                }
-                Cell::String(value) => {
-                    values.push(RowValue::ByteArray(value.as_bytes().to_vec()));
-                }
-                Cell::Date(value) => {
-                    values.push(RowValue::Int32(
-                        value.signed_duration_since(ARROW_EPOCH).num_days() as i32,
-                    ));
-                }
-                Cell::Time(value) => {
-                    let seconds = value.num_seconds_from_midnight() as i64;
-                    let nanos = value.nanosecond() as i64;
-                    values.push(RowValue::Int64(seconds * 1_000_000 + nanos / 1_000))
-                }
-                Cell::TimeStamp(value) => {
-                    values.push(RowValue::Int64(value.and_utc().timestamp_micros()))
-                }
-                Cell::TimeStampTz(value) => values.push(RowValue::Int64(value.timestamp_micros())),
-                Cell::Uuid(value) => {
-                    values.push(RowValue::FixedLenByteArray(*value.as_bytes()));
-                }
-                Cell::Json(value) => {
-                    values.push(RowValue::ByteArray(value.to_string().as_bytes().to_vec()));
-                }
-                Cell::Bytes(value) => {
-                    values.push(RowValue::ByteArray(value));
-                }
-                Cell::Array(value) => {
-                    values.push(RowValue::Array(convert_array_cell(value)));
-                }
-                Cell::Composite(value) => {
-                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
-                    let struct_values: Vec<RowValue> = value
-                        .into_iter()
-                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
-                        .map(|row: MoonlinkRow| {
-                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
-                            row.values.into_iter().next().unwrap_or(RowValue::Null)
-                        })
-                        .collect();
-                    values.push(RowValue::Struct(struct_values));
-                }
-                Cell::Numeric(value) => {
-                    match value {
-                        PgNumeric::Value(bigdecimal) => {
-                            let (int_val, _) = bigdecimal.into_bigint_and_exponent();
-                            values.push(RowValue::Decimal(int_val.to_i128().unwrap()));
-                        }
-                        _ => {
-                            // DevNote:
-                            // nan, inf, -inf will be converted to null
-                            values.push(RowValue::Null);
-                        }
+impl From<Cell> for RowValue {
+    fn from(cell: Cell) -> Self {
+        match cell {
+            Cell::I16(value) => RowValue::Int32(value as i32),
+            Cell::I32(value) => RowValue::Int32(value),
+            Cell::U32(value) => RowValue::Int32(value as i32),
+            Cell::I64(value) => RowValue::Int64(value),
+            Cell::F32(value) => RowValue::Float32(value),
+            Cell::F64(value) => RowValue::Float64(value),
+            Cell::Bool(value) => RowValue::Bool(value),
+            Cell::String(value) => RowValue::ByteArray(value.as_bytes().to_vec()),
+            Cell::Date(value) => {
+                RowValue::Int32(value.signed_duration_since(ARROW_EPOCH).num_days() as i32)
+            }
+            Cell::Time(value) => {
+                let seconds = value.num_seconds_from_midnight() as i64;
+                let nanos = value.nanosecond() as i64;
+                RowValue::Int64(seconds * 1_000_000 + nanos / 1_000)
+            }
+            Cell::TimeStamp(value) => RowValue::Int64(value.and_utc().timestamp_micros()),
+            Cell::TimeStampTz(value) => RowValue::Int64(value.timestamp_micros()),
+            Cell::Uuid(value) => RowValue::FixedLenByteArray(*value.as_bytes()),
+            Cell::Json(value) => RowValue::ByteArray(value.to_string().as_bytes().to_vec()),
+            Cell::Bytes(value) => RowValue::ByteArray(value),
+            Cell::Array(value) => RowValue::Array(convert_array_cell(value)),
+            Cell::Composite(value) => {
+                let struct_values: Vec<RowValue> =
+                    value.into_iter().map(|cell| cell.into()).collect();
+                RowValue::Struct(struct_values)
+            }
+            Cell::Numeric(value) => {
+                match value {
+                    PgNumeric::Value(bigdecimal) => {
+                        let (int_val, _) = bigdecimal.into_bigint_and_exponent();
+                        RowValue::Decimal(int_val.to_i128().unwrap())
+                    }
+                    _ => {
+                        // DevNote:
+                        // nan, inf, -inf will be converted to null
+                        RowValue::Null
                     }
                 }
-                Cell::Null => {
-                    values.push(RowValue::Null);
-                }
             }
+            Cell::Null => RowValue::Null,
         }
+    }
+}
+
+impl From<PostgresTableRow> for MoonlinkRow {
+    fn from(row: PostgresTableRow) -> Self {
+        let values: Vec<RowValue> = row.0.values.into_iter().map(|cell| cell.into()).collect();
         MoonlinkRow::new(values)
     }
 }

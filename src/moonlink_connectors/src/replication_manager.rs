@@ -186,8 +186,8 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
     /// Drop table specified by the given table id.
     /// If the table is not tracked, logs a message and returns successfully.
     /// Return whether the table is tracked by moonlink.
-    pub async fn drop_table(&mut self, mooncake_table_id: T) -> Result<bool> {
-        let (table_uri, src_table_id) = match self.table_info.get(&mooncake_table_id) {
+    pub async fn drop_table(&mut self, mooncake_table_id: &T) -> Result<bool> {
+        let (table_uri, src_table_id) = match self.table_info.get(mooncake_table_id) {
             Some(info) => info.clone(),
             None => {
                 debug!("attempted to drop table that is not tracked by moonlink - table may already be dropped");

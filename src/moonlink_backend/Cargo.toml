@@ -23,7 +23,6 @@ moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 more-asserts = { workspace = true }
 nix = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
-rstest = "0.26.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -33,6 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 iceberg = { workspace = true }
 roaring = { workspace = true }
+rstest = "0.26"
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 tokio-postgres = { workspace = true }

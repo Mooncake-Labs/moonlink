@@ -20,6 +20,11 @@ mod tests {
 
     use serial_test::serial;
 
+    /// Util function to get database URI.
+    fn get_table_uri() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| SRC_TABLE_URI.to_string())
+    }
+
     /// Test util function to get table metadata entries, and check whether it matches written one.
     ///
     /// TODO(hjiang): Refactor to take a trait.
@@ -32,7 +37,7 @@ mod tests {
         let table_metadata_entry = &metadata_entries[0];
         assert_eq!(table_metadata_entry.table, TABLE);
         assert_eq!(table_metadata_entry.src_table_name, SRC_TABLE_NAME);
-        assert_eq!(table_metadata_entry.src_table_uri, SRC_TABLE_URI);
+        assert_eq!(table_metadata_entry.src_table_uri, get_table_uri());
         assert_eq!(
             table_metadata_entry.moonlink_table_config,
             get_moonlink_table_config()
@@ -42,11 +47,12 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_table_metadata_store_and_load() {
-        let _test_environment = TestEnvironment::new(SRC_TABLE_URI).await;
+        let table_uri = get_table_uri();
+        let _test_environment = TestEnvironment::new(&table_uri).await;
         // Unused metadata storage, used to check it could be initialized for multiple times idempotently.
-        let _ = PgMetadataStore::new(SRC_TABLE_URI.to_string()).unwrap();
+        let _ = PgMetadataStore::new(table_uri.clone()).unwrap();
         // Initialize for the second time.
-        let metadata_store = PgMetadataStore::new(SRC_TABLE_URI.to_string()).unwrap();
+        let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
         let moonlink_table_config = get_moonlink_table_config();
 
         // Store moonlink table config to metadata storage.
@@ -55,7 +61,7 @@ mod tests {
                 SCHEMA,
                 TABLE,
                 SRC_TABLE_NAME,
-                SRC_TABLE_URI,
+                &table_uri,
                 moonlink_table_config.clone(),
             )
             .await
@@ -69,8 +75,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_table_metadata_load_from_non_existent_schema() {
-        let test_environment = TestEnvironment::new(SRC_TABLE_URI).await;
-        let metadata_store = PgMetadataStore::new(SRC_TABLE_URI.to_string()).unwrap();
+        let table_uri = get_table_uri();
+        let test_environment = TestEnvironment::new(&table_uri).await;
+        let metadata_store = PgMetadataStore::new(table_uri).unwrap();
 
         // Delete moonlink schema.
         test_environment.delete_mooncake_schema().await;
@@ -84,8 +91,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_table_metadata_load_from_non_existent_table() {
-        let _test_environment = TestEnvironment::new(SRC_TABLE_URI).await;
-        let metadata_store = PgMetadataStore::new(SRC_TABLE_URI.to_string()).unwrap();
+        let table_uri = get_table_uri();
+        let _test_environment = TestEnvironment::new(&table_uri).await;
+        let metadata_store = PgMetadataStore::new(table_uri).unwrap();
 
         // Load moonlink table config from metadata config.
         let res = metadata_store.get_all_table_metadata_entries().await;
@@ -96,8 +104,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_table_metadata_store_for_duplicate_tables() {
-        let _test_environment = TestEnvironment::new(SRC_TABLE_URI).await;
-        let metadata_store = PgMetadataStore::new(SRC_TABLE_URI.to_string()).unwrap();
+        let table_uri = get_table_uri();
+        let _test_environment = TestEnvironment::new(&table_uri).await;
+        let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
         let moonlink_table_config = get_moonlink_table_config();
 
         // Store moonlink table config to metadata storage.
@@ -106,7 +115,7 @@ mod tests {
                 SCHEMA,
                 TABLE,
                 SRC_TABLE_NAME,
-                SRC_TABLE_URI,
+                &table_uri,
                 moonlink_table_config.clone(),
             )
             .await
@@ -118,7 +127,7 @@ mod tests {
                 SCHEMA,
                 TABLE,
                 SRC_TABLE_NAME,
-                SRC_TABLE_URI,
+                &table_uri,
                 moonlink_table_config.clone(),
             )
             .await;
@@ -129,8 +138,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_delete_table_metadata_store() {
-        let _test_environment = TestEnvironment::new(SRC_TABLE_URI).await;
-        let metadata_store = PgMetadataStore::new(SRC_TABLE_URI.to_string()).unwrap();
+        let table_uri = get_table_uri();
+        let _test_environment = TestEnvironment::new(&table_uri).await;
+        let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
         let moonlink_table_config = get_moonlink_table_config();
 
         // Store moonlink table metadata to metadata storage.
@@ -139,7 +149,7 @@ mod tests {
                 SCHEMA,
                 TABLE,
                 SRC_TABLE_NAME,
-                SRC_TABLE_URI,
+                &table_uri,
                 moonlink_table_config.clone(),
             )
             .await
