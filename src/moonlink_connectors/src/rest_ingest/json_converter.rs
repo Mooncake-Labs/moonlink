@@ -518,7 +518,7 @@ mod tests {
                         assert_eq!(*value, "not_a_decimal");
                         let parse_big_decimal_err = error
                             .downcast_ref::<bigdecimal::ParseBigDecimalError>()
-                            .expect("Failed to downcast source_err to ParseBigDecimalError");
+                            .expect("Expected ParseBigDecimalError, got different error type");
                         assert!(matches!(parse_big_decimal_err, ParseInt { .. }));
                     }
                     _ => panic!(
