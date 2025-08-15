@@ -127,8 +127,27 @@ impl JsonToMoonlinkRowConverter {
             DataType::List(child_field) => {
                 if let Some(array) = value.as_array() {
                     let mut converted_elements = Vec::with_capacity(array.len());
-                    for ele in array {
-                        let converted_element = Self::convert_value(child_field, ele)?;
+                    for (index, ele) in array.iter().enumerate() {
+                        let converted_element =
+                            Self::convert_value(child_field, ele).map_err(|e| {
+                                match e {
+                                    JsonToMoonlinkRowError::TypeMismatch(existing_path) => {
+                                        // Transform error to include full path with index
+                                        // (e.g., "int_list.item[1]", "nested_list.item[1].item[0]")
+                                        let full_path = format!(
+                                            "{}.{}",
+                                            field.name(),
+                                            existing_path.replacen(
+                                                child_field.name(),
+                                                &format!("{}[{}]", child_field.name(), index),
+                                                1
+                                            )
+                                        );
+                                        JsonToMoonlinkRowError::TypeMismatch(full_path)
+                                    }
+                                    other => other,
+                                }
+                            })?;
                         converted_elements.push(converted_element);
                     }
                     Ok(RowValue::Array(converted_elements))
@@ -780,7 +799,21 @@ mod tests {
         });
         let err = converter.convert(&input).unwrap_err();
         match err {
-            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "item"),
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "int_list.item[1]"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_nested_list_element_type_mismatch() {
+        let schema = make_nested_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "nested_list": [[1, 2], [3, "not_an_int", 5], []]
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "nested_list.item[1].item[1]"),
             _ => panic!("unexpected error: {err:?}"),
         }
     }
