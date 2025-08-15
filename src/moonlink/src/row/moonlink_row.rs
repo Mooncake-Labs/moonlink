@@ -156,7 +156,8 @@ impl MoonlinkRow {
                         return false;
                     }
                     for (i, ev) in v.iter().enumerate() {
-                        if !Self::value_matches_column(ev, array.column(i), idx) {
+                        let child_column = array.column(i);
+                        if !Self::value_matches_column(ev, child_column, idx) {
                             return false;
                         }
                     }
@@ -691,11 +692,11 @@ mod tests {
         use arrow::datatypes::Schema;
         use std::sync::Arc;
 
-        // Schema: id: Int32, nested: Struct{level2: Struct{value: Utf8}}
-        let level3_field = Field::new("value", DataType::Utf8, /*nullable=*/ true);
+        // Schema: id: Int32, nested: Struct{level2: Struct{value2: Utf8}}
+        let value2_field = Field::new("value2", DataType::Utf8, /*nullable=*/ true);
         let level2_fields = vec![Field::new(
-            "level3",
-            DataType::Struct(vec![level3_field.clone()].into()),
+            "level2",
+            DataType::Struct(vec![value2_field.clone()].into()),
             /*nullable=*/ true,
         )];
         let root_fields = vec![
@@ -710,15 +711,18 @@ mod tests {
         let schema = Arc::new(Schema::new(root_fields));
 
         // Create nested StructArray
-        let value_array = Arc::new(arrow_array::StringArray::from(vec![Some("deep_value")]));
-        let level3_struct = Arc::new(StructArray::new(
-            vec![level3_field].into(),
-            vec![value_array],
+        let value2_array = Arc::new(arrow_array::StringArray::from(vec![Some("deep_value")]));
+
+        // Fix: level2 should be a StructArray containing value2 field
+        // According to the Schema, level2 is a struct containing value2 field
+        let value2_struct = Arc::new(StructArray::new(
+            vec![value2_field].into(),
+            vec![value2_array],
             None,
         ));
         let level2_struct = Arc::new(StructArray::new(
             level2_fields.clone().into(),
-            vec![level3_struct],
+            vec![value2_struct],
             None,
         ));
 
@@ -728,12 +732,19 @@ mod tests {
         )
         .unwrap();
 
-        // Test nested struct: id=1, nested={level2={level3={value="deep_value"}}}
+        // Test nested struct: id=1, nested={level2={value2="deep_value"}}
+        // Fix: MoonlinkRow structure must exactly match the Arrow Schema
+        // Arrow Schema: nested -> level2 -> value2
+        // So MoonlinkRow should be: nested -> level2 -> value2
         let row = MoonlinkRow::new(vec![
             RowValue::Int32(1),
-            RowValue::Struct(vec![RowValue::Struct(vec![RowValue::Struct(vec![
-                RowValue::ByteArray(b"deep_value".to_vec()),
-            ])])]),
+            RowValue::Struct(vec![
+                // nested's first field: level2
+                RowValue::Struct(vec![
+                    // level2's first field: value2
+                    RowValue::ByteArray(b"deep_value".to_vec()),
+                ]),
+            ]),
         ]);
 
         assert!(row.equals_record_batch_at_offset_impl(&batch, 0));
