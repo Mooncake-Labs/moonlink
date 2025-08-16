@@ -4358,6 +4358,7 @@ dependencies = [
  "anyhow",
  "regex",
  "serde",
+ "serde_json",
  "thiserror 2.0.14",
 ]
 

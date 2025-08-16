@@ -173,4 +173,36 @@ mod tests {
         let re_pattern = Regex::new(r"error\.rs:\d+:\d+").unwrap();
         assert!(re_pattern.is_match(&location_str));
     }
+
+    #[test]
+    fn test_error_struct_with_source_serialization() {
+        use std::io;
+
+        // Create an ErrorStruct with a source error
+        let io_error = io::Error::new(io::ErrorKind::NotFound, "Test file not found");
+        let error = ErrorStruct::new("IO operation failed".to_string(), ErrorStatus::Permanent)
+            .with_source(io_error);
+
+        // Serialize
+        let serialized = serde_json::to_string(&error).expect("Failed to serialize");
+
+        println!("Serialized ErrorStruct: {serialized}");
+        // Check that serialized JSON contains expected fields
+        assert!(serialized.contains("Test file not found"));
+        assert!(serialized.contains("Permanent"));
+        assert!(serialized.contains("error.rs"));
+
+        // Deserialize
+        let deserialized: ErrorStruct =
+            serde_json::from_str(&serialized).expect("Failed to deserialize");
+        println!("Deserialized ErrorStruct: {deserialized}");
+
+        assert_eq!(deserialized.message, error.message);
+        assert_eq!(deserialized.status, error.status);
+        assert!(deserialized.source.is_some());
+
+        // The source should be recreated as type anyhow::Error
+        let source = deserialized.source.unwrap();
+        assert!(source.to_string().contains("Test file not found"));
+    }
 }
