@@ -200,7 +200,7 @@ mod tests {
         if let Error::Io(ref inner) = io_error {
             let loc = inner.location.as_ref().unwrap();
             assert!(loc.contains("src/moonlink/src/error.rs"));
-            assert!(loc.contains("190"));
+            assert!(loc.contains("184"));
             assert!(loc.contains("9"));
         }
     }
