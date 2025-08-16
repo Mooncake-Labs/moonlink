@@ -24,7 +24,7 @@ impl From<bincode::error::DecodeError> for Error {
     #[track_caller]
     fn from(source: bincode::error::DecodeError) -> Self {
         Error::Decode(
-            ErrorStruct::new(format!("Decode error: {source}"), ErrorStatus::Permanent)
+            ErrorStruct::new("Decode error".to_string(), ErrorStatus::Permanent)
                 .with_source(source),
         )
     }
@@ -34,7 +34,7 @@ impl From<bincode::error::EncodeError> for Error {
     #[track_caller]
     fn from(source: bincode::error::EncodeError) -> Self {
         Error::Encode(
-            ErrorStruct::new(format!("Encode error: {source}"), ErrorStatus::Permanent)
+            ErrorStruct::new("Encode error".to_string(), ErrorStatus::Permanent)
                 .with_source(source),
         )
     }
@@ -58,7 +58,7 @@ impl From<io::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Io(ErrorStruct::new(format!("IO error: {source}"), status).with_source(source))
+        Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
     }
 }
 
@@ -66,7 +66,7 @@ impl From<std::num::TryFromIntError> for Error {
     #[track_caller]
     fn from(source: std::num::TryFromIntError) -> Self {
         Error::PacketTooLong(
-            ErrorStruct::new(format!("Packet too long: {source}"), ErrorStatus::Permanent)
+            ErrorStruct::new("Packet too long".to_string(), ErrorStatus::Permanent)
                 .with_source(source),
         )
     }

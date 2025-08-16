@@ -42,7 +42,7 @@ impl From<watch::error::RecvError> for Error {
     fn from(source: watch::error::RecvError) -> Self {
         Error::WatchChannelRecvError(
             ErrorStruct::new(
-                format!("Watch channel receiver error: {source}"),
+                "Watch channel receiver error".to_string(),
                 ErrorStatus::Permanent,
             )
             .with_source(source),
@@ -60,7 +60,7 @@ impl From<ArrowError> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Arrow(ErrorStruct::new(format!("Arrow error: {source}"), status).with_source(source))
+        Error::Arrow(ErrorStruct::new("Arrow error".to_string(), status).with_source(source))
     }
 }
 
@@ -77,7 +77,7 @@ impl From<IcebergError> for Error {
         };
 
         Error::IcebergError(
-            ErrorStruct::new(format!("Iceberg error: {source}"), status).with_source(source),
+            ErrorStruct::new("Iceberg error".to_string(), status).with_source(source),
         )
     }
 }
@@ -101,7 +101,7 @@ impl From<io::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Io(ErrorStruct::new(format!("IO error: {source}"), status).with_source(source))
+        Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
     }
 }
 
@@ -117,9 +117,7 @@ impl From<opendal::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::OpenDal(
-            ErrorStruct::new(format!("OpenDAL error: {source}"), status).with_source(source),
-        )
+        Error::OpenDal(ErrorStruct::new("OpenDAL error".to_string(), status).with_source(source))
     }
 }
 
@@ -127,8 +125,7 @@ impl From<tokio::task::JoinError> for Error {
     #[track_caller]
     fn from(source: tokio::task::JoinError) -> Self {
         Error::JoinError(
-            ErrorStruct::new(format!("Join error: {source}"), ErrorStatus::Permanent)
-                .with_source(source),
+            ErrorStruct::new("Join error".to_string(), ErrorStatus::Permanent).with_source(source),
         )
     }
 }
@@ -143,9 +140,7 @@ impl From<ParquetError> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Parquet(
-            ErrorStruct::new(format!("Parquet error: {source}"), status).with_source(source),
-        )
+        Error::Parquet(ErrorStruct::new("Parquet error".to_string(), status).with_source(source))
     }
 }
 
@@ -161,7 +156,7 @@ impl From<serde_json::Error> for Error {
 
         Error::Json(
             ErrorStruct::new(
-                format!("JSON serialization/deserialization error: {source}"),
+                "JSON serialization/deserialization error".to_string(),
                 status,
             )
             .with_source(source),
@@ -175,8 +170,7 @@ impl From<std::string::FromUtf8Error> for Error {
         let status = ErrorStatus::Permanent;
 
         Error::Json(
-            ErrorStruct::new(format!("UTF8 conversion error: {source}"), status)
-                .with_source(source),
+            ErrorStruct::new("UTF8 conversion error".to_string(), status).with_source(source),
         )
     }
 }
