@@ -21,6 +21,7 @@ chrono = { workspace = true }
 chrono-tz = "0.8"
 futures = { workspace = true }
 moonlink = { path = "../moonlink" }
+moonlink_error = { path = "../moonlink_error" }
 num-traits = { workspace = true }
 pg_escape = "0.1"
 pin-project-lite = "0.2"
