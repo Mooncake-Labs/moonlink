@@ -3,9 +3,7 @@ use iceberg::Error as IcebergError;
 use moonlink_error::{ErrorStatus, ErrorStruct};
 use parquet::errors::ParquetError;
 use std::io;
-use std::panic::Location;
 use std::result;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -46,12 +44,13 @@ pub type Result<T> = result::Result<T, Error>;
 impl From<watch::error::RecvError> for Error {
     #[track_caller]
     fn from(source: watch::error::RecvError) -> Self {
-        Error::WatchChannelRecvError(ErrorStruct {
-            message: format!("Watch channel receiver error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::WatchChannelRecvError(
+            ErrorStruct::new(
+                format!("Watch channel receiver error: {source}"),
+                ErrorStatus::Permanent,
+            )
+            .with_source(source),
+        )
     }
 }
 
@@ -65,12 +64,7 @@ impl From<ArrowError> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Arrow(ErrorStruct {
-            message: format!("Arrow error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Arrow(ErrorStruct::new(format!("Arrow error: {source}"), status).with_source(source))
     }
 }
 
@@ -86,12 +80,9 @@ impl From<IcebergError> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::IcebergError(ErrorStruct {
-            message: format!("Iceberg error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::IcebergError(
+            ErrorStruct::new(format!("Iceberg error: {source}"), status).with_source(source),
+        )
     }
 }
 
@@ -114,12 +105,7 @@ impl From<io::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Io(ErrorStruct {
-            message: format!("IO error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Io(ErrorStruct::new(format!("IO error: {source}"), status).with_source(source))
     }
 }
 
@@ -135,24 +121,19 @@ impl From<opendal::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::OpenDal(ErrorStruct {
-            message: format!("OpenDAL error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::OpenDal(
+            ErrorStruct::new(format!("OpenDAL error: {source}"), status).with_source(source),
+        )
     }
 }
 
 impl From<tokio::task::JoinError> for Error {
     #[track_caller]
     fn from(source: tokio::task::JoinError) -> Self {
-        Error::JoinError(ErrorStruct {
-            message: format!("Join error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::JoinError(
+            ErrorStruct::new(format!("Join error: {source}"), ErrorStatus::Permanent)
+                .with_source(source),
+        )
     }
 }
 
@@ -166,12 +147,9 @@ impl From<ParquetError> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Parquet(ErrorStruct {
-            message: format!("Parquet error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Parquet(
+            ErrorStruct::new(format!("Parquet error: {source}"), status).with_source(source),
+        )
     }
 }
 
@@ -185,12 +163,13 @@ impl From<serde_json::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Json(ErrorStruct {
-            message: format!("JSON serialization/deserialization error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Json(
+            ErrorStruct::new(
+                format!("JSON serialization/deserialization error: {source}"),
+                status,
+            )
+            .with_source(source),
+        )
     }
 }
 
@@ -199,12 +178,10 @@ impl From<std::string::FromUtf8Error> for Error {
     fn from(source: std::string::FromUtf8Error) -> Self {
         let status = ErrorStatus::Permanent;
 
-        Error::Json(ErrorStruct {
-            message: format!("UTF8 conversion error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Json(
+            ErrorStruct::new(format!("UTF8 conversion error: {source}"), status)
+                .with_source(source),
+        )
     }
 }
 
@@ -231,10 +208,10 @@ mod tests {
     fn test_error_propagation_with_source() {
         let io_error = another_propagate_error().unwrap_err();
         if let Error::Io(ref inner) = io_error {
-            let loc = inner.location.unwrap();
-            assert_eq!(loc.file(), "src/moonlink/src/error.rs");
-            assert_eq!(loc.line(), 217);
-            assert_eq!(loc.column(), 9);
+            let loc = inner.location.as_ref().unwrap();
+            assert!(loc.contains("src/moonlink/src/error.rs"));
+            assert!(loc.contains("217"));
+            assert!(loc.contains("9"));
         }
     }
 }

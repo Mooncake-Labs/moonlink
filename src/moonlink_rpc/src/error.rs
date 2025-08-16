@@ -1,8 +1,6 @@
 use moonlink_error::{ErrorStatus, ErrorStruct};
 use std::io;
-use std::panic::Location;
 use std::result;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
@@ -25,24 +23,20 @@ pub type Result<T> = result::Result<T, Error>;
 impl From<bincode::error::DecodeError> for Error {
     #[track_caller]
     fn from(source: bincode::error::DecodeError) -> Self {
-        Error::Decode(ErrorStruct {
-            message: format!("Decode error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Decode(
+            ErrorStruct::new(format!("Decode error: {source}"), ErrorStatus::Permanent)
+                .with_source(source),
+        )
     }
 }
 
 impl From<bincode::error::EncodeError> for Error {
     #[track_caller]
     fn from(source: bincode::error::EncodeError) -> Self {
-        Error::Encode(ErrorStruct {
-            message: format!("Encode error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Encode(
+            ErrorStruct::new(format!("Encode error: {source}"), ErrorStatus::Permanent)
+                .with_source(source),
+        )
     }
 }
 
@@ -64,23 +58,16 @@ impl From<io::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Io(ErrorStruct {
-            message: format!("IO error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Io(ErrorStruct::new(format!("IO error: {source}"), status).with_source(source))
     }
 }
 
 impl From<std::num::TryFromIntError> for Error {
     #[track_caller]
     fn from(source: std::num::TryFromIntError) -> Self {
-        Error::PacketTooLong(ErrorStruct {
-            message: format!("Packet too long: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::PacketTooLong(
+            ErrorStruct::new(format!("Packet too long: {source}"), ErrorStatus::Permanent)
+                .with_source(source),
+        )
     }
 }

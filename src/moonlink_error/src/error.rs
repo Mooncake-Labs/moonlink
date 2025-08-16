@@ -32,8 +32,7 @@ pub struct ErrorStruct {
         deserialize_with = "deserialize_error_source"
     )]
     pub source: Option<Arc<anyhow::Error>>,
-    #[serde(skip)]
-    pub location: Option<&'static Location<'static>>,
+    pub location: Option<String>,
 }
 
 fn serialize_error_source<S>(
@@ -62,13 +61,7 @@ impl fmt::Display for ErrorStruct {
         write!(f, "{} ({})", self.message, self.status)?;
 
         if let Some(location) = &self.location {
-            write!(
-                f,
-                " at {}:{}:{}",
-                location.file(),
-                location.line(),
-                location.column()
-            )?;
+            write!(f, " at {location}")?;
         }
 
         if let Some(source) = &self.source {
@@ -83,11 +76,17 @@ impl ErrorStruct {
     /// Creates a new ErrorStruct with the provided location.
     #[track_caller]
     pub fn new(message: String, status: ErrorStatus) -> Self {
+        let location = Location::caller();
         Self {
             message,
             status,
             source: None,
-            location: Some(Location::caller()),
+            location: Some(format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )),
         }
     }
 

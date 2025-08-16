@@ -6,7 +6,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
