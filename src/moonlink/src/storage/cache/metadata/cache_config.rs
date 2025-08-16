@@ -23,7 +23,27 @@ pub struct MetadataCacheConfig {
 
 #[allow(dead_code)]
 impl MetadataCacheConfig {
+    pub(crate) const DEFAULT_MAX_SIZE: u64 = 1000;
+    pub(crate) const DEFAULT_TTL_SECS: u64 = 3600; // 1 hour
+
     pub fn new(max_size: u64, ttl: Duration) -> Self {
         Self { max_size, ttl }
+    }
+
+    pub fn default_max_size() -> u64 {
+        Self::DEFAULT_MAX_SIZE
+    }
+
+    pub fn default_ttl() -> Duration {
+        Duration::from_secs(Self::DEFAULT_TTL_SECS)
+    }
+}
+
+impl Default for MetadataCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_size: Self::default_max_size(),
+            ttl: Self::default_ttl(),
+        }
     }
 }

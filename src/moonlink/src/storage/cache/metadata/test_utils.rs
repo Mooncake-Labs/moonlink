@@ -8,9 +8,10 @@ pub struct MokaCacheTestBuilder {
 
 impl MokaCacheTestBuilder {
     pub fn new() -> Self {
+        let default_cfg = MetadataCacheConfig::default();
         Self {
             max_size: 2,
-            ttl: Duration::from_secs(60 * 60), // 1 hour
+            ttl: default_cfg.ttl,
         }
     }
 
