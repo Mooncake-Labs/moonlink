@@ -186,7 +186,6 @@ mod tests {
         // Serialize
         let serialized = serde_json::to_string(&error).expect("Failed to serialize");
 
-        println!("Serialized ErrorStruct: {serialized}");
         // Check that serialized JSON contains expected fields
         assert!(serialized.contains("Test file not found"));
         assert!(serialized.contains("Permanent"));
@@ -195,7 +194,6 @@ mod tests {
         // Deserialize
         let deserialized: ErrorStruct =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
-        println!("Deserialized ErrorStruct: {deserialized}");
 
         assert_eq!(deserialized.message, error.message);
         assert_eq!(deserialized.status, error.status);
