@@ -168,6 +168,12 @@ impl MooncakeTable {
     }
 
     pub async fn delete_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) {
+        // Check if this is an append-only table
+        if matches!(self.metadata.identity, IdentityProp::None) {
+            tracing::error!("Delete operation not supported for append-only tables");
+            return;
+        }
+
         // Record events for replay.
         if let Some(event_replay_tx) = &self.event_replay_tx {
             let table_event =

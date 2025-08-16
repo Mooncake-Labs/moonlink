@@ -33,6 +33,7 @@ impl MoonlinkRow {
             }
             IdentityProp::Keys(indices) => self.values.len() == indices.len(),
             IdentityProp::FullRow => true,
+            IdentityProp::None => panic!("IdentityProp::None should not be used for identity checks"),
         }
     }
 
@@ -200,6 +201,7 @@ impl MoonlinkRow {
             IdentityProp::SinglePrimitiveKey(idx) => batch.project(std::slice::from_ref(idx)),
             IdentityProp::Keys(keys) => batch.project(keys.as_slice()),
             IdentityProp::FullRow => Ok(batch.clone()),
+            IdentityProp::None => panic!("IdentityProp::None should not be used for record batch operations"),
         }
         .unwrap();
         self.equals_record_batch_at_offset_impl(&indices, offset)
@@ -253,6 +255,7 @@ impl MoonlinkRow {
             IdentityProp::SinglePrimitiveKey(_) => {
                 panic!("Never required for equality checkx")
             }
+            IdentityProp::None => panic!("IdentityProp::None should not be used for row equality checks"),
         }
     }
 }
@@ -262,6 +265,7 @@ pub enum IdentityProp {
     SinglePrimitiveKey(usize),
     Keys(Vec<usize>),
     FullRow,
+    None,
 }
 
 impl IdentityProp {
@@ -284,6 +288,7 @@ impl IdentityProp {
             IdentityProp::SinglePrimitiveKey(index) => vec![*index],
             IdentityProp::Keys(key_indices) => key_indices.clone(),
             IdentityProp::FullRow => (0..col_num).collect(),
+            IdentityProp::None => panic!("None identity is not valid for get_key_indices"),
         }
     }
 
@@ -298,18 +303,21 @@ impl IdentityProp {
                 Some(MoonlinkRow::new(identity_columns))
             }
             IdentityProp::FullRow => Some(row),
+            IdentityProp::None => panic!("IdentityProp::None should not be used for identity column extraction"),
         }
     }
 
     pub fn extract_identity_for_key(&self, row: &MoonlinkRow) -> Option<MoonlinkRow> {
-        if let IdentityProp::Keys(keys) = self {
-            let mut identity_columns = Vec::with_capacity(keys.len());
-            for key in keys {
-                identity_columns.push(row.values[*key].clone());
+        match self {
+            IdentityProp::Keys(keys) => {
+                let mut identity_columns = Vec::with_capacity(keys.len());
+                for key in keys {
+                    identity_columns.push(row.values[*key].clone());
+                }
+                Some(MoonlinkRow::new(identity_columns))
             }
-            Some(MoonlinkRow::new(identity_columns))
-        } else {
-            None
+            IdentityProp::None => None, // Append-only tables don't need identity for key
+            _ => None,
         }
     }
 
@@ -330,6 +338,7 @@ impl IdentityProp {
                 }
                 hasher.finish()
             }
+            IdentityProp::None => panic!("IdentityProp::None should not be used for lookup key generation"),
         }
     }
 
@@ -338,6 +347,7 @@ impl IdentityProp {
             IdentityProp::SinglePrimitiveKey(_) => false,
             IdentityProp::Keys(_) => false,
             IdentityProp::FullRow => true,
+            IdentityProp::None => panic!("IdentityProp::None should not be used for identity check requirements"),
         }
     }
 }
@@ -881,5 +891,21 @@ mod tests {
             ]),
         ]);
         assert!(!row_wrong_type.equals_record_batch_at_offset_impl(&batch, 0));
+    }
+
+    #[test]
+    fn test_append_only_table_identity() {
+        use RowValue::*;
+
+        let row1 = MoonlinkRow::new(vec![Int32(1), Float32(2.0), ByteArray(b"abc".to_vec())]);
+        
+        // Test append-only table identity (None)
+        let append_only_identity = IdentityProp::None;
+        
+        // Test extract_identity_for_key - should return None for append-only tables
+        assert_eq!(append_only_identity.extract_identity_for_key(&row1), None);
+        
+        // These methods should panic for IdentityProp::None since they shouldn't be called
+        // for append-only tables that don't use identity-based operations
     }
 }
