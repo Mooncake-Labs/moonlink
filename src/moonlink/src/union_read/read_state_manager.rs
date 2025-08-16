@@ -1,4 +1,3 @@
-use crate::error::Error;
 use crate::error::Result;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
@@ -191,9 +190,9 @@ impl ReadStateManager {
         table_snapshot_rx: &mut watch::Receiver<u64>,
     ) -> Result<()> {
         if requested_lsn_val > current_replication_lsn {
-            replication_lsn_rx.changed().await.map_err(Error::from)?;
+            replication_lsn_rx.changed().await?;
         } else {
-            table_snapshot_rx.changed().await.map_err(Error::from)?;
+            table_snapshot_rx.changed().await?;
         }
         Ok(())
     }
