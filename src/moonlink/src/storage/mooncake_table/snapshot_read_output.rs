@@ -1,5 +1,4 @@
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
-use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::storage::PuffinDeletionBlobAtRead;
@@ -51,7 +50,7 @@ pub struct ReadOutput {
     /// Table notifier for query completion; could be none for empty read output.
     pub table_notifier: Option<Sender<TableEvent>>,
     /// Object storage cache, to pin local file cache, could be none for empty read output.
-    pub object_storage_cache: Option<ObjectStorageCache>,
+    pub object_storage_cache: Option<Arc<dyn CacheTrait>>,
     /// Filesystem accessor, to access remote storage, could be none for empty read output.
     pub filesystem_accessor: Option<Arc<dyn BaseFileSystemAccess>>,
 }

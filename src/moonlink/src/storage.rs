@@ -15,6 +15,7 @@ pub(super) mod timer;
 pub(crate) mod wal;
 
 pub use crate::event_sync::EventSyncReceiver;
+pub use cache::object_storage::base_cache::CacheTrait;
 pub use cache::object_storage::cache_config::ObjectStorageCacheConfig;
 pub(crate) use cache::object_storage::cache_handle::NonEvictableHandle;
 pub use cache::object_storage::object_storage_cache::ObjectStorageCache;

@@ -136,7 +136,7 @@ pub async fn build_table_components(
             .mooncake_table_config
             .clone(),
         wal_manager,
-        table_components.object_storage_cache,
+        Arc::new(table_components.object_storage_cache),
         Arc::new(FileSystemAccessor::new(
             table_components
                 .moonlink_table_config

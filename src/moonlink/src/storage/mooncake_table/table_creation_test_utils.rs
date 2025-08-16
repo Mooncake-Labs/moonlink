@@ -1,5 +1,6 @@
 /// This module contains table creation tests utils.
 use crate::row::IdentityProp as RowIdentity;
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
@@ -175,6 +176,11 @@ pub(crate) fn create_test_table_metadata(
     let config = MooncakeTableConfig::new(local_table_directory.clone());
     create_test_table_metadata_with_config(local_table_directory, config)
 }
+/// Creates a new `ObjectStorageCache` for testing, based on the given temporary directory.
+pub(crate) fn create_test_object_storage_cache(temp_dir: &TempDir) -> Arc<dyn CacheTrait> {
+    let object_storage_cache = ObjectStorageCache::default_for_test(temp_dir);
+    Arc::new(object_storage_cache)
+}
 
 /// Test util function to create mooncake table with the provided config and identity.
 #[cfg(feature = "chaos-test")]
@@ -320,7 +326,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
     data_compaction_config: DataCompactionConfig,
 ) -> (MooncakeTable, IcebergTableManager, Receiver<TableEvent>) {
     let path = temp_dir.path().to_path_buf();
-    let object_storage_cache = ObjectStorageCache::default_for_test(temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(temp_dir);
     let mooncake_table_metadata =
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
     let identity_property = mooncake_table_metadata.identity.clone();
@@ -407,7 +413,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
         iceberg_table_config.clone(),
         mooncake_table_config,
         wal_manager,
-        object_storage_cache,
+        Arc::new(object_storage_cache),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
     .await
@@ -423,7 +429,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
 pub(crate) async fn create_mooncake_table(
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
     iceberg_table_config: IcebergTableConfig,
-    object_storage_cache: ObjectStorageCache,
+    object_storage_cache: Arc<dyn CacheTrait>,
 ) -> MooncakeTable {
     let wal_config =
         WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &mooncake_table_metadata.path);
@@ -450,7 +456,7 @@ pub(crate) async fn create_mooncake_table(
 pub(crate) async fn create_mooncake_table_and_notify(
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
     iceberg_table_config: IcebergTableConfig,
-    object_storage_cache: ObjectStorageCache,
+    object_storage_cache: Arc<dyn CacheTrait>,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let mut table = create_mooncake_table(
         mooncake_table_metadata,
@@ -467,7 +473,7 @@ pub(crate) async fn create_mooncake_table_and_notify(
 /// Test util function to create mooncake table and table notify for read test.
 pub(crate) async fn create_mooncake_table_and_notify_for_read(
     temp_dir: &TempDir,
-    object_storage_cache: ObjectStorageCache,
+    object_storage_cache: Arc<dyn CacheTrait>,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let path = temp_dir.path().to_path_buf();
     let mooncake_table_metadata =

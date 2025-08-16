@@ -42,7 +42,6 @@ use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::DataCompactionConfig;
 use crate::FileSystemAccessor;
-use crate::ObjectStorageCache;
 use crate::WalConfig;
 use crate::WalManager;
 
@@ -208,7 +207,7 @@ fn get_file_indices_filepath_and_data_filepaths(
 #[tokio::test]
 async fn test_snapshot_load_for_multiple_times() {
     let tmp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&tmp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&tmp_dir);
     let mooncake_table_metadata =
         create_test_table_metadata(tmp_dir.path().to_str().unwrap().to_string());
     let config = create_iceberg_table_config(tmp_dir.path().to_str().unwrap().to_string());
@@ -270,7 +269,7 @@ async fn test_skip_iceberg_snapshot() {
         iceberg_table_config.clone(),
         MooncakeTableConfig::default(),
         wal_manager,
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
     .await
@@ -315,7 +314,6 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
-
     // ==============
     // Step 1
     // ==============
@@ -323,7 +321,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // At the beginning of the test, there's nothing in table.
     let mut iceberg_table_manager = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate object storage cache.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate object storage cache.
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
@@ -518,7 +516,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // Create a new iceberg table manager and check persisted content.
     let mut iceberg_table_manager_for_load = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate object storage cache.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate object storage cache.
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
@@ -599,7 +597,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // Create a new iceberg table manager and check persisted content.
     let mut iceberg_table_manager_for_load = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate object storage cache.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate object storage cache.
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
@@ -670,7 +668,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // Create a new iceberg table manager and check persisted content.
     let mut iceberg_table_manager_for_load = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate object storage cache.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate object storage cache.
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
@@ -739,7 +737,7 @@ async fn test_drop_table_impl(iceberg_table_config: IcebergTableConfig) {
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
     let mut iceberg_table_manager = IcebergTableManager::new(
@@ -822,7 +820,7 @@ async fn test_empty_snapshot_load_impl(iceberg_table_config: IcebergTableConfig)
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     // Recover from iceberg snapshot, and check mooncake table snapshot version.
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
@@ -910,7 +908,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
         mooncake_table_metadata.clone(),
         iceberg_table_config.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
     )
     .await;
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
@@ -945,7 +943,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
     // Create a new iceberg table manager and check states.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -980,7 +978,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
     // Create a new iceberg table manager and check states.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1064,7 +1062,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
         mooncake_table_metadata.clone(),
         iceberg_table_config.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
     )
     .await;
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
@@ -1105,7 +1103,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
     // Create a new iceberg table manager and check states.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1146,7 +1144,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
     // Create a new iceberg table manager and check states.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1232,7 +1230,7 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_impl(
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
         mooncake_table_metadata.clone(),
         iceberg_table_config.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
     )
     .await;
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
@@ -1281,7 +1279,7 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_impl(
     // Create a new iceberg table manager and check states.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate cache for each table.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1350,7 +1348,7 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
     let mut iceberg_table_manager_for_persistence = IcebergTableManager::new(
@@ -1439,7 +1437,7 @@ async fn test_empty_content_snapshot_creation_with_gcs() {
 async fn test_small_batch_size_and_large_parquet_size() {
     let temp_dir = tempfile::tempdir().unwrap();
     let filesystem_accessor = FileSystemAccessor::default_for_test(&temp_dir);
-    let object_storage_cache = ObjectStorageCache::default_for_test(&temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&temp_dir);
     let path = temp_dir.path().to_path_buf();
     let warehouse_uri = path.clone().to_str().unwrap().to_string();
     let mooncake_table_metadata =
@@ -1560,7 +1558,7 @@ async fn test_multiple_table_ids_for_deletion_vector() {
         iceberg_table_config.clone(),
         MooncakeTableConfig::default(),
         wal_manager,
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
     .await
@@ -1662,7 +1660,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     // Create mooncake table and table event notification receiver.
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
@@ -1701,7 +1699,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
     // Load and check iceberg snapshot.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1758,7 +1756,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
     // Load and check iceberg snapshot.
     let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1872,7 +1870,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     // Create mooncake table and table event notification receiver.
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
@@ -1917,7 +1915,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -1989,7 +1987,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -2052,7 +2050,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -2119,7 +2117,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     // Check iceberg snapshot store and load, here we explicitly load snapshot from iceberg table, whose construction is lazy and asynchronous by design.
     let mut iceberg_table_manager = IcebergTableManager::new(
         mooncake_table_metadata.clone(),
-        ObjectStorageCache::default_for_test(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate and fresh new cache for each recovery.
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
@@ -2221,7 +2219,7 @@ async fn test_schema_for_table_creation_impl(iceberg_table_config: IcebergTableC
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     // Append, commit, flush and persist.
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
@@ -2309,7 +2307,7 @@ async fn test_schema_update_with_no_table_write_impl(iceberg_table_config: Icebe
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     // Append, commit, flush and persist.
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
@@ -2439,7 +2437,7 @@ async fn test_schema_update_impl(iceberg_table_config: IcebergTableConfig) {
 
     // Local filesystem to store read-through cache.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     // Append, commit, flush and persist.
     let (mut table, mut notify_rx) = create_mooncake_table_and_notify(

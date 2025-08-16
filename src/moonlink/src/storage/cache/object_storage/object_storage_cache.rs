@@ -362,7 +362,12 @@ impl ObjectStorageCache {
         let config = ObjectStorageCacheConfig::default_for_bench();
         Self::new(config)
     }
-
+    /// Test util function to create an object storage cache for feature=bench.
+    #[cfg(feature = "bench")]
+    pub fn create_bench_object_storage_cache() -> Arc<dyn CacheTrait> {
+        let object_storage_cache = ObjectStorageCache::default_for_bench();
+        Arc::new(object_storage_cache)
+    }
     /// Test util function to get reference count for reference count.
     #[cfg(test)]
     pub(crate) async fn get_non_evictable_entry_ref_count(
@@ -388,7 +393,7 @@ impl ObjectStorageCache {
 #[async_trait::async_trait]
 impl CacheTrait for ObjectStorageCache {
     async fn import_cache_entry(
-        &mut self,
+        &self,
         file_id: TableUniqueFileId,
         cache_entry: CacheEntry,
     ) -> (NonEvictableHandle, InlineEvictedFiles) {
@@ -416,7 +421,7 @@ impl CacheTrait for ObjectStorageCache {
     }
 
     async fn get_cache_entry(
-        &mut self,
+        &self,
         file_id: TableUniqueFileId,
         remote_filepath: &str,
         filesystem_accessor: &dyn BaseFileSystemAccess,
@@ -498,7 +503,7 @@ impl CacheTrait for ObjectStorageCache {
         }
     }
 
-    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId) -> InlineEvictedFiles {
+    async fn try_delete_cache_entry(&self, file_id: TableUniqueFileId) -> InlineEvictedFiles {
         let mut guard = self.cache.write().await;
         guard.delete_cache_entry(file_id, /*panic_if_non_existent=*/ false)
     }
@@ -518,7 +523,7 @@ mod tests {
     async fn get_cache_handle_impl(
         file_index: i32,
         remote_file_directory: std::path::PathBuf,
-        mut object_storage_cache: ObjectStorageCache,
+        object_storage_cache: ObjectStorageCache,
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> NonEvictableHandle {
         let filename = format!("{file_index}.parquet");

@@ -1,5 +1,6 @@
 use super::data_batches::BatchEntry;
 use crate::error::{Error, Result};
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::chaos_generator::ChaosGenerator;
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
 use crate::storage::index::{cache_utils as index_cache_utils, FileIndex, MemIndex};
@@ -9,7 +10,7 @@ use crate::storage::storage_utils::{
     create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
     MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation, TableId,
 };
-use crate::ObjectStorageCache;
+
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use parquet::arrow::AsyncArrowWriter;
@@ -153,7 +154,7 @@ impl DiskSliceWriter {
     /// Return evicted files to delete.
     pub(crate) async fn import_file_indices_to_cache(
         &mut self,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         table_id: TableId,
     ) -> Vec<String> {
         // Aggregate evicted files to delete.

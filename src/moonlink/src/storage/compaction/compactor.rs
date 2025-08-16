@@ -10,7 +10,6 @@ use more_asserts as ma;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::AsyncArrowWriter;
 
-use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::compaction::table_compaction::{
     CompactedDataEntry, DataCompactionPayload, DataCompactionResult, RemappedRecordLocation,
     SingleFileToCompact,

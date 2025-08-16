@@ -1,4 +1,3 @@
-use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::iceberg_table_manager::*;
 use crate::storage::iceberg::index::FileIndexBlob;

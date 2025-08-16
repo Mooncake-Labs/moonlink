@@ -5,7 +5,7 @@ use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::Error;
-use crate::{ObjectStorageCache, TableManager};
+use crate::TableManager;
 
 use iceberg::Error as IcebergError;
 
@@ -20,7 +20,7 @@ fn create_iceberg_table_manager_with_fs_accessor(
     let temp_dir = tempfile::tempdir().unwrap();
     let mooncake_table_metadata =
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
-    let object_storage_cache = ObjectStorageCache::default_for_test(&temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&temp_dir);
     IcebergTableManager::new_with_filesystem_accessor(
         mooncake_table_metadata,
         object_storage_cache,

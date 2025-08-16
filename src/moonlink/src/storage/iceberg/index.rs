@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
@@ -8,7 +9,6 @@ use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeInde
 use crate::storage::index::FileIndex as MooncakeFileIndex;
 use crate::storage::io_utils;
 use crate::storage::storage_utils::{create_data_file, FileId, TableId, TableUniqueFileId};
-use crate::ObjectStorageCache;
 
 use iceberg::io::FileIO;
 use iceberg::puffin::Blob;
@@ -102,7 +102,7 @@ impl FileIndex {
     pub(crate) async fn as_mooncake_file_index(
         &mut self,
         data_file_to_id: &HashMap<String, FileId>,
-        mut object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: &dyn BaseFileSystemAccess,
         table_id: TableId,
         next_file_id: &mut u64,
@@ -275,6 +275,7 @@ mod tests {
     use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
     use crate::storage::index::persisted_bucket_hash_map::IndexBlock as MooncakeIndexBlock;
     use crate::storage::index::FileIndex as MooncakeFileIndex;
+    use crate::storage::mooncake_table::table_creation_test_utils::create_test_object_storage_cache;
     use crate::storage::storage_utils::create_data_file;
 
     #[tokio::test]
@@ -283,7 +284,7 @@ mod tests {
         let table_id = TableId(0);
         // Test object storage cache.
         let temp_dir = tempfile::tempdir().unwrap();
-        let object_storage_cache = ObjectStorageCache::default_for_test(&temp_dir);
+        let object_storage_cache = create_test_object_storage_cache(&temp_dir);
         let filesystem_accessor = FileSystemAccessor::default_for_test(&temp_dir);
 
         // Fill in meaningless random bytes, mainly to verify the correctness of serde.

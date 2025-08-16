@@ -799,7 +799,7 @@ impl TestEnvironment {
         let table = create_mooncake_table(
             mooncake_table_metadata.clone(),
             iceberg_table_config.clone(),
-            object_storage_cache.clone(),
+            Arc::new(object_storage_cache.clone()),
         )
         .await;
         let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
@@ -933,7 +933,7 @@ async fn validate_persisted_iceberg_table(
 
     // Use a fresh new cache for new iceberg table manager.
     let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = ObjectStorageCache::default_for_test(&cache_temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
     let mut table = create_mooncake_table(
         mooncake_table_metadata.clone(),

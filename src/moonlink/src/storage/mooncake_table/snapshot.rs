@@ -8,7 +8,6 @@ use crate::error::Result;
 use crate::storage::cache::object_storage::base_cache::{
     CacheEntry as DataFileCacheEntry, CacheTrait, FileMetadata,
 };
-use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
 use crate::storage::compaction::table_compaction::{CompactedDataEntry, RemappedRecordLocation};
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::index::{cache_utils as index_cache_utils, FileIndex};
@@ -67,7 +66,7 @@ pub(crate) struct SnapshotTableState {
     pub(super) last_commit: RecordLocation,
 
     /// Object storage cache.
-    pub(super) object_storage_cache: ObjectStorageCache,
+    pub(super) object_storage_cache: Arc<dyn CacheTrait>,
 
     /// Filesystem accessor.
     pub(super) filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -160,7 +159,7 @@ impl SnapshotTableState {
     pub(super) async fn new(
         iceberg_warehouse_location: String,
         metadata: Arc<MooncakeTableMetadata>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         current_snapshot: Snapshot,
         non_streaming_batch_id_counter: Arc<BatchIdCounter>,

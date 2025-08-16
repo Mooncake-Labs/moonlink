@@ -5,7 +5,7 @@ use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
 use crate::storage::storage_utils::RecordLocation;
 use crate::storage::storage_utils::TableUniqueFileId;
-use crate::ObjectStorageCache;
+use crate::CacheTrait;
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ pub struct DataCompactionPayload {
     /// UUID for current compaction operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// Object storage cache.
-    pub(crate) object_storage_cache: ObjectStorageCache,
+    pub(crate) object_storage_cache: Arc<dyn CacheTrait>,
     /// Filesystem accessor.
     pub(crate) filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     /// Disk files to compact, including their deletion vector to apply.

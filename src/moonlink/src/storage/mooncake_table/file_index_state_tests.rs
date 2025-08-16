@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// ====================================
 /// State machine for file indices
 /// ====================================
@@ -66,7 +68,7 @@ async fn prepare_test_disk_file(
     object_storage_cache: ObjectStorageCache,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let (mut table, mut table_notify) =
-        create_mooncake_table_and_notify_for_read(temp_dir, object_storage_cache).await;
+        create_mooncake_table_and_notify_for_read(temp_dir, Arc::new(object_storage_cache)).await;
 
     let row = MoonlinkRow::new(vec![
         RowValue::Int32(1),
@@ -108,7 +110,7 @@ async fn test_1_recover_3() {
     let iceberg_table_config = get_iceberg_table_config(&temp_dir);
     let mut iceberg_table_manager_to_recover = IcebergTableManager::new(
         table.metadata.clone(),
-        object_storage_cache_for_recovery.clone(),
+        Arc::new(object_storage_cache_for_recovery.clone()),
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
@@ -222,7 +224,7 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
         iceberg_table_config.clone(),
         mooncake_table_config,
         wal_manager,
-        object_storage_cache,
+        Arc::new(object_storage_cache),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
     .await

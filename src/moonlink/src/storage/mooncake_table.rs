@@ -26,7 +26,7 @@ use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
 use crate::error::Result;
 use crate::row::{IdentityProp, MoonlinkRow};
-use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::compaction::compactor::{CompactionBuilder, CompactionFileParams};
 pub(crate) use crate::storage::compaction::table_compaction::{
     DataCompactionPayload, DataCompactionResult,
@@ -464,7 +464,7 @@ impl MooncakeTable {
         iceberg_table_config: IcebergTableConfig,
         table_config: MooncakeTableConfig,
         wal_manager: WalManager,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
         let metadata = Arc::new(TableMetadata {
@@ -495,7 +495,7 @@ impl MooncakeTable {
     pub(crate) async fn new_with_table_manager(
         table_metadata: Arc<TableMetadata>,
         mut table_manager: Box<dyn TableManager>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         wal_manager: WalManager,
     ) -> Result<Self> {

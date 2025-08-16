@@ -21,7 +21,6 @@ use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
 use crate::storage::TableManager;
 use crate::table_handler::table_handler_state::TableHandlerState;
-use crate::ObjectStorageCache;
 use crate::TableEventManager;
 use crate::WalConfig;
 
@@ -1648,7 +1647,7 @@ async fn test_discard_duplicate_writes() {
     let mut mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
         wal_manager,
     )

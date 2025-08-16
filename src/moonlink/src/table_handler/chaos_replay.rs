@@ -106,7 +106,12 @@ async fn create_mooncake_table_for_replay(
         atomic_write_dir: None,
     };
     let iceberg_table_config = get_iceberg_table_config_with_storage_config(storage_config);
-    create_mooncake_table(table_metadata, iceberg_table_config, object_storage_cache).await
+    create_mooncake_table(
+        table_metadata,
+        iceberg_table_config,
+        Arc::new(object_storage_cache),
+    )
+    .await
 }
 
 pub(crate) async fn replay() {

@@ -1,6 +1,5 @@
 use super::data_batches::create_batch_from_rows;
 use crate::error::Result;
-use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
 use crate::storage::mooncake_table::snapshot_read_output::{
     DataFileForRead, ReadOutput as SnapshotReadOutput,

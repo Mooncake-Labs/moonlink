@@ -1,4 +1,3 @@
-use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::deletion_vector::{
     DELETION_VECTOR_CADINALITY, DELETION_VECTOR_REFERENCED_DATA_FILE,

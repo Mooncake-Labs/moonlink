@@ -116,7 +116,7 @@ async fn prepare_test_disk_file_for_read(
     use_batch_write: bool,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let (mut table, mut table_notify) =
-        create_mooncake_table_and_notify_for_read(temp_dir, cache).await;
+        create_mooncake_table_and_notify_for_read(temp_dir, Arc::new(cache)).await;
 
     let row = MoonlinkRow::new(vec![
         RowValue::Int32(1),

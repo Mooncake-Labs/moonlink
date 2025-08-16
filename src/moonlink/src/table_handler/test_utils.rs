@@ -16,11 +16,11 @@ use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
+use crate::Result;
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
     WalConfig, WalTransactionState,
 };
-use crate::{ObjectStorageCache, Result};
 
 use arrow_array::RecordBatch;
 use futures::StreamExt;
@@ -162,7 +162,7 @@ impl TestEnvironment {
             iceberg_table_config.clone(),
             mooncake_table_config,
             wal_manager,
-            ObjectStorageCache::default_for_test(&temp_dir),
+            create_test_object_storage_cache(&temp_dir),
             create_test_filesystem_accessor(&iceberg_table_config),
         )
         .await
@@ -192,7 +192,7 @@ impl TestEnvironment {
         IcebergTableManager::new(
             mooncake_table_metadata,
             // Create new and separate object storage cache for new iceberg table manager.
-            ObjectStorageCache::default_for_test(&self.temp_dir),
+            create_test_object_storage_cache(&self.temp_dir),
             create_test_filesystem_accessor(&iceberg_table_config),
             iceberg_table_config.clone(),
         )

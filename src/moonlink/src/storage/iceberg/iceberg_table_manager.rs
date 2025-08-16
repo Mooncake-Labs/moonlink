@@ -1,3 +1,4 @@
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
@@ -11,8 +12,8 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
+use crate::IcebergTableConfig;
 use crate::Result;
-use crate::{IcebergTableConfig, ObjectStorageCache};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,7 +60,7 @@ pub struct IcebergTableManager {
     pub(crate) iceberg_table: Option<IcebergTable>,
 
     /// Object storage cache.
-    pub(crate) object_storage_cache: ObjectStorageCache,
+    pub(crate) object_storage_cache: Arc<dyn CacheTrait>,
 
     /// Filesystem accessor.
     pub(crate) filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -77,7 +78,7 @@ pub struct IcebergTableManager {
 impl IcebergTableManager {
     pub fn new(
         mooncake_table_metadata: Arc<MooncakeTableMetadata>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         config: IcebergTableConfig,
     ) -> IcebergResult<IcebergTableManager> {
@@ -102,7 +103,7 @@ impl IcebergTableManager {
     #[cfg(test)]
     pub(crate) fn new_with_filesystem_accessor(
         mooncake_table_metadata: Arc<MooncakeTableMetadata>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         config: IcebergTableConfig,
     ) -> IcebergResult<IcebergTableManager> {

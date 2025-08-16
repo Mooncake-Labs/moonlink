@@ -77,7 +77,7 @@ impl TransactionStreamCommit {
     /// Return evicted files to delete.
     pub(crate) async fn import_file_index_into_cache(
         &mut self,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         table_id: TableId,
     ) -> Vec<String> {
         let file_indices = &mut self.flushed_file_index.file_indices;
