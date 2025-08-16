@@ -4357,6 +4357,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "regex",
+ "serde",
  "thiserror 2.0.14",
 ]
 

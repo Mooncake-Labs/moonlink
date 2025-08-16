@@ -1,10 +1,11 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::error;
 use std::fmt;
 use std::panic::Location;
 use std::sync::Arc;
 
 /// Error status categories
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorStatus {
     /// Temporary errors that can be resolved by retrying (e.g., rate limits, timeouts)
     Temporary,
@@ -22,12 +23,38 @@ impl fmt::Display for ErrorStatus {
 }
 
 /// Custom error struct for moonlink
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorStruct {
     pub message: String,
     pub status: ErrorStatus,
+    #[serde(
+        serialize_with = "serialize_error_source",
+        deserialize_with = "deserialize_error_source"
+    )]
     pub source: Option<Arc<anyhow::Error>>,
+    #[serde(skip)]
     pub location: Option<&'static Location<'static>>,
+}
+
+fn serialize_error_source<S>(
+    error: &Option<Arc<anyhow::Error>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match error {
+        Some(err) => serializer.serialize_str(&err.to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_error_source<'de, D>(deserializer: D) -> Result<Option<Arc<anyhow::Error>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(|msg| Arc::new(anyhow::anyhow!(msg))))
 }
 
 impl fmt::Display for ErrorStruct {
