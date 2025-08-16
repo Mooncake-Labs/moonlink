@@ -14,6 +14,7 @@ use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::storage_utils::{create_data_file, FileId, TableId, TableUniqueFileId};
+use crate::Result;
 
 use std::collections::{HashMap, HashSet};
 use std::vec;
@@ -220,7 +221,7 @@ impl IcebergTableManager {
 
     pub(crate) async fn load_snapshot_from_table_impl(
         &mut self,
-    ) -> IcebergResult<(u32, MooncakeSnapshot)> {
+    ) -> Result<(u32, MooncakeSnapshot)> {
         assert!(!self.snapshot_loaded);
         self.snapshot_loaded = true;
 

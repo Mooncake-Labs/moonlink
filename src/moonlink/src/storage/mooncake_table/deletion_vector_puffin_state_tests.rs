@@ -320,7 +320,8 @@ async fn test_2_read_without_local_optimization(#[case] use_batch_write: bool) {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Check data file has been pinned in mooncake table.
     let puffin_blob_ref = get_only_puffin_blob_ref_from_table(&table).await;
@@ -376,7 +377,8 @@ async fn test_2_read_with_local_optimization(#[case] use_batch_write: bool) {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Check data file has been pinned in mooncake table.
     let puffin_blob_ref = get_only_puffin_blob_ref_from_table(&table).await;

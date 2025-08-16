@@ -11,6 +11,7 @@ use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::table_handler::table_handler_state::MaintenanceProcessStatus;
 use crate::table_handler::table_handler_state::TableHandlerState;
+use crate::Error;
 use crate::FileSystemAccessor;
 use crate::WalConfig;
 use iceberg::{Error as IcebergError, ErrorKind};
@@ -545,10 +546,10 @@ async fn test_snapshot_load_failure() {
         .times(1)
         .returning(|| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 
@@ -601,10 +602,10 @@ async fn test_snapshot_store_failure() {
         .times(1)
         .returning(|_, _| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 

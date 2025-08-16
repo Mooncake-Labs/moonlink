@@ -25,10 +25,6 @@ pub enum Error {
     #[error("{0}")]
     IcebergError(ErrorStruct),
 
-    // TODO(hjiang): Improve error propagation.
-    #[error("Iceberg error: {0}")]
-    IcebergMessage(String),
-
     #[error("{0}")]
     OpenDal(ErrorStruct),
 

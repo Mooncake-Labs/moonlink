@@ -7,6 +7,8 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::Error;
 use crate::{ObjectStorageCache, TableManager};
 
+use iceberg::Error as IcebergError;
+
 use std::sync::Arc;
 
 /// Mock-based unit tests for iceberg table manager.
@@ -36,8 +38,9 @@ async fn test_failed_iceberg_table_manager_drop_table() {
         .times(1)
         .returning(|_| {
             Box::pin(async move {
-                Err(Error::IcebergMessage(String::from(
-                    "Failed to delete object",
+                Err(Error::from(IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "Intended error for unit test",
                 )))
             })
         });
@@ -55,8 +58,9 @@ async fn test_failed_recover_from_iceberg_table() {
         .times(1)
         .returning(|_| {
             Box::pin(async move {
-                Err(Error::IcebergMessage(String::from(
-                    "Failed to check object existence",
+                Err(Error::from(IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    "Intended error for unit test",
                 )))
             })
         });

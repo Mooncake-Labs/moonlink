@@ -17,7 +17,6 @@ use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_handler_timer::TableHandlerTimer;
 use crate::table_notify::TableEvent;
-use crate::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -580,13 +579,10 @@ impl TableHandler {
                                 .update_iceberg_persisted_lsn(iceberg_flush_lsn, replication_lsn);
                         }
                         Err(e) => {
-                            let err = Err(Error::IcebergMessage(format!(
-                                "Failed to create iceberg snapshot: {e:?}"
-                            )));
                             if table_handler_state.has_pending_force_snapshot_request() {
                                 if let Err(send_err) = table_handler_state
                                     .force_snapshot_completion_tx
-                                    .send(Some(err.clone()))
+                                    .send(Some(Err(e.clone())))
                                 {
                                     error!(error = ?send_err, "failed to notify force snapshot, because receive end has closed channel");
                                 }

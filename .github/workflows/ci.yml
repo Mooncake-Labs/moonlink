@@ -373,7 +373,39 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 9 · PostgreSQL Integration Tests ─────────────
+  # ───────────── 9 · Chaos test for append only operation ─────────────
+  append_only_chaos:
+    name: Chaos test for append only operation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
+      - name: Start chaos test
+        timeout-minutes: 10
+        run: |
+          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_append_only_chaos --features=chaos-test -p moonlink -- --nocapture
+
+      #  ────────────────────── Upload chaos dump ────────────────────────────
+      - name: Upload chaos dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          path: /tmp/chaos_test_*
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ───────────── 10 · PostgreSQL Integration Tests ─────────────
   postgres_tests:
     name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest

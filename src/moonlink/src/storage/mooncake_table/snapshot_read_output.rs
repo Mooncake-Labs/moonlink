@@ -6,7 +6,7 @@ use crate::storage::PuffinDeletionBlobAtRead;
 use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
 use crate::ReadStateFilepathRemap;
-use crate::{NonEvictableHandle, ReadState};
+use crate::{NonEvictableHandle, ReadState, Result};
 
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ impl ReadOutput {
     pub async fn take_as_read_state(
         mut self,
         read_state_filepath_remap: ReadStateFilepathRemap,
-    ) -> Arc<ReadState> {
+    ) -> Result<Arc<ReadState>> {
         // Resolve remote data files.
         let mut resolved_data_files = Vec::with_capacity(self.data_file_paths.len());
         let mut cache_handles = vec![];
@@ -71,7 +71,6 @@ impl ReadOutput {
             match cur_data_file {
                 DataFileForRead::TemporaryDataFile(file) => resolved_data_files.push(file),
                 DataFileForRead::RemoteFilePath((file_id, remote_filepath)) => {
-                    // TODO(hjiang): Better error propagation.
                     let (cache_handle, files_to_delete) = self
                         .object_storage_cache
                         .as_mut()
@@ -81,8 +80,7 @@ impl ReadOutput {
                             &remote_filepath,
                             self.filesystem_accessor.as_ref().unwrap().as_ref(),
                         )
-                        .await
-                        .unwrap();
+                        .await?;
                     if let Some(cache_handle) = cache_handle {
                         resolved_data_files.push(cache_handle.get_cache_filepath().to_string());
                         cache_handles.push(cache_handle);
@@ -107,7 +105,7 @@ impl ReadOutput {
         }
 
         // Construct read state.
-        Arc::new(ReadState::new(
+        Ok(Arc::new(ReadState::new(
             // Data file and positional deletes for query.
             resolved_data_files,
             self.puffin_cache_handles,
@@ -117,6 +115,6 @@ impl ReadOutput {
             self.associated_files,
             cache_handles,
             read_state_filepath_remap,
-        ))
+        )))
     }
 }

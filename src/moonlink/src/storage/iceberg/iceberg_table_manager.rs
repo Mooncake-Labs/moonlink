@@ -11,6 +11,7 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
+use crate::Result;
 use crate::{IcebergTableConfig, ObjectStorageCache};
 
 use std::collections::HashMap;
@@ -193,7 +194,7 @@ impl TableManager for IcebergTableManager {
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
-    ) -> IcebergResult<PersistenceResult> {
+    ) -> Result<PersistenceResult> {
         // Persist data files, deletion vectors, and file indices.
         let new_table_schema = std::mem::take(&mut snapshot_payload.new_table_schema);
         let persistence_result = self
@@ -207,15 +208,17 @@ impl TableManager for IcebergTableManager {
         Ok(persistence_result)
     }
 
-    async fn load_snapshot_from_table(&mut self) -> IcebergResult<(u32, MooncakeSnapshot)> {
-        self.load_snapshot_from_table_impl().await
+    async fn load_snapshot_from_table(&mut self) -> Result<(u32, MooncakeSnapshot)> {
+        let snapshot = self.load_snapshot_from_table_impl().await?;
+        Ok(snapshot)
     }
 
-    async fn drop_table(&mut self) -> IcebergResult<()> {
+    async fn drop_table(&mut self) -> Result<()> {
         let table_ident = TableIdent::new(
             NamespaceIdent::from_strs(&self.config.namespace).unwrap(),
             self.config.table_name.clone(),
         );
-        self.catalog.drop_table(&table_ident).await
+        self.catalog.drop_table(&table_ident).await?;
+        Ok(())
     }
 }

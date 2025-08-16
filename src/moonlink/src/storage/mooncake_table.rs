@@ -1424,7 +1424,7 @@ impl MooncakeTable {
         if iceberg_persistence_res.is_err() {
             table_notify
                 .send(TableEvent::IcebergSnapshotResult {
-                    iceberg_snapshot_result: Err(iceberg_persistence_res.unwrap_err().into()),
+                    iceberg_snapshot_result: Err(iceberg_persistence_res.unwrap_err()),
                 })
                 .await
                 .unwrap();
