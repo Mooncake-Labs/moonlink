@@ -1,4 +1,6 @@
+use moonlink_error::{ErrorStatus, ErrorStruct};
 use serde_json::Error as SerdeJsonError;
+use std::panic::Location;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -8,65 +10,96 @@ use tokio_postgres::Error as TokioPostgresError;
 #[derive(Clone, Debug, Error)]
 pub enum Error {
     #[cfg(feature = "metadata-postgres")]
-    #[error("tokio postgres error: {source}")]
-    TokioPostgres { source: Arc<TokioPostgresError> },
+    #[error("{0}")]
+    TokioPostgres(ErrorStruct),
 
-    #[error("metadata operation row number doesn't match {0} vs {1}")]
-    PostgresRowCountError(u32, u32),
+    #[error("{0}")]
+    PostgresRowCountError(ErrorStruct),
 
-    #[error("sqlx error: {source}")]
-    Sqlx { source: Arc<sqlx::Error> },
+    #[error("{0}")]
+    Sqlx(ErrorStruct),
 
-    #[error("metadata operation row number doesn't match {0} vs {1}")]
-    SqliteRowCountError(u32, u32),
+    #[error("{0}")]
+    SqliteRowCountError(ErrorStruct),
 
-    #[error("metadata access failed precondition: {0}")]
-    MetadataStoreFailedPrecondition(String),
+    #[error("{0}")]
+    MetadataStoreFailedPrecondition(ErrorStruct),
 
-    #[error("serde json error: {source}")]
-    SerdeJson { source: Arc<SerdeJsonError> },
+    #[error("{0}")]
+    SerdeJson(ErrorStruct),
 
-    #[error("table id with id {0} not found")]
-    TableIdNotFound(u32),
+    #[error("{0}")]
+    TableIdNotFound(ErrorStruct),
 
-    #[error("required field {0} not exist in serialized config json")]
-    ConfigFieldNotExist(String),
+    #[error("{0}")]
+    ConfigFieldNotExist(ErrorStruct),
 
-    #[error("IO error: {source}")]
-    Io { source: Arc<std::io::Error> },
+    #[error("{0}")]
+    Io(ErrorStruct),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(feature = "metadata-postgres")]
 impl From<TokioPostgresError> for Error {
+    #[track_caller]
     fn from(source: TokioPostgresError) -> Self {
-        Error::TokioPostgres {
-            source: Arc::new(source),
-        }
+        Error::TokioPostgres(ErrorStruct {
+            message: format!("tokio postgres error: {source}"),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
+        })
     }
 }
 
 impl From<sqlx::Error> for Error {
+    #[track_caller]
     fn from(source: sqlx::Error) -> Self {
-        Error::Sqlx {
-            source: Arc::new(source),
-        }
+        Error::Sqlx(ErrorStruct {
+            message: format!("sqlx error: {source}"),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
+        })
     }
 }
 
 impl From<SerdeJsonError> for Error {
+    #[track_caller]
     fn from(source: SerdeJsonError) -> Self {
-        Error::SerdeJson {
-            source: Arc::new(source),
-        }
+        Error::SerdeJson(ErrorStruct {
+            message: format!("serde json error: {source}"),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
+        })
     }
 }
 
 impl From<std::io::Error> for Error {
+    #[track_caller]
     fn from(source: std::io::Error) -> Self {
-        Error::Io {
-            source: Arc::new(source),
-        }
+        let status = match source.kind() {
+            std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NetworkDown
+            | std::io::ErrorKind::ResourceBusy
+            | std::io::ErrorKind::QuotaExceeded => ErrorStatus::Temporary,
+
+            _ => ErrorStatus::Permanent,
+        };
+
+        Error::Io(ErrorStruct {
+            message: format!("IO error: {source}"),
+            status,
+            source: Some(Arc::new(source.into())),
+            location: Some(Location::caller()),
+        })
     }
 }

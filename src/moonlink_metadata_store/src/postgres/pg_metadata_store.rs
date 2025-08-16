@@ -8,6 +8,8 @@ use crate::postgres::pg_client_wrapper::PgClientWrapper;
 use crate::postgres::utils;
 use moonlink::MoonlinkTableConfig;
 use moonlink::MoonlinkTableSecret;
+use moonlink_error::{ErrorStatus, ErrorStruct};
+use std::panic::Location;
 
 use async_trait::async_trait;
 use postgres_types::Json as PgJson;
@@ -138,7 +140,12 @@ impl MetadataStoreTrait for PgMetadataStore {
             )
             .await?;
         if rows_affected != 1 {
-            return Err(Error::PostgresRowCountError(1, rows_affected as u32));
+            return Err(Error::PostgresRowCountError(ErrorStruct {
+                message: format!("expected 1 row affected, but got {}", rows_affected),
+                status: ErrorStatus::Permanent,
+                source: None,
+                location: Some(Location::caller()),
+            }));
         }
 
         // Persist table secrets.
@@ -161,7 +168,12 @@ impl MetadataStoreTrait for PgMetadataStore {
                 )
                 .await?;
             if rows_affected != 1 {
-                return Err(Error::PostgresRowCountError(1, rows_affected as u32));
+                return Err(Error::PostgresRowCountError(ErrorStruct {
+                    message: format!("expected 1 row affected, but got {}", rows_affected),
+                    status: ErrorStatus::Permanent,
+                    source: None,
+                    location: Some(Location::caller()),
+                }));
             }
         }
 
@@ -190,7 +202,12 @@ impl MetadataStoreTrait for PgMetadataStore {
             )
             .await?;
         if rows_affected != 1 {
-            return Err(Error::PostgresRowCountError(1, rows_affected as u32));
+            return Err(Error::PostgresRowCountError(ErrorStruct {
+                message: format!("expected 1 row affected, but got {}", rows_affected),
+                status: ErrorStatus::Permanent,
+                source: None,
+                location: Some(Location::caller()),
+            }));
         }
 
         // Delete rows for secret table, intentionally no check affected row counts.

@@ -19,6 +19,7 @@ metadata-sqlite = ["sqlx"]
 [dependencies]
 async-trait = { workspace = true }
 moonlink = { path = "../moonlink" }
+moonlink_error = { path = "../moonlink_error" }
 more-asserts = { workspace = true }
 postgres-types = { workspace = true, optional = true }
 serde = { workspace = true }
