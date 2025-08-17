@@ -550,72 +550,18 @@ impl TextFormatConverter {
         s: &str,
         fields: &[tokio_postgres::types::Field],
     ) -> Result<Cell, FromTextError> {
-        if s.len() < 2 {
-            return Err(ArrayParseError::InputTooShort.into());
-        }
-
-        if !s.starts_with('{') || !s.ends_with('}') {
-            return Err(ArrayParseError::MissingBraces.into());
-        }
-
-        let mut res = Vec::new();
-        let inner = &s[1..(s.len() - 1)];
-
-        if inner.is_empty() {
-            return Ok(Cell::Array(ArrayCell::Composite(res)));
-        }
-
-        let mut val_str = String::with_capacity(50);
-        let mut in_quotes = false;
-        let mut in_escape = false;
-        let mut chars = inner.chars();
-        let mut done = false;
-
-        while !done {
-            loop {
-                match chars.next() {
-                    Some(c) => match c {
-                        c if in_escape => {
-                            val_str.push(c);
-                            in_escape = false;
-                        }
-                        '\\' if in_quotes => {
-                            in_escape = true;
-                        }
-                        '"' => {
-                            in_quotes = !in_quotes;
-                        }
-                        ',' if !in_quotes => {
-                            break;
-                        }
-                        c => {
-                            val_str.push(c);
-                        }
-                    },
-                    None => {
-                        done = true;
-                        break;
-                    }
+        // Delegate to the generic array parser
+        TextFormatConverter::parse_array(
+            s,
+            |str| {
+                let cell = TextFormatConverter::parse_composite(str, fields)?;
+                match cell {
+                    Cell::Composite(values) => Ok(Some(values)),
+                    _ => unreachable!("parse_composite should always return Cell::Composite"),
                 }
-            }
-
-            let val = if val_str.to_lowercase() == "null" {
-                None
-            } else {
-                // The value should be a composite wrapped in parentheses
-                Some(
-                    match TextFormatConverter::parse_composite(&val_str, fields)? {
-                        Cell::Composite(cells) => cells,
-                        _ => unreachable!("parse_composite should always return Cell::Composite"),
-                    },
-                )
-            };
-
-            res.push(val);
-            val_str.clear();
-        }
-
-        Ok(Cell::Array(ArrayCell::Composite(res)))
+            },
+            ArrayCell::Composite,
+        )
     }
 }
 
