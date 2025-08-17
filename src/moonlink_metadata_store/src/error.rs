@@ -1,7 +1,5 @@
 use moonlink_error::{ErrorStatus, ErrorStruct};
 use serde_json::Error as SerdeJsonError;
-use std::panic::Location;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[cfg(feature = "metadata-postgres")]
@@ -44,36 +42,36 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<TokioPostgresError> for Error {
     #[track_caller]
     fn from(source: TokioPostgresError) -> Self {
-        Error::TokioPostgres(ErrorStruct {
-            message: format!("tokio postgres error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::TokioPostgres(
+            ErrorStruct::new(
+                format!("tokio postgres error: {source}"),
+                ErrorStatus::Permanent,
+            )
+            .with_source(source),
+        )
     }
 }
 
 impl From<sqlx::Error> for Error {
     #[track_caller]
     fn from(source: sqlx::Error) -> Self {
-        Error::Sqlx(ErrorStruct {
-            message: format!("sqlx error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Sqlx(
+            ErrorStruct::new(format!("sqlx error: {source}"), ErrorStatus::Permanent)
+                .with_source(source),
+        )
     }
 }
 
 impl From<SerdeJsonError> for Error {
     #[track_caller]
     fn from(source: SerdeJsonError) -> Self {
-        Error::SerdeJson(ErrorStruct {
-            message: format!("serde json error: {source}"),
-            status: ErrorStatus::Permanent,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::SerdeJson(
+            ErrorStruct::new(
+                format!("serde json error: {source}"),
+                ErrorStatus::Permanent,
+            )
+            .with_source(source),
+        )
     }
 }
 
@@ -95,11 +93,6 @@ impl From<std::io::Error> for Error {
             _ => ErrorStatus::Permanent,
         };
 
-        Error::Io(ErrorStruct {
-            message: format!("IO error: {source}"),
-            status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller()),
-        })
+        Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
     }
 }
