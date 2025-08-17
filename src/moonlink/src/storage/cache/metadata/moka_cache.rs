@@ -62,6 +62,22 @@ where
         self.cache.get(key).await
     }
 
+    /// Inserts a key-value pair into the cache.
+    ///
+    /// - If the key already exists:
+    ///   - The old value will be **overwritten** with the new one.
+    ///   - The entry's **expiration time (TTL)** will be refreshed (reset from now).
+    ///
+    /// - If the key does not exist:
+    ///   - A new entry will be inserted with the configured TTL.
+    ///
+    /// # Example
+    /// ```
+    /// cache.put("user:1".to_string(), "Alice".to_string()).await;
+    /// cache.put("user:1".to_string(), "Bob".to_string()).await;
+    ///
+    /// // "Alice" is replaced by "Bob", and TTL is refreshed.
+    /// ```
     async fn put(&self, key: K, value: V) {
         self.cache.insert(key, value).await;
     }
