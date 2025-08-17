@@ -896,6 +896,28 @@ mod tests {
             }
             _ => panic!("expected array of composites, got: {cell:?}"),
         }
+
+        let addr_fields = vec![
+            Field::new("street".to_string(), Type::TEXT),
+            Field::new("city".to_string(), Type::TEXT),
+            Field::new("zip".to_string(), Type::INT4),
+        ];
+        let pgoutput_like = r#"{"(\"789 Pine St\",Chicago,60601)","(\"321 Elm St\",Boston,2101)"}"#;
+        let cell = TextFormatConverter::parse_composite_array(pgoutput_like, &addr_fields).unwrap();
+        match cell {
+            Cell::Array(ArrayCell::Composite(composites)) => {
+                assert_eq!(composites.len(), 2);
+                let first = composites[0].as_ref().unwrap();
+                assert!(matches!(first[0], Cell::String(ref s) if s == "789 Pine St"));
+                assert!(matches!(first[1], Cell::String(ref s) if s == "Chicago"));
+                assert!(matches!(first[2], Cell::I32(60601)));
+                let second = composites[1].as_ref().unwrap();
+                assert!(matches!(second[0], Cell::String(ref s) if s == "321 Elm St"));
+                assert!(matches!(second[1], Cell::String(ref s) if s == "Boston"));
+                assert!(matches!(second[2], Cell::I32(2101)));
+            }
+            _ => panic!("expected array of composites, got: {cell:?}"),
+        }
     }
 
     #[test]
@@ -933,6 +955,14 @@ mod tests {
             }
             _ => panic!("expected array of composites, got: {cell:?}"),
         }
+
+        // Quoted "null" is not a NULL element; it should fail composite parsing (missing parens)
+        let array_str = r#"{"\"null\""}"#;
+        let err = TextFormatConverter::parse_composite_array(array_str, &fields).unwrap_err();
+        assert!(matches!(
+            err,
+            FromTextError::InvalidComposite(CompositeParseError::MissingParentheses)
+        ));
     }
 
     #[test]
