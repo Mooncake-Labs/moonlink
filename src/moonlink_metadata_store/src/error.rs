@@ -44,11 +44,8 @@ impl From<TokioPostgresError> for Error {
     #[track_caller]
     fn from(source: TokioPostgresError) -> Self {
         Error::TokioPostgres(
-            ErrorStruct::new(
-                format!("tokio postgres error: {source}"),
-                ErrorStatus::Permanent,
-            )
-            .with_source(source),
+            ErrorStruct::new("tokio postgres error".to_string(), ErrorStatus::Permanent)
+                .with_source(source),
         )
     }
 }
@@ -57,8 +54,7 @@ impl From<sqlx::Error> for Error {
     #[track_caller]
     fn from(source: sqlx::Error) -> Self {
         Error::Sqlx(
-            ErrorStruct::new(format!("sqlx error: {source}"), ErrorStatus::Permanent)
-                .with_source(source),
+            ErrorStruct::new("sqlx error".to_string(), ErrorStatus::Permanent).with_source(source),
         )
     }
 }
@@ -67,11 +63,8 @@ impl From<SerdeJsonError> for Error {
     #[track_caller]
     fn from(source: SerdeJsonError) -> Self {
         Error::SerdeJson(
-            ErrorStruct::new(
-                format!("serde json error: {source}"),
-                ErrorStatus::Permanent,
-            )
-            .with_source(source),
+            ErrorStruct::new("serde json error".to_string(), ErrorStatus::Permanent)
+                .with_source(source),
         )
     }
 }
