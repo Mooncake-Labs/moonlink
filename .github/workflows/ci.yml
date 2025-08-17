@@ -28,7 +28,7 @@ jobs:
     name: Format & Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         id: toolchain
@@ -71,7 +71,7 @@ jobs:
             cmd: |
               RUST_BACKTRACE=1 cargo test test_gcs_chaos --features=chaos-test,storage-gcs -p moonlink -- --nocapture
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ─────────────────────── Start Fake GCS Server ──────────────────────────
       - name: Start Fake GCS Server
@@ -137,7 +137,7 @@ jobs:
               cargo test storage::filesystem::accessor -p moonlink --features=chaos-test
               RUST_BACKTRACE=1 cargo test test_s3_chaos --features=chaos-test,storage-s3 -p moonlink -- --nocapture
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -198,7 +198,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
       - uses: dtolnay/rust-toolchain@stable
@@ -260,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -292,7 +292,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start chaos test
         timeout-minutes: 10
@@ -315,7 +315,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -347,7 +347,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -379,7 +379,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -426,7 +426,7 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         id: toolchain
