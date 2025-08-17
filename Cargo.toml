@@ -43,7 +43,7 @@ itertools = { version = "0.14" }
 lru = { version = "0.14" }
 more-asserts = "0.3"
 multimap = { version = "0.10", default-features = false }
-nix = { version = "0.27", default-features = false, features = ["fs"] }
+nix = { version = "0.30", default-features = false, features = ["fs"] }
 num-bigint = { version = "0.4" }
 num-traits = "0.2"
 object_store = "0.12"
