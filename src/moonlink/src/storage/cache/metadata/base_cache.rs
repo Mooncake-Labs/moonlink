@@ -20,4 +20,6 @@ where
     async fn clear(&self);
 
     async fn evict(&self, key: &K);
+
+    async fn len(&self) -> u64;
 }

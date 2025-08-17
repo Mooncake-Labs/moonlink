@@ -33,8 +33,7 @@ async fn test_evict_by_ttl() {
         ])
         .await;
 
-    let all_entries_after_ttl = cache.dump_all_for_test().await;
-    assert_eq!(all_entries_after_ttl.len(), 0);
+    assert_eq!(cache.len().await, 0);
 }
 
 #[tokio::test]
@@ -46,7 +45,7 @@ async fn test_put_values() {
 
     let all_entries = cache.dump_all_for_test().await;
 
-    assert_eq!(all_entries.len(), 2);
+    assert_eq!(cache.len().await, 2);
     assert!(all_entries.contains(&("key1".to_string(), "value1".to_string())));
     assert!(all_entries.contains(&("key2".to_string(), "value2".to_string())));
 }
@@ -67,7 +66,7 @@ async fn test_replace_entry_when_max_size_exceeds() {
 
     let all_entries = cache.dump_all_for_test().await;
 
-    assert_eq!(all_entries.len(), 2);
+    assert_eq!(cache.len().await, 2);
     assert!(all_entries.contains(&("key2".to_string(), "value2".to_string())));
     assert!(all_entries.contains(&("key3".to_string(), "value3".to_string())));
 }
@@ -88,7 +87,7 @@ async fn test_evict_value() {
 
     let all_entries = cache.dump_all_for_test().await;
 
-    assert_eq!(all_entries.len(), 1);
+    assert_eq!(cache.len().await, 1);
     assert!(all_entries.contains(&("key2".to_string(), "value2".to_string())));
 }
 
@@ -106,7 +105,5 @@ async fn test_clear_all_values() {
     cache.clear().await;
     cache.force_cleanup_for_test().await;
 
-    let all_entries = cache.dump_all_for_test().await;
-
-    assert_eq!(all_entries.len(), 0);
+    assert_eq!(cache.len().await, 0);
 }

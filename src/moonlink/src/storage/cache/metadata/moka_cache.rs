@@ -73,4 +73,9 @@ where
     async fn evict(&self, key: &K) {
         self.cache.invalidate(key).await;
     }
+
+    async fn len(&self) -> u64 {
+        self.cache.run_pending_tasks().await;
+        self.cache.entry_count()
+    }
 }
