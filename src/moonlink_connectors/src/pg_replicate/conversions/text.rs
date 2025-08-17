@@ -364,6 +364,7 @@ impl TextFormatConverter {
         }
     }
 
+    /// Parse Postgres text arrays: respect quotes/escapes; unquoted NULL is None, quoted "null" is a string
     fn parse_array<P, M, T>(str: &str, mut parse: P, m: M) -> Result<Cell, FromTextError>
     where
         P: FnMut(&str) -> Result<Option<T>, FromTextError>,
@@ -383,7 +384,7 @@ impl TextFormatConverter {
         let mut in_quotes = false;
         let mut in_escape = false;
         let mut val_quoted = false;
-        let mut chars = str.chars();
+        let mut chars = str.chars().peekable();
         let mut done = str.is_empty();
 
         while !done {
@@ -395,10 +396,20 @@ impl TextFormatConverter {
                             in_escape = false;
                         }
                         '"' => {
-                            if !in_quotes {
+                            if in_quotes {
+                                // support doubled quotes inside quoted value
+                                if let Some('"') = chars.peek().copied() {
+                                    // consume next quote and append a single quote to value
+                                    // means we are encapsulating a composite value
+                                    let _ = chars.next();
+                                    val_str.push('"');
+                                } else {
+                                    in_quotes = false;
+                                }
+                            } else {
                                 val_quoted = true;
+                                in_quotes = true;
                             }
-                            in_quotes = !in_quotes;
                         }
                         '\\' => in_escape = true,
                         ',' if !in_quotes => {
@@ -434,6 +445,7 @@ impl TextFormatConverter {
     /// - NULL values are represented as empty or the literal 'null' (case-insensitive)
     /// - Quoted values preserve all characters including commas and parentheses
     /// - Escaped characters within quotes are handled with backslash
+    /// - Don't split on commas inside quotes
     ///
     /// Reference: https://www.postgresql.org/docs/current/rowtypes.html#ROWTYPES-IO-SYNTAX
     fn parse_composite(
@@ -454,7 +466,7 @@ impl TextFormatConverter {
         let mut in_quotes = false;
         let mut in_escape = false;
         let mut val_quoted = false;
-        let mut chars = inner.chars();
+        let mut chars = inner.chars().peekable();
         let mut field_iter = fields.iter();
         let mut done = inner.is_empty();
 
@@ -467,10 +479,19 @@ impl TextFormatConverter {
                             in_escape = false;
                         }
                         '"' => {
-                            if !in_quotes {
+                            if in_quotes {
+                                // support doubled quotes inside quoted value
+                                if let Some('"') = chars.peek().copied() {
+                                    // consume next quote and append a single quote to value
+                                    let _ = chars.next();
+                                    val_str.push('"');
+                                } else {
+                                    in_quotes = false;
+                                }
+                            } else {
                                 val_quoted = true;
+                                in_quotes = true;
                             }
-                            in_quotes = !in_quotes;
                         }
                         '\\' if in_quotes => in_escape = true,
                         ',' if !in_quotes => {
