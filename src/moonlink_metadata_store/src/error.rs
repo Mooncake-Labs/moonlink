@@ -1,3 +1,4 @@
+use moonlink_error::io_error_utils::get_io_error_status;
 use moonlink_error::{ErrorStatus, ErrorStruct};
 use serde_json::Error as SerdeJsonError;
 use thiserror::Error;
@@ -78,21 +79,7 @@ impl From<SerdeJsonError> for Error {
 impl From<std::io::Error> for Error {
     #[track_caller]
     fn from(source: std::io::Error) -> Self {
-        let status = match source.kind() {
-            std::io::ErrorKind::TimedOut
-            | std::io::ErrorKind::Interrupted
-            | std::io::ErrorKind::WouldBlock
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::NetworkDown
-            | std::io::ErrorKind::ResourceBusy
-            | std::io::ErrorKind::QuotaExceeded => ErrorStatus::Temporary,
-
-            _ => ErrorStatus::Permanent,
-        };
-
+        let status = get_io_error_status(&source);
         Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
     }
 }

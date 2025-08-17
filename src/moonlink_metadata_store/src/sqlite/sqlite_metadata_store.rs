@@ -142,7 +142,7 @@ impl MetadataStoreTrait for SqliteMetadataStore {
         .rows_affected();
         if rows_affected != 1 {
             return Err(Error::SqliteRowCountError(ErrorStruct::new(
-                format!("expected 1 row affected, but got {}", rows_affected),
+                format!("expected 1 row affected, but got {rows_affected}"),
                 ErrorStatus::Permanent,
             )));
         }
@@ -168,7 +168,7 @@ impl MetadataStoreTrait for SqliteMetadataStore {
             .rows_affected();
             if rows_affected != 1 {
                 return Err(Error::SqliteRowCountError(ErrorStruct::new(
-                    format!("expected 1 row affected, but got {}", rows_affected),
+                    format!("expected 1 row affected, but got {rows_affected}"),
                     ErrorStatus::Permanent,
                 )));
             }
@@ -198,7 +198,7 @@ impl MetadataStoreTrait for SqliteMetadataStore {
         .rows_affected();
         if rows_affected != 1 {
             return Err(Error::SqliteRowCountError(ErrorStruct::new(
-                format!("expected 1 row affected, but got {}", rows_affected),
+                format!("expected 1 row affected, but got {rows_affected}"),
                 ErrorStatus::Permanent,
             )));
         }
