@@ -18,7 +18,7 @@ bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
 byteorder = "1.5"
 bytes = "1.0"
 chrono = { workspace = true }
-chrono-tz = "0.8"
+chrono-tz = "0.10"
 futures = { workspace = true }
 moonlink = { path = "../moonlink" }
 num-traits = { workspace = true }
