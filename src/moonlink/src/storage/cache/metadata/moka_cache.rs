@@ -6,6 +6,9 @@ use crate::storage::cache::metadata::{
 use async_trait::async_trait;
 use moka::future::Cache;
 
+#[cfg(test)]
+mod test_utils;
+
 /// A wrapper around [`moka::future::Cache`] providing async cache operations.
 ///
 /// # Eviction Policy
@@ -46,26 +49,6 @@ where
             .build();
 
         Self { cache }
-    }
-
-    #[cfg(test)]
-    pub async fn initialize_for_test(&self, entries: Vec<(K, V)>) {
-        for (k, v) in entries {
-            self.cache.insert(k, v).await;
-        }
-    }
-
-    #[cfg(test)]
-    pub async fn dump_all_for_test(&self) -> Vec<(K, V)> {
-        self.cache
-            .iter()
-            .map(|(k_arc, v)| ((*k_arc).clone(), v.clone()))
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub async fn force_cleanup_for_test(&self) {
-        self.cache.run_pending_tasks().await;
     }
 }
 
