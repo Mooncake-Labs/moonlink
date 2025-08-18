@@ -463,3 +463,62 @@ jobs:
         run: |
           cargo test --package moonlink_connectors --lib --features connector-pg
           cargo test --package moonlink_metadata_store --tests --features metadata-postgres
+
+  # ───────────── 11 · Moonlink Service Integration Tests ─────────────
+  moonlink_service_tests:
+    name: Moonlink Service Integration Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      nginx:
+        image: nginx:alpine
+        ports:
+          - 80:80
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:80 || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 3
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
+      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
+      - name: Add nginx.local to /etc/hosts
+        run: |
+          echo "127.0.0.1 nginx.local" | sudo tee -a /etc/hosts
+
+      # ───────────────────── Wait for nginx to be ready ───────────────────
+      - name: Wait for nginx
+        run: |
+          for i in {1..10}; do
+            if curl -sf http://nginx.local:80; then
+              echo "Nginx is ready!"
+              break
+            fi
+            echo "Waiting for nginx..."
+            sleep 2
+          done
+
+      # ────────────────────── Create backend directory ─────────────────────────
+      - name: Create backend directory
+        run: |
+          sudo mkdir -p /workspaces/moonlink/.shared-nginx
+          sudo chmod 777 /workspaces/moonlink/.shared-nginx
+
+      - name: Run moonlink_service integration tests
+        timeout-minutes: 10
+        run: |
+          cargo test --package moonlink_service --test test
