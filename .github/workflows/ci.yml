@@ -475,7 +475,7 @@ jobs:
         ports:
           - 80:80
         volumes:
-          - /workspaces/moonlink/.shared-nginx:/usr/share/nginx/html:rw
+          - ${{ github.workspace }}/.shared-nginx:/usr/share/nginx/html:rw
         options: >-
           --health-cmd "nginx -t"
           --health-interval 30s
