@@ -713,17 +713,16 @@ mod tests {
         // Create nested StructArray
         let value2_array = Arc::new(arrow_array::StringArray::from(vec![Some("deep_value")]));
 
-        // Fix: level2 should be a StructArray containing value2 field
         // According to the Schema, level2 is a struct containing value2 field
         let value2_struct = Arc::new(StructArray::new(
             vec![value2_field].into(),
             vec![value2_array],
-            None,
+            /*nulls=*/ None,
         ));
         let level2_struct = Arc::new(StructArray::new(
             level2_fields.clone().into(),
             vec![value2_struct],
-            None,
+            /*nulls=*/ None,
         ));
 
         let batch = RecordBatch::try_new(
@@ -733,7 +732,6 @@ mod tests {
         .unwrap();
 
         // Test nested struct: id=1, nested={level2={value2="deep_value"}}
-        // Fix: MoonlinkRow structure must exactly match the Arrow Schema
         // Arrow Schema: nested -> level2 -> value2
         // So MoonlinkRow should be: nested -> level2 -> value2
         let row = MoonlinkRow::new(vec![
@@ -839,7 +837,7 @@ mod tests {
         let info_struct_array = Arc::new(StructArray::new(
             info_struct_fields.into(),
             vec![name_array, age_array],
-            None,
+            /*nulls=*/ None,
         ));
 
         let batch = RecordBatch::try_new(
