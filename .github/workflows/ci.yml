@@ -474,6 +474,8 @@ jobs:
         image: nginx:alpine
         ports:
           - 80:80
+        volumes:
+          - /workspaces/moonlink/.shared-nginx:/usr/share/nginx/html:rw
         options: >-
           --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:80 || exit 1"
           --health-interval 30s
@@ -504,7 +506,7 @@ jobs:
       - name: Wait for nginx
         run: |
           for i in {1..10}; do
-            if curl -sf http://nginx.local:80; then
+            if curl -sf http://localhost:80; then
               echo "Nginx is ready!"
               break
             fi
