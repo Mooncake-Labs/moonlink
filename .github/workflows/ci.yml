@@ -477,7 +477,7 @@ jobs:
         volumes:
           - /workspaces/moonlink/.shared-nginx:/usr/share/nginx/html:rw
         options: >-
-          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:80 || exit 1"
+          --health-cmd "nginx -t"
           --health-interval 30s
           --health-timeout 10s
           --health-retries 3
