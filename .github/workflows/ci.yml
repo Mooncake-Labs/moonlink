@@ -521,4 +521,4 @@ jobs:
       - name: Run moonlink_service integration tests
         timeout-minutes: 10
         run: |
-          cargo test --package moonlink_service --test test
+          cargo test --package moonlink_service --lib --features standalone-test
