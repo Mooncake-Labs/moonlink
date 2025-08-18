@@ -33,7 +33,9 @@ impl MoonlinkRow {
             }
             IdentityProp::Keys(indices) => self.values.len() == indices.len(),
             IdentityProp::FullRow => true,
-            IdentityProp::None => panic!("IdentityProp::None should not be used for identity checks"),
+            IdentityProp::None => {
+                panic!("IdentityProp::None should not be used for identity checks")
+            }
         }
     }
 
@@ -201,7 +203,9 @@ impl MoonlinkRow {
             IdentityProp::SinglePrimitiveKey(idx) => batch.project(std::slice::from_ref(idx)),
             IdentityProp::Keys(keys) => batch.project(keys.as_slice()),
             IdentityProp::FullRow => Ok(batch.clone()),
-            IdentityProp::None => panic!("IdentityProp::None should not be used for record batch operations"),
+            IdentityProp::None => {
+                panic!("IdentityProp::None should not be used for record batch operations")
+            }
         }
         .unwrap();
         self.equals_record_batch_at_offset_impl(&indices, offset)
@@ -255,7 +259,9 @@ impl MoonlinkRow {
             IdentityProp::SinglePrimitiveKey(_) => {
                 panic!("Never required for equality checkx")
             }
-            IdentityProp::None => panic!("IdentityProp::None should not be used for row equality checks"),
+            IdentityProp::None => {
+                panic!("IdentityProp::None should not be used for row equality checks")
+            }
         }
     }
 }
@@ -303,7 +309,9 @@ impl IdentityProp {
                 Some(MoonlinkRow::new(identity_columns))
             }
             IdentityProp::FullRow => Some(row),
-            IdentityProp::None => panic!("IdentityProp::None should not be used for identity column extraction"),
+            IdentityProp::None => {
+                panic!("IdentityProp::None should not be used for identity column extraction")
+            }
         }
     }
 
@@ -338,7 +346,7 @@ impl IdentityProp {
                 }
                 hasher.finish()
             }
-            IdentityProp::None => panic!("IdentityProp::None should not be used for lookup key generation"),
+            IdentityProp::None => 0, // Append-only tables don't need meaningful lookup keys
         }
     }
 
@@ -347,7 +355,9 @@ impl IdentityProp {
             IdentityProp::SinglePrimitiveKey(_) => false,
             IdentityProp::Keys(_) => false,
             IdentityProp::FullRow => true,
-            IdentityProp::None => panic!("IdentityProp::None should not be used for identity check requirements"),
+            IdentityProp::None => {
+                panic!("IdentityProp::None should not be used for identity check requirements")
+            }
         }
     }
 }
@@ -898,13 +908,13 @@ mod tests {
         use RowValue::*;
 
         let row1 = MoonlinkRow::new(vec![Int32(1), Float32(2.0), ByteArray(b"abc".to_vec())]);
-        
+
         // Test append-only table identity (None)
         let append_only_identity = IdentityProp::None;
-        
+
         // Test extract_identity_for_key - should return None for append-only tables
         assert_eq!(append_only_identity.extract_identity_for_key(&row1), None);
-        
+
         // These methods should panic for IdentityProp::None since they shouldn't be called
         // for append-only tables that don't use identity-based operations
     }

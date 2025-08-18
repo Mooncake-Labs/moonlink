@@ -137,7 +137,7 @@ impl MemIndex {
             MemIndex::SinglePrimitive(map) => map.is_empty(),
             MemIndex::Key(map) => map.is_empty(),
             MemIndex::FullRow(map) => map.is_empty(),
-            MemIndex::None => panic!("AppendOnly index does not support empty checking"),
+            MemIndex::None => true, // Append-only tables are always considered "empty" for index purposes
         }
     }
 
@@ -392,11 +392,11 @@ mod tests {
     #[test]
     fn test_append_only_mem_index() {
         let mem_index = MemIndex::new(IdentityProp::None);
-        
+
         // Test that new_like creates another append-only index
         let new_index = MemIndex::new_like(&mem_index);
         assert!(matches!(new_index, MemIndex::None));
-        
+
         // These operations should panic for AppendOnly index since they shouldn't be called
         // for append-only tables that don't use index-based operations
     }

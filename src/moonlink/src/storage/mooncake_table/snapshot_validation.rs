@@ -1,3 +1,4 @@
+use crate::row::IdentityProp;
 use crate::storage::mooncake_table::SnapshotTableState;
 use crate::storage::mooncake_table::{SnapshotOption, SnapshotTask};
 use more_asserts as ma;
@@ -71,6 +72,11 @@ impl SnapshotTableState {
     /// Util function to validate data files and file indices match each other.
     #[cfg(any(test, debug_assertions))]
     fn assert_data_files_and_file_indices_match(&self) {
+        // Skip validation for append-only tables since they don't have file indices
+        if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
+            return;
+        }
+
         let mut all_data_files_1 = HashSet::new();
         let mut all_data_files_2 = HashSet::new();
         for (cur_data_file, _) in self.current_snapshot.disk_files.iter() {
@@ -87,6 +93,11 @@ impl SnapshotTableState {
     /// Util function to validate all index block files are cached, and cache handle filepath matches index file path.
     #[cfg(any(test, debug_assertions))]
     async fn assert_index_blocks_cached(&self) {
+        // Skip validation for append-only tables since they don't have file indices
+        if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
+            return;
+        }
+
         for cur_file_index in self.current_snapshot.indices.file_indices.iter() {
             for cur_index_block in cur_file_index.index_blocks.iter() {
                 assert!(cur_index_block.cache_handle.is_some());
@@ -110,6 +121,11 @@ impl SnapshotTableState {
     /// Util function to validate one data file is referenced by exactly one file index.
     #[cfg(any(test, debug_assertions))]
     fn assert_file_indices_no_duplicate(&self) {
+        // Skip validation for append-only tables since they don't have file indices
+        if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
+            return;
+        }
+
         // Get referenced data files by file indices.
         let mut referenced_data_files = HashSet::new();
         for cur_file_index in self.current_snapshot.indices.file_indices.iter() {

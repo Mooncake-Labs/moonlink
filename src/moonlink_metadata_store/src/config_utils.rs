@@ -63,6 +63,10 @@ struct MooncakeTableConfigForPersistence {
     /// Config for iceberg persistence config.
     #[serde(default)]
     persistence_config: IcebergPersistenceConfig,
+
+    /// Whether this is an append-only table (no indexes, no deletes).
+    #[serde(default)]
+    append_only: bool,
 }
 
 /// Struct for moonlink table config.
@@ -79,6 +83,7 @@ impl MoonlinkTableConfigForPersistence {
     /// Get mooncake table config from persisted moonlink config.
     fn get_mooncake_table_config(&self) -> MooncakeTableConfig {
         MooncakeTableConfig {
+            append_only: false,
             mem_slice_size: self.mooncake_table_config.mem_slice_size,
             snapshot_deletion_record_count: self
                 .mooncake_table_config
@@ -120,6 +125,7 @@ pub(crate) fn parse_moonlink_table_config(
             data_compaction_config: mooncake_config.data_compaction_config.clone(),
             file_index_config: mooncake_config.file_index_config.clone(),
             persistence_config: mooncake_config.persistence_config.clone(),
+            append_only: mooncake_config.append_only,
         },
     };
     let config_json = serde_json::to_value(&persisted)?;
@@ -287,6 +293,8 @@ mod tests {
             },
             // Iceberg persistence config.
             persistence_config: IcebergPersistenceConfig::default(),
+            // Append-only config.
+            append_only: false,
         };
         assert_eq!(actual_persisted_config, expected_persisted_config);
     }

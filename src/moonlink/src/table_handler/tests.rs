@@ -67,6 +67,7 @@ async fn test_table_handler_flush() {
 async fn test_append_with_small_disk_slice() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         batch_size: 1, // One mem slice only contains one row.
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -626,6 +627,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
     // Set mooncake and iceberg flush and snapshot threshold to huge value, to verify force flush and force snapshot works as expected.
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -828,6 +830,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
     // Set mooncake and iceberg flush and snapshot threshold to huge value, to verify force flush and force snapshot works as expected.
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -1061,6 +1064,7 @@ async fn test_multiple_snapshot_requests() {
     // Set mooncake and iceberg flush and snapshot threshold to huge value, to verify force flush and force snapshot works as expected.
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -1524,6 +1528,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
     let temp_dir = tempdir().unwrap();
     // Setup mooncake config, which won't trigger any data compaction or index merge, if not full table maintenance.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         data_compaction_config: DataCompactionConfig {
             min_data_file_to_compact: 2,
             max_data_file_to_compact: u32::MAX,
@@ -2113,4 +2118,230 @@ async fn test_commit_flush_streaming_transaction_with_deletes() {
     env.verify_snapshot(250, &[10]).await;
 
     env.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_append_only_table_full_pipeline() {
+    // Create a test environment with append-only configuration
+    let temp_dir = tempdir().unwrap();
+    let mooncake_table_config = MooncakeTableConfig {
+        append_only: true, // Enable append-only mode
+        batch_size: 2,
+        mem_slice_size: 1000,
+        snapshot_deletion_record_count: 1000,
+        temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig {
+            parquet_file_size: 1000,
+            chaos_config: None,
+        },
+        data_compaction_config: DataCompactionConfig::default(),
+        file_index_config: FileIndexMergeConfig::default(),
+        persistence_config: IcebergPersistenceConfig {
+            new_data_file_count: 1, // Create snapshot after 1 data file
+            new_committed_deletion_log: 1,
+            new_compacted_data_file_count: 1,
+            old_compacted_data_file_count: 1,
+            old_merged_file_indices_count: 1,
+        },
+    };
+
+    let mut env = TestEnvironment::new(temp_dir, mooncake_table_config.clone()).await;
+
+    // Test 1: Basic append operations work
+    println!("Testing basic append operations...");
+    env.append_row(1, "Alice", 25, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.append_row(2, "Bob", 30, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.append_row(3, "Charlie", 35, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.commit(1).await;
+
+    // Test 2: Flush operations work
+    println!("Testing flush operations...");
+    env.flush_table(1).await;
+
+    // Test 3: Iceberg snapshot creation works
+    println!("Testing iceberg snapshot creation...");
+    let rx = env.table_event_manager.initiate_snapshot(/*lsn=*/ 1).await;
+    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 1)
+        .await
+        .unwrap();
+
+    // Verify snapshot was created successfully
+    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let (next_file_id, snapshot) = iceberg_table_manager
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+
+    // Should have at least one data file
+    assert!(
+        !snapshot.disk_files.is_empty(),
+        "Snapshot should contain data files"
+    );
+    assert!(next_file_id > 0, "Next file ID should be incremented");
+
+    // Test 4: Streaming transactions work
+    println!("Testing streaming transactions...");
+    let xact_id = 101;
+    env.append_row(4, "David", 40, /*lsn=*/ 2, Some(xact_id))
+        .await;
+    env.append_row(5, "Eve", 45, /*lsn=*/ 2, Some(xact_id))
+        .await;
+    env.stream_commit(2, xact_id).await;
+
+    // Test 5: Multiple commits and flushes work
+    println!("Testing multiple commits and flushes...");
+    env.append_row(6, "Frank", 50, /*lsn=*/ 3, /*xact_id=*/ None)
+        .await;
+    env.commit(3).await;
+    env.flush_table(3).await;
+
+    env.append_row(7, "Grace", 55, /*lsn=*/ 4, /*xact_id=*/ None)
+        .await;
+    env.commit(4).await;
+    env.flush_table(4).await;
+
+    // Test 6: Final iceberg snapshot with all data
+    println!("Testing final iceberg snapshot...");
+    let rx = env.table_event_manager.initiate_snapshot(/*lsn=*/ 4).await;
+    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 4)
+        .await
+        .unwrap();
+
+    // Verify final snapshot
+    let mut final_iceberg_table_manager =
+        env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let (final_next_file_id, final_snapshot) = final_iceberg_table_manager
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+
+    assert!(
+        !final_snapshot.disk_files.is_empty(),
+        "Final snapshot should contain data files"
+    );
+    assert!(
+        final_next_file_id > next_file_id,
+        "File ID should be incremented"
+    );
+
+    env.shutdown().await;
+    println!("Full pipeline append-only table test passed!");
+}
+
+#[tokio::test]
+async fn test_append_only_table_high_volume() {
+    // Test append-only table with high volume of data
+    let temp_dir = tempdir().unwrap();
+    let mooncake_table_config = MooncakeTableConfig {
+        append_only: true,
+        batch_size: 10,
+        mem_slice_size: 100,
+        snapshot_deletion_record_count: 1000,
+        temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig::default(),
+        data_compaction_config: DataCompactionConfig::default(),
+        file_index_config: FileIndexMergeConfig::default(),
+        persistence_config: IcebergPersistenceConfig::default(),
+    };
+
+    let mut env = TestEnvironment::new(temp_dir, mooncake_table_config).await;
+
+    // Insert 100 rows in batches
+    println!("Testing high volume insertions...");
+    for batch in 0..10 {
+        let start_id = batch * 10 + 1;
+        for i in 0..10 {
+            let id = start_id + i;
+            env.append_row(
+                id,
+                &format!("User{id}"),
+                20 + (id % 30),
+                /*lsn=*/ batch as u64,
+                /*xact_id=*/ None,
+            )
+            .await;
+        }
+        env.commit((batch + 1) as u64).await;
+        env.flush_table((batch + 1) as u64).await;
+    }
+
+    // Verify all data is accessible
+    env.set_readable_lsn(10);
+    let expected_ids: Vec<i32> = (1..=100).collect();
+    env.verify_snapshot(10, &expected_ids).await;
+
+    // Test iceberg snapshot with large dataset
+    println!("Testing iceberg snapshot with large dataset...");
+    let rx = env.table_event_manager.initiate_snapshot(/*lsn=*/ 10).await;
+    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 10)
+        .await
+        .unwrap();
+
+    env.shutdown().await;
+    println!("High volume append-only table test passed!");
+}
+
+#[tokio::test]
+async fn test_append_only_table_basic() {
+    // Create a test environment with append-only configuration
+    let temp_dir = tempdir().unwrap();
+    let mooncake_table_config = MooncakeTableConfig {
+        append_only: true, // Enable append-only mode
+        batch_size: 2,
+        mem_slice_size: 1000,
+        snapshot_deletion_record_count: 1000,
+        temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig::default(),
+        data_compaction_config: DataCompactionConfig::default(),
+        file_index_config: FileIndexMergeConfig::default(),
+        persistence_config: IcebergPersistenceConfig::default(),
+    };
+
+    let mut env = TestEnvironment::new(temp_dir, mooncake_table_config).await;
+
+    // Test basic append operations
+    println!("Testing basic append operations...");
+    env.append_row(1, "Alice", 25, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.append_row(2, "Bob", 30, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.commit(1).await;
+
+    // Test flush operations
+    println!("Testing flush operations...");
+    env.flush_table(1).await;
+
+    // Test iceberg snapshot creation
+    println!("Testing iceberg snapshot creation...");
+    let rx = env.table_event_manager.initiate_snapshot(/*lsn=*/ 1).await;
+    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 1)
+        .await
+        .unwrap();
+
+    // Test streaming transactions
+    println!("Testing streaming transactions...");
+    let xact_id = 101;
+    env.append_row(3, "Charlie", 35, /*lsn=*/ 2, Some(xact_id))
+        .await;
+    env.stream_commit(2, xact_id).await;
+
+    // Test multiple commits and flushes
+    println!("Testing multiple commits and flushes...");
+    env.append_row(4, "David", 40, /*lsn=*/ 3, /*xact_id=*/ None)
+        .await;
+    env.commit(3).await;
+    env.flush_table(3).await;
+
+    // Test final iceberg snapshot
+    println!("Testing final iceberg snapshot...");
+    let rx = env.table_event_manager.initiate_snapshot(/*lsn=*/ 3).await;
+    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 3)
+        .await
+        .unwrap();
+
+    env.shutdown().await;
+    println!("Basic append-only table test passed!");
 }

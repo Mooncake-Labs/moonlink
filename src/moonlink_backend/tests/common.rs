@@ -62,6 +62,7 @@ impl TestGuard {
             mooncake_config: MooncakeConfig {
                 skip_index_merge: true,
                 skip_data_compaction: true,
+                append_only: false,
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
                 StorageConfig::FileSystem {
@@ -408,6 +409,7 @@ fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
         mooncake_config: MooncakeConfig {
             skip_index_merge: true,
             skip_data_compaction: true,
+            append_only: false,
         },
         iceberg_config: Some(AccessorConfig::new_with_storage_config(
             StorageConfig::FileSystem {

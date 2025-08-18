@@ -352,6 +352,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         data_compaction_config,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
@@ -405,6 +406,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
             ..Default::default()
@@ -502,6 +504,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
             ..Default::default()

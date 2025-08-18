@@ -150,12 +150,20 @@ impl TestEnvironment {
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
         let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let wal_manager = WalManager::new(&wal_config);
+
+        // Use appropriate identity based on append_only configuration
+        let identity = if mooncake_table_config.append_only {
+            IdentityProp::None
+        } else {
+            IdentityProp::Keys(vec![0])
+        };
+
         let mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),
             1,
             path,
-            IdentityProp::Keys(vec![0]),
+            identity,
             iceberg_table_config.clone(),
             mooncake_table_config,
             wal_manager,
@@ -174,13 +182,21 @@ impl TestEnvironment {
         mooncake_table_config: MooncakeTableConfig,
     ) -> IcebergTableManager {
         let table_name = "table_name";
+
+        // Use appropriate identity based on append_only configuration
+        let identity = if mooncake_table_config.append_only {
+            IdentityProp::None
+        } else {
+            IdentityProp::Keys(vec![0])
+        };
+
         let mooncake_table_metadata = Arc::new(MooncakeTableMetadata {
             name: table_name.to_string(),
             table_id: 0,
             schema: create_test_arrow_schema(),
             config: mooncake_table_config.clone(),
             path: self.temp_dir.path().to_path_buf(),
-            identity: IdentityProp::Keys(vec![0]),
+            identity,
         });
         let iceberg_table_config = get_iceberg_manager_config(
             table_name.to_string(),

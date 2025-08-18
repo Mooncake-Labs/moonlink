@@ -1427,6 +1427,7 @@ async fn test_small_batch_size_and_large_parquet_size() {
     let wal_manager = WalManager::new(&wal_config);
     let schema = create_test_arrow_schema();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         batch_size: 1,
         disk_slice_writer_config: DiskSliceWriterConfig {
             parquet_file_size: 1000,
@@ -1508,6 +1509,7 @@ async fn test_multiple_table_ids_for_deletion_vector() {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_path_buf();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         // Flush as long as there's new rows appended at commit.
         mem_slice_size: 1,
         // At flush, place each row in a separate parquet file.
