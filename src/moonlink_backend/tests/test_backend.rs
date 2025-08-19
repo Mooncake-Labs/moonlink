@@ -2,7 +2,7 @@ mod common;
 
 #[cfg(test)]
 mod tests {
-    use crate::common::{ids_from_state, nonunique_ids_from_state};
+    use crate::common::{ids_from_state, nonunique_ids_from_state, SRC_URI};
 
     use super::common::{
         assert_scan_ids_eq, assert_scan_nonunique_ids_eq, crash_and_recover_backend,
@@ -16,9 +16,7 @@ mod tests {
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
 
-    use tokio_postgres::connect;
-
-    const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+    // const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
 
     // ───────────────────────────── Tests ─────────────────────────────
 
@@ -473,13 +471,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_and_incomplete_pg_replay(#[case] use_iceberg: bool) {
-        use crate::common::create_backend_from_tempdir;
+        use crate::common::{connect_to_postgres, create_backend_from_tempdir};
 
         let (mut guard, client1) = TestGuard::new(Some("recovery"), false).await;
-        let (mut client2, conn2) = connect(SRC_URI, tokio_postgres::NoTls).await.unwrap();
-        tokio::spawn(async move {
-            let _ = conn2.await;
-        });
+        let (mut client2, _) = connect_to_postgres().await;
 
         guard.set_test_mode(TestGuardMode::Crash);
 

@@ -10,7 +10,7 @@ pub mod table;
 pub mod table_init;
 pub mod util;
 
-use crate::pg_replicate::clients::postgres::ReplicationClient;
+use crate::pg_replicate::clients::postgres::{build_tls_connector, ReplicationClient};
 use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
 use crate::pg_replicate::initial_copy::copy_table_stream_impl;
 use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
@@ -25,7 +25,10 @@ use futures::StreamExt;
 use moonlink::{
     MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent, WalManager,
 };
+use native_tls::{Certificate, TlsConnector};
+use postgres_native_tls::{MakeTlsConnector, TlsStream};
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Error, ErrorKind};
 use std::mem::take;
 use std::sync::Arc;
@@ -35,9 +38,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_postgres::error::SqlState;
-use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::PgLsn;
-use tokio_postgres::{connect, Client, Config, NoTls};
+use tokio_postgres::{connect, Client, Config};
 use tokio_postgres::{Connection, Socket};
 use tracing::{debug, error, info_span, warn, Instrument};
 
@@ -71,9 +73,15 @@ impl PostgresConnection {
     pub async fn new(uri: String) -> Result<Self> {
         debug!(%uri, "initializing postgres connection");
 
-        let (postgres_client, connection) = connect(&uri, NoTls)
+        let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+
+        debug!("created tls connector");
+
+        let (postgres_client, connection) = connect(&uri, tls)
             .await
             .map_err(PostgresSourceError::from)?;
+
+        debug!("connected to postgres");
         tokio::spawn(
             async move {
                 if let Err(e) = connection.await {
@@ -210,7 +218,8 @@ impl PostgresConnection {
         tokio::spawn(async move {
             let mut retry_count = 0;
             loop {
-                match connect(&uri, NoTls).await {
+                let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+                match connect(&uri, tls).await {
                     Ok((client, connection)) => {
                         tokio::spawn(async move {
                             if let Err(e) = connection.await {
@@ -500,11 +509,9 @@ impl PostgresConnection {
 
         tokio::spawn(async move {
             let (client, connection) =
-                crate::pg_replicate::clients::postgres::ReplicationClient::connect_no_tls(
-                    &uri, true,
-                )
-                .await
-                .map_err(PostgresSourceError::from)?;
+                crate::pg_replicate::clients::postgres::ReplicationClient::connect(&uri, true)
+                    .await
+                    .map_err(PostgresSourceError::from)?;
 
             run_event_loop(client, cfg, connection, sink, receiver, source).await
         })
@@ -515,7 +522,7 @@ impl PostgresConnection {
 pub async fn run_event_loop(
     client: ReplicationClient,
     cfg: CdcStreamConfig,
-    connection: Connection<Socket, NoTlsStream>,
+    connection: Connection<Socket, TlsStream<Socket>>,
     mut sink: Sink,
     mut cmd_rx: mpsc::Receiver<PostgresReplicationCommand>,
     postgres_source: Arc<PostgresSource>,

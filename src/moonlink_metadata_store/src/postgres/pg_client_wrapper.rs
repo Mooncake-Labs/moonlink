@@ -1,4 +1,6 @@
-use tokio_postgres::{connect, Client, NoTls};
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
+use tokio_postgres::{connect, Client};
 
 use crate::error::Result;
 
@@ -12,7 +14,10 @@ pub(super) struct PgClientWrapper {
 
 impl PgClientWrapper {
     pub(super) async fn new(uri: &str) -> Result<Self> {
-        let (postgres_client, connection) = connect(uri, NoTls).await?;
+        let tls_connector = TlsConnector::new().unwrap();
+        let tls = MakeTlsConnector::new(tls_connector);
+
+        let (postgres_client, connection) = connect(uri, tls).await?;
 
         // Spawn connection driver in background to keep eventloop alive.
         let _pg_connection = tokio::spawn(async move {

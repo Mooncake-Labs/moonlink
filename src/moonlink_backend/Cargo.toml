@@ -9,6 +9,7 @@ default = ["storage-fs"]
 
 profiling = ["console-subscriber"]
 test-utils = ["moonlink/test-utils"]
+test-tls = ["moonlink_connectors/test-tls"]
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
@@ -22,8 +23,10 @@ moonlink = { path = "../moonlink", features = ["test-utils"] }
 moonlink_connectors = { path = "../moonlink_connectors" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 more-asserts = { workspace = true }
+native-tls = "0.2.14"
 nix = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
+postgres-native-tls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

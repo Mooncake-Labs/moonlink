@@ -5,20 +5,28 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
+use tokio_postgres::{connect, types::PgLsn, Client};
 
 use std::{collections::HashSet, fs::File};
 
 use moonlink::{decode_read_state_for_testing, AccessorConfig, StorageConfig};
 use moonlink_backend::file_utils::{recreate_directory, DEFAULT_MOONLINK_TEMP_FILE_PATH};
 use moonlink_backend::{MoonlinkBackend, ReadState};
+use native_tls::{Certificate, TlsConnector};
+use postgres_native_tls::MakeTlsConnector;
 
 /// Mooncake table database.
 pub const DATABASE: &str = "mooncake-database";
 /// Mooncake table name.
 pub const TABLE: &str = "mooncake-schema.mooncake-table";
 
-pub const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+// Devcontainer postgres instance is configured to use self-signed certs, which will fail if we don't disable TLS.
+#[cfg(not(feature = "test-tls"))]
+pub const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable";
+
+#[cfg(feature = "test-tls")]
+pub const SRC_URI: &str =
+    "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestGuardMode {
@@ -442,10 +450,7 @@ async fn setup_backend(
     .unwrap();
 
     // Connect to Postgres.
-    let (client, connection) = connect(SRC_URI, NoTls).await.unwrap();
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+    let (client, _) = connect_to_postgres().await;
 
     // Clear any leftover replication slot from previous runs.
     let _ = client
@@ -458,7 +463,6 @@ async fn setup_backend(
     let _ = client
         .simple_query("SELECT pg_drop_replication_slot('moonlink_slot_postgres')")
         .await;
-
     // Re-create the working table.
     if let Some(table_name) = table_name {
         let create_table_query = if has_primary_key {
@@ -554,4 +558,31 @@ pub async fn smoke_create_and_insert(
     assert_ne!(old.data, new.data);
 
     recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+}
+
+#[cfg(feature = "test-tls")]
+pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
+    let root_cert_pem = std::fs::read("../../.devcontainer/certs/ca.crt").unwrap();
+
+    let connector = TlsConnector::builder()
+        .add_root_certificate(Certificate::from_pem(root_cert_pem.as_slice()).unwrap())
+        .build()
+        .unwrap();
+    let tls = MakeTlsConnector::new(connector);
+    let (client, connection) = connect(SRC_URI, tls).await.unwrap();
+    let connection_handle = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, connection_handle)
+}
+
+#[cfg(not(feature = "test-tls"))]
+pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
+    let connector = TlsConnector::new().unwrap();
+    let tls = MakeTlsConnector::new(connector);
+    let (client, connection) = connect(SRC_URI, tls).await.unwrap();
+    let connection_handle = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, connection_handle)
 }

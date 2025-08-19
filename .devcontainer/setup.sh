@@ -1,8 +1,12 @@
 # VSCode devcontainer config.
 git config devcontainers-theme.show-dirty 1
 
+# first we ALTER the running postgres instance to use the TLS certs in /certs
+psql "postgresql://postgres:postgres@postgres:5432/postgres" -c "ALTER SYSTEM SET ssl_cert_file = '/certs/server.crt'; ALTER SYSTEM SET ssl_key_file = '/certs/server.key'; ALTER SYSTEM SET ssl = on;"
+psql "postgresql://postgres:postgres@postgres:5432/postgres" -c "SELECT pg_reload_conf();"
+
 # pg access.
-echo "alias psql='PGPASSWORD=postgres psql -h postgres -p 5432 -U postgres -d postgres'" >> ~/.bashrc
+echo "alias psql='PGPASSWORD=postgres psql "postgresql://postgres:postgres@127.0.0.1:5432/postgres"'" >> ~/.bashrc
 
 # precommit hook requirement.
 rm -f .git/hooks/*

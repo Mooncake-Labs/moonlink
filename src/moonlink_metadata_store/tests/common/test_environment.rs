@@ -1,5 +1,7 @@
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
 /// Test environment to setup and cleanup a test case.
-use tokio_postgres::{connect, Client, NoTls};
+use tokio_postgres::{connect, Client};
 
 pub(crate) struct TestEnvironment {
     postgres_client: Client,
@@ -20,7 +22,9 @@ impl TestEnvironment {
 
     /// Delete test moonlink metadata table.
     pub(crate) async fn new(uri: &str) -> Self {
-        let (postgres_client, connection) = connect(uri, NoTls).await.unwrap();
+        let connector = TlsConnector::new().unwrap();
+        let tls = MakeTlsConnector::new(connector);
+        let (postgres_client, connection) = connect(uri, tls).await.unwrap();
         let _connection_handle = tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("Postgres connection error: {e}");
