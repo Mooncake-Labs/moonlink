@@ -514,10 +514,11 @@ jobs:
             sleep 2
           done
 
-      # ───────────────────── Create shared nginx directory ───────────────────
-      - name: Create shared nginx directory
+      # ────────────────────── Create backend directory ─────────────────────────
+      - name: Create backend directory
         run: |
-          mkdir -p /workspaces/moonlink/.shared-nginx
+          sudo mkdir -p /workspaces/moonlink/.shared-nginx
+          sudo chmod 777 /workspaces/moonlink/.shared-nginx
 
       - name: Run moonlink_service integration tests
         timeout-minutes: 10
