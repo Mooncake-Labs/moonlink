@@ -16,8 +16,8 @@ use moonlink_rpc::{scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
 fn get_moonlink_backend_dir() -> String {
-    if let Ok(workspace) = std::env::var("GITHUB_WORKSPACE") {
-        format!("{workspace}/.shared-nginx")
+    if let Ok(backend_dir) = std::env::var("MOONLINK_BACKEND_DIR") {
+        backend_dir
     } else {
         "/workspaces/moonlink/.shared-nginx".to_string()
     }
