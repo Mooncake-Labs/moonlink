@@ -324,7 +324,6 @@ impl IdentityProp {
                 }
                 Some(MoonlinkRow::new(identity_columns))
             }
-            IdentityProp::None => None, // Append-only tables don't need identity for key
             _ => None,
         }
     }
