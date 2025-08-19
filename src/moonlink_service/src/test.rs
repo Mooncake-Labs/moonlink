@@ -15,7 +15,13 @@ use crate::{start_with_config, ServiceConfig, READINESS_PROBE_PORT};
 use moonlink_rpc::{scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
-const MOONLINK_BACKEND_DIR: &str = "/workspaces/moonlink/.shared-nginx";
+fn get_moonlink_backend_dir() -> String {
+    if let Ok(workspace) = std::env::var("GITHUB_WORKSPACE") {
+        format!("{workspace}/.shared-nginx")
+    } else {
+        "/workspaces/moonlink/.shared-nginx".to_string()
+    }
+}
 /// Local nginx server IP/port address.
 const NGINX_ADDR: &str = "http://nginx.local:80";
 /// Local moonlink REST API IP/port address.
@@ -124,9 +130,9 @@ fn create_test_arrow_schema() -> Arc<ArrowSchema> {
 #[tokio::test]
 #[serial]
 async fn test_moonlink_standalone() {
-    cleanup_directory(MOONLINK_BACKEND_DIR).await;
+    cleanup_directory(&get_moonlink_backend_dir()).await;
     let config = ServiceConfig {
-        base_path: MOONLINK_BACKEND_DIR.to_string(),
+        base_path: get_moonlink_backend_dir(),
         data_server_uri: Some(NGINX_ADDR.to_string()),
         rest_api_port: Some(3030),
         tcp_port: Some(3031),
@@ -199,16 +205,16 @@ async fn test_moonlink_standalone() {
     .unwrap();
 
     // Cleanup shared directory.
-    cleanup_directory(MOONLINK_BACKEND_DIR).await;
+    cleanup_directory(&get_moonlink_backend_dir()).await;
 }
 
 /// Testing scenario: two tables with the same name, but under different databases are created.
 #[tokio::test]
 #[serial]
 async fn test_multiple_tables_creation() {
-    cleanup_directory(MOONLINK_BACKEND_DIR).await;
+    cleanup_directory(&get_moonlink_backend_dir()).await;
     let config = ServiceConfig {
-        base_path: MOONLINK_BACKEND_DIR.to_string(),
+        base_path: get_moonlink_backend_dir(),
         data_server_uri: Some(NGINX_ADDR.to_string()),
         rest_api_port: Some(3030),
         tcp_port: Some(3031),

@@ -475,7 +475,7 @@ jobs:
         ports:
           - 80:80
         volumes:
-          - /workspaces/moonlink/.shared-nginx:/usr/share/nginx/html:rw
+          - ${{ github.workspace }}/.shared-nginx:/usr/share/nginx/html:rw
         options: >-
           --health-cmd "nginx -t"
           --health-interval 30s
@@ -517,8 +517,8 @@ jobs:
       # ────────────────────── Create backend directory ─────────────────────────
       - name: Create backend directory
         run: |
-          sudo mkdir -p /workspaces/moonlink/.shared-nginx
-          sudo chmod 777 /workspaces/moonlink/.shared-nginx
+          mkdir -p ${{ github.workspace }}/.shared-nginx
+          chmod 777 ${{ github.workspace }}/.shared-nginx
 
       - name: Run moonlink_service integration tests
         timeout-minutes: 10
