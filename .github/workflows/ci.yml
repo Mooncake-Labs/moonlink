@@ -475,7 +475,7 @@ jobs:
         ports:
           - 80:80
         volumes:
-          - ${{ github.workspace }}/.shared-nginx:/usr/share/nginx/html:rw
+          - /workspaces/moonlink/.shared-nginx:/usr/share/nginx/html:rw
         options: >-
           --health-cmd "nginx -t"
           --health-interval 30s
@@ -513,6 +513,11 @@ jobs:
             echo "Waiting for nginx..."
             sleep 2
           done
+
+      # ───────────────────── Create shared nginx directory ───────────────────
+      - name: Create shared nginx directory
+        run: |
+          mkdir -p /workspaces/moonlink/.shared-nginx
 
       - name: Run moonlink_service integration tests
         timeout-minutes: 10
