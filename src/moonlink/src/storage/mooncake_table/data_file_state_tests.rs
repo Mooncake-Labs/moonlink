@@ -116,7 +116,7 @@ async fn prepare_test_disk_file_for_read(
     use_batch_write: bool,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let (mut table, mut table_notify) =
-        create_mooncake_table_and_notify_for_read(temp_dir, cache).await;
+        create_mooncake_table_and_notify_for_read(temp_dir, Arc::new(cache)).await;
 
     let row = MoonlinkRow::new(vec![
         RowValue::Int32(1),
@@ -268,7 +268,8 @@ async fn prepare_state_3(
         let snapshot_read_output = perform_read_request_for_test(&mut table).await;
         let read_state = snapshot_read_output
             .take_as_read_state(get_read_state_filepath_remap())
-            .await;
+            .await
+            .unwrap();
 
         // Persist.
         create_mooncake_and_persist_for_test(&mut table, &mut table_notify).await;
@@ -299,7 +300,8 @@ async fn prepare_state_3(
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     (table, table_notify, read_state)
 }
@@ -320,7 +322,8 @@ async fn prepare_state_4(
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     (table, table_notify, read_state)
 }
@@ -1138,14 +1141,16 @@ async fn test_2_read_and_unpinned_2_without_local_optimization(#[case] use_batch
     let snapshot_read_output_1 = perform_read_request_for_test(&mut table).await;
     let read_state_1 = snapshot_read_output_1
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
     // Till now, the state is (remote, no local, in use).
 
     // Read, but no reference count hold within read state.
     let snapshot_read_output_2 = perform_read_request_for_test(&mut table).await;
     let read_state_2 = snapshot_read_output_2
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Check data file has been recorded in mooncake table.
     let data_file_id = get_only_remote_data_file_id(&table, &temp_dir).await;
@@ -1193,14 +1198,16 @@ async fn test_2_read_and_unpinned_2_with_local_optimization(#[case] use_batch_wr
     let snapshot_read_output_1 = perform_read_request_for_test(&mut table).await;
     let read_state_1 = snapshot_read_output_1
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
     // Till now, the state is (remote, no local, in use).
 
     // Read, but no reference count hold within read state.
     let snapshot_read_output_2 = perform_read_request_for_test(&mut table).await;
     let read_state_2 = snapshot_read_output_2
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Check data file has been recorded in mooncake table.
     let data_file_id = get_only_remote_data_file_id(&table, &temp_dir).await;
@@ -1247,7 +1254,8 @@ async fn test_2_read_over_1_without_local_optimization(#[case] use_batch_write: 
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
     // Till now, the state is (remote, no local, in use).
     drop(read_state);
 
@@ -1284,7 +1292,8 @@ async fn test_2_read_over_1_with_local_optimization(#[case] use_batch_write: boo
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
     // Till now, the state is (remote, no local, in use).
     drop(read_state);
 
@@ -1381,7 +1390,8 @@ async fn test_3_compact_3_5_without_local_filesystem_optimization() {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Persist and reflect result to mooncake snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut table_notify).await;
@@ -1490,7 +1500,8 @@ async fn test_3_compact_3_5_with_local_filesystem_optimization() {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Persist and reflect result to mooncake snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut table_notify).await;
@@ -1602,7 +1613,8 @@ async fn test_3_compact_1_5_without_local_filesystem_optimization() {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Persist and reflect result to mooncake snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut table_notify).await;
@@ -1684,7 +1696,8 @@ async fn test_3_compact_1_5_with_local_filesystem_optimization() {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Persist and reflect result to mooncake snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut table_notify).await;

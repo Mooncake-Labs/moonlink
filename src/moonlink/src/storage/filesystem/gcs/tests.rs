@@ -5,7 +5,6 @@ use crate::storage::filesystem::accessor::unbuffered_stream_writer::UnbufferedSt
 use crate::storage::filesystem::gcs::gcs_test_utils::*;
 use crate::storage::filesystem::gcs::test_guard::TestGuard;
 use crate::storage::filesystem::test_utils::writer_test_utils::*;
-
 use futures::StreamExt;
 use rstest::rstest;
 
@@ -38,7 +37,7 @@ async fn test_stats_object() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[rstest]
 #[case(10)]
-#[case(5 * 1024 * 1024)] // TODO(hjiang): Increase upload size.
+#[case(18 * 1024 * 1024)]
 async fn test_stream_read(#[case] file_size: usize) {
     let (bucket, warehouse_uri) = get_test_gcs_bucket_and_warehouse();
     let _test_guard = TestGuard::new(bucket.clone()).await;
@@ -70,7 +69,7 @@ async fn test_stream_read(#[case] file_size: usize) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[rstest]
 #[case(10)]
-#[case(5 * 1024 * 1024)] // TODO(hjiang): Increase upload size.
+#[case(18 * 1024 * 1024)]
 async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
     // Prepare src file.
     let temp_dir = tempfile::tempdir().unwrap();
@@ -85,6 +84,7 @@ async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
     // Copy from src to dst.
     let filesystem_accessor = create_filesystem_accessor(gcs_storage_config);
     let dst_filepath = format!("{warehouse_uri}/dst");
+
     filesystem_accessor
         .copy_from_local_to_remote(&src_filepath, &dst_filepath)
         .await

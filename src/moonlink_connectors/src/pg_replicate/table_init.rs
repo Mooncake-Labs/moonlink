@@ -1,21 +1,32 @@
-use crate::pg_replicate::replication_state::ReplicationState;
 use crate::pg_replicate::table::SrcTableId;
+use crate::replication_state::ReplicationState;
 use crate::{Error, Result};
 use arrow_schema::Schema as ArrowSchema;
 use moonlink::event_sync::create_table_event_syncer;
 use moonlink::table_handler_timer::create_table_handler_timers;
+use moonlink::PersistentWalMetadata;
 use moonlink::ReadStateFilepathRemap;
 use moonlink::{
-    row::IdentityProp, AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor,
-    IcebergTableConfig, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
+    row::IdentityProp, AccessorConfig, BaseFileSystemAccess, EventSyncReceiver, EventSyncSender,
+    FileSystemAccessor, IcebergTableConfig, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
     MoonlinkTableConfig, MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig,
-    TableEvent, TableEventManager, TableHandler, TableStatusReader, WalConfig,
+    TableEvent, TableEventManager, TableHandler, TableStatusReader, WalConfig, WalManager,
 };
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, mpsc::Sender, oneshot, watch};
+
+/// Used to assign unique monotonically increasing id to mooncake table.
+static NEXT_TABLE_ID: AtomicU32 = AtomicU32::new(0);
+
+/// Get the next unique table id to use.
+#[inline]
+pub fn get_next_table_id() -> u32 {
+    NEXT_TABLE_ID.fetch_add(1, Ordering::SeqCst)
+}
 
 /// Components required to create a mooncake table.
 pub struct TableComponents {
@@ -36,6 +47,9 @@ pub struct TableResources {
     pub commit_lsn_tx: Option<watch::Sender<u64>>,
     pub flush_lsn_rx: Option<watch::Receiver<u64>>,
     pub wal_flush_lsn_rx: Option<watch::Receiver<u64>>,
+    pub wal_file_accessor: Arc<dyn BaseFileSystemAccess>,
+    pub wal_persistence_metadata: Option<PersistentWalMetadata>,
+    pub last_iceberg_snapshot_lsn: Option<u64>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -57,15 +71,23 @@ async fn recreate_directory(dir: &PathBuf) -> Result<()> {
 /// Build all components needed to replicate `table_schema`.
 pub async fn build_table_components(
     mooncake_table_id: String,
-    table_id: u32,
     arrow_schema: ArrowSchema,
-    identity: IdentityProp,
-    table_name: String,
+    mut identity: IdentityProp,
+    src_table_name: String,
     src_table_id: SrcTableId,
     base_path: &str,
     replication_state: &ReplicationState,
     table_components: TableComponents,
+    is_recovery: bool,
 ) -> Result<TableResources> {
+    // Override identity to None if append_only is enabled
+    if table_components
+        .moonlink_table_config
+        .mooncake_table_config
+        .append_only
+    {
+        identity = IdentityProp::None;
+    }
     // Recreate write-through cache directory.
     let write_cache_path = PathBuf::from(base_path).join(&mooncake_table_id);
     recreate_directory(&write_cache_path).await?;
@@ -80,10 +102,37 @@ pub async fn build_table_components(
 
     let wal_config =
         WalConfig::default_wal_config_local(&mooncake_table_id, &PathBuf::from(base_path));
+    let wal_file_accessor = Arc::new(FileSystemAccessor::new(
+        wal_config.get_accessor_config().clone(),
+    ));
+
+    let wal_persistence_metadata = {
+        if is_recovery {
+            let recovered_wal_metadata = WalManager::recover_from_persistent_wal_metadata(
+                wal_file_accessor.clone(),
+                wal_config.clone(),
+            )
+            .await;
+            recovered_wal_metadata
+        } else {
+            None
+        }
+    };
+
+    let wal_manager = if let Some(wal_persistence_metadata) = wal_persistence_metadata.clone() {
+        WalManager::from_persistent_wal_metadata(
+            wal_file_accessor.clone(),
+            wal_persistence_metadata,
+            wal_config.clone(),
+        )
+    } else {
+        WalManager::new(&wal_config)
+    };
+
     let table = MooncakeTable::new(
         arrow_schema,
-        table_name,
-        table_id,
+        mooncake_table_id,
+        get_next_table_id(),
         write_cache_path,
         identity,
         table_components
@@ -94,8 +143,8 @@ pub async fn build_table_components(
             .moonlink_table_config
             .mooncake_table_config
             .clone(),
-        wal_config,
-        table_components.object_storage_cache,
+        wal_manager,
+        Arc::new(table_components.object_storage_cache),
         Arc::new(FileSystemAccessor::new(
             table_components
                 .moonlink_table_config
@@ -105,6 +154,8 @@ pub async fn build_table_components(
         )),
     )
     .await?;
+
+    let last_iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
 
     let (commit_lsn_tx, commit_lsn_rx) = watch::channel(0u64);
     let read_state_manager = ReadStateManager::new(
@@ -142,6 +193,9 @@ pub async fn build_table_components(
         commit_lsn_tx: Some(commit_lsn_tx),
         flush_lsn_rx: Some(flush_lsn_rx),
         wal_flush_lsn_rx: Some(wal_flush_lsn_rx),
+        wal_file_accessor,
+        wal_persistence_metadata,
+        last_iceberg_snapshot_lsn,
     };
     Ok(table_resource)
 }

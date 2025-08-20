@@ -1,4 +1,3 @@
-use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::deletion_vector::{
     DELETION_VECTOR_CADINALITY, DELETION_VECTOR_REFERENCED_DATA_FILE,
@@ -27,6 +26,7 @@ use crate::storage::storage_utils::{
     TableUniqueFileId,
 };
 use crate::storage::{io_utils, storage_utils};
+use crate::Result;
 
 use std::collections::{HashMap, HashSet};
 use std::vec;
@@ -523,7 +523,7 @@ impl IcebergTableManager {
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
-    ) -> IcebergResult<PersistenceResult> {
+    ) -> Result<PersistenceResult> {
         // Initialize iceberg table on access.
         self.initialize_iceberg_table_for_once().await?;
 

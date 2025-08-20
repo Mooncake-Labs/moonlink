@@ -53,7 +53,6 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         &mut self,
         src_uri: &str,
         mooncake_table_id: T,
-        table_id: u32,
         table_name: &str,
         moonlink_table_config: MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
@@ -81,7 +80,6 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
             .add_table_replication(
                 table_name,
                 &mooncake_table_id,
-                table_id,
                 moonlink_table_config,
                 read_state_filepath_remap,
                 is_recovery,
@@ -108,14 +106,13 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         &mut self,
         src_uri: &str,
         mooncake_table_id: T,
-        table_id: u32,
-        table_name: &str,
+        src_table_name: &str,
         arrow_schema: arrow_schema::Schema,
         moonlink_table_config: MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
         is_recovery: bool,
     ) -> Result<()> {
-        debug!(%src_uri, table_name, "adding REST API table through manager");
+        debug!(%src_uri, src_table_name, "adding REST API table through manager");
 
         // Fail if REST API connection doesn't exist
         if !self.connections.contains_key(src_uri) {
@@ -128,9 +125,8 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
 
         let src_table_id = replication_connection
             .add_table_api(
-                table_name,
+                src_table_name,
                 &mooncake_table_id,
-                table_id,
                 arrow_schema,
                 moonlink_table_config,
                 read_state_filepath_remap,
@@ -190,8 +186,8 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
     /// Drop table specified by the given table id.
     /// If the table is not tracked, logs a message and returns successfully.
     /// Return whether the table is tracked by moonlink.
-    pub async fn drop_table(&mut self, mooncake_table_id: T) -> Result<bool> {
-        let (table_uri, src_table_id) = match self.table_info.get(&mooncake_table_id) {
+    pub async fn drop_table(&mut self, mooncake_table_id: &T) -> Result<bool> {
+        let (table_uri, src_table_id) = match self.table_info.get(mooncake_table_id) {
             Some(info) => info.clone(),
             None => {
                 debug!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
@@ -202,7 +198,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
         repl_conn.drop_table(src_table_id).await?;
         if repl_conn.table_count() == 0 && table_uri != REST_API_URI {
-            self.shutdown_connection(&table_uri);
+            self.shutdown_connection(&table_uri, true);
         }
 
         debug!(src_table_id, "table dropped through manager");
@@ -252,12 +248,14 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
     }
 
     /// Gracefully shutdown a replication connection by its URI.
-    pub fn shutdown_connection(&mut self, uri: &str) {
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    pub fn shutdown_connection(&mut self, uri: &str, postgres_drop_all: bool) {
         // Clean up completed shutdown handles first
         self.cleanup_completed_shutdowns();
 
         if let Some(conn) = self.connections.remove(uri) {
-            let shutdown_handle = conn.shutdown();
+            let shutdown_handle = conn.shutdown(postgres_drop_all);
             self.shutdown_handles.push(shutdown_handle);
             self.table_info.retain(|_, (u, _)| u != uri);
         }

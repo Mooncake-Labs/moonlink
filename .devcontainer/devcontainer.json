@@ -1,6 +1,7 @@
 {
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
+    "runServices": ["nginx", "postgres", "minio", "fake-gcs"],
     "workspaceFolder": "/workspaces/moonlink",
     "features": {
         "ghcr.io/devcontainers/features/docker-in-docker:2": {},

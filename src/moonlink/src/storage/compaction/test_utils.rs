@@ -173,7 +173,7 @@ pub(crate) async fn dump_deletion_vector_puffin(
     data_file: String,
     puffin_filepath: String,
     batch_deletion_vector: BatchDeletionVector,
-    mut object_storage_cache: ObjectStorageCache,
+    object_storage_cache: ObjectStorageCache,
     filesystem_accessor: &dyn BaseFileSystemAccess,
     table_unique_file_id: TableUniqueFileId,
 ) -> PuffinBlobRef {

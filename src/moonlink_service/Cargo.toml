@@ -5,8 +5,13 @@ edition = { workspace = true }
 license = { workspace = true }
 
 [features]
-default = []
+default = ["storage-fs"]
 rest_api_demo = ["dep:reqwest"]
+standalone-test = []
+
+storage-s3 = ["moonlink/storage-s3"]
+storage-gcs = ["moonlink/storage-gcs"]
+storage-fs = ["moonlink/storage-fs"]
 
 [dependencies]
 arrow-ipc = { workspace = true }
@@ -15,6 +20,7 @@ axum = "0.8"
 clap = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }
+moonlink_error = { path = "../moonlink_error" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 moonlink_rpc = { path = "../moonlink_rpc" }
 reqwest = { version = "0.12", features = ["json"], optional = true }
@@ -24,6 +30,16 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+bytes = "1"
+parquet = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [[example]]
 name = "rest_api_demo"

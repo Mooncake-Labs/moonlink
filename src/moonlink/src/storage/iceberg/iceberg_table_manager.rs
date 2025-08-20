@@ -1,3 +1,4 @@
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
@@ -11,7 +12,8 @@ use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
-use crate::{IcebergTableConfig, ObjectStorageCache};
+use crate::IcebergTableConfig;
+use crate::Result;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,7 +60,7 @@ pub struct IcebergTableManager {
     pub(crate) iceberg_table: Option<IcebergTable>,
 
     /// Object storage cache.
-    pub(crate) object_storage_cache: ObjectStorageCache,
+    pub(crate) object_storage_cache: Arc<dyn CacheTrait>,
 
     /// Filesystem accessor.
     pub(crate) filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -76,7 +78,7 @@ pub struct IcebergTableManager {
 impl IcebergTableManager {
     pub fn new(
         mooncake_table_metadata: Arc<MooncakeTableMetadata>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         config: IcebergTableConfig,
     ) -> IcebergResult<IcebergTableManager> {
@@ -101,7 +103,7 @@ impl IcebergTableManager {
     #[cfg(test)]
     pub(crate) fn new_with_filesystem_accessor(
         mooncake_table_metadata: Arc<MooncakeTableMetadata>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         config: IcebergTableConfig,
     ) -> IcebergResult<IcebergTableManager> {
@@ -193,7 +195,7 @@ impl TableManager for IcebergTableManager {
         &mut self,
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
-    ) -> IcebergResult<PersistenceResult> {
+    ) -> Result<PersistenceResult> {
         // Persist data files, deletion vectors, and file indices.
         let new_table_schema = std::mem::take(&mut snapshot_payload.new_table_schema);
         let persistence_result = self
@@ -207,15 +209,17 @@ impl TableManager for IcebergTableManager {
         Ok(persistence_result)
     }
 
-    async fn load_snapshot_from_table(&mut self) -> IcebergResult<(u32, MooncakeSnapshot)> {
-        self.load_snapshot_from_table_impl().await
+    async fn load_snapshot_from_table(&mut self) -> Result<(u32, MooncakeSnapshot)> {
+        let snapshot = self.load_snapshot_from_table_impl().await?;
+        Ok(snapshot)
     }
 
-    async fn drop_table(&mut self) -> IcebergResult<()> {
+    async fn drop_table(&mut self) -> Result<()> {
         let table_ident = TableIdent::new(
             NamespaceIdent::from_strs(&self.config.namespace).unwrap(),
             self.config.table_name.clone(),
         );
-        self.catalog.drop_table(&table_ident).await
+        self.catalog.drop_table(&table_ident).await?;
+        Ok(())
     }
 }

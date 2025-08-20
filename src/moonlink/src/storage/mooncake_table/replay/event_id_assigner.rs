@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 /// Class which assigns monotonically increasing id for background events.
+#[derive(Clone)]
 pub(crate) struct EventIdAssigner {
     counter: Arc<AtomicU64>,
 }

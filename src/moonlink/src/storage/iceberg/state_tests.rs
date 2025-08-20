@@ -45,6 +45,7 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::validation_test_utils::*;
 use crate::storage::mooncake_table::Snapshot;
+use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::MooncakeTable;
 use crate::table_notify::TableEvent;
@@ -416,7 +417,15 @@ async fn test_state_1_1() {
     table.append(row).unwrap();
 
     // Request to persist.
-    assert!(!table.create_snapshot(SnapshotOption::default()));
+    assert!(!table.create_snapshot(SnapshotOption {
+        id: None,
+        uuid: uuid::Uuid::new_v4(),
+        dump_snapshot: false,
+        force_create: false,
+        skip_iceberg_snapshot: false,
+        index_merge_option: MaintenanceOption::BestEffort,
+        data_compaction_option: MaintenanceOption::BestEffort,
+    }));
 
     // Validate end state.
     validate_no_snapshot(&mut iceberg_table_manager, filesystem_accessor.as_ref()).await;
@@ -437,7 +446,15 @@ async fn test_state_1_2() {
     table.delete(row.clone(), /*lsn=*/ 1).await;
 
     // Request to persist.
-    assert!(!table.create_snapshot(SnapshotOption::default()));
+    assert!(!table.create_snapshot(SnapshotOption {
+        id: None,
+        uuid: uuid::Uuid::new_v4(),
+        dump_snapshot: false,
+        force_create: false,
+        skip_iceberg_snapshot: false,
+        index_merge_option: MaintenanceOption::BestEffort,
+        data_compaction_option: MaintenanceOption::BestEffort,
+    }));
 
     // Validate end state.
     validate_no_snapshot(&mut iceberg_table_manager, filesystem_accessor.as_ref()).await;

@@ -86,6 +86,14 @@ impl ReplicationClient {
         ))
     }
 
+    /// Create a ReplicationClient from an existing PostgresClient
+    pub fn from_client(postgres_client: PostgresClient) -> Self {
+        ReplicationClient {
+            postgres_client,
+            in_txn: false,
+        }
+    }
+
     /// Starts a read-only transaction with repeatable read isolation level
     pub async fn begin_readonly_transaction(&mut self) -> Result<(), ReplicationClientError> {
         // Now start the new read-only transaction
@@ -258,8 +266,8 @@ impl ReplicationClient {
                     .parse()
                     .map_err(|_| ReplicationClientError::OidColumnNotU32)?;
 
-                // Fail fast on any type that we are not able to parse in try_from_str.
-                let typ = Type::from_oid(type_oid).ok_or_else(|| {
+                // Get the Type from OID, handling composite types and arrays recursively
+                let typ = self.resolve_type(type_oid).await.map_err(|_| {
                     ReplicationClientError::UnsupportedType(
                         name.clone(),
                         type_oid,
@@ -319,6 +327,135 @@ impl ReplicationClient {
         }
 
         Ok(column_schemas)
+    }
+
+    /// Recursively resolve a PostgreSQL type by its OID.
+    /// This handles nested composite types and arrays of composite types.
+    fn resolve_type<'a>(
+        &'a self,
+        type_oid: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Type, ReplicationClientError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            // First try to get the type from OID
+            if let Some(typ) = Type::from_oid(type_oid) {
+                return Ok(typ);
+            }
+
+            // Query the database for the type information
+            let (type_name, type_relid, schema_name, type_type, type_elem) =
+                self.get_type_info(type_oid).await?;
+
+            // https://www.postgresql.org/docs/current/catalog-pg-type.html
+            // composite type (type_type == "c")
+            let is_composite_type = type_type == "c";
+            // If a data type is an array, typelem stores the OID of its element type.
+            // For example, if typtype indicates an array type, typelem would point to the pg_type entry for the base type of the array elements (e.g., integer for integer[]).
+            // If a data type is not an array, typelem will be 0.
+            let is_array_type = type_type == "b" && type_elem != 0;
+
+            if !is_composite_type && !is_array_type {
+                // Return error for unknown types
+                return Err(ReplicationClientError::UnsupportedType(
+                    type_name,
+                    type_oid,
+                    format!("unknown type_type={}, type_elem={}", type_type, type_elem),
+                ));
+            }
+
+            if is_array_type {
+                // This is an array type, recursively resolve the element type
+                let element_type = self.resolve_type(type_elem).await?;
+
+                return Ok(Type::new(
+                    type_name,
+                    type_oid,
+                    Kind::Array(element_type),
+                    schema_name,
+                ));
+            }
+
+            let composite_fields = self.get_composite_fields(type_relid).await?;
+
+            Ok(Type::new(
+                type_name,
+                type_oid,
+                Kind::Composite(composite_fields),
+                schema_name,
+            ))
+        })
+    }
+
+    /// Query PostgreSQL type information by OID
+    async fn get_type_info(
+        &self,
+        type_oid: u32,
+    ) -> Result<(String, u32, String, String, u32), ReplicationClientError> {
+        let type_query = format!(
+            "SELECT t.typname, t.typrelid, n.nspname, t.typtype, t.typelem
+         FROM pg_type t
+         JOIN pg_namespace n ON t.typnamespace = n.oid
+         WHERE t.oid = {}",
+            type_oid
+        );
+
+        let mut type_name = String::new();
+        let mut type_relid = 0;
+        let mut schema_name = String::new();
+        let mut type_type = String::new();
+        let mut type_elem = 0;
+
+        // Query should return exactly one row since we're querying by OID which is unique
+        let mut row_count = 0;
+        for message in self.postgres_client.simple_query(&type_query).await? {
+            if let SimpleQueryMessage::Row(row) = message {
+                type_name = row.get("typname").unwrap().to_string();
+                type_relid = row.get("typrelid").unwrap().parse().unwrap();
+                schema_name = row.get("nspname").unwrap().to_string();
+                type_type = row.get("typtype").unwrap().to_string();
+                type_elem = row.get("typelem").unwrap().parse().unwrap_or(0);
+                row_count += 1;
+            }
+        }
+        assert_eq!(
+            row_count, 1,
+            "Expected exactly one row for type OID {}",
+            type_oid
+        );
+
+        Ok((type_name, type_relid, schema_name, type_type, type_elem))
+    }
+
+    /// Query composite type fields by relation ID
+    async fn get_composite_fields(
+        &self,
+        type_relid: u32,
+    ) -> Result<Vec<tokio_postgres::types::Field>, ReplicationClientError> {
+        let fields_query = format!(
+            "SELECT a.attname, a.atttypid
+             FROM pg_attribute a
+             WHERE a.attrelid = {}
+             AND a.attnum > 0
+             AND NOT a.attisdropped
+             ORDER BY a.attnum",
+            type_relid
+        );
+
+        let mut composite_fields = vec![];
+        for message in self.postgres_client.simple_query(&fields_query).await? {
+            if let SimpleQueryMessage::Row(row) = message {
+                let field_name = row.get("attname").unwrap().to_string();
+                let field_type_oid: u32 = row.get("atttypid").unwrap().parse().unwrap();
+
+                // Recursively resolve the field type
+                let field_type = self.resolve_type(field_type_oid).await?;
+
+                composite_fields.push(tokio_postgres::types::Field::new(field_name, field_type));
+            }
+        }
+
+        Ok(composite_fields)
     }
 
     async fn fetch_lookup_key(

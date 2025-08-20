@@ -5,12 +5,14 @@ services:
       dockerfile: Dockerfile
     volumes:
       - ..:/workspaces/moonlink:cached
+      - ../.shared-nginx:/tmp/moonlink_service_test
     networks:
       - shared_network
     depends_on:
       - minio
       - postgres
       - fake-gcs
+      - nginx
     command: sleep infinity
 
   postgres:
@@ -53,9 +55,23 @@ services:
     volumes:
       - fake-gcs-data:/data
 
+  nginx:
+    image: nginx:latest
+    hostname: nginx
+    ports:
+      - "8080:80"
+    networks:
+      shared_network:
+        aliases:
+          - nginx.local
+    volumes:
+      - ../.shared-nginx:/usr/share/nginx/html:ro
+
 volumes:
   minio-data:
   fake-gcs-data:
+  shared-nginx:
+    name: moonlink-shared-nginx
 
 networks:
   shared_network:

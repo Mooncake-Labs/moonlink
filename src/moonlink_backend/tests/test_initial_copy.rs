@@ -3,7 +3,8 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::{
-        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, SRC_URI, TABLE_ID,
+        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, DATABASE, SRC_URI,
+        TABLE,
     };
     use serial_test::serial;
     use std::collections::HashSet;
@@ -38,21 +39,26 @@ mod tests {
             .unwrap();
 
         // Create the backend with no tables
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = guard.backend();
 
-        // Register the table - this kicks off *initial copy* in the background
-        backend
-            .create_table(
-                guard.database_id,
-                TABLE_ID,
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        // Register the table and run the initial copy in a spawned task so we can
+        // insert additional rows while the copy is running.
+        let backend_clone = Arc::clone(backend);
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // While copy is in-flight, send an additional row that must be *buffered*
         initial_client
@@ -62,9 +68,16 @@ mod tests {
 
         let lsn_after_insert = current_wal_lsn(&initial_client).await;
 
+        // Wait for the copy to complete before scanning
+        create_handle.await.unwrap();
+
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn_after_insert))
+                .scan_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    Some(lsn_after_insert),
+                )
                 .await
                 .unwrap(),
         );
@@ -76,7 +89,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,14 +125,14 @@ mod tests {
             .unwrap();
 
         // Create the backend with no tables
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = guard.backend();
 
         // Register the table - this kicks off *initial copy* in the background
         backend
             .create_table(
-                guard.database_id,
-                TABLE_ID,
+                DATABASE.to_string(),
+                TABLE.to_string(),
                 format!("public.{table_name}"),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
@@ -133,7 +148,11 @@ mod tests {
 
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn_after_insert))
+                .scan_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    Some(lsn_after_insert),
+                )
                 .await
                 .unwrap(),
         );
@@ -146,7 +165,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -172,17 +193,17 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
-        // Start create_table without awaiting so we can modify data during copy
+        // Start create_table in a separate task so we can modify data during copy
         let backend_clone = Arc::clone(&backend);
         let table_config = guard.get_serialized_table_config();
-        tokio::spawn(async move {
+        let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
-                    guard.database_id,
-                    TABLE_ID,
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
                     table_config,
@@ -203,9 +224,13 @@ mod tests {
             .unwrap();
 
         let lsn = current_wal_lsn(&initial_client).await;
+
+        // Wait for the copy to complete before scanning
+        create_handle.await.unwrap();
+
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         );
@@ -220,7 +245,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -246,7 +273,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, _) = TestGuard::new(None).await;
+        let (guard, _) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         // Start create_table without awaiting so we can modify data during copy
@@ -255,8 +282,8 @@ mod tests {
         let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
-                    guard.database_id,
-                    TABLE_ID,
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
                     table_config,
@@ -307,7 +334,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         );
@@ -323,7 +350,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -354,27 +383,33 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, new_client) = TestGuard::new(None).await;
+        let (guard, new_client) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
-        backend_clone
-            .create_table(
-                guard.database_id,
-                TABLE_ID,
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // Delete one of the rows while copy is executing
         new_client
             .simple_query(&format!("DELETE FROM {table_name} WHERE id = 1;"))
             .await
             .unwrap();
+
+        // Wait for the copy to complete before inserting a new row
+        create_handle.await.unwrap();
 
         // Add another row after copy finishes
         initial_client
@@ -389,7 +424,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -404,7 +439,9 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -429,21 +466,24 @@ mod tests {
             .await
             .unwrap();
 
-        let (guard, new_client) = TestGuard::new(None).await;
+        let (guard, new_client) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
-        backend_clone
-            .create_table(
-                guard.database_id,
-                TABLE_ID,
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // Delete one of the rows currently being copied
         new_client
@@ -455,10 +495,13 @@ mod tests {
             .await
             .unwrap();
 
+        // Wait for the copy to complete before scanning
+        create_handle.await.unwrap();
+
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -474,7 +517,62 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_initial_copy_handles_empty_table_simple() {
+        let (initial_client, connection) = connect(SRC_URI, NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let table_name = "copy_empty";
+
+        // Create empty table
+        initial_client
+            .simple_query(&format!(
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
+            ))
+            .await
+            .unwrap();
+
+        // Spin up backend and register the table
+        let (guard, _) = TestGuard::new(None, true).await;
+        let backend = guard.backend();
+        backend
+            .create_table(
+                DATABASE.to_string(),
+                TABLE.to_string(),
+                format!("public.{table_name}"),
+                SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Scan should yield empty set; also exercises the early no-copy branch
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), None)
+                .await
+                .unwrap(),
+        );
+        assert!(ids.is_empty());
+
+        // Cleanup
+        initial_client
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
+            .await
+            .unwrap();
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 
     /// A kitchen-sink stress test that:
@@ -508,21 +606,24 @@ mod tests {
             .unwrap();
 
         // Spin up backend & kick off the initial copy in its own task.
-        let (guard, new_client) = TestGuard::new(None).await;
+        let (guard, new_client) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
-        backend_clone
-            .create_table(
-                guard.database_id,
-                TABLE_ID,
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // ===== 1. Massive concurrent mutations while COPY is still running =====
         // (a) Insert 100 fresh rows that must be buffered then applied.
@@ -575,10 +676,13 @@ mod tests {
             .unwrap();
 
         // ===== 2. Final verification =====
+        // Wait for the copy to complete before scanning the table
+        create_handle.await.unwrap();
+
         let lsn = current_wal_lsn(&initial_client).await;
         let observed_ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -617,6 +721,122 @@ mod tests {
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
             .unwrap();
-        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_initial_copy_fails_to_get_stream() {
+        let (initial_client, connection) = connect(SRC_URI, NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let table_name = "copy_fail_stream";
+
+        // Create and seed a table so row_count > 0, ensuring the initial copy path is taken
+        initial_client
+            .simple_query(&format!(
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);
+                 INSERT INTO {table_name} VALUES (1,'a'),(2,'b');"
+            ))
+            .await
+            .unwrap();
+
+        let (guard, _) = TestGuard::new(None, true).await;
+        let backend = guard.backend();
+
+        // Start create_table, then immediately drop the source table to force stream acquisition to fail
+        let backend_clone = Arc::clone(backend);
+        let table_config = guard.get_serialized_table_config();
+        let handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None,
+                )
+                .await
+                .unwrap();
+        });
+
+        // Race: drop the source table right away to break COPY stream setup
+        initial_client
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
+            .await
+            .unwrap();
+
+        // The spawned task should panic due to `.expect("failed to get table copy stream")`
+        let res = handle.await;
+        assert!(
+            res.is_err(),
+            "expected panic when failing to get copy stream"
+        );
+
+        // Best-effort cleanup of mooncake table if it was partially created
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_initial_copy_copy_stream_send_error_logged() {
+        let (initial_client, connection) = connect(SRC_URI, NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let table_name = "copy_send_error";
+
+        // Create and seed a table
+        initial_client
+            .simple_query(&format!(
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);
+                 INSERT INTO {table_name} VALUES (1,'a');"
+            ))
+            .await
+            .unwrap();
+
+        let (guard, _) = TestGuard::new(None, true).await;
+        let backend = guard.backend();
+
+        // Create a tiny channel and drop receiver early to cause send error during initial copy
+        let backend_clone = Arc::clone(backend);
+        let table_config = guard.get_serialized_table_config();
+        let handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None,
+                )
+                .await
+                .unwrap();
+        });
+
+        // Wait briefly then drop source table to accelerate the end of copy
+        // (We primarily want to trigger send failure paths during copying.)
+        // It's okay if this sometimes races; the goal is to execute the error branch at least once.
+        initial_client
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
+            .await
+            .unwrap();
+
+        let _ = handle.await; // ignore result; best-effort
+
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
     }
 }

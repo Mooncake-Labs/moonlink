@@ -1,4 +1,3 @@
-use crate::error::Error;
 use crate::error::Result;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
@@ -7,6 +6,15 @@ use crate::ReadStateFilepathRemap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
+
+/// LSN, which indicates there're no preceding read operations.
+const NO_READ_LSN: u64 = u64::MAX;
+/// Cache LSN, which indicates there's no cached snapshot.
+const NO_CACHE_LSN: u64 = u64::MAX;
+/// Snapshot LSN, which indicates there's no snapshot LSN update.
+const NO_SNAPSHOT_LSN: u64 = u64::MAX;
+/// Commit LSN, which indicates there's no commit.
+const NO_COMMIT_LSN: u64 = 0;
 
 pub struct ReadStateManager {
     last_read_lsn: AtomicU64,
@@ -28,7 +36,7 @@ impl ReadStateManager {
     ) -> Self {
         let (table_snapshot, table_snapshot_watch_receiver) = table.get_state_for_reader();
         ReadStateManager {
-            last_read_lsn: AtomicU64::new(u64::MAX),
+            last_read_lsn: AtomicU64::new(NO_READ_LSN),
             last_read_state: RwLock::new(Arc::new(ReadState::new(
                 /*data_files=*/ Vec::new(),
                 /*puffin_cache_handles=*/ Vec::new(),
@@ -48,8 +56,11 @@ impl ReadStateManager {
 
     #[inline]
     fn snapshot_is_clean(snapshot_lsn: u64, commit_lsn: u64) -> bool {
-        // Assume dirty when uninitialized.
-        snapshot_lsn == commit_lsn && snapshot_lsn != u64::MAX
+        // Snapshot clean when there's completely no updates to the snapshot.
+        if snapshot_lsn == NO_SNAPSHOT_LSN && commit_lsn == NO_COMMIT_LSN {
+            return true;
+        }
+        snapshot_lsn == commit_lsn && snapshot_lsn != NO_SNAPSHOT_LSN
     }
 
     #[inline]
@@ -60,7 +71,7 @@ impl ReadStateManager {
         commit_lsn: u64,
     ) -> bool {
         // Never use cache if it's uninitialized (cached_lsn = u64::MAX)
-        if cached_lsn == u64::MAX {
+        if cached_lsn == NO_CACHE_LSN {
             return false;
         }
 
@@ -111,7 +122,6 @@ impl ReadStateManager {
                     )
                     .await;
             }
-
             self.wait_for_relevant_lsn_change(
                 requested_lsn.unwrap(),
                 current_replication_lsn,
@@ -130,7 +140,7 @@ impl ReadStateManager {
         commit_lsn: u64,
     ) -> bool {
         let is_snapshot_clean = Self::snapshot_is_clean(snapshot_lsn, commit_lsn);
-        let is_snapshot_initialized = snapshot_lsn != u64::MAX;
+        let is_snapshot_initialized = snapshot_lsn != NO_SNAPSHOT_LSN;
         match requested_lsn {
             // If no specific LSN is requested, we can always try to read the latest.
             None => true,
@@ -157,9 +167,9 @@ impl ReadStateManager {
         let is_snapshot_clean = current_snapshot_lsn == current_commit_lsn;
 
         let last_read_lsn = self.last_read_lsn.load(Ordering::Acquire);
-        if last_read_lsn < current_snapshot_lsn || last_read_lsn == u64::MAX {
+        if last_read_lsn < current_snapshot_lsn || last_read_lsn == NO_READ_LSN {
             // Only calculate effective_lsn if we're not uninitialized
-            let effective_lsn = if last_read_lsn == u64::MAX {
+            let effective_lsn = if last_read_lsn == NO_READ_LSN {
                 // For uninitialized cache, just use the current snapshot LSN
                 current_snapshot_lsn
             } else {
@@ -177,7 +187,7 @@ impl ReadStateManager {
             self.last_read_lsn.store(effective_lsn, Ordering::Release);
             *last_read_state_guard = snapshot_read_output
                 .take_as_read_state(self.read_state_filepath_remap.clone())
-                .await;
+                .await?;
         }
         Ok(last_read_state_guard.clone())
     }
@@ -191,9 +201,9 @@ impl ReadStateManager {
         table_snapshot_rx: &mut watch::Receiver<u64>,
     ) -> Result<()> {
         if requested_lsn_val > current_replication_lsn {
-            replication_lsn_rx.changed().await.map_err(Error::from)?;
+            replication_lsn_rx.changed().await?;
         } else {
-            table_snapshot_rx.changed().await.map_err(Error::from)?;
+            table_snapshot_rx.changed().await?;
         }
         Ok(())
     }
@@ -202,6 +212,43 @@ impl ReadStateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_snapshot_clean() {
+        struct Case {
+            snapshot_lsn: u64,
+            commit_lsn: u64,
+            expected: bool,
+        }
+
+        let cases = [
+            // Completely no updates for the snapshot.
+            Case {
+                snapshot_lsn: NO_SNAPSHOT_LSN,
+                commit_lsn: NO_COMMIT_LSN,
+                expected: true,
+            },
+            // All commits are sync-ed to the snapshot.
+            Case {
+                snapshot_lsn: 10,
+                commit_lsn: 10,
+                expected: true,
+            },
+            // Still commits not reflected to snapshot.
+            Case {
+                snapshot_lsn: 10,
+                commit_lsn: 98,
+                expected: false,
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            assert_eq!(
+                ReadStateManager::snapshot_is_clean(c.snapshot_lsn, c.commit_lsn),
+                c.expected,
+                "case {i} failed"
+            );
+        }
+    }
 
     #[test]
     fn cache_decision_matrix() {
@@ -281,7 +328,7 @@ mod tests {
             // miss: uninitialized cache (cached_lsn = u64::MAX)
             Case {
                 requested: Some(10),
-                cached: u64::MAX,
+                cached: NO_CACHE_LSN,
                 snap: 10,
                 commit: 10,
                 expect: false,
@@ -289,7 +336,7 @@ mod tests {
             // miss: uninitialized cache for latest read
             Case {
                 requested: None,
-                cached: u64::MAX,
+                cached: NO_CACHE_LSN,
                 snap: 10,
                 commit: 10,
                 expect: false,

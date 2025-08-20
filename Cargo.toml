@@ -28,15 +28,16 @@ async-trait = "0.1"
 backon = { version = "1.5" }
 bincode = { version = "2", features = ["serde"] }
 bitstream-io = "4.5"
+bytes = "1.0"
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 datafusion = "49"
 datafusion-cli = "49"
-fastbloom = "0.12.0"
+fastbloom = "0.12"
 futures = { version = "0.3", default-features = false }
-hashbrown = "0.15.3"
-iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "17e4351a4a4d52c8d33f7f791384bae467186cd7", default-features = false, features = [
+hashbrown = "0.15"
+iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "7cde26a7d793905bbbe4d7264b215ca9dc7e9567", default-features = false, features = [
   "storage-fs",
 ] }
 itertools = { version = "0.14" }
@@ -44,7 +45,7 @@ lru = { version = "0.14" }
 moka = { version = "0.12.10", features = ["future"] }
 more-asserts = "0.3"
 multimap = { version = "0.10", default-features = false }
-nix = { version = "0.27", default-features = false, features = ["fs"] }
+nix = { version = "0.30", default-features = false, features = ["fs"] }
 num-bigint = { version = "0.4" }
 num-traits = "0.2"
 object_store = "0.12"
@@ -55,8 +56,8 @@ parquet = { version = "55", default-features = false, features = [
   "arrow_canonical_extension_types",
 ] }
 paste = "1"
-postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
-postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5", features = [
+postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "4fda9c1bece3b93359ca1eb2779458fc1c080eae" }
+postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "4fda9c1bece3b93359ca1eb2779458fc1c080eae", features = [
   "with-serde_json-1",
 ] }
 rand = "0.9"
@@ -80,18 +81,18 @@ tokio = { version = "1.47", default-features = false, features = [
   "tracing",
 ] }
 tokio-bitstream-io = "0.0"
-tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5", features = [
+tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "4fda9c1bece3b93359ca1eb2779458fc1c080eae", features = [
   "with-serde_json-1",
 ] }
 tracing = "0.1"
 typed-builder = "0.20"
 url = "2.5"
-uuid = { version = "1.17", default-features = false, features = ["v4"] }
+uuid = { version = "1.18", default-features = false, features = ["v4"] }
 
 [profile.release-with-debug]
 inherits = "release"
 debug = true
 
 [patch.crates-io]
-postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
-postgres-protocol = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
+postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "4fda9c1bece3b93359ca1eb2779458fc1c080eae" }
+postgres-protocol = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "4fda9c1bece3b93359ca1eb2779458fc1c080eae" }

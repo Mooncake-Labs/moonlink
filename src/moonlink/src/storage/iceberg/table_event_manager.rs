@@ -13,6 +13,8 @@ pub struct TableEventManager {
     drop_table_completion_rx: Option<oneshot::Receiver<Result<()>>>,
     /// Channel to observe latest flush LSN reported by iceberg.
     flush_lsn_rx: watch::Receiver<u64>,
+    /// Channel to observe latest wal flush LSN reported by iceberg.
+    wal_flush_lsn_rx: watch::Receiver<u64>,
     /// Sender which is used to create notification at latest force snapshot completion.
     force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
     /// Sender which is used to create notification at latest data compaction completion.
@@ -28,6 +30,7 @@ impl TableEventManager {
             table_event_tx,
             drop_table_completion_rx: Some(table_event_sync_rx.drop_table_completion_rx),
             flush_lsn_rx: table_event_sync_rx.flush_lsn_rx,
+            wal_flush_lsn_rx: table_event_sync_rx.wal_flush_lsn_rx,
             force_snapshot_completion_rx: table_event_sync_rx.force_snapshot_completion_rx,
             table_maintenance_completion_tx: table_event_sync_rx.table_maintenance_completion_tx,
         }
@@ -36,6 +39,11 @@ impl TableEventManager {
     /// Subscribe to flush LSN updates.
     pub fn subscribe_flush_lsn(&self) -> watch::Receiver<u64> {
         self.flush_lsn_rx.clone()
+    }
+
+    /// Subscribe to WAL flush LSN updates.
+    pub fn subscribe_wal_flush_lsn(&self) -> watch::Receiver<u64> {
+        self.wal_flush_lsn_rx.clone()
     }
 
     /// Initiate an iceberg snapshot event, return the channel for synchronization.

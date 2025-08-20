@@ -6,12 +6,12 @@ use tempfile::{tempdir, TempDir};
 
 /// Source table uri.
 const SRC_TABLE_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
-/// Test database id.
-const DATABASE_ID: u32 = 0;
-/// Test table id.
-const TABLE_ID: u32 = 0;
 /// Test table name.
-const TABLE_NAME: &str = "table";
+const SRC_TABLE_NAME: &str = "src_table";
+/// Test destination database.
+const DATABASE: &str = "dst_database";
+/// Test destination table name.
+const TABLE: &str = "dst_schema.dst_table";
 
 /// Create a filesystem config for test.
 fn get_storage_config() -> StorageConfig {
@@ -26,6 +26,7 @@ fn get_storage_config() -> StorageConfig {
             secret_access_key: "secret_access_key".to_string(),
             endpoint: None,
             disable_auth: false,
+            write_option: None,
         };
     }
 
@@ -79,8 +80,8 @@ async fn check_persisted_metadata(sqlite_metadata_store: &SqliteMetadataStore) {
         .unwrap();
     assert_eq!(metadata_entries.len(), 1);
     let table_metadata_entry = &metadata_entries[0];
-    assert_eq!(table_metadata_entry.table_id, TABLE_ID);
-    assert_eq!(table_metadata_entry.src_table_name, TABLE_NAME);
+    assert_eq!(table_metadata_entry.table, TABLE);
+    assert_eq!(table_metadata_entry.src_table_name, SRC_TABLE_NAME);
     assert_eq!(table_metadata_entry.src_table_uri, SRC_TABLE_URI);
     assert_eq!(
         table_metadata_entry.moonlink_table_config,
@@ -97,6 +98,36 @@ fn get_sqlite_database_filepath(tmp_dir: &TempDir) -> String {
 }
 
 #[tokio::test]
+async fn test_metadata_table_exists() {
+    let tmp_dir = tempdir().unwrap();
+    let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
+
+    let metadata_store = SqliteMetadataStore::new(sqlite_path.clone()).await.unwrap();
+    let moonlink_table_config = get_moonlink_table_config();
+
+    // Check metadata table existence.
+    let exists = metadata_store.metadata_table_exists().await.unwrap();
+    assert!(!exists);
+
+    // Store moonlink table config to metadata storage.
+    metadata_store
+        .store_table_metadata(
+            DATABASE,
+            TABLE,
+            SRC_TABLE_NAME,
+            SRC_TABLE_URI,
+            moonlink_table_config.clone(),
+        )
+        .await
+        .unwrap();
+
+    // Load moonlink table config from metadata config.
+    let exists = metadata_store.metadata_table_exists().await.unwrap();
+    assert!(exists);
+    check_persisted_metadata(&metadata_store).await;
+}
+
+#[tokio::test]
 async fn test_table_metadata_store_and_load() {
     let tmp_dir = tempdir().unwrap();
     let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
@@ -107,9 +138,9 @@ async fn test_table_metadata_store_and_load() {
     // Store moonlink table config to metadata storage.
     metadata_store
         .store_table_metadata(
-            DATABASE_ID,
-            TABLE_ID,
-            TABLE_NAME,
+            DATABASE,
+            TABLE,
+            SRC_TABLE_NAME,
             SRC_TABLE_URI,
             moonlink_table_config.clone(),
         )
@@ -132,9 +163,9 @@ async fn test_table_metadata_store_for_duplicate_tables() {
     // Store moonlink table config to metadata storage.
     metadata_store
         .store_table_metadata(
-            DATABASE_ID,
-            TABLE_ID,
-            TABLE_NAME,
+            DATABASE,
+            TABLE,
+            SRC_TABLE_NAME,
             SRC_TABLE_URI,
             moonlink_table_config.clone(),
         )
@@ -144,9 +175,9 @@ async fn test_table_metadata_store_for_duplicate_tables() {
     // Load and check moonlink table config from metadata config.
     let res = metadata_store
         .store_table_metadata(
-            DATABASE_ID,
-            TABLE_ID,
-            TABLE_NAME,
+            DATABASE,
+            TABLE,
+            SRC_TABLE_NAME,
             SRC_TABLE_URI,
             moonlink_table_config.clone(),
         )
@@ -178,9 +209,9 @@ async fn test_delete_table_metadata_store() {
     // Store moonlink table config to metadata storage.
     metadata_store
         .store_table_metadata(
-            DATABASE_ID,
-            TABLE_ID,
-            TABLE_NAME,
+            DATABASE,
+            TABLE,
+            SRC_TABLE_NAME,
             SRC_TABLE_URI,
             moonlink_table_config.clone(),
         )
@@ -192,7 +223,7 @@ async fn test_delete_table_metadata_store() {
 
     // Delete moonlink table config to metadata storage and check.
     metadata_store
-        .delete_table_metadata(DATABASE_ID, TABLE_ID)
+        .delete_table_metadata(DATABASE, TABLE)
         .await
         .unwrap();
     let metadata_entries = metadata_store
@@ -202,8 +233,6 @@ async fn test_delete_table_metadata_store() {
     assert_eq!(metadata_entries.len(), 0);
 
     // Delete for the second time also fails.
-    let res = metadata_store
-        .delete_table_metadata(DATABASE_ID, TABLE_ID)
-        .await;
+    let res = metadata_store.delete_table_metadata(DATABASE, TABLE).await;
     assert!(res.is_err());
 }

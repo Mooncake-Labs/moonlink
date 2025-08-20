@@ -16,10 +16,10 @@ pub const MOONLINK_SECRET_TABLE: &str = "secrets";
 /// Metadata entry for each table.
 #[derive(Clone, Debug)]
 pub struct TableMetadataEntry {
-    /// Database id.
-    pub database_id: u32,
-    /// Table id.
-    pub table_id: u32,
+    /// Mooncake database name.
+    pub database: String,
+    /// Mooncake table name.
+    pub table: String,
     /// Src table name.
     pub src_table_name: String,
     /// Src table connection string.
@@ -56,15 +56,15 @@ pub trait MetadataStoreTrait: Send + Sync {
     #[allow(async_fn_in_trait)]
     async fn store_table_metadata(
         &self,
-        database_id: u32,
-        table_id: u32,
-        table_name: &str,
-        table_uri: &str,
+        database: &str,
+        table: &str,
+        src_table_name: &str,
+        src_uri: &str,
         moonlink_table_config: MoonlinkTableConfig,
     ) -> Result<()>;
 
     /// Delete table config for the given table.
     /// Precondition: the requested table id has been record in the metadata storage.
     #[allow(async_fn_in_trait)]
-    async fn delete_table_metadata(&self, database_id: u32, table_id: u32) -> Result<()>;
+    async fn delete_table_metadata(&self, database: &str, table: &str) -> Result<()>;
 }

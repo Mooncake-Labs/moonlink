@@ -1,9 +1,9 @@
 -- SQL statement(s) to store moonlink managed column store tables.
 CREATE TABLE tables (
-    database_id oid,              -- column store database OID
-    table_id oid,                 -- column store table OID
-    table_name text NOT NULL,     -- source table name
-    uri text,                     -- source URI
-    config json,                  -- mooncake and persistence configurations
-    PRIMARY KEY (database_id, table_id)
+    "database" TEXT,         -- column store database name
+    "table" TEXT,            -- column store table name
+    src_table_name TEXT NOT NULL,   -- source table name
+    src_table_uri TEXT,             -- source URI
+    config JSON,                    -- mooncake and persistence configurations
+    PRIMARY KEY ("database", "table")
 );

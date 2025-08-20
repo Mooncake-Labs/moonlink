@@ -7,7 +7,6 @@ license = { workspace = true }
 [features]
 default = ["storage-fs", "metadata-sqlite"]
 storage-all = ["storage-fs", "metadata-postgres", "metadata-sqlite"]
-test-utils = []
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
@@ -20,6 +19,7 @@ metadata-sqlite = ["sqlx"]
 [dependencies]
 async-trait = { workspace = true }
 moonlink = { path = "../moonlink" }
+moonlink_error = { path = "../moonlink_error" }
 more-asserts = { workspace = true }
 postgres-types = { workspace = true, optional = true }
 serde = { workspace = true }

@@ -10,7 +10,7 @@ use crate::storage::wal::WalManager;
 use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
 use crate::storage::PersistenceResult;
-use crate::ObjectStorageCache;
+use crate::Error;
 use crate::TableEventManager;
 use crate::WalConfig;
 
@@ -57,10 +57,10 @@ async fn test_iceberg_snapshot_failure_mock_test() {
         .times(1)
         .returning(|_, _| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 
@@ -70,7 +70,7 @@ async fn test_iceberg_snapshot_failure_mock_test() {
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
         wal_manager,
     )
@@ -129,10 +129,10 @@ async fn test_iceberg_drop_table_failure_mock_test() {
         .times(1)
         .returning(|| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 
@@ -142,7 +142,7 @@ async fn test_iceberg_drop_table_failure_mock_test() {
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
         wal_manager,
     )
@@ -219,10 +219,10 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
         .times(1)
         .returning(|_, _| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 
@@ -232,7 +232,7 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
         wal_manager,
     )
@@ -327,10 +327,10 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
         .times(1)
         .returning(|_, _| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 
@@ -340,7 +340,7 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
         wal_manager,
     )
@@ -436,10 +436,10 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
         .times(1)
         .returning(|_, _| {
             Box::pin(async move {
-                Err(IcebergError::new(
+                Err(Error::from(IcebergError::new(
                     ErrorKind::Unexpected,
                     "Intended error for unit test",
-                ))
+                )))
             })
         });
 
@@ -449,7 +449,7 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
     let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
-        ObjectStorageCache::default_for_test(&temp_dir),
+        create_test_object_storage_cache(&temp_dir),
         FileSystemAccessor::default_for_test(&temp_dir),
         wal_manager,
     )

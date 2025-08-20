@@ -139,6 +139,24 @@ pub fn decode_read_state_for_testing(
     )
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(clippy::type_complexity)]
+pub fn decode_serialized_read_state_for_testing(
+    data: Vec<u8>,
+) -> (
+    Vec<String>, /*data_file_paths*/
+    Vec<String>, /*puffin_file_paths*/
+    Vec<PuffinDeletionBlobAtRead>,
+    Vec<(u32, u32)>,
+) {
+    let read_state = ReadState {
+        data,
+        associated_files: vec![],
+        cache_handles: vec![],
+    };
+    decode_read_state_for_testing(&read_state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

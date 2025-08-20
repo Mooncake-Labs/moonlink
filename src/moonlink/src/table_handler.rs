@@ -17,7 +17,6 @@ use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_handler_timer::TableHandlerTimer;
 use crate::table_notify::TableEvent;
-use crate::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -27,6 +26,8 @@ pub(crate) mod table_handler_state;
 use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
 };
+
+const MAX_BUFFERED_TABLE_EVENTS: usize = 32_768;
 
 /// Handler for table operations
 pub struct TableHandler {
@@ -51,7 +52,7 @@ impl TableHandler {
         table_event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
     ) -> Self {
         // Create channel for events
-        let (event_sender, event_receiver) = mpsc::channel(100);
+        let (event_sender, event_receiver) = mpsc::channel(MAX_BUFFERED_TABLE_EVENTS);
 
         // Register channel for internal control events.
         table.register_table_notify(event_sender.clone()).await;
@@ -128,11 +129,29 @@ impl TableHandler {
         event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
         mut table: MooncakeTable,
     ) {
-        let initial_persistence_lsn = table.get_iceberg_snapshot_lsn();
+        let iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
+        // Here we indicate that highest completion lsn of 0 indicates that we have not seen any completed WAL events yet.
+        let wal_highest_completion_lsn = table.get_wal_highest_completion_lsn();
+        let wal_curr_file_number = table.get_wal_curr_file_number();
+
+        let initial_persistence_lsn = if wal_curr_file_number > 0 {
+            if let Some(iceberg_snapshot_lsn) = iceberg_snapshot_lsn {
+                Some(std::cmp::max(
+                    iceberg_snapshot_lsn,
+                    wal_highest_completion_lsn,
+                ))
+            } else {
+                Some(wal_highest_completion_lsn)
+            }
+        } else {
+            iceberg_snapshot_lsn
+        };
+
         let mut table_handler_state = TableHandlerState::new(
             event_sync_sender.table_maintenance_completion_tx.clone(),
             event_sync_sender.force_snapshot_completion_tx.clone(),
             initial_persistence_lsn,
+            iceberg_snapshot_lsn,
         );
 
         // Used to clean up mooncake table status, and send completion notification.
@@ -194,6 +213,13 @@ impl TableHandler {
                     Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
                         .await;
                 }
+                // ==============================
+                // Bulk ingestion events
+                // ==============================
+                TableEvent::LoadFiles { files, lsn } => {
+                    table.batch_ingest(files, lsn).await;
+                }
+
                 // ==============================
                 // Interactive blocking events
                 // ==============================
@@ -314,11 +340,13 @@ impl TableHandler {
                 }
                 TableEvent::FinishInitialCopy { start_lsn } => {
                     debug!("finishing initial copy");
-                    if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0) {
+                    if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, start_lsn)
+                    {
                         error!(error = %e, "failed to finish initial copy");
                     }
-                    // Force create the snapshot with LSN 0
+                    // Force create the snapshot with LSN `start_lsn`
                     assert!(table.create_snapshot(SnapshotOption {
+                        id: None,
                         uuid: uuid::Uuid::new_v4(),
                         force_create: true,
                         dump_snapshot: false,
@@ -327,7 +355,7 @@ impl TableHandler {
                         data_compaction_option: MaintenanceOption::Skip,
                     }));
                     table_handler_state.mooncake_snapshot_ongoing = true;
-                    table_handler_state.finish_initial_copy();
+                    table_handler_state.finish_initial_copy(start_lsn);
 
                     // Drop any events that have LSN less than the start LSN during apply.
                     table_handler_state.initial_persistence_lsn = Some(start_lsn);
@@ -405,16 +433,15 @@ impl TableHandler {
                     table.persist_iceberg_snapshot(iceberg_snapshot_payload);
                 }
                 TableEvent::MooncakeTableSnapshotResult {
-                    lsn,
-                    uuid: _,
-                    iceberg_snapshot_payload,
-                    data_compaction_payload,
-                    file_indice_merge_payload,
-                    evicted_files_to_delete,
-                    current_snapshot: _,
+                    mooncake_snapshot_result,
                 } => {
+                    // Record mooncake snapshot completion.
+                    table.record_mooncake_snapshot_completion(&mooncake_snapshot_result);
+
                     // Spawn a detached best-effort task to delete evicted object storage cache.
-                    start_task_to_delete_evicted(evicted_files_to_delete.files);
+                    start_task_to_delete_evicted(
+                        mooncake_snapshot_result.evicted_data_files_to_delete,
+                    );
 
                     // Mark mooncake snapshot as completed.
                     table.mark_mooncake_snapshot_completed();
@@ -429,17 +456,19 @@ impl TableHandler {
                     }
 
                     // Notify read the mooncake table commit of LSN.
-                    table.notify_snapshot_reader(lsn);
+                    table.notify_snapshot_reader(mooncake_snapshot_result.commit_lsn);
 
                     // Process iceberg snapshot and trigger iceberg snapshot if necessary.
                     let min_pending_flush_lsn = table.get_min_ongoing_flush_lsn();
                     if TableHandlerState::can_initiate_iceberg_snapshot(
-                        lsn,
+                        mooncake_snapshot_result.commit_lsn,
                         min_pending_flush_lsn,
                         table_handler_state.iceberg_snapshot_result_consumed,
                         table_handler_state.iceberg_snapshot_ongoing,
                     ) {
-                        if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
+                        if let Some(iceberg_snapshot_payload) =
+                            mooncake_snapshot_result.iceberg_snapshot_payload
+                        {
                             table_handler_event_sender
                                 .send(TableEvent::RegularIcebergSnapshot {
                                     iceberg_snapshot_payload,
@@ -464,7 +493,9 @@ impl TableHandler {
                         if table_handler_state
                             .data_compaction_request_status
                             .is_force_request()
-                            && data_compaction_payload.is_nothing()
+                            && mooncake_snapshot_result
+                                .data_compaction_payload
+                                .is_nothing()
                         {
                             let _ = table_handler_state
                                 .table_maintenance_completion_tx
@@ -474,8 +505,9 @@ impl TableHandler {
                         }
 
                         // Get payload and try perform maintenance operations.
-                        if let Some(data_compaction_payload) =
-                            data_compaction_payload.take_payload()
+                        if let Some(data_compaction_payload) = mooncake_snapshot_result
+                            .data_compaction_payload
+                            .take_payload()
                         {
                             table_handler_state.table_maintenance_process_status =
                                 MaintenanceProcessStatus::InProcess;
@@ -493,7 +525,9 @@ impl TableHandler {
                         if table_handler_state
                             .index_merge_request_status
                             .is_force_request()
-                            && file_indice_merge_payload.is_nothing()
+                            && mooncake_snapshot_result
+                                .file_indices_merge_payload
+                                .is_nothing()
                         {
                             let _ = table_handler_state
                                 .table_maintenance_completion_tx
@@ -502,8 +536,9 @@ impl TableHandler {
                                 MaintenanceRequestStatus::Unrequested;
                         }
 
-                        if let Some(file_indice_merge_payload) =
-                            file_indice_merge_payload.take_payload()
+                        if let Some(file_indices_merge_payload) = mooncake_snapshot_result
+                            .file_indices_merge_payload
+                            .take_payload()
                         {
                             assert_eq!(
                                 table_handler_state.table_maintenance_process_status,
@@ -511,7 +546,7 @@ impl TableHandler {
                             );
                             table_handler_state.table_maintenance_process_status =
                                 MaintenanceProcessStatus::InProcess;
-                            table.perform_index_merge(file_indice_merge_payload);
+                            table.perform_index_merge(file_indices_merge_payload);
                         }
                     }
                 }
@@ -521,6 +556,9 @@ impl TableHandler {
                     table_handler_state.iceberg_snapshot_ongoing = false;
                     match iceberg_snapshot_result {
                         Ok(snapshot_res) => {
+                            // Record iceberg snapshot completion.
+                            table.record_iceberg_snapshot_completion(&snapshot_res);
+
                             // Update table maintenance operation status.
                             if table_handler_state.table_maintenance_process_status
                                 == MaintenanceProcessStatus::InPersist
@@ -549,13 +587,10 @@ impl TableHandler {
                                 .update_iceberg_persisted_lsn(iceberg_flush_lsn, replication_lsn);
                         }
                         Err(e) => {
-                            let err = Err(Error::IcebergMessage(format!(
-                                "Failed to create iceberg snapshot: {e:?}"
-                            )));
                             if table_handler_state.has_pending_force_snapshot_request() {
                                 if let Err(send_err) = table_handler_state
                                     .force_snapshot_completion_tx
-                                    .send(Some(err.clone()))
+                                    .send(Some(Err(e.clone())))
                                 {
                                     error!(error = ?send_err, "failed to notify force snapshot, because receive end has closed channel");
                                 }
@@ -587,6 +622,7 @@ impl TableHandler {
                     }
                 }
                 TableEvent::IndexMergeResult { index_merge_result } => {
+                    table.record_index_merge_completion(&index_merge_result);
                     table.set_file_indices_merge_res(index_merge_result);
                     table_handler_state.mark_index_merge_completed().await;
                     // Check whether need to drop table.
@@ -605,6 +641,7 @@ impl TableHandler {
                         .await;
                     match data_compaction_result {
                         Ok(data_compaction_res) => {
+                            table.record_data_compaction_completion(&data_compaction_res);
                             table.set_data_compaction_res(data_compaction_res)
                         }
                         Err(err) => {
@@ -656,16 +693,24 @@ impl TableHandler {
                         }
                     }
                 }
+                TableEvent::FinishRecovery {
+                    highest_completion_lsn,
+                } => {
+                    event_sync_sender
+                        .wal_flush_lsn_tx
+                        .send(highest_completion_lsn)
+                        .unwrap();
+                }
                 TableEvent::FlushResult {
-                    id: _,
+                    id,
                     xact_id,
                     flush_result,
                 } => match flush_result {
                     Some(Ok(disk_slice)) => {
                         if let Some(xact_id) = xact_id {
-                            table.apply_stream_flush_result(xact_id, disk_slice);
+                            table.apply_stream_flush_result(xact_id, disk_slice, id);
                         } else {
-                            table.apply_flush_result(disk_slice);
+                            table.apply_flush_result(disk_slice, id);
                         }
                     }
                     Some(Err(e)) => {
@@ -715,7 +760,10 @@ impl TableHandler {
         }
 
         // In the case that this is an initial copy event we actually expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
-        if table_handler_state.should_discard_event(&event) && !is_initial_copy_event {
+        if table_handler_state.should_discard_event(&event)
+            && !is_initial_copy_event
+            && !event.is_recovery()
+        {
             return;
         }
         assert_eq!(
@@ -776,8 +824,15 @@ impl TableHandler {
                 )
                 .await;
             }
-            TableEvent::StreamAbort { xact_id, .. } => {
-                table.abort_in_stream_batch(xact_id);
+            TableEvent::StreamAbort {
+                xact_id,
+                closes_incomplete_wal_transaction,
+                ..
+            } => {
+                // If we are closing a transaction that is part of the WAL recovery process, then we do not need to process it, but just push it in to the WAL.
+                if !closes_incomplete_wal_transaction {
+                    table.abort_in_stream_batch(xact_id);
+                }
             }
             TableEvent::CommitFlush { lsn, xact_id, .. } => {
                 Self::commit_and_attempt_flush(

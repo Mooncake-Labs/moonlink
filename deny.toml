@@ -4,7 +4,7 @@ all-features = true
 [licenses]
 allow = [
     "Apache-2.0",
-    
+
     "Zlib",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -24,7 +24,7 @@ allow = [
 unknown-git = "deny"
 allow-git = [
     "https://github.com/apache/iceberg-rust.git",
-    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5",
+    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=4fda9c1bece3b93359ca1eb2779458fc1c080eae",
 ]
 
 # TODO(hjiang): Cleanup these unmaintained crates.

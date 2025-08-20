@@ -55,11 +55,15 @@ impl MooncakeIndex {
         raw_records: &[RawDeletionRecord],
     ) -> Vec<(u64, RecordLocation)> {
         let mut res: Vec<(u64, RecordLocation)> = Vec::new();
-
-        // Check in-memory indices
+        // In memory index may produce duplicate results,
+        // since we can't blindly input by key,
+        // as records with same key may have different row_identity,
+        // and we do use row_identity in lookup.
+        // Dedup the result instead.
+        let mut in_memory_res = HashSet::new();
         for index in self.in_memory_index.iter() {
             for record in raw_records {
-                res.extend(
+                in_memory_res.extend(
                     index
                         .0
                         .find_record(record)
@@ -68,9 +72,11 @@ impl MooncakeIndex {
                 );
             }
         }
+        res.extend(in_memory_res.into_iter());
         if self.file_indices.is_empty() {
             return res;
         }
+        // For file index, we can dedup input by key.
         let value_and_hashes = GlobalIndex::prepare_hashes_for_lookup(
             raw_records.iter().map(|record| record.lookup_key),
         );

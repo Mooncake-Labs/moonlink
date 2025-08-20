@@ -1,3 +1,4 @@
+use crate::mooncake_table_id::MooncakeTableId;
 use crate::Result;
 use moonlink::{
     AccessorConfig as IcebergConfig, DataCompactionConfig, FileIndexMergeConfig,
@@ -5,9 +6,6 @@ use moonlink::{
 };
 /// Configuration on table creation.
 use serde::{Deserialize, Serialize};
-
-/// Default namespace for all iceberg tables.
-const DEFAULT_ICEBERG_NAMESPACE: &str = "default";
 
 /// Mooncake table config.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
@@ -18,6 +16,9 @@ pub struct MooncakeConfig {
     /// Whether background regular data compaction is enabled.
     #[serde(default)]
     pub skip_data_compaction: bool,
+    /// Whether this is an append-only table (no indexes, no deletes).
+    #[serde(default)]
+    pub append_only: bool,
 }
 
 impl MooncakeConfig {
@@ -40,6 +41,7 @@ impl MooncakeConfig {
         let mut mooncake_table_config = MooncakeTableConfig::new(temp_files_dir);
         mooncake_table_config.file_index_config = index_merge_config;
         mooncake_table_config.data_compaction_config = data_compaction_config;
+        mooncake_table_config.append_only = self.append_only;
         mooncake_table_config
     }
 }
@@ -76,15 +78,15 @@ impl TableConfig {
     pub(crate) fn take_as_moonlink_config(
         self,
         temp_files_dir: String,
-        mooncake_table_id: String,
+        mooncake_table_id: &MooncakeTableId,
     ) -> MoonlinkTableConfig {
         MoonlinkTableConfig {
             mooncake_table_config: self
                 .mooncake_config
                 .take_as_mooncake_table_config(temp_files_dir),
             iceberg_table_config: IcebergTableConfig {
-                namespace: vec![DEFAULT_ICEBERG_NAMESPACE.to_string()],
-                table_name: mooncake_table_id,
+                namespace: vec![mooncake_table_id.database.clone()],
+                table_name: mooncake_table_id.table.clone(),
                 accessor_config: self.iceberg_config.unwrap(),
             },
         }
@@ -104,6 +106,7 @@ mod tests {
             mooncake_config: MooncakeConfig {
                 skip_index_merge: false,
                 skip_data_compaction: false,
+                append_only: false,
             },
             iceberg_config: Some(IcebergConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
@@ -128,7 +131,7 @@ mod tests {
                             "root_directory": "/tmp"
                         }
                     }
-                } 
+                }
             }
         "#;
 
@@ -142,6 +145,7 @@ mod tests {
             mooncake_config: MooncakeConfig {
                 skip_index_merge: true,
                 skip_data_compaction: false,
+                append_only: false,
             },
             iceberg_config: Some(IcebergConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
@@ -171,7 +175,7 @@ mod tests {
                             "secret_access_key": "secret"
                         }
                     }
-                } 
+                }
             }
         "#;
 
@@ -185,6 +189,7 @@ mod tests {
             mooncake_config: MooncakeConfig {
                 skip_index_merge: true,
                 skip_data_compaction: false,
+                append_only: false,
             },
             iceberg_config: Some(IcebergConfig::new_with_storage_config(
                 moonlink::StorageConfig::Gcs {
@@ -195,6 +200,7 @@ mod tests {
                     secret_access_key: "secret".to_string(),
                     endpoint: None,
                     disable_auth: false,
+                    write_option: None,
                 },
             )),
         };
@@ -218,7 +224,7 @@ mod tests {
                             "secret_access_key": "secret"
                         }
                     }
-                } 
+                }
             }
         "#;
 
@@ -232,6 +238,7 @@ mod tests {
             mooncake_config: MooncakeConfig {
                 skip_index_merge: true,
                 skip_data_compaction: false,
+                append_only: false,
             },
             iceberg_config: Some(IcebergConfig::new_with_storage_config(
                 moonlink::StorageConfig::S3 {
@@ -240,6 +247,40 @@ mod tests {
                     access_key_id: "access-key".to_string(),
                     secret_access_key: "secret".to_string(),
                     endpoint: None,
+                },
+            )),
+        };
+        assert_eq!(expected_table_config, actual_table_config);
+    }
+
+    #[test]
+    fn test_table_config_with_append_only() {
+        let serialized = r#"
+            {
+                "mooncake": {
+                    "append_only": true,
+                    "skip_index_merge": true,
+                    "skip_data_compaction": true
+                }
+            }
+        "#;
+
+        // Deserialize and check.
+        let actual_table_config = TableConfig::from_json_or_default(
+            serialized,
+            /*default_table_directory=*/ "/tmp/path",
+        )
+        .unwrap();
+        let expected_table_config = TableConfig {
+            mooncake_config: MooncakeConfig {
+                skip_index_merge: true,
+                skip_data_compaction: true,
+                append_only: true,
+            },
+            iceberg_config: Some(IcebergConfig::new_with_storage_config(
+                moonlink::StorageConfig::FileSystem {
+                    root_directory: "/tmp/path".to_string(),
+                    atomic_write_dir: None,
                 },
             )),
         };

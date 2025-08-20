@@ -11,13 +11,18 @@ mod tests {
 
     use moonlink_metadata_store::PgUtils;
 
+    /// Util function to get database URI.
+    fn get_table_uri() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| URI.to_string())
+    }
+
     #[tokio::test]
     #[serial]
     async fn test_table_exists() {
         const EXISTENT_TABLE: &str = "existent_table";
         const NON_EXISTENT_TABLE: &str = "non_existent_table";
 
-        let (postgres_client, connection) = connect(URI, NoTls).await.unwrap();
+        let (postgres_client, connection) = connect(&get_table_uri(), NoTls).await.unwrap();
 
         // Spawn connection driver in background to keep eventloop alive.
         let _pg_connection = tokio::spawn(async move {

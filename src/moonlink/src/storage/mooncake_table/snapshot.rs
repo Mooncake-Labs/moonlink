@@ -8,11 +8,12 @@ use crate::error::Result;
 use crate::storage::cache::object_storage::base_cache::{
     CacheEntry as DataFileCacheEntry, CacheTrait, FileMetadata,
 };
-use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
 use crate::storage::compaction::table_compaction::{CompactedDataEntry, RemappedRecordLocation};
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::index::{cache_utils as index_cache_utils, FileIndex};
 use crate::storage::mooncake_table::persistence_buffer::UnpersistedRecords;
+use crate::storage::mooncake_table::replay::event_id_assigner::EventIdAssigner;
+use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::mooncake_table::BatchIdCounter;
 use crate::storage::mooncake_table::MoonlinkRow;
@@ -65,7 +66,7 @@ pub(crate) struct SnapshotTableState {
     pub(super) last_commit: RecordLocation,
 
     /// Object storage cache.
-    pub(super) object_storage_cache: ObjectStorageCache,
+    pub(super) object_storage_cache: Arc<dyn CacheTrait>,
 
     /// Filesystem accessor.
     pub(super) filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -81,6 +82,9 @@ pub(crate) struct SnapshotTableState {
 
     /// Batch ID counter for non-streaming operations
     pub(super) non_streaming_batch_id_counter: Arc<BatchIdCounter>,
+
+    /// Used to generated monotonically increasing id to differentiate each replay events.
+    pub(super) event_id_assigner: EventIdAssigner,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +97,12 @@ pub struct PuffinDeletionBlobAtRead {
     pub blob_size: u32,
 }
 
-pub(crate) struct MooncakeSnapshotOutput {
+#[derive(Clone)]
+pub struct MooncakeSnapshotOutput {
+    /// Table event id.
+    pub(crate) id: BackgroundEventId,
+    /// UUID for the current mooncake snapshot result.
+    pub(crate) uuid: uuid::Uuid,
     /// Committed LSN for mooncake snapshot.
     pub(crate) commit_lsn: u64,
     /// Iceberg snapshot payload.
@@ -106,6 +115,27 @@ pub(crate) struct MooncakeSnapshotOutput {
     pub(crate) evicted_data_files_to_delete: Vec<String>,
     /// Optional mooncake snapshot dump.
     pub(crate) current_snapshot: Option<Snapshot>,
+}
+
+impl std::fmt::Debug for MooncakeSnapshotOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MooncakeSnapshotOutput")
+            .field("id", &self.id)
+            .field("uuid", &self.uuid)
+            .field("commit", &self.commit_lsn)
+            .field("iceberg_snapshot_payload", &self.iceberg_snapshot_payload)
+            .field(
+                "file_indices_merge_payload",
+                &self.file_indices_merge_payload,
+            )
+            .field("data_compaction_payload", &self.data_compaction_payload)
+            .field(
+                "evicted data files count",
+                &self.evicted_data_files_to_delete.len(),
+            )
+            .field("current_snapshot", &self.current_snapshot)
+            .finish()
+    }
 }
 
 /// Committed deletion record to persist.
@@ -129,10 +159,11 @@ impl SnapshotTableState {
     pub(super) async fn new(
         iceberg_warehouse_location: String,
         metadata: Arc<MooncakeTableMetadata>,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         current_snapshot: Snapshot,
         non_streaming_batch_id_counter: Arc<BatchIdCounter>,
+        event_id_assigner: EventIdAssigner,
     ) -> Result<Self> {
         let mut batches = BTreeMap::new();
         // Properly load a batch ID from the counter to ensure correspondence with MemSlice.
@@ -157,6 +188,7 @@ impl SnapshotTableState {
             uncommitted_deletion_log: Vec::new(),
             unpersisted_records: UnpersistedRecords::new(table_config),
             non_streaming_batch_id_counter,
+            event_id_assigner,
         })
     }
 
@@ -452,6 +484,8 @@ impl SnapshotTableState {
         mut task: SnapshotTask,
         opt: SnapshotOption,
     ) -> MooncakeSnapshotOutput {
+        // Validate event id is assigned.
+        assert!(opt.id.is_some());
         // Validate mooncake table operation invariants.
         self.validate_mooncake_table_invariants(&task, &opt);
         // Validate persistence results.
@@ -598,6 +632,8 @@ impl SnapshotTableState {
         }
 
         MooncakeSnapshotOutput {
+            id: opt.id.unwrap(),
+            uuid: opt.uuid,
             commit_lsn: self.current_snapshot.snapshot_version,
             iceberg_snapshot_payload,
             data_compaction_payload,
@@ -783,12 +819,13 @@ impl SnapshotTableState {
                 .map(|(loc, deletion)| Self::build_processed_deletion(deletion, loc))
                 .collect(),
             Ordering::Less => {
-                panic!("find less than expected candidates to deletions {deletions:?}")
+                panic!("find less than expected candidates to deletions {deletions:?}, candidates: {candidates:?}, batch_id_to_lsn: {batch_id_to_lsn:?}, file_id_to_lsn: {file_id_to_lsn:?}")
             }
             Ordering::Greater => {
                 let mut processed_deletions = Vec::new();
                 // multiple candidates → disambiguate via full row identity comparison.
                 for deletion in deletions.iter() {
+                    assert!(deletion.row_identity.is_some(), "deletion: {deletion:?}, candidates: {candidates:?}, batch_id_to_lsn: {batch_id_to_lsn:?}, file_id_to_lsn: {file_id_to_lsn:?}");
                     let identity = deletion
                         .row_identity
                         .as_ref()
@@ -966,7 +1003,7 @@ impl SnapshotTableState {
             }
         });
         self.add_processed_deletion(already_processed, task.commit_lsn_baseline);
-        new_deletions.sort_by_key(|deletion| deletion.lookup_key);
+        new_deletions.sort_by(|a, b| a.lookup_key.cmp(&b.lookup_key).then(a.lsn.cmp(&b.lsn)));
         if new_deletions.is_empty() {
             return;
         }

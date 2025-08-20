@@ -1,5 +1,8 @@
 use core::str;
-use std::num::{ParseFloatError, ParseIntError};
+use std::{
+    fmt::format,
+    num::{ParseFloatError, ParseIntError},
+};
 
 use bigdecimal::ParseBigDecimalError;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -13,8 +16,8 @@ use super::{bool::ParseBoolError, hex::ByteaHexParseError, numeric::PgNumeric, A
 
 #[derive(Debug, Error)]
 pub enum FromTextError {
-    #[error("invalid text conversion")]
-    InvalidConversion(),
+    #[error("invalid text conversion, unsupported type: {0}")]
+    InvalidConversion(String),
 
     #[error("invalid bool value")]
     InvalidBool(#[from] ParseBoolError),
@@ -349,19 +352,19 @@ impl TextFormatConverter {
                         Kind::Composite(fields) => {
                             TextFormatConverter::parse_composite_array(str, fields)
                         }
-                        Kind::Array(_) => {
-                            // TODO: Multi-dimensional arrays not yet implemented
-                            // TODO: Need to print out the unsupported type (included in error type)
-                            Err(FromTextError::InvalidConversion())
-                        }
-                        _ => Err(FromTextError::InvalidConversion()),
+                        // TODO: Multi-dimensional arrays not yet implemented
+                        _ => Err(FromTextError::InvalidConversion(format!(
+                            "{} with inner type: {}",
+                            typ, inner_type
+                        ))),
                     }
                 }
-                _ => Err(FromTextError::InvalidConversion()),
+                _ => Err(FromTextError::InvalidConversion(format!("{:?}", typ))),
             },
         }
     }
 
+    /// Parse Postgres text arrays: respect quotes/escapes; unquoted NULL is None, quoted "null" is a string
     fn parse_array<P, M, T>(str: &str, mut parse: P, m: M) -> Result<Cell, FromTextError>
     where
         P: FnMut(&str) -> Result<Option<T>, FromTextError>,
@@ -381,7 +384,7 @@ impl TextFormatConverter {
         let mut in_quotes = false;
         let mut in_escape = false;
         let mut val_quoted = false;
-        let mut chars = str.chars();
+        let mut chars = str.chars().peekable();
         let mut done = str.is_empty();
 
         while !done {
@@ -393,10 +396,20 @@ impl TextFormatConverter {
                             in_escape = false;
                         }
                         '"' => {
-                            if !in_quotes {
+                            if in_quotes {
+                                // support doubled quotes inside quoted value
+                                if let Some('"') = chars.peek().copied() {
+                                    // consume next quote and append a single quote to value
+                                    // means we are encapsulating a composite value
+                                    let _ = chars.next();
+                                    val_str.push('"');
+                                } else {
+                                    in_quotes = false;
+                                }
+                            } else {
                                 val_quoted = true;
+                                in_quotes = true;
                             }
-                            in_quotes = !in_quotes;
                         }
                         '\\' => in_escape = true,
                         ',' if !in_quotes => {
@@ -432,6 +445,7 @@ impl TextFormatConverter {
     /// - NULL values are represented as empty or the literal 'null' (case-insensitive)
     /// - Quoted values preserve all characters including commas and parentheses
     /// - Escaped characters within quotes are handled with backslash
+    /// - Don't split on commas inside quotes
     ///
     /// Reference: https://www.postgresql.org/docs/current/rowtypes.html#ROWTYPES-IO-SYNTAX
     fn parse_composite(
@@ -452,7 +466,7 @@ impl TextFormatConverter {
         let mut in_quotes = false;
         let mut in_escape = false;
         let mut val_quoted = false;
-        let mut chars = inner.chars();
+        let mut chars = inner.chars().peekable();
         let mut field_iter = fields.iter();
         let mut done = inner.is_empty();
 
@@ -465,10 +479,19 @@ impl TextFormatConverter {
                             in_escape = false;
                         }
                         '"' => {
-                            if !in_quotes {
+                            if in_quotes {
+                                // support doubled quotes inside quoted value
+                                if let Some('"') = chars.peek().copied() {
+                                    // consume next quote and append a single quote to value
+                                    let _ = chars.next();
+                                    val_str.push('"');
+                                } else {
+                                    in_quotes = false;
+                                }
+                            } else {
                                 val_quoted = true;
+                                in_quotes = true;
                             }
-                            in_quotes = !in_quotes;
                         }
                         '\\' if in_quotes => in_escape = true,
                         ',' if !in_quotes => {
@@ -527,72 +550,18 @@ impl TextFormatConverter {
         s: &str,
         fields: &[tokio_postgres::types::Field],
     ) -> Result<Cell, FromTextError> {
-        if s.len() < 2 {
-            return Err(ArrayParseError::InputTooShort.into());
-        }
-
-        if !s.starts_with('{') || !s.ends_with('}') {
-            return Err(ArrayParseError::MissingBraces.into());
-        }
-
-        let mut res = Vec::new();
-        let inner = &s[1..(s.len() - 1)];
-
-        if inner.is_empty() {
-            return Ok(Cell::Array(ArrayCell::Composite(res)));
-        }
-
-        let mut val_str = String::with_capacity(50);
-        let mut in_quotes = false;
-        let mut in_escape = false;
-        let mut chars = inner.chars();
-        let mut done = false;
-
-        while !done {
-            loop {
-                match chars.next() {
-                    Some(c) => match c {
-                        c if in_escape => {
-                            val_str.push(c);
-                            in_escape = false;
-                        }
-                        '\\' if in_quotes => {
-                            in_escape = true;
-                        }
-                        '"' => {
-                            in_quotes = !in_quotes;
-                        }
-                        ',' if !in_quotes => {
-                            break;
-                        }
-                        c => {
-                            val_str.push(c);
-                        }
-                    },
-                    None => {
-                        done = true;
-                        break;
-                    }
+        // Delegate to the generic array parser
+        TextFormatConverter::parse_array(
+            s,
+            |str| {
+                let cell = TextFormatConverter::parse_composite(str, fields)?;
+                match cell {
+                    Cell::Composite(values) => Ok(Some(values)),
+                    _ => unreachable!("parse_composite should always return Cell::Composite"),
                 }
-            }
-
-            let val = if val_str.to_lowercase() == "null" {
-                None
-            } else {
-                // The value should be a composite wrapped in parentheses
-                Some(
-                    match TextFormatConverter::parse_composite(&val_str, fields)? {
-                        Cell::Composite(cells) => cells,
-                        _ => unreachable!("parse_composite should always return Cell::Composite"),
-                    },
-                )
-            };
-
-            res.push(val);
-            val_str.clear();
-        }
-
-        Ok(Cell::Array(ArrayCell::Composite(res)))
+            },
+            ArrayCell::Composite,
+        )
     }
 }
 
@@ -927,6 +896,28 @@ mod tests {
             }
             _ => panic!("expected array of composites, got: {cell:?}"),
         }
+
+        let addr_fields = vec![
+            Field::new("street".to_string(), Type::TEXT),
+            Field::new("city".to_string(), Type::TEXT),
+            Field::new("zip".to_string(), Type::INT4),
+        ];
+        let pgoutput_like = r#"{"(\"789 Pine St\",Chicago,60601)","(\"321 Elm St\",Boston,2101)"}"#;
+        let cell = TextFormatConverter::parse_composite_array(pgoutput_like, &addr_fields).unwrap();
+        match cell {
+            Cell::Array(ArrayCell::Composite(composites)) => {
+                assert_eq!(composites.len(), 2);
+                let first = composites[0].as_ref().unwrap();
+                assert!(matches!(first[0], Cell::String(ref s) if s == "789 Pine St"));
+                assert!(matches!(first[1], Cell::String(ref s) if s == "Chicago"));
+                assert!(matches!(first[2], Cell::I32(60601)));
+                let second = composites[1].as_ref().unwrap();
+                assert!(matches!(second[0], Cell::String(ref s) if s == "321 Elm St"));
+                assert!(matches!(second[1], Cell::String(ref s) if s == "Boston"));
+                assert!(matches!(second[2], Cell::I32(2101)));
+            }
+            _ => panic!("expected array of composites, got: {cell:?}"),
+        }
     }
 
     #[test]
@@ -964,6 +955,14 @@ mod tests {
             }
             _ => panic!("expected array of composites, got: {cell:?}"),
         }
+
+        // Quoted "null" is not a NULL element; it should fail composite parsing (missing parens)
+        let array_str = r#"{"\"null\""}"#;
+        let err = TextFormatConverter::parse_composite_array(array_str, &fields).unwrap_err();
+        assert!(matches!(
+            err,
+            FromTextError::InvalidComposite(CompositeParseError::MissingParentheses)
+        ));
     }
 
     #[test]

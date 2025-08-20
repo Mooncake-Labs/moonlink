@@ -1,10 +1,9 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::test_utils::test_row;
-use crate::storage::wal::{PersistentWalMetadata, WalEvent, WalFileInfo, WalManager};
+use crate::storage::wal::{WalEvent, WalManager};
 use crate::table_notify::TableEvent;
-use crate::{Result, WalConfig, WalTransactionState};
+use crate::{PersistentWalMetadata, Result, WalConfig};
 use futures::StreamExt;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The ID used to test the WAL. Note that for now this could be decoupled from the
@@ -48,35 +47,8 @@ impl WalManager {
     }
 }
 
-impl PersistentWalMetadata {
-    pub fn get_live_wal_files_tracker(&self) -> &Vec<WalFileInfo> {
-        &self.live_wal_files_tracker
-    }
-
-    pub fn get_highest_seen_lsn(&self) -> u64 {
-        self.highest_seen_lsn
-    }
-
-    pub fn get_curr_file_number(&self) -> u64 {
-        self.curr_file_number
-    }
-
-    pub fn get_active_transactions(&self) -> &HashMap<u32, WalTransactionState> {
-        &self.active_transactions
-    }
-
-    pub fn get_main_transaction_tracker(&self) -> &Vec<WalTransactionState> {
-        &self.main_transaction_tracker
-    }
-
-    pub fn get_iceberg_snapshot_lsn(&self) -> Option<u64> {
-        self.iceberg_snapshot_lsn
-    }
-}
-
 // ================================================
 // Helper functions for WAL file manipulation
-// TODO(Paul): Rework these when implementing object storage WAL
 // ================================================
 
 pub async fn extract_file_contents(
@@ -90,10 +62,16 @@ pub async fn extract_file_contents(
 pub async fn get_wal_logs_from_files(
     file_ids: &[u64],
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    wal_config: &WalConfig,
 ) -> Vec<WalEvent> {
     let file_paths = file_ids
         .iter()
-        .map(|id| WalManager::get_file_name(*id))
+        .map(|id| {
+            WalManager::get_wal_file_path_for_mooncake_table(
+                *id,
+                wal_config.get_mooncake_table_id(),
+            )
+        })
         .collect::<Vec<String>>();
     let mut wal_events = Vec::new();
     for file_path in file_paths {
@@ -104,10 +82,14 @@ pub async fn get_wal_logs_from_files(
 }
 
 pub async fn wal_file_exists(
-    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
     file_number: u64,
+    file_system_accessor: Arc<dyn BaseFileSystemAccess>,
+    wal_config: &WalConfig,
 ) -> bool {
-    let file_name = WalManager::get_file_name(file_number);
+    let file_name = WalManager::get_wal_file_path_for_mooncake_table(
+        file_number,
+        wal_config.get_mooncake_table_id(),
+    );
     file_system_accessor
         .object_exists(&file_name)
         .await
@@ -238,11 +220,11 @@ pub fn assert_wal_events_does_not_contain(
 
 pub async fn get_table_events_vector_recovery(
     file_system_accessor: Arc<dyn BaseFileSystemAccess>,
-    start_file_name: u64,
+    wal_metadata: &PersistentWalMetadata,
 ) -> Vec<TableEvent> {
     // Recover events using flat stream
     let mut recovered_events = Vec::new();
-    let mut stream = WalManager::recover_flushed_wals_flat(file_system_accessor, start_file_name);
+    let mut stream = WalManager::recover_flushed_wals_flat(file_system_accessor, wal_metadata);
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => recovered_events.push(event),
@@ -337,6 +319,7 @@ pub fn add_new_example_stream_abort_event(
     let event = TableEvent::StreamAbort {
         xact_id,
         is_recovery: false,
+        closes_incomplete_wal_transaction: false,
     };
     wal.push(&event);
     expected_events.push(event);
@@ -344,10 +327,14 @@ pub fn add_new_example_stream_abort_event(
 
 #[macro_export]
 macro_rules! assert_wal_file_exists {
-    ($file_system_accessor:expr, $file_number:expr) => {
+    ($file_number:expr, $file_system_accessor:expr, $wal_config:expr) => {
         assert!(
-            $crate::storage::wal::test_utils::wal_file_exists($file_system_accessor, $file_number)
-                .await,
+            $crate::storage::wal::test_utils::wal_file_exists(
+                $file_number,
+                $file_system_accessor,
+                $wal_config
+            )
+            .await,
             "File {} should exist",
             $file_number
         );
@@ -356,10 +343,14 @@ macro_rules! assert_wal_file_exists {
 
 #[macro_export]
 macro_rules! assert_wal_file_does_not_exist {
-    ($file_system_accessor:expr, $file_number:expr) => {
+    ($file_number:expr, $file_system_accessor:expr, $wal_config:expr) => {
         assert!(
-            !$crate::storage::wal::test_utils::wal_file_exists($file_system_accessor, $file_number)
-                .await,
+            !$crate::storage::wal::test_utils::wal_file_exists(
+                $file_number,
+                $file_system_accessor,
+                $wal_config
+            )
+            .await,
             "File {} should not exist",
             $file_number
         );
@@ -368,10 +359,11 @@ macro_rules! assert_wal_file_does_not_exist {
 
 #[macro_export]
 macro_rules! assert_wal_logs_equal {
-    ($file_ids:expr, $file_system_accessor:expr, $expected_events:expr) => {
+    ($file_ids:expr, $expected_events:expr, $file_system_accessor:expr, $wal_config:expr) => {
         let wal_events = $crate::storage::wal::test_utils::get_wal_logs_from_files(
             $file_ids,
             $file_system_accessor.clone(),
+            $wal_config,
         )
         .await;
         assert_eq!(wal_events, $expected_events);

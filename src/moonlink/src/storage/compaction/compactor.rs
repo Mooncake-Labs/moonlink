@@ -10,7 +10,6 @@ use more_asserts as ma;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::AsyncArrowWriter;
 
-use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::compaction::table_compaction::{
     CompactedDataEntry, DataCompactionPayload, DataCompactionResult, RemappedRecordLocation,
     SingleFileToCompact,
@@ -134,7 +133,7 @@ impl CompactionBuilder {
         self.cur_new_data_file = Some(self.create_new_data_file());
         let write_file =
             tokio::fs::File::create(self.cur_new_data_file.as_ref().unwrap().file_path()).await?;
-        let properties = parquet_utils::get_default_parquet_properties();
+        let properties = parquet_utils::get_parquet_properties_for_compaction();
         let writer: AsyncArrowWriter<tokio::fs::File> =
             AsyncArrowWriter::try_new(write_file, self.schema.clone(), Some(properties))?;
         self.cur_arrow_writer = Some(writer);
@@ -393,6 +392,7 @@ impl CompactionBuilder {
         // All rows have been deleted.
         if old_record_loc_to_new_mapping.is_empty() {
             return Ok(DataCompactionResult {
+                id: self.compaction_payload.id,
                 uuid: self.compaction_payload.uuid,
                 remapped_data_files: old_record_loc_to_new_mapping,
                 old_data_files,
@@ -417,6 +417,7 @@ impl CompactionBuilder {
             .await;
 
         Ok(DataCompactionResult {
+            id: self.compaction_payload.id,
             uuid: self.compaction_payload.uuid,
             remapped_data_files: old_record_loc_to_new_mapping,
             old_data_files,

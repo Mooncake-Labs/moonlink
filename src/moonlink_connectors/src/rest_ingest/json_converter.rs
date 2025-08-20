@@ -1,4 +1,5 @@
 use crate::rest_ingest::datetime_utils::{parse_date, parse_time, parse_timestamp_with_timezone};
+use crate::rest_ingest::decimal_utils::convert_decimal_to_row_value;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use moonlink::row::{MoonlinkRow, RowValue};
 use serde_json::Value;
@@ -15,6 +16,10 @@ pub enum JsonToMoonlinkRowError {
     InvalidValue(String),
     #[error("serde json error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("Unsupported data type {0} in field {1}")]
+    UnsupportedDataType(String, String),
+    #[error("invalid value for field: {0} with cause: {1}")]
+    InvalidValueWithCause(String, Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub struct JsonToMoonlinkRowConverter {
@@ -44,6 +49,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Boolean => {
                 if let Some(b) = value.as_bool() {
                     Ok(RowValue::Bool(b))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -51,6 +58,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Int32 => {
                 if let Some(i) = value.as_i64() {
                     Ok(RowValue::Int32(i as i32))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -58,6 +67,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Int64 => {
                 if let Some(i) = value.as_i64() {
                     Ok(RowValue::Int64(i))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -65,6 +76,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Float32 => {
                 if let Some(f) = value.as_f64() {
                     Ok(RowValue::Float32(f as f32))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -72,6 +85,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Float64 => {
                 if let Some(f) = value.as_f64() {
                     Ok(RowValue::Float64(f))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -80,6 +95,8 @@ impl JsonToMoonlinkRowConverter {
                 if let Some(s) = value.as_str() {
                     parse_date(s)
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -88,6 +105,8 @@ impl JsonToMoonlinkRowConverter {
                 if let Some(s) = value.as_str() {
                     parse_time(s)
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -96,6 +115,8 @@ impl JsonToMoonlinkRowConverter {
                 if let Some(s) = value.as_str() {
                     parse_timestamp_with_timezone(s, tz.as_deref())
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -103,6 +124,59 @@ impl JsonToMoonlinkRowConverter {
             DataType::Utf8 => {
                 if let Some(s) = value.as_str() {
                     Ok(RowValue::ByteArray(s.as_bytes().to_vec()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Decimal128(precision, scale) => {
+                if let Some(s) = value.as_str() {
+                    convert_decimal_to_row_value(s, *precision, *scale).map_err(|e| {
+                        JsonToMoonlinkRowError::InvalidValueWithCause(
+                            field.name().clone(),
+                            Box::new(e),
+                        )
+                    })
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
+            DataType::Decimal256(_precision, _scale) => {
+                Err(JsonToMoonlinkRowError::UnsupportedDataType(
+                    "Decimal256".to_string(),
+                    field.name().clone(),
+                ))
+            }
+            DataType::List(child_field) => {
+                if let Some(array) = value.as_array() {
+                    let mut converted_elements = Vec::with_capacity(array.len());
+                    for (index, ele) in array.iter().enumerate() {
+                        let converted_element =
+                            Self::convert_value(child_field, ele).map_err(|e| {
+                                match e {
+                                    JsonToMoonlinkRowError::TypeMismatch(existing_path) => {
+                                        // Transform error to include full path with index
+                                        // (e.g., "int_list.item[1]", "nested_list.item[1].item[0]")
+                                        let full_path = format!(
+                                            "{}.{}",
+                                            field.name(),
+                                            existing_path.replacen(
+                                                child_field.name(),
+                                                &format!("{}[{}]", child_field.name(), index),
+                                                1
+                                            )
+                                        );
+                                        JsonToMoonlinkRowError::TypeMismatch(full_path)
+                                    }
+                                    other => other,
+                                }
+                            })?;
+                        converted_elements.push(converted_element);
+                    }
+                    Ok(RowValue::Array(converted_elements))
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -115,20 +189,44 @@ impl JsonToMoonlinkRowConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rest_ingest::decimal_utils::DecimalConversionError;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use bigdecimal::num_bigint::TryFromBigIntError;
+    use bigdecimal::ParseBigDecimalError::ParseInt;
     use chrono::{NaiveDate, TimeZone, Utc};
     use serde_json::json;
     use std::sync::Arc;
 
     fn make_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("is_active", DataType::Boolean, false),
-            Field::new("score", DataType::Float64, false),
-            Field::new("id_int64", DataType::Int64, false),
-            Field::new("score_float32", DataType::Float32, false),
+            Field::new("id", DataType::Int32, /*nullable=*/ true),
+            Field::new("name", DataType::Utf8, /*nullable=*/ true),
+            Field::new("is_active", DataType::Boolean, /*nullable=*/ true),
+            Field::new("score", DataType::Float64, /*nullable=*/ true),
+            Field::new("id_int64", DataType::Int64, /*nullable=*/ true),
+            Field::new("score_float32", DataType::Float32, /*nullable=*/ true),
+            Field::new(
+                "decimal128",
+                DataType::Decimal128(5, 2),
+                /*nullable=*/ true,
+            ),
         ]))
+    }
+
+    fn make_schema_with_decimal128_overflow() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "decimal128",
+            DataType::Decimal128(40, 3),
+            false,
+        )]))
+    }
+
+    fn make_schema_with_decimal256() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "decimal256",
+            DataType::Decimal256(38, 10),
+            false,
+        )]))
     }
 
     fn make_datetime_schema() -> Arc<Schema> {
@@ -152,6 +250,43 @@ mod tests {
         ]))
     }
 
+    fn make_list_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "int_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                false,
+            ),
+            Field::new(
+                "string_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+                false,
+            ),
+            Field::new(
+                "bool_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Boolean, false))),
+                false,
+            ),
+            Field::new(
+                "float_list",
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, false))),
+                false,
+            ),
+        ]))
+    }
+
+    fn make_nested_list_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "nested_list",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                false,
+            ))),
+            false,
+        )]))
+    }
+
     #[test]
     fn test_successful_conversion() {
         let schema = make_schema();
@@ -163,15 +298,41 @@ mod tests {
             "score": 100.0,
             "id_int64": 123,
             "score_float32": 100.0,
+            "decimal128": "123.45",
         });
         let row = converter.convert(&input).unwrap();
-        assert_eq!(row.values.len(), 6);
+        assert_eq!(row.values.len(), 7);
         assert_eq!(row.values[0], RowValue::Int32(42));
         assert_eq!(row.values[1], RowValue::ByteArray(b"moonlink".to_vec()));
         assert_eq!(row.values[2], RowValue::Bool(true));
         assert_eq!(row.values[3], RowValue::Float64(100.0));
         assert_eq!(row.values[4], RowValue::Int64(123));
         assert_eq!(row.values[5], RowValue::Float32(100.0));
+        assert_eq!(row.values[6], RowValue::Decimal(12345));
+    }
+
+    #[test]
+    fn test_conversion_with_null() {
+        let schema = make_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": null,
+            "name": null,
+            "is_active": null,
+            "score": null,
+            "id_int64": null,
+            "score_float32": null,
+            "decimal128": null
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 7);
+        assert_eq!(row.values[0], RowValue::Null);
+        assert_eq!(row.values[1], RowValue::Null);
+        assert_eq!(row.values[2], RowValue::Null);
+        assert_eq!(row.values[3], RowValue::Null);
+        assert_eq!(row.values[4], RowValue::Null);
+        assert_eq!(row.values[5], RowValue::Null);
+        assert_eq!(row.values[6], RowValue::Null);
     }
 
     #[test]
@@ -255,6 +416,185 @@ mod tests {
         let err = converter.convert(&input).unwrap_err();
         match err {
             JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "id_int64"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+
+        let input = json!({
+            "id": 42,
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "decimal128": 123.45, // number instead of string
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "decimal128"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    /* Test to ensure that decimal conversion fails when precision is out of range
+     * decimal128: Decimal128(precision=8, scale=2)
+     * "1234567.89" => digits=9 (> precision=8), scale=2 (OK) → violates precision only
+     */
+    fn test_decimal_conversion_precision_out_of_range() {
+        let schema = make_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 42,
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "decimal128": "12333.456",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Expected DecimalConversionError, got different error type");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::PrecisionOutOfRange {
+                        value,
+                        expected_precision,
+                        actual_precision,
+                    } => {
+                        assert_eq!(*value, "12333.456");
+                        assert_eq!(*expected_precision, 5);
+                        assert_eq!(*actual_precision, 8);
+                    }
+                    _ => panic!("Expected PrecisionOutOfRange, but got another DecimalConversionError: {decimal_conversion_err:?}"),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_conversion_integer_part_out_of_range_error() {
+        let schema = make_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 42,
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "decimal128": "1235.4",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Expected DecimalConversionError, got different error type");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::IntegerPartOutOfRange {
+                        value,
+                        expected_len,
+                        actual_len,
+                    } => {
+                        assert_eq!(*value, "1235.4");
+                        assert_eq!(*expected_len, 3);
+                        assert_eq!(*actual_len, 4);
+                    }
+                    _ => panic!("Expected IntegerPartOutOfRange, but got another DecimalConversionError: {decimal_conversion_err:?}"),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_conversion_overflow() {
+        let schema = make_schema_with_decimal128_overflow();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "decimal128": "1234567890123456789012345678901234567.789"
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Expected DecimalConversionError, got different error type");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::Overflow { mantissa, error } => {
+                        assert_eq!(mantissa, "1234567890123456789012345678901234567789");
+                        assert!(error.is::<TryFromBigIntError<()>>());
+                    }
+                    _ => panic!(
+                        "Expected Overflow, but got another DecimalConversionError: {decimal_conversion_err:?}"
+                    ),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_invalid_value() {
+        let schema = make_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 42,
+            "name": "moonlink",
+            "is_active": true,
+            "score": 100.0,
+            "id_int64": 123,
+            "score_float32": 100.0,
+            "decimal128": "not_a_decimal",
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal128");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Expected DecimalConversionError, got different error type");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::InvalidValue { value, error } => {
+                        assert_eq!(*value, "not_a_decimal");
+                        let parse_big_decimal_err = error
+                            .downcast_ref::<bigdecimal::ParseBigDecimalError>()
+                            .expect("Expected ParseBigDecimalError, got different error type");
+                        assert!(matches!(parse_big_decimal_err, ParseInt { .. }));
+                    }
+                    _ => panic!(
+                        "Expected InvalidValue, but got another DecimalConversionError: {decimal_conversion_err:?}"
+                    ),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_256_not_supported() {
+        let schema = make_schema_with_decimal256();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "decimal256": "9876.5432"
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::UnsupportedDataType(f, e) => {
+                assert_eq!(f, "Decimal256");
+                assert_eq!(e, "decimal256");
+            }
             _ => panic!("unexpected error: {err:?}"),
         }
     }
@@ -527,5 +867,126 @@ mod tests {
         // 2024-02-29T23:59:59.999999Z = 1709251199999999 microseconds since epoch
         assert_eq!(row.values[2], RowValue::Int64(1709251199999999));
         assert_eq!(row.values[3], RowValue::Int64(1709251199999999));
+    }
+
+    #[test]
+    fn test_list_conversion_success() {
+        let int_values = vec![1, 2, 3, 42];
+        let string_values = vec!["hello", "world", "moonlink"];
+        let bool_values = vec![true, false, true];
+        let float_values = vec![1.1, 2.2, 3.3];
+
+        let schema = make_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list": int_values,
+            "string_list": string_values,
+            "bool_list": bool_values,
+            "float_list": float_values
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 4);
+
+        // Check int_list
+        assert_eq!(
+            row.values[0],
+            RowValue::Array(int_values.into_iter().map(RowValue::Int32).collect())
+        );
+
+        // Check string_list
+        assert_eq!(
+            row.values[1],
+            RowValue::Array(
+                string_values
+                    .into_iter()
+                    .map(|s| RowValue::ByteArray(s.as_bytes().to_vec()))
+                    .collect()
+            )
+        );
+
+        // Check bool_list
+        assert_eq!(
+            row.values[2],
+            RowValue::Array(bool_values.into_iter().map(RowValue::Bool).collect())
+        );
+
+        // Check float_list
+        assert_eq!(
+            row.values[3],
+            RowValue::Array(float_values.into_iter().map(RowValue::Float64).collect())
+        );
+    }
+
+    #[test]
+    fn test_nested_list_conversion() {
+        let nested_values = vec![vec![1, 2], vec![3, 4, 5], vec![]];
+
+        let schema = make_nested_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "nested_list": nested_values
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 1);
+
+        assert_eq!(
+            row.values[0],
+            RowValue::Array(
+                nested_values
+                    .into_iter()
+                    .map(|inner_vec| RowValue::Array(
+                        inner_vec.into_iter().map(RowValue::Int32).collect()
+                    ))
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn test_list_type_mismatch_non_array() {
+        let schema = make_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list": "not_an_array",
+            "string_list": [],
+            "bool_list": [],
+            "float_list": []
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "int_list"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_element_type_mismatch() {
+        let schema = make_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list": [1, "not_an_int", 3],
+            "string_list": [],
+            "bool_list": [],
+            "float_list": []
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "int_list.item[1]"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_nested_list_element_type_mismatch() {
+        let schema = make_nested_list_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "nested_list": [[1, 2], [3, "not_an_int", 5], []]
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "nested_list.item[1].item[1]"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
     }
 }

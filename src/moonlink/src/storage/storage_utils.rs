@@ -79,7 +79,7 @@ impl Hash for TableUniqueFileId {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum RecordLocation {
     /// Record is in a memory batch
     /// (batch_id, row_offset)

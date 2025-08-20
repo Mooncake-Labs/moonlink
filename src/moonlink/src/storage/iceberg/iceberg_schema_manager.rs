@@ -1,8 +1,8 @@
 use crate::storage::iceberg::iceberg_table_manager::*;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
+use crate::Result;
 
 use iceberg::arrow as IcebergArrow;
-use iceberg::Result as IcebergResult;
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ impl IcebergTableManager {
     pub(super) async fn alter_table_schema_impl(
         &mut self,
         updated_table_metadata: Arc<MooncakeTableMetadata>,
-    ) -> IcebergResult<()> {
+    ) -> Result<()> {
         // Initialize iceberg table on access.
         self.initialize_iceberg_table_for_once().await?;
 

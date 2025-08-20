@@ -29,6 +29,7 @@ impl MemIndex {
                     vec![]
                 }
             }
+            MemIndex::None => panic!("AppendOnly index does not support record lookups"),
         }
     }
 }
@@ -41,6 +42,7 @@ impl MemIndex {
             }
             IdentityProp::Keys(_) => MemIndex::Key(hashbrown::HashTable::new()),
             IdentityProp::FullRow => MemIndex::FullRow(MultiMap::new()),
+            IdentityProp::None => MemIndex::None,
         }
     }
 
@@ -49,6 +51,7 @@ impl MemIndex {
             MemIndex::SinglePrimitive(_) => MemIndex::SinglePrimitive(hashbrown::HashTable::new()),
             MemIndex::Key(_) => MemIndex::Key(hashbrown::HashTable::new()),
             MemIndex::FullRow(_) => MemIndex::FullRow(MultiMap::new()),
+            MemIndex::None => MemIndex::None,
         }
     }
 
@@ -57,6 +60,7 @@ impl MemIndex {
             MemIndex::SinglePrimitive(_) => false,
             MemIndex::Key(_) => false,
             MemIndex::FullRow(_) => true,
+            MemIndex::None => panic!("AppendOnly index does not support duplicate checking"),
         }
     }
 
@@ -85,6 +89,9 @@ impl MemIndex {
             }
             MemIndex::FullRow(_) => {
                 panic!("FullRow index does not support fast delete")
+            }
+            MemIndex::None => {
+                panic!("AppendOnly index does not support delete operations")
             }
         }
     }
@@ -119,6 +126,9 @@ impl MemIndex {
                 assert!(identity_for_key.is_none());
                 map.insert(key, location);
             }
+            MemIndex::None => {
+                panic!("AppendOnly index does not support insert operations")
+            }
         }
     }
 
@@ -127,6 +137,7 @@ impl MemIndex {
             MemIndex::SinglePrimitive(map) => map.is_empty(),
             MemIndex::Key(map) => map.is_empty(),
             MemIndex::FullRow(map) => map.is_empty(),
+            MemIndex::None => true, // Append-only tables are always considered "empty" for index purposes
         }
     }
 
@@ -154,6 +165,7 @@ impl MemIndex {
                 .filter_map(|v| remap(v.hash, &v.location))
                 .collect(),
             MemIndex::FullRow(map) => map.flat_iter().filter_map(|(k, v)| remap(*k, v)).collect(),
+            MemIndex::None => panic!("AppendOnly index does not support remapping operations"),
         }
     }
 }
@@ -375,5 +387,17 @@ mod tests {
         let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);
         assert!(matches!(record_loc[0], RecordLocation::MemoryBatch(_, _)));
+    }
+
+    #[test]
+    fn test_append_only_mem_index() {
+        let mem_index = MemIndex::new(IdentityProp::None);
+
+        // Test that new_like creates another append-only index
+        let new_index = MemIndex::new_like(&mem_index);
+        assert!(matches!(new_index, MemIndex::None));
+
+        // These operations should panic for AppendOnly index since they shouldn't be called
+        // for append-only tables that don't use index-based operations
     }
 }

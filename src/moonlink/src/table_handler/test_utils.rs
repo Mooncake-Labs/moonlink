@@ -16,19 +16,19 @@ use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
+use crate::Result;
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
     WalConfig, WalTransactionState,
 };
-use crate::{ObjectStorageCache, Result};
 
-use arrow_array::RecordBatch;
+use arrow_array::{Int32Array, RecordBatch, StringArray};
 use futures::StreamExt;
 use iceberg::io::FileIOBuilder;
 use iceberg::io::FileRead;
 use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::path::PathBuf;
+use parquet::arrow::AsyncArrowWriter;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::{mpsc, watch};
@@ -65,7 +65,7 @@ pub struct TestEnvironment {
     last_commit_tx: watch::Sender<u64>,
     snapshot_lsn_tx: watch::Sender<u64>,
     pub(crate) wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
-    wal_filesystem_path: String,
+    pub(crate) wal_config: WalConfig,
     pub(crate) force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
     pub(crate) wal_flush_lsn_rx: watch::Receiver<u64>,
     pub(crate) table_event_manager: TableEventManager,
@@ -91,15 +91,12 @@ impl TestEnvironment {
     }
 
     /// Create a new test environment with the given mooncake table.
-    pub(crate) async fn new_with_mooncake_table(
-        temp_dir: TempDir,
-        mooncake_table: MooncakeTable,
-    ) -> Self {
+    pub(crate) async fn new_with_mooncake_table(temp_dir: TempDir, table: MooncakeTable) -> Self {
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (last_commit_tx, last_commit_rx) = watch::channel(0u64);
-        let snapshot_lsn_tx = mooncake_table.get_snapshot_watch_sender().clone();
+        let snapshot_lsn_tx = table.get_snapshot_watch_sender().clone();
         let read_state_manager = Some(Arc::new(ReadStateManager::new(
-            &mooncake_table,
+            &table,
             replication_rx.clone(),
             last_commit_rx,
             get_read_state_filepath_remap(),
@@ -111,16 +108,14 @@ impl TestEnvironment {
         let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
 
         // TODO(Paul): Change this default when we support object storage for WAL
-        let default_wal_config =
-            WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
-        let wal_filesystem_path = default_wal_config.get_accessor_config().get_root_path();
+        let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
-            default_wal_config.get_accessor_config().clone(),
+            wal_config.get_accessor_config().clone(),
         ));
         let table_handler_timer = create_table_handler_timers();
 
         let handler = TableHandler::new(
-            mooncake_table,
+            table,
             table_event_sync_sender,
             table_handler_timer,
             replication_rx.clone(),
@@ -140,7 +135,7 @@ impl TestEnvironment {
             last_commit_tx,
             snapshot_lsn_tx,
             wal_filesystem_accessor,
-            wal_filesystem_path,
+            wal_config,
             force_snapshot_completion_rx,
             wal_flush_lsn_rx,
             table_event_manager,
@@ -155,16 +150,25 @@ impl TestEnvironment {
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
         let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
+        let wal_manager = WalManager::new(&wal_config);
+
+        // Use appropriate identity based on append_only configuration
+        let identity = if mooncake_table_config.append_only {
+            IdentityProp::None
+        } else {
+            IdentityProp::Keys(vec![0])
+        };
+
         let mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),
             1,
             path,
-            IdentityProp::Keys(vec![0]),
+            identity,
             iceberg_table_config.clone(),
             mooncake_table_config,
-            wal_config,
-            ObjectStorageCache::default_for_test(&temp_dir),
+            wal_manager,
+            create_test_object_storage_cache(&temp_dir),
             create_test_filesystem_accessor(&iceberg_table_config),
         )
         .await
@@ -179,13 +183,21 @@ impl TestEnvironment {
         mooncake_table_config: MooncakeTableConfig,
     ) -> IcebergTableManager {
         let table_name = "table_name";
+
+        // Use appropriate identity based on append_only configuration
+        let identity = if mooncake_table_config.append_only {
+            IdentityProp::None
+        } else {
+            IdentityProp::Keys(vec![0])
+        };
+
         let mooncake_table_metadata = Arc::new(MooncakeTableMetadata {
             name: table_name.to_string(),
             table_id: 0,
             schema: create_test_arrow_schema(),
             config: mooncake_table_config.clone(),
             path: self.temp_dir.path().to_path_buf(),
-            identity: IdentityProp::Keys(vec![0]),
+            identity,
         });
         let iceberg_table_config = get_iceberg_manager_config(
             table_name.to_string(),
@@ -194,7 +206,7 @@ impl TestEnvironment {
         IcebergTableManager::new(
             mooncake_table_metadata,
             // Create new and separate object storage cache for new iceberg table manager.
-            ObjectStorageCache::default_for_test(&self.temp_dir),
+            create_test_object_storage_cache(&self.temp_dir),
             create_test_filesystem_accessor(&iceberg_table_config),
             iceberg_table_config.clone(),
         )
@@ -284,6 +296,7 @@ impl TestEnvironment {
         let event = TableEvent::StreamAbort {
             xact_id,
             is_recovery: false,
+            closes_incomplete_wal_transaction: false,
         };
         self.send_event(event.clone()).await;
         event
@@ -339,6 +352,10 @@ impl TestEnvironment {
             is_recovery: false,
         })
         .await;
+    }
+
+    pub async fn bulk_upload_files(&self, files: Vec<String>, lsn: u64) {
+        self.send_event(TableEvent::LoadFiles { files, lsn }).await;
     }
 
     // --- LSN and Verification Helpers ---
@@ -414,47 +431,15 @@ impl TestEnvironment {
         }
     }
 
-    // TODO(Paul): Rework these when implementing object storage WAL
-    /// Infers the lowest file number by looking at all remaining files in the WAL directory.
-    pub async fn infer_lowest_wal_file_number(&self) -> Option<u64> {
-        let mut files = tokio::fs::read_dir(PathBuf::from(&self.wal_filesystem_path))
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Failed to read wal filesystem path: {}",
-                    self.wal_filesystem_path
-                )
-            });
-        let mut lowest = u64::MAX;
-
-        while let Some(file) = files.next_entry().await.unwrap() {
-            debug!("file: {:?}", file);
-            let path = file.path();
-            let file_name = path.file_name()?.to_str()?;
-
-            // skip metadata file
-            if file_name == WalManager::get_metadata_file_name() {
-                continue;
-            }
-
-            if let Some(num_str) = file_name.strip_prefix("wal_")?.strip_suffix(".json") {
-                if let Ok(num) = num_str.parse::<u64>() {
-                    lowest = lowest.min(num);
-                }
-            }
-        }
-        (lowest != u64::MAX).then_some(lowest)
-    }
-
     // Recover wal events locally by reading from the wal filesystem and finding the lowest file number
     // TODO(Paul): Rework these when implementing object storage WAL
-    pub async fn get_wal_events_with_start_file_number(
+    pub async fn get_wal_events_with_metadata(
         &self,
-        start_file_num: u64,
+        wal_metadata: &PersistentWalMetadata,
     ) -> Vec<TableEvent> {
         let wal_events_stream = WalManager::recover_flushed_wals_flat(
             self.wal_filesystem_accessor.clone(),
-            start_file_num,
+            wal_metadata,
         );
         let wal_events_vec = wal_events_stream
             .collect::<Vec<Result<TableEvent>>>()
@@ -471,26 +456,12 @@ impl TestEnvironment {
         wal_events_vec
     }
 
-    pub async fn get_wal_events_inferring_lowest_file_number(&self) -> Vec<TableEvent> {
-        let lowest_file_number = self.infer_lowest_wal_file_number().await.unwrap();
-        self.get_wal_events_with_start_file_number(lowest_file_number)
-            .await
-    }
-
-    /// Infers the lowest file number by looking at all remaining files in the WAL directory.
-    pub async fn check_wal_events_inferring_lowest_file_number(
-        &self,
-        should_contain_table_events: &[TableEvent],
-        should_not_contain_table_events: &[TableEvent],
-    ) {
-        let wal_events = self.get_wal_events_inferring_lowest_file_number().await;
-
-        assert_wal_events_contains(&wal_events, should_contain_table_events);
-        assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
-    }
-
-    pub async fn get_latest_wal_metadata(&self) -> PersistentWalMetadata {
-        WalManager::recover_persistent_wal_metadata(self.wal_filesystem_accessor.clone()).await
+    pub async fn get_latest_wal_metadata(&self) -> Option<PersistentWalMetadata> {
+        WalManager::recover_from_persistent_wal_metadata(
+            self.wal_filesystem_accessor.clone(),
+            self.wal_config.clone(),
+        )
+        .await
     }
 
     pub async fn check_wal_events_from_metadata(
@@ -499,7 +470,6 @@ impl TestEnvironment {
         should_contain_table_events: &[TableEvent],
         should_not_contain_table_events: &[TableEvent],
     ) {
-        let live_wal_files_tracker = wal_metadata.get_live_wal_files_tracker();
         if wal_metadata.get_live_wal_files_tracker().is_empty() {
             assert!(
                 should_contain_table_events.is_empty(),
@@ -508,11 +478,7 @@ impl TestEnvironment {
             return;
         }
 
-        let start_file_number = live_wal_files_tracker.first().unwrap().file_number;
-
-        let wal_events = self
-            .get_wal_events_with_start_file_number(start_file_number)
-            .await;
+        let wal_events = self.get_wal_events_with_metadata(wal_metadata).await;
 
         assert_wal_events_contains(&wal_events, should_contain_table_events);
         assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
@@ -579,17 +545,46 @@ impl TestEnvironment {
         // Check consistency between files
         let active_wal_files = metadata.get_live_wal_files_tracker();
 
-        let lowest_file_number_from_fs = self.infer_lowest_wal_file_number().await;
+        let highest_file_number_from_metadata =
+            active_wal_files.last().map(|file| file.file_number);
+        if let Some(highest_file_number_from_metadata) = highest_file_number_from_metadata {
+            // check if the metadata is empty
+            let file_number = highest_file_number_from_metadata + 1;
+            assert!(
+                !wal_file_exists(
+                    file_number,
+                    self.wal_filesystem_accessor.clone(),
+                    &self.wal_config
+                )
+                .await,
+                "file {file_number} should not exist as it is out of range of the active wal files",
+            );
+        };
+
         let lowest_file_number_from_metadata =
             active_wal_files.first().map(|file| file.file_number);
-        assert_eq!(
-            lowest_file_number_from_fs, lowest_file_number_from_metadata,
-            "lowest file number from fs and metadata should be the same"
-        );
+        if let Some(lowest_file_number_from_metadata) = lowest_file_number_from_metadata {
+            if lowest_file_number_from_metadata > 0 {
+                let file_number = lowest_file_number_from_metadata - 1;
+                assert!(!wal_file_exists(
+                    file_number,
+                    self.wal_filesystem_accessor.clone(),
+                    &self.wal_config
+                )
+                .await,
+                "file {file_number} should not exist as it is out of range of the active wal files",
+            );
+            }
+        }
 
         for file in active_wal_files {
             assert!(
-                wal_file_exists(self.wal_filesystem_accessor.clone(), file.file_number).await,
+                wal_file_exists(
+                    file.file_number,
+                    self.wal_filesystem_accessor.clone(),
+                    &self.wal_config
+                )
+                .await,
                 "file {file_number} should exist",
                 file_number = file.file_number
             );
@@ -638,4 +633,25 @@ pub(crate) async fn load_one_arrow_batch(filepath: &str) -> RecordBatch {
         .transpose()
         .unwrap()
         .expect("Should have one batch")
+}
+
+/// Test util function to generate a parquet under the given [`tempdir`].
+pub(crate) async fn generate_parquet_file(tempdir: &TempDir) -> String {
+    let schema = create_test_arrow_schema();
+    let ids = Int32Array::from(vec![1, 2, 3]);
+    let names = StringArray::from(vec!["Alice", "Bob", "Charlie"]);
+    let ages = Int32Array::from(vec![10, 20, 30]);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(ids), Arc::new(names), Arc::new(ages)],
+    )
+    .unwrap();
+    let file_path = tempdir.path().join("test.parquet");
+    let file_path_str = file_path.to_str().unwrap().to_string();
+    let file = tokio::fs::File::create(file_path).await.unwrap();
+    let mut writer: AsyncArrowWriter<tokio::fs::File> =
+        AsyncArrowWriter::try_new(file, schema, /*props=*/ None).unwrap();
+    writer.write(&batch).await.unwrap();
+    writer.close().await.unwrap();
+    file_path_str
 }

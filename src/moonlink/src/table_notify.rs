@@ -1,5 +1,6 @@
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
+use crate::storage::mooncake_table::snapshot::MooncakeSnapshotOutput;
 use crate::storage::mooncake_table::DataCompactionPayload;
 use crate::storage::mooncake_table::DataCompactionResult;
 use crate::storage::mooncake_table::DiskSliceWriter;
@@ -7,8 +8,6 @@ use crate::storage::mooncake_table::FileIndiceMergePayload;
 use crate::storage::mooncake_table::FileIndiceMergeResult;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::IcebergSnapshotResult;
-
-use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::wal::WalPersistenceUpdateResult;
 use crate::Result;
 
@@ -88,15 +87,34 @@ pub enum TableEvent {
         is_recovery: bool,
     },
     /// Abort current stream with given xact_id
-    StreamAbort { xact_id: u32, is_recovery: bool },
+    /// If closes incomplete wal transaction is true, then this is being used during recovery
+    /// to close any incomplete transactions in the WAL that are now discarded as we will replay them from the source instead.
+    /// Note that in this case, is_recovery will be set to false as we want the event to be persisted into the WAL.
+    StreamAbort {
+        xact_id: u32,
+        is_recovery: bool,
+        closes_incomplete_wal_transaction: bool,
+    },
     FlushResult {
-        // Background event id.
+        /// Background event id.
         id: BackgroundEventId,
-        // Transaction ID
+        /// Transaction ID
         xact_id: Option<u32>,
         /// Result for mem slice flush.
         flush_result: Option<Result<DiskSliceWriter>>,
     },
+
+    /// ==============================
+    /// Bulk ingestion events
+    /// ==============================
+    ///
+    LoadFiles {
+        /// Parquet files to directly load into mooncake table, without schema validation, index construction, etc.
+        files: Vec<String>,
+        /// LSN for the bulk upload operation.
+        lsn: u64,
+    },
+
     /// ==============================
     /// Test events
     /// ==============================
@@ -108,14 +126,20 @@ pub enum TableEvent {
         is_recovery: bool,
     },
     /// Flush the transaction stream with given xact_id
-    StreamFlush { xact_id: u32, is_recovery: bool },
+    StreamFlush {
+        xact_id: u32,
+        is_recovery: bool,
+    },
+
     /// ==============================
     /// Interactive blocking events
     /// ==============================
     ///
     /// Force a mooncake and iceberg snapshot.
     /// - If [`lsn`] unassigned, will force snapshot on the latest committed LSN.
-    ForceSnapshot { lsn: Option<u64> },
+    ForceSnapshot {
+        lsn: Option<u64>,
+    },
     /// There's at most one outstanding force table maintenance requests.
     ///
     /// Force a regular index merge operation.
@@ -127,13 +151,18 @@ pub enum TableEvent {
     /// Drop table.
     DropTable,
     /// Alter table,
-    AlterTable { columns_to_drop: Vec<String> },
+    AlterTable {
+        columns_to_drop: Vec<String>,
+    },
     /// Start initial table copy.
     /// `start_lsn` is the `pg_current_wal_lsn` when the initial copy starts.
     StartInitialCopy,
     /// Finish initial table copy and merge buffered changes.
     /// `start_lsn` is the `pg_current_wal_lsn` when the initial copy starts. We want this in FinishInitialCopy so we can set the commit LSN correctly.
-    FinishInitialCopy { start_lsn: u64 },
+    FinishInitialCopy {
+        start_lsn: u64,
+    },
+
     /// ==============================
     /// Table internal events
     /// ==============================
@@ -142,20 +171,8 @@ pub enum TableEvent {
     PeriodicalMooncakeTableSnapshot(uuid::Uuid),
     /// Mooncake snapshot completes.
     MooncakeTableSnapshotResult {
-        /// Mooncake snapshot LSN.
-        lsn: u64,
-        /// UUID for the current mooncake snapshot operation, used for observability purpose.
-        uuid: uuid::Uuid,
-        /// Payload used to create an iceberg snapshot.
-        iceberg_snapshot_payload: Option<IcebergSnapshotPayload>,
-        /// Payload used to trigger an index merge.
-        file_indice_merge_payload: IndexMergeMaintenanceStatus,
-        /// Payload used to trigger a data compaction.
-        data_compaction_payload: DataCompactionMaintenanceStatus,
-        /// Evicted files to delete.
-        evicted_files_to_delete: EvictedFiles,
-        /// Optional snapshot dump.
-        current_snapshot: Option<MooncakeSnapshot>,
+        /// Mooncake snapshot result.
+        mooncake_snapshot_result: MooncakeSnapshotOutput,
     },
     /// Regular iceberg persistence.
     RegularIcebergSnapshot {
@@ -192,6 +209,9 @@ pub enum TableEvent {
     /// Periodic persist and truncate wal completes.
     PeriodicalWalPersistenceUpdateResult {
         result: Result<WalPersistenceUpdateResult>,
+    },
+    FinishRecovery {
+        highest_completion_lsn: u64,
     },
 }
 

@@ -225,7 +225,7 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
         ArrayCell::U32(values) => values
             .into_iter()
             .map(|v| {
-                v.map(|i| RowValue::Int32(i as i32))
+                v.map(|i| RowValue::Int64(i as i64))
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
@@ -312,15 +312,8 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
             .into_iter()
             .map(|v| {
                 v.map(|cells| {
-                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
-                    let struct_values: Vec<RowValue> = cells
-                        .into_iter()
-                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
-                        .map(|row: MoonlinkRow| {
-                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
-                            row.values.into_iter().next().unwrap_or(RowValue::Null)
-                        })
-                        .collect();
+                    let struct_values: Vec<RowValue> =
+                        cells.into_iter().map(|cell| cell.into()).collect();
                     RowValue::Struct(struct_values)
                 })
                 .unwrap_or(RowValue::Null)
@@ -329,91 +322,57 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
     }
 }
 
-impl From<PostgresTableRow> for MoonlinkRow {
-    fn from(row: PostgresTableRow) -> Self {
-        let mut values = Vec::with_capacity(row.0.values.len());
-        for cell in row.0.values {
-            match cell {
-                Cell::I16(value) => {
-                    values.push(RowValue::Int32(value as i32));
-                }
-                Cell::I32(value) => {
-                    values.push(RowValue::Int32(value));
-                }
-                Cell::U32(value) => {
-                    values.push(RowValue::Int32(value as i32));
-                }
-                Cell::I64(value) => {
-                    values.push(RowValue::Int64(value));
-                }
-                Cell::F32(value) => {
-                    values.push(RowValue::Float32(value));
-                }
-                Cell::F64(value) => {
-                    values.push(RowValue::Float64(value));
-                }
-                Cell::Bool(value) => {
-                    values.push(RowValue::Bool(value));
-                }
-                Cell::String(value) => {
-                    values.push(RowValue::ByteArray(value.as_bytes().to_vec()));
-                }
-                Cell::Date(value) => {
-                    values.push(RowValue::Int32(
-                        value.signed_duration_since(ARROW_EPOCH).num_days() as i32,
-                    ));
-                }
-                Cell::Time(value) => {
-                    let seconds = value.num_seconds_from_midnight() as i64;
-                    let nanos = value.nanosecond() as i64;
-                    values.push(RowValue::Int64(seconds * 1_000_000 + nanos / 1_000))
-                }
-                Cell::TimeStamp(value) => {
-                    values.push(RowValue::Int64(value.and_utc().timestamp_micros()))
-                }
-                Cell::TimeStampTz(value) => values.push(RowValue::Int64(value.timestamp_micros())),
-                Cell::Uuid(value) => {
-                    values.push(RowValue::FixedLenByteArray(*value.as_bytes()));
-                }
-                Cell::Json(value) => {
-                    values.push(RowValue::ByteArray(value.to_string().as_bytes().to_vec()));
-                }
-                Cell::Bytes(value) => {
-                    values.push(RowValue::ByteArray(value));
-                }
-                Cell::Array(value) => {
-                    values.push(RowValue::Array(convert_array_cell(value)));
-                }
-                Cell::Composite(value) => {
-                    // TODO: Need to have a separate from Cell type to row value type, which handles recursion.
-                    let struct_values: Vec<RowValue> = value
-                        .into_iter()
-                        .map(|cell| PostgresTableRow(TableRow { values: vec![cell] }).into())
-                        .map(|row: MoonlinkRow| {
-                            assert_eq!(row.values.len(), 1, "Composite cell should have exactly one value, but got {} values. This indicates an unexpected conversion from PostgresTableRow to MoonlinkRow", row.values.len());
-                            row.values.into_iter().next().unwrap_or(RowValue::Null)
-                        })
-                        .collect();
-                    values.push(RowValue::Struct(struct_values));
-                }
-                Cell::Numeric(value) => {
-                    match value {
-                        PgNumeric::Value(bigdecimal) => {
-                            let (int_val, _) = bigdecimal.into_bigint_and_exponent();
-                            values.push(RowValue::Decimal(int_val.to_i128().unwrap()));
-                        }
-                        _ => {
-                            // DevNote:
-                            // nan, inf, -inf will be converted to null
-                            values.push(RowValue::Null);
-                        }
+impl From<Cell> for RowValue {
+    fn from(cell: Cell) -> Self {
+        match cell {
+            Cell::I16(value) => RowValue::Int32(value as i32),
+            Cell::I32(value) => RowValue::Int32(value),
+            Cell::U32(value) => RowValue::Int64(value as i64),
+            Cell::I64(value) => RowValue::Int64(value),
+            Cell::F32(value) => RowValue::Float32(value),
+            Cell::F64(value) => RowValue::Float64(value),
+            Cell::Bool(value) => RowValue::Bool(value),
+            Cell::String(value) => RowValue::ByteArray(value.as_bytes().to_vec()),
+            Cell::Date(value) => {
+                RowValue::Int32(value.signed_duration_since(ARROW_EPOCH).num_days() as i32)
+            }
+            Cell::Time(value) => {
+                let seconds = value.num_seconds_from_midnight() as i64;
+                let nanos = value.nanosecond() as i64;
+                RowValue::Int64(seconds * 1_000_000 + nanos / 1_000)
+            }
+            Cell::TimeStamp(value) => RowValue::Int64(value.and_utc().timestamp_micros()),
+            Cell::TimeStampTz(value) => RowValue::Int64(value.timestamp_micros()),
+            Cell::Uuid(value) => RowValue::FixedLenByteArray(*value.as_bytes()),
+            Cell::Json(value) => RowValue::ByteArray(value.to_string().as_bytes().to_vec()),
+            Cell::Bytes(value) => RowValue::ByteArray(value),
+            Cell::Array(value) => RowValue::Array(convert_array_cell(value)),
+            Cell::Composite(value) => {
+                let struct_values: Vec<RowValue> =
+                    value.into_iter().map(|cell| cell.into()).collect();
+                RowValue::Struct(struct_values)
+            }
+            Cell::Numeric(value) => {
+                match value {
+                    PgNumeric::Value(bigdecimal) => {
+                        let (int_val, _) = bigdecimal.into_bigint_and_exponent();
+                        RowValue::Decimal(int_val.to_i128().unwrap())
+                    }
+                    _ => {
+                        // DevNote:
+                        // nan, inf, -inf will be converted to null
+                        RowValue::Null
                     }
                 }
-                Cell::Null => {
-                    values.push(RowValue::Null);
-                }
             }
+            Cell::Null => RowValue::Null,
         }
+    }
+}
+
+impl From<PostgresTableRow> for MoonlinkRow {
+    fn from(row: PostgresTableRow) -> Self {
+        let values: Vec<RowValue> = row.0.values.into_iter().map(|cell| cell.into()).collect();
         MoonlinkRow::new(values)
     }
 }
@@ -427,6 +386,7 @@ mod tests {
     use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     use iceberg::arrow as IcebergArrow;
     use moonlink::row::RowValue;
+    use std::str::FromStr;
 
     #[test]
     fn test_table_schema_to_arrow_schema() {
@@ -826,8 +786,10 @@ mod tests {
     fn test_postgres_table_row_to_moonlink_row() {
         let postgres_table_row = PostgresTableRow(TableRow {
             values: vec![
+                Cell::I16(0),
                 Cell::I32(1),
-                Cell::I64(2),
+                Cell::U32(2),
+                Cell::I64(3),
                 Cell::F32(std::f32::consts::PI),
                 Cell::F64(std::f64::consts::E),
                 Cell::Bool(true),
@@ -843,37 +805,40 @@ mod tests {
                         .unwrap()
                         .with_timezone(&Utc),
                 ),
-                Cell::Null,
                 Cell::Uuid(uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap()),
+                Cell::Json(serde_json::from_str(r#"{"name":"Alice"}"#).unwrap()),
+                Cell::Null,
             ],
         });
 
         let moonlink_row: MoonlinkRow = postgres_table_row.into();
-        assert_eq!(moonlink_row.values.len(), 12);
-        assert_eq!(moonlink_row.values[0], RowValue::Int32(1));
-        assert_eq!(moonlink_row.values[1], RowValue::Int64(2));
+        assert_eq!(moonlink_row.values.len(), 15);
+        assert_eq!(moonlink_row.values[0], RowValue::Int32(0));
+        assert_eq!(moonlink_row.values[1], RowValue::Int32(1));
+        assert_eq!(moonlink_row.values[2], RowValue::Int64(2));
+        assert_eq!(moonlink_row.values[3], RowValue::Int64(3));
         assert_eq!(
-            moonlink_row.values[2],
+            moonlink_row.values[4],
             RowValue::Float32(std::f32::consts::PI)
         );
         assert_eq!(
-            moonlink_row.values[3],
+            moonlink_row.values[5],
             RowValue::Float64(std::f64::consts::E)
         );
-        assert_eq!(moonlink_row.values[4], RowValue::Bool(true));
+        assert_eq!(moonlink_row.values[6], RowValue::Bool(true));
         let vec = "test".as_bytes().to_vec();
-        assert_eq!(moonlink_row.values[5], RowValue::ByteArray(vec.clone()));
+        assert_eq!(moonlink_row.values[7], RowValue::ByteArray(vec.clone()));
         let string = unsafe { std::str::from_utf8_unchecked(&vec) };
         let array = StringArray::from(vec![string]);
         assert_eq!(array.value(0), "test");
-        assert_eq!(moonlink_row.values[6], RowValue::Int32(19723)); // 2024-01-01 days since epoch
+        assert_eq!(moonlink_row.values[8], RowValue::Int32(19723)); // 2024-01-01 days since epoch
         let array = Date32Array::from(vec![19723]);
         assert_eq!(
             array.value_as_date(0),
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())
         );
-        assert_eq!(moonlink_row.values[7], RowValue::Int64(43200000000)); // 12:00:00 in microseconds
-        assert_eq!(moonlink_row.values[8], RowValue::Int64(1704110400000000)); // 2024-01-01 12:00:00 in microseconds
+        assert_eq!(moonlink_row.values[9], RowValue::Int64(43200000000)); // 12:00:00 in microseconds
+        assert_eq!(moonlink_row.values[10], RowValue::Int64(1704110400000000)); // 2024-01-01 12:00:00 in microseconds
         let array = TimestampMicrosecondArray::from(vec![1704110400000000]);
         assert_eq!(
             array.value_as_datetime(0),
@@ -881,7 +846,7 @@ mod tests {
                 NaiveDateTime::parse_from_str("2024-01-01 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap()
             )
         );
-        assert_eq!(moonlink_row.values[9], RowValue::Int64(1704110400000000)); // 2024-01-01 12:00:00 UTC in microseconds
+        assert_eq!(moonlink_row.values[11], RowValue::Int64(1704110400000000)); // 2024-01-01 12:00:00 UTC in microseconds
         let array = TimestampMicrosecondArray::from(vec![1704110400000000]);
         assert_eq!(
             array.value_as_datetime(0),
@@ -889,8 +854,7 @@ mod tests {
                 NaiveDateTime::parse_from_str("2024-01-01 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap()
             )
         );
-        assert_eq!(moonlink_row.values[10], RowValue::Null);
-        if let RowValue::FixedLenByteArray(bytes) = moonlink_row.values[11] {
+        if let RowValue::FixedLenByteArray(bytes) = moonlink_row.values[12] {
             assert_eq!(
                 uuid::Uuid::from_bytes(bytes).to_string(),
                 "123e4567-e89b-12d3-a456-426614174000"
@@ -898,6 +862,29 @@ mod tests {
         } else {
             panic!("Expected fixed length byte array");
         };
+        let vec = r#"{"name":"Alice"}"#.to_string().as_bytes().to_vec();
+        assert_eq!(moonlink_row.values[13], RowValue::ByteArray(vec));
+        assert_eq!(moonlink_row.values[14], RowValue::Null);
+    }
+
+    #[test]
+    fn test_postgres_numeric_row_to_moonlink_row() {
+        let postgres_table_row = PostgresTableRow(TableRow {
+            values: vec![
+                Cell::Numeric(PgNumeric::NaN),
+                Cell::Numeric(PgNumeric::NegativeInf),
+                Cell::Numeric(PgNumeric::PositiveInf),
+                Cell::Numeric(PgNumeric::Value(
+                    bigdecimal::BigDecimal::from_str("12345.6789").unwrap(),
+                )),
+            ],
+        });
+        let moonlink_row: MoonlinkRow = postgres_table_row.into();
+        assert_eq!(moonlink_row.values.len(), 4);
+        assert_eq!(moonlink_row.values[0], RowValue::Null);
+        assert_eq!(moonlink_row.values[1], RowValue::Null);
+        assert_eq!(moonlink_row.values[2], RowValue::Null);
+        assert_eq!(moonlink_row.values[3], RowValue::Decimal(123456789 as i128));
     }
 
     #[test]

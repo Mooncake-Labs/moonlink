@@ -1,6 +1,7 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::filesystem::storage_config::StorageConfig;
+use crate::storage::filesystem::storage_config::WriteOption;
 use crate::storage::filesystem::test_utils::object_storage_test_utils::*;
 use crate::FileSystemAccessor;
 
@@ -27,6 +28,9 @@ pub(crate) fn create_gcs_storage_config(warehouse_uri: &str) -> AccessorConfig {
         region: "".to_string(),
         access_key_id: "".to_string(),
         secret_access_key: "".to_string(),
+        write_option: Some(WriteOption {
+            multipart_upload_threshold: Some(usize::MAX),
+        }),
     };
     AccessorConfig::new_with_storage_config(storage_config)
 }

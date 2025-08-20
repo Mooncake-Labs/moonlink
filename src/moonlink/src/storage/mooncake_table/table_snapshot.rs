@@ -3,6 +3,7 @@ use crate::storage::index::persisted_bucket_hash_map::GlobalIndex;
 /// Items needed for iceberg snapshot.
 use crate::storage::index::FileIndex as MooncakeFileIndex;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
+use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
@@ -126,6 +127,8 @@ impl IcebergSnapshotDataCompactionPayload {
 
 #[derive(Clone)]
 pub struct IcebergSnapshotPayload {
+    /// Background event id.
+    pub(crate) id: BackgroundEventId,
     /// UUID for the current persistence operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// Flush LSN.
@@ -145,6 +148,7 @@ pub struct IcebergSnapshotPayload {
 impl std::fmt::Debug for IcebergSnapshotPayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IcebergSnapshotPayload")
+            .field("id", &self.id)
             .field("uuid", &self.uuid)
             .field("flush_lsn", &self.flush_lsn)
             .field(
@@ -352,6 +356,8 @@ impl std::fmt::Debug for IcebergSnapshotDataCompactionResult {
 }
 
 pub struct IcebergSnapshotResult {
+    /// Background event id.
+    pub(crate) id: BackgroundEventId,
     /// UUID for the current persistence operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// Table manager is (1) not `Sync` safe; (2) only used at iceberg snapshot creation, so we `move` it around every snapshot.
@@ -373,6 +379,7 @@ pub struct IcebergSnapshotResult {
 impl Clone for IcebergSnapshotResult {
     fn clone(&self) -> Self {
         IcebergSnapshotResult {
+            id: self.id,
             uuid: self.uuid,
             table_manager: None,
             flush_lsn: self.flush_lsn,
@@ -401,7 +408,9 @@ impl IcebergSnapshotResult {
 impl std::fmt::Debug for IcebergSnapshotResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IcebergSnapshotResult")
+            .field("id", &self.id)
             .field("uuid", &self.uuid)
+            .field("id", &self.id)
             .field("flush_lsn", &self.flush_lsn)
             .field(
                 "committed deletion log count",
@@ -420,6 +429,8 @@ impl std::fmt::Debug for IcebergSnapshotResult {
 ///
 #[derive(Clone)]
 pub struct FileIndiceMergePayload {
+    /// Background event id.
+    pub(crate) id: BackgroundEventId,
     /// UUID for current index merge operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// File indices to merge.
@@ -429,6 +440,7 @@ pub struct FileIndiceMergePayload {
 impl std::fmt::Debug for FileIndiceMergePayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileIndiceMergePayload")
+            .field("id", &self.id)
             .field("uuid", &self.uuid)
             .field("file indices count", &self.file_indices.len())
             .finish()
@@ -437,6 +449,8 @@ impl std::fmt::Debug for FileIndiceMergePayload {
 
 #[derive(Clone, Default)]
 pub struct FileIndiceMergeResult {
+    /// Background event id.
+    pub(crate) id: BackgroundEventId,
     /// UUID for current index merge operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// Old file indices being merged.
@@ -459,6 +473,7 @@ impl FileIndiceMergeResult {
 impl std::fmt::Debug for FileIndiceMergeResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileIndiceMergeResult")
+            .field("id", &self.id)
             .field("uuid", &self.uuid)
             .field("old file indices count", &self.old_file_indices.len())
             .field("new file indices count", &self.new_file_indices.len())

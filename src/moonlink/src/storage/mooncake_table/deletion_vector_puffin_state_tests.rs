@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rstest::rstest;
 use tempfile::TempDir;
 use tokio::sync::mpsc::Receiver;
@@ -62,7 +64,7 @@ async fn prepare_test_deletion_vector_for_read(
     use_batch_write: bool,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let (mut table, mut table_notify) =
-        create_mooncake_table_and_notify_for_read(temp_dir, cache).await;
+        create_mooncake_table_and_notify_for_read(temp_dir, Arc::new(cache)).await;
 
     // Append a new row.
     let row = MoonlinkRow::new(vec![
@@ -213,7 +215,7 @@ async fn test_1_recover_2_without_local_optimization(#[case] use_batch_write: bo
     let iceberg_table_config = get_iceberg_table_config(&temp_dir);
     let mut iceberg_table_manager_to_recover = IcebergTableManager::new(
         table.metadata.clone(),
-        cache_for_recovery.clone(),
+        Arc::new(cache_for_recovery.clone()),
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
@@ -272,7 +274,7 @@ async fn test_1_recover_2_with_local_optimization(#[case] use_batch_write: bool)
     let iceberg_table_config = get_iceberg_table_config(&temp_dir);
     let mut iceberg_table_manager_to_recover = IcebergTableManager::new(
         table.metadata.clone(),
-        cache_for_recovery.clone(),
+        Arc::new(cache_for_recovery.clone()),
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
@@ -320,7 +322,8 @@ async fn test_2_read_without_local_optimization(#[case] use_batch_write: bool) {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Check data file has been pinned in mooncake table.
     let puffin_blob_ref = get_only_puffin_blob_ref_from_table(&table).await;
@@ -376,7 +379,8 @@ async fn test_2_read_with_local_optimization(#[case] use_batch_write: bool) {
     let snapshot_read_output = perform_read_request_for_test(&mut table).await;
     let read_state = snapshot_read_output
         .take_as_read_state(get_read_state_filepath_remap())
-        .await;
+        .await
+        .unwrap();
 
     // Check data file has been pinned in mooncake table.
     let puffin_blob_ref = get_only_puffin_blob_ref_from_table(&table).await;

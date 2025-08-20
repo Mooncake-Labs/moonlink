@@ -93,7 +93,7 @@ fn get_data_compaction_config() -> DataCompactionConfig {
     DataCompactionConfig {
         min_data_file_to_compact: 2,
         max_data_file_to_compact: u32::MAX,
-        data_file_final_size: 1000000,
+        data_file_final_size: u64::MAX,
         data_file_deletion_percentage: 0,
     }
 }

@@ -32,7 +32,9 @@ impl SnapshotTableState {
         flush_lsn: u64,
         committed_deletion_to_persist: CommittedDeletionToPersist,
     ) -> IcebergSnapshotPayload {
+        let table_event_id = self.event_id_assigner.get_next_event_id();
         IcebergSnapshotPayload {
+            id: table_event_id,
             uuid: uuid::Uuid::new_v4(),
             flush_lsn,
             new_table_schema: None,

@@ -1,6 +1,9 @@
 use tempfile::TempDir;
 
-use crate::storage::storage_utils::{FileId, MooncakeDataFileRef, TableId, TableUniqueFileId};
+use crate::storage::{
+    mooncake_table::replay::replay_events::BackgroundEventId,
+    storage_utils::{FileId, MooncakeDataFileRef, TableId, TableUniqueFileId},
+};
 
 /// Test constant to mimic an infinitely large object storage cache.
 pub(crate) const INFINITE_LARGE_OBJECT_STORAGE_CACHE_SIZE: u64 = u64::MAX;
@@ -24,6 +27,8 @@ pub(crate) const FAKE_FILE_ID: TableUniqueFileId = TableUniqueFileId {
 pub(crate) const FAKE_FILE_SIZE: u64 = 1 << 30; // 1GiB
 /// Fake filename.
 pub(crate) const FAKE_FILE_NAME: &str = "fake-file-name";
+/// Background events are attached with an event id for replay, not needed for unit tests.
+pub(crate) const DUMMY_EVENT_ID: BackgroundEventId = 0;
 
 /// Test util function to get unique table file id.
 pub(crate) fn get_unique_table_file_id(file_id: FileId) -> TableUniqueFileId {

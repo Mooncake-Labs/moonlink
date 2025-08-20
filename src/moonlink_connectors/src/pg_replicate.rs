@@ -5,7 +5,6 @@ pub mod conversions;
 pub mod initial_copy;
 pub mod moonlink_sink;
 pub mod postgres_source;
-pub mod replication_state;
 pub mod table;
 pub mod table_init;
 pub mod util;
@@ -17,12 +16,14 @@ use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
-use crate::pg_replicate::replication_state::ReplicationState;
 use crate::pg_replicate::table::{SrcTableId, TableSchema};
 use crate::pg_replicate::table_init::{build_table_components, TableComponents};
+use crate::replication_state::ReplicationState;
 use crate::Result;
 use futures::StreamExt;
-use moonlink::{MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent};
+use moonlink::{
+    MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent, WalManager,
+};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::mem::take;
@@ -131,13 +132,16 @@ impl PostgresConnection {
         Ok(())
     }
 
+    #[must_use]
     /// Perform initial copy of existing table data
+    /// Returns true if initial copy was performed, false otherwise.
     pub async fn perform_initial_copy(
         &self,
         schema: &TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
-    ) -> Result<()> {
+        commit_lsn_tx: watch::Sender<u64>,
+    ) -> Result<(bool)> {
         let src_table_id = schema.src_table_id;
         // Create a dedicated source for the copy
         let mut copy_source = PostgresSource::new(&self.uri, None, None, false).await?;
@@ -159,40 +163,44 @@ impl PostgresConnection {
                 .add_table_to_publication(&schema.table_name)
                 .await?;
 
-            let schema_clone = schema.clone();
-            tokio::spawn(async move {
-                let (stream, start_lsn) = copy_source
-                    .get_table_copy_stream(&schema_clone.table_name, &schema_clone.column_schemas)
-                    .await
-                    .expect("failed to get table copy stream");
-                let res = copy_table_stream_impl(schema_clone, stream, &event_sender).await;
+            let (stream, start_lsn) = copy_source
+                .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
+                .await
+                .expect("failed to get table copy stream");
+            let res = copy_table_stream_impl(schema.clone(), stream, &event_sender).await;
 
-                if let Err(e) = res {
-                    error!(error = ?e, table_id = src_table_id, "failed to copy table");
-                }
-                // Commit the transaction
-                copy_source
-                    .commit_transaction()
-                    .await
-                    .expect("failed to commit transaction");
+            if let Err(e) = res {
+                error!(error = ?e, table_id = src_table_id, "failed to copy table");
+            }
 
-                if let Err(e) = event_sender
-                    .send(TableEvent::FinishInitialCopy {
-                        start_lsn: start_lsn.into(),
-                    })
-                    .await
-                {
-                    error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
-                }
-            });
+            // Commit the transaction
+            copy_source
+                .commit_transaction()
+                .await
+                .expect("failed to commit transaction");
+
+            if let Err(e) = event_sender
+                .send(TableEvent::FinishInitialCopy {
+                    start_lsn: start_lsn.into(),
+                })
+                .await
+            {
+                error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
+            }
+
+            // Notify read state manager with the commit LSN for the initial copy boundary.
+            if let Err(e) = commit_lsn_tx.send(start_lsn.into()) {
+                warn!(error = ?e, table_id = src_table_id, "failed to send initial copy commit lsn");
+            }
+
+            Ok(true)
         } else {
             // If there are no rows to copy, we still need to add the table to publication.
             copy_source
                 .add_table_to_publication(&schema.table_name)
                 .await?;
+            Ok(false)
         }
-
-        Ok(())
     }
 
     pub fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
@@ -342,7 +350,6 @@ impl PostgresConnection {
         &self,
         table_name: &str,
         mooncake_table_id: &T,
-        table_id: u32,
         moonlink_table_config: MoonlinkTableConfig,
         is_recovery: bool,
         table_base_path: &str,
@@ -367,7 +374,6 @@ impl PostgresConnection {
 
         let mut table_resources = build_table_components(
             mooncake_table_id.to_string(),
-            table_id,
             arrow_schema,
             identity,
             table_name.to_string(),
@@ -375,18 +381,21 @@ impl PostgresConnection {
             &table_base_path.to_string(),
             &self.replication_state,
             table_components,
+            is_recovery,
         )
         .await?;
 
         // Send command to add table to replication
+        let commit_lsn_tx = table_resources
+            .commit_lsn_tx
+            .take()
+            .expect("commit_lsn_tx is None");
+        let commit_lsn_tx_for_copy = commit_lsn_tx.clone();
         self.add_table_to_replication(
             table_schema.src_table_id,
             table_schema.clone(),
             table_resources.event_sender.clone(),
-            table_resources
-                .commit_lsn_tx
-                .take()
-                .expect("commit_lsn_tx is None"),
+            commit_lsn_tx,
             table_resources
                 .flush_lsn_rx
                 .take()
@@ -399,12 +408,37 @@ impl PostgresConnection {
         .await?;
 
         // Perform initial copy
-        self.perform_initial_copy(
-            &table_schema,
-            table_resources.event_sender.clone(),
-            is_recovery,
-        )
-        .await?;
+        let initial_copy_performed = self
+            .perform_initial_copy(
+                &table_schema,
+                table_resources.event_sender.clone(),
+                is_recovery,
+                commit_lsn_tx_for_copy,
+            )
+            .await?;
+
+        if is_recovery {
+            assert!(
+                !initial_copy_performed,
+                "initial copy should not be performed during recovery"
+            );
+            debug!(
+                "Performing recovery for table with ID {:?}",
+                table_schema.src_table_id
+            );
+            // Perform recovery
+            WalManager::replay_recovery_from_wal(
+                table_resources.event_sender.clone(),
+                table_resources.wal_persistence_metadata.clone(),
+                table_resources.wal_file_accessor.clone(),
+                table_resources.last_iceberg_snapshot_lsn,
+            )
+            .await?;
+            debug!(
+                "Finished recovery for table with ID {:?}",
+                table_schema.src_table_id
+            );
+        }
 
         debug!(src_table_id = table_schema.src_table_id, "table added");
 
@@ -440,9 +474,13 @@ impl PostgresConnection {
     }
 
     /// Shutdown PostgreSQL replication
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.drop_publication().await?;
-        self.drop_replication_slot().await?;
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    pub async fn shutdown(&mut self, drop_all: bool) -> Result<()> {
+        if drop_all {
+            self.drop_publication().await?;
+            self.drop_replication_slot().await?;
+        }
         // Wait for any pending retry operations to complete
         self.wait_for_pending_retries().await;
 
@@ -498,14 +536,13 @@ pub async fn run_event_loop(
 
     let mut status_interval = tokio::time::interval(Duration::from_secs(10));
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
-    // TODO(Paul): Currently unused. In preparation for acknowledging latest WAL flush LSN to replication sink.
-    let mut _wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
+    let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
 
     loop {
         tokio::select! {
             _ = status_interval.tick() => {
                 let mut confirmed_lsn: Option<u64> = None;
-                for rx in flush_lsn_rxs.values() {
+                for rx in wal_flush_lsn_rxs.values() {
                     let lsn = *rx.borrow();
                     confirmed_lsn = Some(match confirmed_lsn {
                         Some(v) => v.min(lsn),
@@ -525,13 +562,13 @@ pub async fn run_event_loop(
                 PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
                     sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
-                    _wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
+                    wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
                     stream.as_mut().add_table_schema(schema);
                 }
                 PostgresReplicationCommand::DropTable { src_table_id } => {
                     sink.drop_table(src_table_id);
                     flush_lsn_rxs.remove(&src_table_id);
-                    _wal_flush_lsn_rxs.remove(&src_table_id);
+                    wal_flush_lsn_rxs.remove(&src_table_id);
                     stream.as_mut().remove_table_schema(src_table_id);
                 }
                 PostgresReplicationCommand::Shutdown => {
@@ -563,7 +600,7 @@ pub async fn run_event_loop(
                         if let Some(SchemaChangeRequest(src_table_id)) = res {
                             let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
                             sink.alter_table(src_table_id, &table_schema).await;
-                            stream.as_mut().add_table_schema(table_schema);
+                            stream.as_mut().update_table_schema(table_schema);
                         }
                     }
                 }
@@ -578,3 +615,6 @@ pub async fn run_event_loop(
     debug!("replication event loop stopped");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

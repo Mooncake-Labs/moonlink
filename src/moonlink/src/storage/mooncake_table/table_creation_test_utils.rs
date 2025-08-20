@@ -1,5 +1,6 @@
 /// This module contains table creation tests utils.
 use crate::row::IdentityProp as RowIdentity;
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
@@ -16,6 +17,7 @@ use crate::storage::mooncake_table::test_utils_commons::*;
 use crate::storage::mooncake_table::{MooncakeTableConfig, TableMetadata as MooncakeTableMetadata};
 use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
+use crate::storage::wal::WalManager;
 use crate::storage::MooncakeTable;
 use crate::table_notify::TableEvent;
 #[cfg(feature = "chaos-test")]
@@ -174,6 +176,11 @@ pub(crate) fn create_test_table_metadata(
     let config = MooncakeTableConfig::new(local_table_directory.clone());
     create_test_table_metadata_with_config(local_table_directory, config)
 }
+/// Creates a new `ObjectStorageCache` for testing, based on the given temporary directory.
+pub(crate) fn create_test_object_storage_cache(temp_dir: &TempDir) -> Arc<dyn CacheTrait> {
+    let object_storage_cache = ObjectStorageCache::default_for_test(temp_dir);
+    Arc::new(object_storage_cache)
+}
 
 /// Test util function to create mooncake table with the provided config and identity.
 #[cfg(feature = "chaos-test")]
@@ -245,6 +252,23 @@ pub(crate) fn create_disk_slice_write_option(
         parquet_file_size: DiskSliceWriterConfig::DEFAULT_DISK_SLICE_PARQUET_FILE_SIZE,
         chaos_config,
     }
+}
+
+/// Test util function to create mooncake table metadata with the provided full config, and disabled flush at commit.
+#[cfg(feature = "chaos-test")]
+pub(crate) fn create_test_table_metadata_disable_flush_with_full_config(
+    local_table_directory: String,
+    disk_slice_write_config: DiskSliceWriterConfig,
+    index_merge_config: FileIndexMergeConfig,
+    data_compaction_config: DataCompactionConfig,
+    identity: RowIdentity,
+) -> Arc<MooncakeTableMetadata> {
+    let mut config = MooncakeTableConfig::new(local_table_directory.clone());
+    config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
+    config.disk_slice_writer_config = disk_slice_write_config;
+    config.file_index_config = index_merge_config;
+    config.data_compaction_config = data_compaction_config;
+    create_test_table_metadata_with_config_and_identity(local_table_directory, config, identity)
 }
 
 /// Test util function to create mooncake table metadata, which disables flush at commit.
@@ -319,7 +343,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
     data_compaction_config: DataCompactionConfig,
 ) -> (MooncakeTable, IcebergTableManager, Receiver<TableEvent>) {
     let path = temp_dir.path().to_path_buf();
-    let object_storage_cache = ObjectStorageCache::default_for_test(temp_dir);
+    let object_storage_cache = create_test_object_storage_cache(temp_dir);
     let mooncake_table_metadata =
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
     let identity_property = mooncake_table_metadata.identity.clone();
@@ -328,6 +352,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         data_compaction_config,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
@@ -336,6 +361,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
         ..Default::default()
     };
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
+    let wal_manager = WalManager::new(&wal_config);
 
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -345,7 +371,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
         identity_property,
         iceberg_table_config.clone(),
         mooncake_table_config,
-        wal_config,
+        wal_manager,
         object_storage_cache.clone(),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
@@ -380,6 +406,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
             ..Default::default()
@@ -394,6 +421,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
         ..Default::default()
     };
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
+    let wal_manager = WalManager::new(&wal_config);
 
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -403,8 +431,8 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
         identity_property,
         iceberg_table_config.clone(),
         mooncake_table_config,
-        wal_config,
-        object_storage_cache,
+        wal_manager,
+        Arc::new(object_storage_cache),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
     .await
@@ -420,10 +448,11 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
 pub(crate) async fn create_mooncake_table(
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
     iceberg_table_config: IcebergTableConfig,
-    object_storage_cache: ObjectStorageCache,
+    object_storage_cache: Arc<dyn CacheTrait>,
 ) -> MooncakeTable {
     let wal_config =
         WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &mooncake_table_metadata.path);
+    let wal_manager = WalManager::new(&wal_config);
     let table = MooncakeTable::new(
         create_test_arrow_schema().as_ref().clone(),
         ICEBERG_TEST_TABLE.to_string(),
@@ -432,7 +461,7 @@ pub(crate) async fn create_mooncake_table(
         mooncake_table_metadata.identity.clone(),
         iceberg_table_config.clone(),
         mooncake_table_metadata.config.clone(),
-        wal_config,
+        wal_manager,
         object_storage_cache,
         create_test_filesystem_accessor(&iceberg_table_config),
     )
@@ -446,7 +475,7 @@ pub(crate) async fn create_mooncake_table(
 pub(crate) async fn create_mooncake_table_and_notify(
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
     iceberg_table_config: IcebergTableConfig,
-    object_storage_cache: ObjectStorageCache,
+    object_storage_cache: Arc<dyn CacheTrait>,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let mut table = create_mooncake_table(
         mooncake_table_metadata,
@@ -463,7 +492,7 @@ pub(crate) async fn create_mooncake_table_and_notify(
 /// Test util function to create mooncake table and table notify for read test.
 pub(crate) async fn create_mooncake_table_and_notify_for_read(
     temp_dir: &TempDir,
-    object_storage_cache: ObjectStorageCache,
+    object_storage_cache: Arc<dyn CacheTrait>,
 ) -> (MooncakeTable, Receiver<TableEvent>) {
     let path = temp_dir.path().to_path_buf();
     let mooncake_table_metadata =
@@ -475,6 +504,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
             ..Default::default()
@@ -482,6 +512,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
         ..Default::default()
     };
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
+    let wal_manager = WalManager::new(&wal_config);
 
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -491,7 +522,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
         identity_property,
         iceberg_table_config.clone(),
         mooncake_table_config,
-        wal_config,
+        wal_manager,
         object_storage_cache,
         create_test_filesystem_accessor(&iceberg_table_config),
     )

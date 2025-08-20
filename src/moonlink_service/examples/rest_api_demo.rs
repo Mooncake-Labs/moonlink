@@ -59,14 +59,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 2: Create a table
     println!("\n🏗️ Creating table 'demo_users'...");
     let create_table_payload = json!({
-        "database_id": 1,
-        "table_id": 100,
+        "database": "database_name",
+        "table": "table_name",
         "schema": [
             {"name": "id", "data_type": "int32", "nullable": false},
             {"name": "name", "data_type": "string", "nullable": false},
             {"name": "email", "data_type": "string", "nullable": true},
             {"name": "age", "data_type": "int32", "nullable": true}
-        ]
+        ],
+        "table_config": {}
     });
 
     let response = client
@@ -235,8 +236,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
    Create Table:
    POST {base_url}/tables/my_table
    {{
-     \"database_id\": 1,
-     \"table_id\": 123,
+     \"schema\": \"test_schema\",
+     \"table_id\": \"test_table\",
      \"schema\": [
        {{\"name\": \"id\", \"data_type\": \"int32\", \"nullable\": false}},
        {{\"name\": \"name\", \"data_type\": \"string\", \"nullable\": true}}
@@ -270,8 +271,10 @@ async fn read_table_via_rpc() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Found {} table(s):", tables.len());
     for table in &tables {
         println!(
-            "     - Database ID: {}, Table ID: {}, Commit LSN: {}",
-            table.database_id, table.table_id, table.commit_lsn
+            "     - Database: {}, Table: {}, Commit LSN: {}",
+            table.database.clone(),
+            table.table.clone(),
+            table.commit_lsn
         );
     }
 
@@ -283,29 +286,39 @@ async fn read_table_via_rpc() -> Result<(), Box<dyn std::error::Error>> {
     // Find our demo table (database_id=1, table_id=100)
     let demo_table = tables
         .iter()
-        .find(|t| t.database_id == 1 && t.table_id == 100);
+        .find(|t| t.database == "test_schema" && t.table == "test_table");
 
     if let Some(table) = demo_table {
         println!(
-            "   📖 Reading from demo table (DB: {}, Table: {})...",
-            table.database_id, table.table_id
+            "   📖 Reading from demo table (Database: {}, Table: {})...",
+            table.database.clone(),
+            table.table.clone()
         );
 
         // Get table schema
         println!("   📐 Getting table schema...");
-        let schema_bytes =
-            moonlink_rpc::get_table_schema(&mut stream, table.database_id, table.table_id).await?;
+        let schema_bytes = moonlink_rpc::get_table_schema(
+            &mut stream,
+            table.database.clone(),
+            table.table.clone(),
+        )
+        .await?;
         println!("   Schema size: {} bytes", schema_bytes.len());
 
         // Scan table data
         println!("   🔍 Scanning table data...");
-        let data_bytes =
-            moonlink_rpc::scan_table_begin(&mut stream, table.database_id, table.table_id, 0)
-                .await?;
+        let data_bytes: Vec<u8> = moonlink_rpc::scan_table_begin(
+            &mut stream,
+            table.database.clone(),
+            table.table.clone(),
+            0,
+        )
+        .await?;
         println!("   Data size: {} bytes", data_bytes.len());
 
         // End scan
-        moonlink_rpc::scan_table_end(&mut stream, table.database_id, table.table_id).await?;
+        moonlink_rpc::scan_table_end(&mut stream, table.database.clone(), table.table.clone())
+            .await?;
         println!("   ✅ Table scan completed");
 
         // Try to decode the Arrow data (basic attempt)

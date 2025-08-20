@@ -9,6 +9,7 @@ use moonlink::{
     MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, ReadStateManager,
     TableEventManager, TableStatusReader,
 };
+
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -42,9 +43,11 @@ impl SourceType {
         }
     }
 
-    async fn finalize(&mut self) -> Result<()> {
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    async fn finalize(&mut self, postgres_drop_all: bool) -> Result<()> {
         match self {
-            SourceType::Postgres(conn) => conn.shutdown().await,
+            SourceType::Postgres(conn) => conn.shutdown(postgres_drop_all).await,
             SourceType::RestApi(_) => Ok(()),
         }
     }
@@ -151,22 +154,20 @@ impl ReplicationConnection {
     /// Add a table for PostgreSQL CDC replication
     pub async fn add_table_replication<T: std::fmt::Display>(
         &mut self,
-        table_name: &str,
+        src_table_name: &str,
         mooncake_table_id: &T,
-        table_id: u32,
         moonlink_table_config: MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
         is_recovery: bool,
     ) -> Result<SrcTableId> {
         match &mut self.source {
             SourceType::Postgres(conn) => {
-                debug!(table_name, "adding PostgreSQL table for replication");
+                debug!(src_table_name, "adding PostgreSQL table for replication");
 
                 let (src_table_id, table_resources) = conn
                     .add_table(
-                        table_name,
+                        src_table_name,
                         mooncake_table_id,
-                        table_id,
                         moonlink_table_config,
                         is_recovery,
                         &self.table_base_path,
@@ -176,7 +177,7 @@ impl ReplicationConnection {
                     .await?;
 
                 let table_state = TableState {
-                    src_table_name: table_name.to_string(),
+                    src_table_name: src_table_name.to_string(),
                     reader: table_resources.read_state_manager,
                     event_manager: table_resources.table_event_manager,
                     status_reader: table_resources.table_status_reader,
@@ -196,17 +197,16 @@ impl ReplicationConnection {
     #[allow(clippy::too_many_arguments)]
     pub async fn add_table_api<T: std::fmt::Display>(
         &mut self,
-        table_name: &str,
+        src_table_name: &str,
         mooncake_table_id: &T,
-        table_id: u32,
         arrow_schema: ArrowSchema,
         moonlink_table_config: MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
-        _is_recovery: bool,
+        is_recovery: bool,
     ) -> Result<SrcTableId> {
         match &mut self.source {
             SourceType::RestApi(conn) => {
-                debug!(table_name, "adding REST API table");
+                debug!(src_table_name, "adding REST API table");
 
                 let src_table_id = conn.next_src_table_id();
                 let table_components = TableComponents {
@@ -215,24 +215,24 @@ impl ReplicationConnection {
                     moonlink_table_config,
                 };
 
-                // Create MooncakeTable resources using the table init function
+                // Create MooncakeTable resources using the table init function.
+                let replication_state = conn.get_replication_state();
                 let mut table_resources = build_table_components(
                     mooncake_table_id.to_string(),
-                    table_id,
                     arrow_schema.clone(),
                     moonlink::row::IdentityProp::FullRow, // REST API doesn't need identity
-                    table_name.to_string(),
+                    src_table_name.to_string(),
                     src_table_id,
                     &self.table_base_path,
-                    // REST API doesn't have replication state, create a dummy one
-                    &crate::pg_replicate::replication_state::ReplicationState::new(),
+                    &replication_state,
                     table_components,
+                    is_recovery,
                 )
                 .await?;
 
                 // Add table to RestSource and connect to RestSink
                 conn.add_table(
-                    table_name.to_string(),
+                    src_table_name.to_string(),
                     src_table_id,
                     std::sync::Arc::new(arrow_schema),
                     table_resources.event_sender.clone(),
@@ -253,7 +253,7 @@ impl ReplicationConnection {
 
                 // Store table state
                 let table_state = TableState {
-                    src_table_name: table_name.to_string(),
+                    src_table_name: src_table_name.to_string(),
                     reader: table_resources.read_state_manager,
                     event_manager: table_resources.table_event_manager,
                     status_reader: table_resources.table_status_reader,
@@ -262,7 +262,7 @@ impl ReplicationConnection {
                 self.table_states.insert(src_table_id, table_state);
                 debug!(
                     src_table_id,
-                    table_name, "REST API table added successfully"
+                    src_table_name, "REST API table added successfully"
                 );
                 Ok(src_table_id)
             }
@@ -297,7 +297,11 @@ impl ReplicationConnection {
         Ok(())
     }
 
-    pub fn shutdown(mut self) -> JoinHandle<Result<()>> {
+    /// Shuts down the replication event loop and finalizes the source connection.
+    ///
+    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
+    /// which allows for recovery from the PostgreSQL replication slot.
+    pub fn shutdown(mut self, postgres_drop_all: bool) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
@@ -311,7 +315,7 @@ impl ReplicationConnection {
             }
 
             // Finalize the source connection
-            self.source.finalize().await?;
+            self.source.finalize(postgres_drop_all).await?;
 
             debug!("replication connection shutdown complete");
             Ok(())

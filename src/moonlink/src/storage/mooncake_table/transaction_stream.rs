@@ -14,7 +14,7 @@ use more_asserts as ma;
 /// 3. row belong to main table's flushed files, directly pushed to snapshot_task.new_deletions and let snapshot handle it.
 /// 4. row belong to main table's memslice, add to `pending_deletions_in_main_mem_slice`, and handle at commit time`
 ///
-pub(super) struct TransactionStreamState {
+pub(crate) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
     pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
@@ -28,7 +28,7 @@ pub(super) struct TransactionStreamState {
     /// Only safe to remove transaction stream state when there are no pending flushes.
     ongoing_flush_count: u32,
     /// Commit LSN for this transaction, set when transaction is committed.
-    commit_lsn: Option<u64>,
+    pub(crate) commit_lsn: Option<u64>,
 }
 
 /// Determines the state of a transaction stream.
@@ -65,6 +65,24 @@ pub struct TransactionStreamCommit {
 }
 
 impl TransactionStreamCommit {
+    /// Create a stream commit from disk files.
+    pub(crate) fn from_disk_files(
+        disk_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+        lsn: u64,
+    ) -> Self {
+        Self {
+            xact_id: 0, // Unused.
+            commit_lsn: lsn,
+            flushed_file_index: MooncakeIndex {
+                in_memory_index: HashSet::new(),
+                file_indices: Vec::new(),
+            },
+            flushed_files: disk_files,
+            local_deletions: Vec::new(),
+            pending_deletions: Vec::new(),
+        }
+    }
+
     /// Get flushed data files for the current streaming commit.
     pub(crate) fn get_flushed_data_files(&self) -> Vec<MooncakeDataFileRef> {
         self.flushed_files.keys().cloned().collect::<Vec<_>>()
@@ -77,7 +95,7 @@ impl TransactionStreamCommit {
     /// Return evicted files to delete.
     pub(crate) async fn import_file_index_into_cache(
         &mut self,
-        object_storage_cache: ObjectStorageCache,
+        object_storage_cache: Arc<dyn CacheTrait>,
         table_id: TableId,
     ) -> Vec<String> {
         let file_indices = &mut self.flushed_file_index.file_indices;
@@ -91,7 +109,7 @@ impl TransactionStreamCommit {
 }
 
 impl TransactionStreamState {
-    fn new(
+    pub(crate) fn new(
         schema: Arc<Schema>,
         batch_size: usize,
         identity: IdentityProp,
@@ -168,6 +186,12 @@ impl MooncakeTable {
     }
 
     pub async fn delete_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) {
+        // Check if this is an append-only table
+        if matches!(self.metadata.identity, IdentityProp::None) {
+            tracing::error!("Delete operation not supported for append-only tables");
+            return;
+        }
+
         // Record events for replay.
         if let Some(event_replay_tx) = &self.event_replay_tx {
             let table_event =
@@ -372,7 +396,28 @@ impl MooncakeTable {
     /// Decrements the pending flush count for this transaction.
     /// Handles commit and abort cleanup.
     /// Removes in memory indices and record batches from the stream state.
-    pub fn apply_stream_flush_result(&mut self, xact_id: u32, mut disk_slice: DiskSliceWriter) {
+    pub fn apply_stream_flush_result(
+        &mut self,
+        xact_id: u32,
+        mut disk_slice: DiskSliceWriter,
+        flush_event_id: BackgroundEventId,
+    ) {
+        // Record events for flush completion.
+        if let Some(event_replay_tx) = &self.event_replay_tx {
+            let table_event = replay_events::create_flush_event_completion(
+                flush_event_id,
+                disk_slice
+                    .output_files()
+                    .iter()
+                    .map(|(file, _)| file.file_id)
+                    .collect(),
+            );
+            event_replay_tx
+                .send(MooncakeTableEvent::FlushCompletion(table_event))
+                .unwrap();
+        }
+
+        // Perform table flush completion notification.
         if let Some(lsn) = disk_slice.lsn() {
             self.remove_ongoing_flush_lsn(lsn);
             self.try_set_next_flush_lsn(lsn);
@@ -463,6 +508,12 @@ impl MooncakeTable {
     }
 
     pub fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
+        // Temporarily remove to drop reference to self
+        let mut stream_state = self
+            .transaction_stream_states
+            .remove(&xact_id)
+            .expect("Stream state not found for xact_id, lsn: {xact_id, lsn}");
+
         // Record events for flush initiation.
         let flush_event_id = self.event_id_assigner.get_next_event_id();
         if let Some(event_replay_tx) = &self.event_replay_tx {
@@ -470,17 +521,12 @@ impl MooncakeTable {
                 flush_event_id,
                 /*xact_id=*/ Some(xact_id),
                 lsn,
+                stream_state.mem_slice.get_commit_check_point(),
             );
             event_replay_tx
                 .send(MooncakeTableEvent::FlushInitiation(table_event))
                 .unwrap();
         }
-
-        // Temporarily remove to drop reference to self
-        let mut stream_state = self
-            .transaction_stream_states
-            .remove(&xact_id)
-            .expect("Stream state not found for xact_id, lsn: {xact_id, lsn}");
 
         let mut disk_slice = self.prepare_stream_disk_slice(&mut stream_state, lsn)?;
 
@@ -526,13 +572,15 @@ impl MooncakeTable {
                     deletions: batch.batch.deletions.clone(),
                 },
             );
+        }
+        for (id, _) in stream_state.new_record_batches.iter() {
             assert!(
                 self.next_snapshot_task
                     .flushing_batch_lsn_map
-                    .insert(batch.id, lsn)
+                    .insert(*id, lsn)
                     .is_none(),
                 "batch id {} already in flushing_batch_lsn_map",
-                batch.id
+                *id
             );
         }
         stream_state

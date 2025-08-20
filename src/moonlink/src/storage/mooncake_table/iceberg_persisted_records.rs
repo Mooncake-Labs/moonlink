@@ -84,6 +84,7 @@ impl IcebergPersistedRecords {
     }
 
     /// Util function to validate all data files referenced by file indices are remote files.
+    #[cfg(any(test, debug_assertions))]
     fn validate_file_indices_remote(&self, file_index: &FileIndex, warehouse_uri: &str) {
         for cur_index_block in file_index.index_blocks.iter() {
             assert!(cur_index_block
@@ -94,19 +95,19 @@ impl IcebergPersistedRecords {
     }
 
     /// Validate all imported data files, file indices and index blocks point to remote files.
-    pub fn validate_imported_files_remote(&self, warehouse_uri: &str) {
+    pub fn validate_imported_files_remote(&self, _warehouse_uri: &str) {
         #[cfg(any(test, debug_assertions))]
         {
             let import_result = &self.import_result;
 
             // Validate persisted data files point to remote.
             for cur_data_file in import_result.new_data_files.iter() {
-                assert!(cur_data_file.file_path().starts_with(warehouse_uri));
+                assert!(cur_data_file.file_path().starts_with(_warehouse_uri));
             }
 
             // Validate persisted file indices and index blocks point to remote.
             for cur_file_index in import_result.new_file_indices.iter() {
-                self.validate_file_indices_remote(cur_file_index, warehouse_uri);
+                self.validate_file_indices_remote(cur_file_index, _warehouse_uri);
             }
         }
 
@@ -114,7 +115,7 @@ impl IcebergPersistedRecords {
         {
             let index_merge_results = &self.index_merge_result;
             for cur_file_index in index_merge_results.new_file_indices_imported.iter() {
-                self.validate_file_indices_remote(cur_file_index, warehouse_uri);
+                self.validate_file_indices_remote(cur_file_index, _warehouse_uri);
             }
         }
 
@@ -124,12 +125,12 @@ impl IcebergPersistedRecords {
 
             // Validate persisted data files point to remote.
             for cur_data_file in data_compaction_results.new_data_files_imported.iter() {
-                assert!(cur_data_file.file_path().starts_with(warehouse_uri));
+                assert!(cur_data_file.file_path().starts_with(_warehouse_uri));
             }
 
             // Validate persisted file indices and index blocks point to remote.
             for cur_file_index in data_compaction_results.new_file_indices_imported.iter() {
-                self.validate_file_indices_remote(cur_file_index, warehouse_uri);
+                self.validate_file_indices_remote(cur_file_index, _warehouse_uri);
             }
         }
     }

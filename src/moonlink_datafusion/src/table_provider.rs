@@ -37,12 +37,15 @@ pub struct MooncakeTableProvider {
 }
 
 impl MooncakeTableProvider {
-    pub async fn try_new(uri: &str, database_id: u32, table_id: u32, lsn: u64) -> Result<Self> {
+    pub async fn try_new(uri: &str, schema: String, table: String, lsn: u64) -> Result<Self> {
         let mut stream = UnixStream::connect(uri).await?;
-        let schema = get_table_schema(&mut stream, database_id, table_id).await?;
-        let schema = StreamReader::try_new(schema.as_slice(), None)?.schema();
-        let scan = Arc::new(MooncakeTableScan::try_new(stream, database_id, table_id, lsn).await?);
-        Ok(Self { schema, scan })
+        let table_schema = get_table_schema(&mut stream, schema.clone(), table.clone()).await?;
+        let table_schema = StreamReader::try_new(table_schema.as_slice(), None)?.schema();
+        let scan = Arc::new(MooncakeTableScan::try_new(stream, schema, table, lsn).await?);
+        Ok(Self {
+            schema: table_schema,
+            scan,
+        })
     }
 }
 
@@ -200,24 +203,24 @@ impl ParquetFileReaderFactory for MooncakeParquetFileReaderFactory {
 #[derive(Debug)]
 struct MooncakeTableScan {
     stream: Option<UnixStream>,
-    database_id: u32,
-    table_id: u32,
+    schema: String,
+    table: String,
     metadata: MooncakeTableMetadata,
 }
 
 impl MooncakeTableScan {
     async fn try_new(
         mut stream: UnixStream,
-        database_id: u32,
-        table_id: u32,
+        schema: String,
+        table: String,
         lsn: u64,
     ) -> Result<Self> {
-        let metadata = scan_table_begin(&mut stream, database_id, table_id, lsn).await?;
+        let metadata = scan_table_begin(&mut stream, schema.clone(), table.clone(), lsn).await?;
         let metadata = bincode::decode_from_slice(&metadata, bincode::config::standard())?.0;
         Ok(Self {
             stream: Some(stream),
-            database_id,
-            table_id,
+            schema,
+            table,
             metadata,
         })
     }
@@ -226,11 +229,11 @@ impl MooncakeTableScan {
 impl Drop for MooncakeTableScan {
     fn drop(&mut self) {
         let stream = self.stream.take();
-        let database_id = self.database_id;
-        let table_id = self.table_id;
+        let schema = std::mem::take(&mut self.schema);
+        let table = std::mem::take(&mut self.table);
         tokio::spawn(async move {
             let mut stream = stream.expect("stream should be set by try_new");
-            if let Err(e) = scan_table_end(&mut stream, database_id, table_id).await {
+            if let Err(e) = scan_table_end(&mut stream, schema, table).await {
                 eprintln!("scan_table_end error: {e}");
             }
         });

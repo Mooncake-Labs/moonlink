@@ -28,13 +28,13 @@ pub struct CacheEntry {
 }
 
 #[async_trait]
-pub trait CacheTrait {
+pub trait CacheTrait: std::fmt::Debug + Send + Sync {
     /// Import cache entry to the cache. If there's no enough disk space, panic directly.
     /// Precondition: the file is not managed by cache.
     #[must_use]
     #[allow(async_fn_in_trait)]
     async fn import_cache_entry(
-        &mut self,
+        &self,
         file_id: TableUniqueFileId,
         cache_entry: CacheEntry,
     ) -> (NonEvictableHandle, InlineEvictedFiles);
@@ -42,7 +42,7 @@ pub trait CacheTrait {
     /// Similar to [`delete_cache_entry`], but doesn't panic if requested entry doesn't exist.
     #[must_use]
     #[allow(async_fn_in_trait)]
-    async fn try_delete_cache_entry(&mut self, file_id: TableUniqueFileId) -> InlineEvictedFiles;
+    async fn try_delete_cache_entry(&self, file_id: TableUniqueFileId) -> InlineEvictedFiles;
 
     /// Attempt to get a pinned cache file entry.
     ///
@@ -52,7 +52,7 @@ pub trait CacheTrait {
     #[must_use]
     #[allow(async_fn_in_trait)]
     async fn get_cache_entry(
-        &mut self,
+        &self,
         file_id: TableUniqueFileId,
         remote_filepath: &str,
         filesystem_accessor: &dyn BaseFileSystemAccess,

@@ -14,7 +14,7 @@ use crate::storage::mooncake_table::{
 };
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
-use crate::storage::storage_utils::{FileId, TableUniqueFileId};
+use crate::storage::storage_utils::{FileId, RecordLocation, TableUniqueFileId};
 use crate::NonEvictableHandle;
 
 /// Type alias for background event id.
@@ -66,6 +66,8 @@ pub struct FlushEventInitiation {
     pub xact_id: Option<u32>,
     /// Flush LSN.
     pub lsn: Option<u64>,
+    /// Commit check point.
+    pub commit_check_point: RecordLocation,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -214,6 +216,7 @@ pub struct DataCompactionEventInitiation {
 pub struct DataCompactionEventCompletion {
     /// Unique event id, assigned globally.
     pub id: BackgroundEventId,
+    pub data_files: Vec<FileId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -276,11 +279,13 @@ pub fn create_flush_event_initiation(
     event_id: u64,
     xact_id: Option<u32>,
     lsn: Option<u64>,
+    commit_check_point: RecordLocation,
 ) -> FlushEventInitiation {
     FlushEventInitiation {
         id: event_id,
         xact_id,
         lsn,
+        commit_check_point,
     }
 }
 pub fn create_flush_event_completion(
@@ -484,6 +489,7 @@ pub fn create_data_compaction_event_initiation(
 }
 pub fn create_data_compaction_event_completion(
     id: BackgroundEventId,
+    data_files: Vec<FileId>,
 ) -> DataCompactionEventCompletion {
-    DataCompactionEventCompletion { id }
+    DataCompactionEventCompletion { id, data_files }
 }

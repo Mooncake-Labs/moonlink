@@ -47,6 +47,7 @@ backon = { workspace = true }
 base64 = { version = "0.22", optional = true }
 bincode = { workspace = true }
 bitstream-io = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 crc32fast = { workspace = true }
 fastbloom = { workspace = true }
@@ -59,6 +60,7 @@ itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"
 moka = { workspace = true }
+moonlink_error = { path = "../moonlink_error" }
 more-asserts = { workspace = true }
 multimap = { workspace = true }
 num-bigint = { workspace = true }
@@ -86,7 +88,6 @@ mockall = "0.13"
 pico-args = "0.5"
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
 rand = "0.9"
-regex = { workspace = true }
 rstest = "0.26"
 rstest_reuse = "0.7"
 tempfile = { workspace = true }
