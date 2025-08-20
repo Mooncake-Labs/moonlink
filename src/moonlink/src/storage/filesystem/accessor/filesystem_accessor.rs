@@ -119,6 +119,20 @@ impl FileSystemAccessor {
         dst_file.flush().await?;
         Ok(ObjectMetadata { size: file_size })
     }
+
+    fn get_write_option(&self) -> WriteOptions {
+        match self.config.storage_config {
+            #[cfg(feature = "storage-gcs")]
+            crate::storage::filesystem::storage_config::StorageConfig::Gcs {
+                multipart_upload_threshold,
+                ..
+            } => WriteOptions {
+                chunk: multipart_upload_threshold,
+                ..Default::default()
+            },
+            _ => WriteOptions::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -321,20 +335,6 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let operator = self.get_operator().await?;
         operator.delete(sanitized_object).await?;
         Ok(())
-    }
-
-    fn get_write_option(&self) -> WriteOptions {
-        match self.config.storage_config {
-            #[cfg(feature = "storage-gcs")]
-            crate::storage::filesystem::storage_config::StorageConfig::Gcs {
-                multipart_upload_threshold,
-                ..
-            } => WriteOptions {
-                chunk: multipart_upload_threshold,
-                ..Default::default()
-            },
-            _ => WriteOptions::default(),
-        }
     }
 
     async fn copy_from_local_to_remote(&self, src: &str, dst: &str) -> Result<ObjectMetadata> {

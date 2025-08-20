@@ -2,7 +2,6 @@ use crate::storage::filesystem::accessor::base_unbuffered_stream_writer::BaseUnb
 /// This module defines the interface for filesystem accessor.
 use crate::storage::filesystem::accessor::metadata::ObjectMetadata;
 use crate::Result;
-use opendal::options::WriteOptions;
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -87,7 +86,4 @@ pub trait BaseFileSystemAccess: std::fmt::Debug + Send + Sync {
 
     /// Copy from remote file [`src`] to local file [`dst`].
     async fn copy_from_remote_to_local(&self, src: &str, dst: &str) -> Result<ObjectMetadata>;
-
-    /// Get the write options for the current storage backend.
-    fn get_write_option(&self) -> WriteOptions;
 }
