@@ -5,16 +5,14 @@ mod tests {
     use crate::common::{ids_from_state, SRC_URI};
 
     use super::common::{
-        assert_scan_ids_eq,
-        crash_and_recover_backend_with_guard, current_wal_lsn, smoke_create_and_insert, TestGuard,
-        TestGuardMode, DATABASE, TABLE,
+        assert_scan_ids_eq, crash_and_recover_backend_with_guard, current_wal_lsn,
+        smoke_create_and_insert, TestGuard, TestGuardMode, DATABASE, TABLE,
     };
     use moonlink_backend::table_status::TableStatus;
     use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, SqliteMetadataStore};
 
-
     use serial_test::serial;
-    use std::collections::{HashSet};
+    use std::collections::HashSet;
 
     // ───────────────────────────── Tests ─────────────────────────────
 
@@ -377,11 +375,9 @@ mod tests {
     }
 
     #[cfg(feature = "test-utils")]
-    use crate::common::nonunique_ids_from_state;
+    use super::common::{assert_scan_nonunique_ids_eq, crash_and_recover_backend};
     #[cfg(feature = "test-utils")]
-    use super::common::{
-        assert_scan_nonunique_ids_eq, crash_and_recover_backend
-    };
+    use crate::common::nonunique_ids_from_state;
     #[cfg(feature = "test-utils")]
     use rstest::*;
     #[cfg(feature = "test-utils")]
