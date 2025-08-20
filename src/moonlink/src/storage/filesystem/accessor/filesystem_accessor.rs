@@ -323,12 +323,21 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(())
     }
 
-    async fn copy_from_local_to_remote(
-        &self,
-        src: &str,
-        dst: &str,
-        write_options: WriteOptions,
-    ) -> Result<ObjectMetadata> {
+    fn get_write_option(&self) -> WriteOptions {
+        match self.config.storage_config {
+            #[cfg(feature = "storage-gcs")]
+            crate::storage::filesystem::storage_config::StorageConfig::Gcs {
+                multipart_upload_threshold,
+                ..
+            } => WriteOptions {
+                chunk: multipart_upload_threshold,
+                ..Default::default()
+            },
+            _ => WriteOptions::default(),
+        }
+    }
+
+    async fn copy_from_local_to_remote(&self, src: &str, dst: &str) -> Result<ObjectMetadata> {
         // For small files, no need to parallelize IO operations.
         let sanitized_dst = self.sanitize_path(dst);
         let file_size = Self::get_local_file_size(src).await?;
@@ -366,8 +375,9 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         });
 
         let mut total_size = 0u64;
+
         let mut writer = operator
-            .writer_options(sanitized_dst, write_options)
+            .writer_options(sanitized_dst, self.get_write_option())
             .await?;
         while let Some(cur_chunk) = rx.recv().await {
             let cur_byte_len = cur_chunk.len();
@@ -608,9 +618,8 @@ mod tests {
 
         // Copy from src to dst.
         let dst_filepath = format!("{}/dst", &root_directory);
-        let options = WriteOptions::default();
         filesystem_accessor
-            .copy_from_local_to_remote(&src_filepath, &dst_filepath, options)
+            .copy_from_local_to_remote(&src_filepath, &dst_filepath)
             .await
             .unwrap();
 

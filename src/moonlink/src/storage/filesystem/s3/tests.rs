@@ -7,7 +7,6 @@ use crate::storage::filesystem::s3::test_guard::TestGuard;
 use crate::storage::filesystem::test_utils::writer_test_utils::*;
 
 use futures::StreamExt;
-use opendal::options::WriteOptions;
 use rstest::rstest;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -143,9 +142,8 @@ async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
     // Copy from src to dst.
     let filesystem_accessor = create_filesystem_accessor(s3_storage_config);
     let dst_filepath = format!("{warehouse_uri}/dst");
-    let write_options = WriteOptions::default();
     filesystem_accessor
-        .copy_from_local_to_remote(&src_filepath, &dst_filepath, write_options)
+        .copy_from_local_to_remote(&src_filepath, &dst_filepath)
         .await
         .unwrap();
 

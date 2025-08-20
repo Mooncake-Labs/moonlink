@@ -1,5 +1,3 @@
-use opendal::options::WriteOptions;
-
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor::operator_utils;
 use crate::storage::filesystem::accessor::test_utils::*;
@@ -39,7 +37,7 @@ async fn test_stats_object() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[rstest]
 #[case(10)]
-#[case(5 * 1024 * 1024)] // TODO(hjiang): Increase upload size.
+#[case(18 * 1024 * 1024)] // TODO(hjiang): Increase upload size.
 async fn test_stream_read(#[case] file_size: usize) {
     let (bucket, warehouse_uri) = get_test_gcs_bucket_and_warehouse();
     let _test_guard = TestGuard::new(bucket.clone()).await;
@@ -87,13 +85,8 @@ async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
     let filesystem_accessor = create_filesystem_accessor(gcs_storage_config);
     let dst_filepath = format!("{warehouse_uri}/dst");
 
-    // Use max chunk size to avoid triggering the opendal's multi-part upload, which fails for falke-GCS.
-    let write_options = WriteOptions {
-        chunk: Some(usize::MAX),
-        ..Default::default()
-    };
     filesystem_accessor
-        .copy_from_local_to_remote(&src_filepath, &dst_filepath, write_options)
+        .copy_from_local_to_remote(&src_filepath, &dst_filepath)
         .await
         .unwrap();
 

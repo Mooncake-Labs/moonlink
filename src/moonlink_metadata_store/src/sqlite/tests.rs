@@ -26,6 +26,7 @@ fn get_storage_config() -> StorageConfig {
             secret_access_key: "secret_access_key".to_string(),
             endpoint: None,
             disable_auth: false,
+            multipart_upload_threshold: None,
         };
     }
 

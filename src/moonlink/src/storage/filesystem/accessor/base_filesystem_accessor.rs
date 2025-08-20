@@ -83,13 +83,11 @@ pub trait BaseFileSystemAccess: std::fmt::Debug + Send + Sync {
     async fn delete_object(&self, object_filepath: &str) -> Result<()>;
 
     /// Copy from local file [`src`] to remote file [`dst`].
-    async fn copy_from_local_to_remote(
-        &self,
-        src: &str,
-        dst: &str,
-        options: WriteOptions,
-    ) -> Result<ObjectMetadata>;
+    async fn copy_from_local_to_remote(&self, src: &str, dst: &str) -> Result<ObjectMetadata>;
 
     /// Copy from remote file [`src`] to local file [`dst`].
     async fn copy_from_remote_to_local(&self, src: &str, dst: &str) -> Result<ObjectMetadata>;
+
+    /// Get the write options for the current storage backend.
+    fn get_write_option(&self) -> WriteOptions;
 }

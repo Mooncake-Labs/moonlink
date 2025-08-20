@@ -126,7 +126,7 @@ mod tests {
                             "root_directory": "/tmp"
                         }
                     }
-                } 
+                }
             }
         "#;
 
@@ -169,7 +169,7 @@ mod tests {
                             "secret_access_key": "secret"
                         }
                     }
-                } 
+                }
             }
         "#;
 
@@ -193,6 +193,7 @@ mod tests {
                     secret_access_key: "secret".to_string(),
                     endpoint: None,
                     disable_auth: false,
+                    multipart_upload_threshold: None,
                 },
             )),
         };
@@ -216,7 +217,7 @@ mod tests {
                             "secret_access_key": "secret"
                         }
                     }
-                } 
+                }
             }
         "#;
 
