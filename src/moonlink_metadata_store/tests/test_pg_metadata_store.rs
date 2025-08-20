@@ -6,8 +6,12 @@ use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
 use moonlink_metadata_store::PgMetadataStore;
 
 /// Test connection string.
-// TODO(Paul): Add TLS testing for metadata store
+#[cfg(not(feature = "test-tls"))]
 const SRC_TABLE_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable";
+#[cfg(feature = "test-tls")]
+const SRC_TABLE_URI: &str =
+    "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
+
 /// Test table name.
 const SRC_TABLE_NAME: &str = "table";
 /// Test destination database name.

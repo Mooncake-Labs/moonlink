@@ -1,7 +1,12 @@
-use tokio_postgres::{connect, NoTls};
+mod common;
+
+use common::test_environment::get_postgres_client;
 
 /// Test connection string.
-const URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+#[cfg(not(feature = "test-tls"))]
+const URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable";
+#[cfg(feature = "test-tls")]
+const URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
 
 #[cfg(test)]
 mod tests {
@@ -22,14 +27,7 @@ mod tests {
         const EXISTENT_TABLE: &str = "existent_table";
         const NON_EXISTENT_TABLE: &str = "non_existent_table";
 
-        let (postgres_client, connection) = connect(&get_table_uri(), NoTls).await.unwrap();
-
-        // Spawn connection driver in background to keep eventloop alive.
-        let _pg_connection = tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Postgres connection error: {e}");
-            }
-        });
+        let (postgres_client, _connection_handle) = get_postgres_client(&get_table_uri()).await;
 
         // Drop table.
         postgres_client

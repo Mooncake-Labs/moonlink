@@ -75,13 +75,11 @@ impl PostgresConnection {
 
         let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
 
-        debug!("created tls connector");
-
         let (postgres_client, connection) = connect(&uri, tls)
             .await
             .map_err(PostgresSourceError::from)?;
 
-        debug!("connected to postgres");
+        debug!(%uri, "connected to postgres");
         tokio::spawn(
             async move {
                 if let Err(e) = connection.await {

@@ -16,13 +16,15 @@ metadata-all = ["metadata-sqlite", "metadata-postgres"]
 metadata-postgres = ["postgres-types", "tokio-postgres"]
 metadata-sqlite = ["sqlx"]
 
+test-tls = []
+
 [dependencies]
 async-trait = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_error = { path = "../moonlink_error" }
 more-asserts = { workspace = true }
-native-tls = "0.2.14"
-postgres-native-tls.workspace = true
+native-tls = { workspace = true }
+postgres-native-tls = { workspace = true }
 postgres-types = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -16,8 +16,6 @@ mod tests {
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
 
-    // const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
-
     // ───────────────────────────── Tests ─────────────────────────────
 
     /// Validate `create_table` and `drop_table` across successive uses.

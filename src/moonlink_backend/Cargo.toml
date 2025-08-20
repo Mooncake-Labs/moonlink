@@ -23,7 +23,7 @@ moonlink = { path = "../moonlink", features = ["test-utils"] }
 moonlink_connectors = { path = "../moonlink_connectors" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 more-asserts = { workspace = true }
-native-tls = "0.2.14"
+native-tls = { workspace = true }
 nix = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
 postgres-native-tls = { workspace = true }

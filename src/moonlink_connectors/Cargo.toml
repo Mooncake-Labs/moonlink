@@ -29,7 +29,7 @@ num-traits = { workspace = true }
 parquet = { workspace = true }
 pg_escape = "0.1"
 pin-project-lite = "0.2"
-postgres-native-tls.workspace = true
+postgres-native-tls = { workspace = true }
 postgres-replication = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

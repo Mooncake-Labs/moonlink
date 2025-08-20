@@ -12,7 +12,7 @@ use std::{collections::HashSet, fs::File};
 use moonlink::{decode_read_state_for_testing, AccessorConfig, StorageConfig};
 use moonlink_backend::file_utils::{recreate_directory, DEFAULT_MOONLINK_TEMP_FILE_PATH};
 use moonlink_backend::{MoonlinkBackend, ReadState};
-use native_tls::{Certificate, TlsConnector};
+use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 
 /// Mooncake table database.
@@ -565,7 +565,7 @@ pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
     let root_cert_pem = std::fs::read("../../.devcontainer/certs/ca.crt").unwrap();
 
     let connector = TlsConnector::builder()
-        .add_root_certificate(Certificate::from_pem(root_cert_pem.as_slice()).unwrap())
+        .add_root_certificate(native_tls::Certificate::from_pem(root_cert_pem.as_slice()).unwrap())
         .build()
         .unwrap();
     let tls = MakeTlsConnector::new(connector);

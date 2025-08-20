@@ -3,11 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::pg_replicate::conversions::text::TextFormatConverter;
 use crate::pg_replicate::table::{ColumnSchema, LookupKey, SrcTableId, TableName, TableSchema};
 use futures::future::err;
-use native_tls::{Certificate, TlsConnector};
+use native_tls::TlsConnector;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_native_tls::{MakeTlsConnector, TlsStream};
 use postgres_replication::LogicalReplicationStream;
-use std::fs;
 use thiserror::Error;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -883,7 +882,7 @@ pub fn build_tls_connector() -> Result<MakeTlsConnector, ReplicationClientError>
     let pem_bytes = std::fs::read(file_path).unwrap();
 
     let connector = TlsConnector::builder()
-        .add_root_certificate(Certificate::from_pem(pem_bytes.as_slice()).unwrap())
+        .add_root_certificate(native_tls::Certificate::from_pem(pem_bytes.as_slice()).unwrap())
         .build()
         .unwrap();
 
