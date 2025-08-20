@@ -76,3 +76,20 @@ impl From<std::io::Error> for Error {
         Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
     }
 }
+
+impl Error {
+    pub fn get_status(&self) -> ErrorStatus {
+        match self {
+            #[cfg(feature = "metadata-postgres")]
+            Error::TokioPostgres(err) => err.status,
+            Error::PostgresRowCountError(err)
+            | Error::Sqlx(err)
+            | Error::SqliteRowCountError(err)
+            | Error::MetadataStoreFailedPrecondition(err)
+            | Error::SerdeJson(err)
+            | Error::TableIdNotFound(err)
+            | Error::ConfigFieldNotExist(err)
+            | Error::Io(err) => err.status,
+        }
+    }
+}

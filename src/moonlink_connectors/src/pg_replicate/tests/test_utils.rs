@@ -81,7 +81,10 @@ pub fn spawn_sql_executor(database_url: String) -> mpsc::UnboundedSender<String>
         });
 
         while let Some(sql) = rx.recv().await {
-            bg_client.simple_query(&sql).await.unwrap();
+            bg_client
+                .simple_query(&sql)
+                .await
+                .expect(&format!("SQL statement execution {} failed", sql));
         }
     });
     tx

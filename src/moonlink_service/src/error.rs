@@ -61,16 +61,7 @@ impl From<moonlink_rpc::Error> for Error {
     #[track_caller]
     fn from(source: moonlink_rpc::Error) -> Self {
         Error::Rpc(
-            ErrorStruct::new(
-                "RPC error".to_string(),
-                match &source {
-                    moonlink_rpc::Error::Io(err) => err.status,
-                    moonlink_rpc::Error::Decode(err) => err.status,
-                    moonlink_rpc::Error::Encode(err) => err.status,
-                    moonlink_rpc::Error::PacketTooLong(err) => err.status,
-                },
-            )
-            .with_source(source),
+            ErrorStruct::new("RPC error".to_string(), source.get_status()).with_source(source),
         )
     }
 }

@@ -9,6 +9,8 @@ use crate::storage::cache::object_storage::cache_handle::NonEvictableHandle;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::Result;
+#[cfg(test)]
+use mockall::*;
 use smallvec::SmallVec;
 
 pub type InlineEvictedFiles = SmallVec<[String; 1]>;
@@ -28,10 +30,10 @@ pub struct CacheEntry {
 }
 
 #[async_trait]
+#[cfg_attr(test, automock)]
 pub trait CacheTrait: std::fmt::Debug + Send + Sync {
     /// Import cache entry to the cache. If there's no enough disk space, panic directly.
     /// Precondition: the file is not managed by cache.
-    #[must_use]
     #[allow(async_fn_in_trait)]
     async fn import_cache_entry(
         &self,
@@ -40,7 +42,6 @@ pub trait CacheTrait: std::fmt::Debug + Send + Sync {
     ) -> (NonEvictableHandle, InlineEvictedFiles);
 
     /// Similar to [`delete_cache_entry`], but doesn't panic if requested entry doesn't exist.
-    #[must_use]
     #[allow(async_fn_in_trait)]
     async fn try_delete_cache_entry(&self, file_id: TableUniqueFileId) -> InlineEvictedFiles;
 
@@ -49,7 +50,6 @@ pub trait CacheTrait: std::fmt::Debug + Send + Sync {
     /// If the requested file is already pinned, cache handle will returned immediately without any IO operations.
     /// Otherwise, an IO operation might be performed, depending on whether the corresponding cache entry happens to be alive.
     /// If there's no sufficient disk space, return [`None`].
-    #[must_use]
     #[allow(async_fn_in_trait)]
     async fn get_cache_entry(
         &self,

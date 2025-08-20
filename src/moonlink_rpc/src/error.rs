@@ -58,3 +58,14 @@ impl From<std::num::TryFromIntError> for Error {
         )
     }
 }
+
+impl Error {
+    pub fn get_status(&self) -> ErrorStatus {
+        match self {
+            Error::Decode(err)
+            | Error::Encode(err)
+            | Error::Io(err)
+            | Error::PacketTooLong(err) => err.status,
+        }
+    }
+}
