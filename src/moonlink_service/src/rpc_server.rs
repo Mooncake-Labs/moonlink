@@ -3,7 +3,7 @@ use arrow_ipc::writer::StreamWriter;
 use moonlink_backend::MoonlinkBackend;
 use moonlink_rpc::{read, write, Request, Table};
 use std::collections::HashMap;
-use std::error::Error as StdError;
+use std::error::Error as _;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,6 +12,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tracing::info;
 
+fn is_disconnect(io: &std::io::Error) -> bool {
+    matches!(io.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
+}
+
 fn is_closed_connection(err: &Error) -> bool {
     // Direct IO error path
     if let Error::Io(error_struct) = err {
@@ -19,7 +23,7 @@ fn is_closed_connection(err: &Error) -> bool {
             .source()
             .and_then(|e| e.downcast_ref::<std::io::Error>())
         {
-            return matches!(io_err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof);
+            return is_disconnect(io_err);
         }
     }
 
@@ -34,7 +38,7 @@ fn is_closed_connection(err: &Error) -> bool {
                     .source()
                     .and_then(|e| e.downcast_ref::<std::io::Error>())
                 {
-                    return matches!(io_err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof);
+                    return is_disconnect(io_err);
                 }
             }
         }
@@ -180,5 +184,75 @@ where
                 write(&mut stream, &()).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rpc_server::start_unix_server;
+    use moonlink_backend::MoonlinkBackend;
+    use moonlink_metadata_store::SqliteMetadataStore;
+    use serial_test::serial;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc as StdArc,
+    };
+    use tempfile::TempDir;
+    use tokio::net::UnixStream;
+
+    #[tokio::test]
+    #[serial]
+    async fn unix_server_ignores_client_disconnect() {
+        // Capture panics from background tasks
+        let panic_count = StdArc::new(AtomicUsize::new(0));
+        let prev_hook = std::panic::take_hook();
+        {
+            let panic_count = StdArc::clone(&panic_count);
+            std::panic::set_hook(Box::new(move |_| {
+                panic_count.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = MoonlinkBackend::new(base_path.clone(), None, Box::new(sqlite_store))
+            .await
+            .unwrap();
+
+        let socket_path = tempdir.path().join("moonlink_test.sock");
+        let server_handle = tokio::spawn({
+            let backend = std::sync::Arc::new(backend);
+            let socket_path = socket_path.clone();
+            async move {
+                // Ignore the result since we abort the task at the end of the test
+                let _ = start_unix_server(backend, socket_path).await;
+            }
+        });
+
+        // Wait for the socket file to appear
+        for _ in 0..50 {
+            if tokio::fs::metadata(&socket_path).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Connect and immediately drop to simulate client closing connection
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        drop(stream);
+
+        // Give the server a brief moment to process the disconnect
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Ensure no panic occurred
+        assert_eq!(panic_count.load(Ordering::SeqCst), 0);
+
+        // Cleanup
+        server_handle.abort();
+        let _ = server_handle.await;
+        std::panic::set_hook(prev_hook);
     }
 }
