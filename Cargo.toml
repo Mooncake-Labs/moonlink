@@ -1,12 +1,12 @@
 [workspace]
 members = [
-  "src/moonlink",
-  "src/moonlink_backend",
-  "src/moonlink_connectors",
-  "src/moonlink_datafusion",
-  "src/moonlink_metadata_store",
-  "src/moonlink_rpc",
-  "src/moonlink_service",
+    "src/moonlink",
+    "src/moonlink_backend",
+    "src/moonlink_connectors",
+    "src/moonlink_datafusion",
+    "src/moonlink_metadata_store",
+    "src/moonlink_rpc",
+    "src/moonlink_service",
 ]
 resolver = "2"
 
