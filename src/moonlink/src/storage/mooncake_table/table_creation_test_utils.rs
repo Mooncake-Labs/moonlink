@@ -254,6 +254,23 @@ pub(crate) fn create_disk_slice_write_option(
     }
 }
 
+/// Test util function to create mooncake table metadata with the provided full config, and disabled flush at commit.
+#[cfg(feature = "chaos-test")]
+pub(crate) fn create_test_table_metadata_disable_flush_with_full_config(
+    local_table_directory: String,
+    disk_slice_write_config: DiskSliceWriterConfig,
+    index_merge_config: FileIndexMergeConfig,
+    data_compaction_config: DataCompactionConfig,
+    identity: RowIdentity,
+) -> Arc<MooncakeTableMetadata> {
+    let mut config = MooncakeTableConfig::new(local_table_directory.clone());
+    config.mem_slice_size = usize::MAX; // Disable flush at commit if not force flush.
+    config.disk_slice_writer_config = disk_slice_write_config;
+    config.file_index_config = index_merge_config;
+    config.data_compaction_config = data_compaction_config;
+    create_test_table_metadata_with_config_and_identity(local_table_directory, config, identity)
+}
+
 /// Test util function to create mooncake table metadata, which disables flush at commit.
 #[cfg(feature = "chaos-test")]
 pub(crate) fn create_test_table_metadata_disable_flush(
@@ -335,6 +352,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         data_compaction_config,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
@@ -388,6 +406,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_compaction(
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
             ..Default::default()
@@ -485,6 +504,7 @@ pub(crate) async fn create_mooncake_table_and_notify_for_read(
 
     // Create iceberg snapshot whenever `create_snapshot` is called.
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         persistence_config: IcebergPersistenceConfig {
             new_data_file_count: 0,
             ..Default::default()

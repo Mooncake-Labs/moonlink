@@ -2,10 +2,10 @@
 BEGIN;
 
 CREATE TABLE secrets (
-    id SERIAL PRIMARY KEY,          -- Unique row identifier.
-    mooncake_database TEXT,         -- Column store database name.
-    mooncake_table TEXT,            -- Column store table name.
-    secret_type TEXT,               -- One of (S3, GCS)
+    id SERIAL PRIMARY KEY,   -- Unique row identifier.
+    "database" TEXT,         -- Column store database name.
+    "table" TEXT,            -- Column store table name.
+    secret_type TEXT,        -- One of (S3, GCS)
     key_id TEXT,
     secret TEXT,
     project TEXT,          -- (optional)
@@ -13,5 +13,5 @@ CREATE TABLE secrets (
     region TEXT            -- (optional)
 );
 
--- Index to enable query on (mooncake_database, mooncake_table).
-CREATE INDEX idx_secrets_uid_oid ON secrets (mooncake_database, mooncake_table);
+-- Index to enable query on ("database", "table").
+CREATE INDEX idx_secrets_uid_oid ON secrets ("database", "table");

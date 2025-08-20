@@ -95,9 +95,12 @@ where
 /// Tests for the initial copy functionality
 #[cfg(test)]
 mod tests {
+    use std::panic::Location;
+
     use super::*;
     use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableName};
     use futures::stream;
+    use moonlink_error::ErrorStruct;
     use tokio::sync::mpsc;
     use tokio::time::{timeout, Duration};
     use tokio_postgres::types::Type;
@@ -126,11 +129,15 @@ mod tests {
 
     /// Create a simple test error for testing error propagation
     fn make_test_error() -> crate::Error {
-        crate::Error::PostgresSourceError {
-            source: Arc::new(
-                crate::pg_replicate::postgres_source::PostgresSourceError::MissingPublication,
-            ),
-        }
+        crate::Error::PostgresSourceError(ErrorStruct {
+            message: "Postgres source error".to_string(),
+            status: moonlink_error::ErrorStatus::Permanent,
+            source: Some(Arc::new(
+                crate::pg_replicate::postgres_source::PostgresSourceError::MissingPublication
+                    .into(),
+            )),
+            location: Some(Location::caller().to_string()),
+        })
     }
 
     //----------------------------------------------------------------------

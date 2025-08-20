@@ -45,6 +45,8 @@ pub enum StorageConfig {
         /// Used for fake GCS server.
         #[serde(default)]
         disable_auth: bool,
+        /// Used to overwrite write option.
+        multipart_upload_threshold: Option<usize>,
     },
 }
 
@@ -84,6 +86,7 @@ impl std::fmt::Debug for StorageConfig {
                 bucket,
                 endpoint,
                 disable_auth,
+                multipart_upload_threshold,
                 access_key_id: _,
                 secret_access_key: _,
             } => f
@@ -93,6 +96,7 @@ impl std::fmt::Debug for StorageConfig {
                 .field("bucket", bucket)
                 .field("endpoint", endpoint)
                 .field("disable_auth", disable_auth)
+                .field("multipart_upload_threshold", multipart_upload_threshold)
                 .field("access key id", &"xxxxx")
                 .field("secret access key", &"xxxxx")
                 .finish(),
@@ -183,6 +187,7 @@ mod tests {
                 secret_access_key: "fake-secret-key".to_string(),
                 endpoint: None,
                 disable_auth: false,
+                multipart_upload_threshold: None,
             }
         );
     }

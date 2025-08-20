@@ -1,3 +1,4 @@
+pub(super) mod arrow_converter;
 mod column_array_builder;
 mod moonlink_row;
 mod moonlink_type;

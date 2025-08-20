@@ -5,7 +5,6 @@ pub mod conversions;
 pub mod initial_copy;
 pub mod moonlink_sink;
 pub mod postgres_source;
-pub mod replication_state;
 pub mod table;
 pub mod table_init;
 pub mod util;
@@ -17,9 +16,9 @@ use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
-use crate::pg_replicate::replication_state::ReplicationState;
 use crate::pg_replicate::table::{SrcTableId, TableSchema};
 use crate::pg_replicate::table_init::{build_table_components, TableComponents};
+use crate::replication_state::ReplicationState;
 use crate::Result;
 use futures::StreamExt;
 use moonlink::{
@@ -141,6 +140,7 @@ impl PostgresConnection {
         schema: &TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
+        commit_lsn_tx: watch::Sender<u64>,
     ) -> Result<(bool)> {
         let src_table_id = schema.src_table_id;
         // Create a dedicated source for the copy
@@ -187,6 +187,12 @@ impl PostgresConnection {
             {
                 error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
             }
+
+            // Notify read state manager with the commit LSN for the initial copy boundary.
+            if let Err(e) = commit_lsn_tx.send(start_lsn.into()) {
+                warn!(error = ?e, table_id = src_table_id, "failed to send initial copy commit lsn");
+            }
+
             Ok(true)
         } else {
             // If there are no rows to copy, we still need to add the table to publication.
@@ -380,14 +386,16 @@ impl PostgresConnection {
         .await?;
 
         // Send command to add table to replication
+        let commit_lsn_tx = table_resources
+            .commit_lsn_tx
+            .take()
+            .expect("commit_lsn_tx is None");
+        let commit_lsn_tx_for_copy = commit_lsn_tx.clone();
         self.add_table_to_replication(
             table_schema.src_table_id,
             table_schema.clone(),
             table_resources.event_sender.clone(),
-            table_resources
-                .commit_lsn_tx
-                .take()
-                .expect("commit_lsn_tx is None"),
+            commit_lsn_tx,
             table_resources
                 .flush_lsn_rx
                 .take()
@@ -405,6 +413,7 @@ impl PostgresConnection {
                 &table_schema,
                 table_resources.event_sender.clone(),
                 is_recovery,
+                commit_lsn_tx_for_copy,
             )
             .await?;
 

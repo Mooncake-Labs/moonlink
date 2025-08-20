@@ -27,6 +27,7 @@ pub(crate) fn create_gcs_storage_config(warehouse_uri: &str) -> AccessorConfig {
         region: "".to_string(),
         access_key_id: "".to_string(),
         secret_access_key: "".to_string(),
+        multipart_upload_threshold: Some(usize::MAX),
     };
     AccessorConfig::new_with_storage_config(storage_config)
 }

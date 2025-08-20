@@ -29,7 +29,6 @@ pub(crate) async fn write_record_batch_to_iceberg(
         .to_string();
     let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
     let remote_filepath = location_generator.generate_location(&filename);
-
     // Import local parquet file to remote.
     filesystem_accessor
         .copy_from_local_to_remote(local_filepath, &remote_filepath)

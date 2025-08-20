@@ -26,6 +26,7 @@ fn get_storage_config() -> StorageConfig {
             secret_access_key: "secret_access_key".to_string(),
             endpoint: None,
             disable_auth: false,
+            multipart_upload_threshold: None,
         };
     }
 
@@ -79,7 +80,7 @@ async fn check_persisted_metadata(sqlite_metadata_store: &SqliteMetadataStore) {
         .unwrap();
     assert_eq!(metadata_entries.len(), 1);
     let table_metadata_entry = &metadata_entries[0];
-    assert_eq!(table_metadata_entry.mooncake_table, TABLE);
+    assert_eq!(table_metadata_entry.table, TABLE);
     assert_eq!(table_metadata_entry.src_table_name, SRC_TABLE_NAME);
     assert_eq!(table_metadata_entry.src_table_uri, SRC_TABLE_URI);
     assert_eq!(

@@ -1,9 +1,9 @@
 use crate::pg_replicate::util::PostgresTableRow;
 use crate::pg_replicate::{
     conversions::{cdc_event::CdcEvent, table_row::TableRow},
-    replication_state::ReplicationState,
     table::{SrcTableId, TableSchema},
 };
+use crate::replication_state::ReplicationState;
 use moonlink::TableEvent;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
@@ -220,8 +220,8 @@ impl Sink {
                 self.transaction_state.touched_tables.clear();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
-                self.replication_state
-                    .mark(PgLsn::from(commit_body.end_lsn()));
+                let pg_lsn = PgLsn::from(commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
@@ -256,8 +256,8 @@ impl Sink {
                     self.streaming_transactions_state.remove(&xact_id);
                 }
                 self.streaming_last_key = None;
-                self.replication_state
-                    .mark(PgLsn::from(stream_commit_body.end_lsn()));
+                let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
@@ -351,8 +351,8 @@ impl Sink {
                 );
             }
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
-                self.replication_state
-                    .mark(PgLsn::from(primary_keepalive_body.wal_end()));
+                let pg_lsn = PgLsn::from(primary_keepalive_body.wal_end());
+                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::StreamStop(_stream_stop_body) => {
                 debug!("Stream stop");

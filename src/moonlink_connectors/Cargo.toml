@@ -12,16 +12,19 @@ connector-pg = []
 
 [dependencies]
 arrow = { workspace = true }
+arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
 byteorder = "1.5"
-bytes = "1.0"
+bytes = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"
 futures = { workspace = true }
 moonlink = { path = "../moonlink" }
+moonlink_error = { path = "../moonlink_error" }
 num-traits = { workspace = true }
+parquet = { workspace = true }
 pg_escape = "0.1"
 pin-project-lite = "0.2"
 postgres-replication = { workspace = true }

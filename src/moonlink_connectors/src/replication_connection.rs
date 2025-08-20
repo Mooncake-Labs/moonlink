@@ -1,6 +1,7 @@
 use crate::pg_replicate::table_init::build_table_components;
 use crate::pg_replicate::PostgresConnection;
 use crate::pg_replicate::{table::SrcTableId, table_init::TableComponents};
+use crate::replication_state::ReplicationState;
 use crate::rest_ingest::rest_source::EventRequest;
 use crate::rest_ingest::RestApiConnection;
 use crate::Result;
@@ -216,6 +217,7 @@ impl ReplicationConnection {
                 };
 
                 // Create MooncakeTable resources using the table init function
+                let replication_state = ReplicationState::new();
                 let mut table_resources = build_table_components(
                     mooncake_table_id.to_string(),
                     arrow_schema.clone(),
@@ -223,8 +225,7 @@ impl ReplicationConnection {
                     src_table_name.to_string(),
                     src_table_id,
                     &self.table_base_path,
-                    // REST API doesn't have replication state, create a dummy one
-                    &crate::pg_replicate::replication_state::ReplicationState::new(),
+                    &replication_state,
                     table_components,
                     is_recovery,
                 )
@@ -248,6 +249,7 @@ impl ReplicationConnection {
                         .wal_flush_lsn_rx
                         .take()
                         .expect("wal_flush_lsn_rx not set"),
+                    replication_state,
                 )
                 .await?;
 

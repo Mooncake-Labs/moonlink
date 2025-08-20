@@ -476,3 +476,62 @@ jobs:
         run: |
           cargo test --package moonlink_connectors --lib --features connector-pg
           cargo test --package moonlink_metadata_store --tests --features metadata-postgres
+
+  # ───────────── 11 · Moonlink Service Integration Tests ─────────────
+  moonlink_service_tests:
+    name: Moonlink Service Integration Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 2.40.3
+          make-default: true
+
+      # ────────────────────── Create backend directory ─────────────────────────
+      - name: Create backend directory
+        run: |
+          mkdir -p ${{ github.workspace }}/.shared-nginx
+          chmod 777 ${{ github.workspace }}/.shared-nginx
+
+      # ─────────────────────── Start nginx manually ──────────────────────────
+      - name: Start nginx
+        run: |
+          docker run -d \
+            --name nginx \
+            -p 80:80 \
+            -v ${{ github.workspace }}/.shared-nginx:/usr/share/nginx/html:ro \
+            nginx:latest
+
+      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
+      - name: Add nginx.local to /etc/hosts
+        run: |
+          echo "127.0.0.1 nginx.local" | sudo tee -a /etc/hosts
+
+      # ───────────────────── Wait for nginx to be ready ───────────────────
+      - name: Wait for nginx
+        run: |
+          for i in {1..10}; do
+            if curl -sf http://localhost:80; then
+              echo "Nginx is ready!"
+              break
+            fi
+            echo "Waiting for nginx..."
+            sleep 2
+          done
+
+      - name: Run moonlink_service integration tests
+        timeout-minutes: 10
+        env:
+          MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
+        run: |
+          RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features standalone-test -- --nocapture

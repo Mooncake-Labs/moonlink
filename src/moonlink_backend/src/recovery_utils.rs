@@ -24,8 +24,8 @@ async fn recover_table(
     }
 
     let mooncake_table_id = MooncakeTableId {
-        mooncake_database: metadata_entry.mooncake_database,
-        mooncake_table: metadata_entry.mooncake_table,
+        database: metadata_entry.database,
+        table: metadata_entry.table,
     };
     replication_manager
         .add_table(

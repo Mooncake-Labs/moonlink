@@ -80,19 +80,16 @@ where
         let request = read(&mut stream).await?;
         match request {
             Request::CreateSnapshot {
-                mooncake_database,
-                mooncake_table,
+                database,
+                table,
                 lsn,
             } => {
-                backend
-                    .create_snapshot(mooncake_database, mooncake_table, lsn)
-                    .await
-                    .unwrap();
+                backend.create_snapshot(database, table, lsn).await.unwrap();
                 write(&mut stream, &()).await?;
             }
             Request::CreateTable {
-                mooncake_database,
-                mooncake_table,
+                database,
+                table,
                 src,
                 src_uri,
                 table_config,
@@ -100,32 +97,24 @@ where
                 // Use default mooncake config, and local filesystem for storage layer.
                 backend
                     .create_table(
-                        mooncake_database,
-                        mooncake_table,
+                        database,
+                        table,
                         src,
                         src_uri,
                         table_config,
-                        None, /* input_mooncake_database */
+                        None, /* input_database */
                     )
                     .await
                     .unwrap();
                 write(&mut stream, &()).await?;
             }
-            Request::DropTable {
-                mooncake_database,
-                mooncake_table,
-            } => {
-                backend.drop_table(mooncake_database, mooncake_table).await;
+            Request::DropTable { database, table } => {
+                backend.drop_table(database, table).await;
                 write(&mut stream, &()).await?;
             }
-            Request::GetTableSchema {
-                mooncake_database,
-                mooncake_table,
-            } => {
-                let mooncake_database = backend
-                    .get_table_schema(mooncake_database, mooncake_table)
-                    .await?;
-                let writer = StreamWriter::try_new(vec![], &mooncake_database)?;
+            Request::GetTableSchema { database, table } => {
+                let database = backend.get_table_schema(database, table).await?;
+                let writer = StreamWriter::try_new(vec![], &database)?;
                 let data = writer.into_inner()?;
                 write(&mut stream, &data).await?;
             }
@@ -134,8 +123,8 @@ where
                 let tables: Vec<Table> = tables
                     .into_iter()
                     .map(|table| Table {
-                        mooncake_database: table.mooncake_database,
-                        mooncake_table: table.mooncake_table,
+                        database: table.database,
+                        table: table.table,
                         commit_lsn: table.commit_lsn,
                         flush_lsn: table.flush_lsn,
                         iceberg_warehouse_location: table.iceberg_warehouse_location,
@@ -144,39 +133,38 @@ where
                 write(&mut stream, &tables).await?;
             }
             Request::OptimizeTable {
-                mooncake_database,
-                mooncake_table,
+                database,
+                table,
                 mode,
             } => {
                 backend
-                    .optimize_table(mooncake_database, mooncake_table, &mode)
+                    .optimize_table(database, table, &mode)
                     .await
                     .unwrap();
                 write(&mut stream, &()).await?;
             }
             Request::ScanTableBegin {
-                mooncake_database,
-                mooncake_table,
+                database,
+                table,
                 lsn,
             } => {
                 let state = backend
-                    .scan_table(
-                        mooncake_database.to_string(),
-                        mooncake_table.to_string(),
-                        Some(lsn),
-                    )
+                    .scan_table(database.to_string(), table.to_string(), Some(lsn))
                     .await
                     .unwrap();
                 write(&mut stream, &state.data).await?;
-                assert!(map
-                    .insert((mooncake_database, mooncake_table), state)
-                    .is_none());
+                assert!(map.insert((database, table), state).is_none());
             }
-            Request::ScanTableEnd {
-                mooncake_database,
-                mooncake_table,
+            Request::ScanTableEnd { database, table } => {
+                assert!(map.remove(&(database, table)).is_some());
+                write(&mut stream, &()).await?;
+            }
+            Request::LoadFiles {
+                database,
+                table,
+                files,
             } => {
-                assert!(map.remove(&(mooncake_database, mooncake_table)).is_some());
+                backend.load_files(database, table, files).await.unwrap();
                 write(&mut stream, &()).await?;
             }
         }

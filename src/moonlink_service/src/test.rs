@@ -8,13 +8,20 @@ use bytes::Bytes;
 use moonlink::decode_serialized_read_state_for_testing;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
+use serial_test::serial;
 use tokio::net::TcpStream;
 
 use crate::{start_with_config, ServiceConfig, READINESS_PROBE_PORT};
-use moonlink_rpc::{scan_table_begin, scan_table_end};
+use moonlink_rpc::{load_files, scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
-const MOONLINK_BACKEND_DIR: &str = "/workspaces/moonlink/.shared-nginx";
+fn get_moonlink_backend_dir() -> String {
+    if let Ok(backend_dir) = std::env::var("MOONLINK_BACKEND_DIR") {
+        backend_dir
+    } else {
+        "/workspaces/moonlink/.shared-nginx".to_string()
+    }
+}
 /// Local nginx server IP/port address.
 const NGINX_ADDR: &str = "http://nginx.local:80";
 /// Local moonlink REST API IP/port address.
@@ -24,7 +31,7 @@ const MOONLINK_ADDR: &str = "127.0.0.1:3031";
 /// Test database name.
 const DATABASE: &str = "test-database";
 /// Test table name.
-const TABLE: &str = "test-schema.test-table";
+const TABLE: &str = "test-table";
 
 /// Util function to delete and all subdirectories and files in the given directory.
 async fn cleanup_directory(dir: &str) {
@@ -53,8 +60,39 @@ async fn test_readiness_probe() {
     }
 }
 
+/// Util function to get table creation payload.
+fn get_create_table_payload(database: &str, table: &str) -> serde_json::Value {
+    let create_table_payload = json!({
+        "database": database,
+        "table": table,
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false},
+            {"name": "name", "data_type": "string", "nullable": false},
+            {"name": "email", "data_type": "string", "nullable": true},
+            {"name": "age", "data_type": "int32", "nullable": true}
+        ]
+    });
+    create_table_payload
+}
+
+/// Util function to create table via REST API.
+async fn create_table(client: &reqwest::Client, database: &str, table: &str) {
+    // REST API doesn't allow duplicate source table name.
+    let crafted_src_table_name = format!("{database}.{table}");
+
+    let payload = get_create_table_payload(database, table);
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+}
+
 /// Util function to load all record batches inside of the given [`path`].
-pub async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
+async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
     let resp = reqwest::get(url).await.unwrap();
     assert!(resp.status().is_success());
     let data: Bytes = resp.bytes().await.unwrap();
@@ -88,11 +126,13 @@ fn create_test_arrow_schema() -> Arc<ArrowSchema> {
     ]))
 }
 
+/// Test basic table creation, insertion and query.
 #[tokio::test]
+#[serial]
 async fn test_moonlink_standalone() {
-    cleanup_directory(MOONLINK_BACKEND_DIR).await;
+    cleanup_directory(&get_moonlink_backend_dir()).await;
     let config = ServiceConfig {
-        base_path: MOONLINK_BACKEND_DIR.to_string(),
+        base_path: get_moonlink_backend_dir(),
         data_server_uri: Some(NGINX_ADDR.to_string()),
         rest_api_port: Some(3030),
         tcp_port: Some(3031),
@@ -104,24 +144,7 @@ async fn test_moonlink_standalone() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    let create_table_payload = json!({
-        "mooncake_database": DATABASE,
-        "mooncake_table": TABLE,
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
-            {"name": "name", "data_type": "string", "nullable": false},
-            {"name": "email", "data_type": "string", "nullable": true},
-            {"name": "age", "data_type": "int32", "nullable": true}
-        ]
-    });
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{TABLE}"))
-        .header("content-type", "application/json")
-        .json(&create_table_payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(response.status().is_success());
+    create_table(&client, DATABASE, TABLE).await;
 
     // Ingest some data.
     let insert_payload = json!({
@@ -133,8 +156,9 @@ async fn test_moonlink_standalone() {
             "age": 30
         }
     });
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
     let response = client
-        .post(format!("{REST_ADDR}/ingest/{TABLE}"))
+        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
         .header("content-type", "application/json")
         .json(&insert_payload)
         .send()
@@ -148,7 +172,7 @@ async fn test_moonlink_standalone() {
         &mut moonlink_stream,
         DATABASE.to_string(),
         TABLE.to_string(),
-        0,
+        /*lsn=*/ 1,
     )
     .await
     .unwrap();
@@ -181,5 +205,60 @@ async fn test_moonlink_standalone() {
     .unwrap();
 
     // Cleanup shared directory.
-    cleanup_directory(MOONLINK_BACKEND_DIR).await;
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+}
+
+/// Testing scenario: two tables with the same name, but under different databases are created.
+#[tokio::test]
+#[serial]
+async fn test_multiple_tables_creation() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = ServiceConfig {
+        base_path: get_moonlink_backend_dir(),
+        data_server_uri: Some(NGINX_ADDR.to_string()),
+        rest_api_port: Some(3030),
+        tcp_port: Some(3031),
+    };
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create the first test table.
+    let client: reqwest::Client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE).await;
+
+    // Create the second test table.
+    create_table(&client, "second-database", TABLE).await;
+}
+
+/// Dummy testing for bulk ingest files into mooncake table.
+#[tokio::test]
+#[serial]
+async fn test_bulk_ingest_files() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = ServiceConfig {
+        base_path: get_moonlink_backend_dir(),
+        data_server_uri: Some(NGINX_ADDR.to_string()),
+        rest_api_port: Some(3030),
+        tcp_port: Some(3031),
+    };
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    let client: reqwest::Client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE).await;
+
+    // A dummy stub-level interface testing.
+    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
+    load_files(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+        /*files=*/ vec![],
+    )
+    .await
+    .unwrap();
 }

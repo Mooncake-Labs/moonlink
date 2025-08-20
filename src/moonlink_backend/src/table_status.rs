@@ -2,9 +2,9 @@
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableStatus {
     /// Mooncake database name.
-    pub mooncake_database: String,
+    pub database: String,
     /// Mooncake table name.
-    pub mooncake_table: String,
+    pub table: String,
     /// Mooncake table commit LSN.
     pub commit_lsn: u64,
     /// Iceberg flush LSN.

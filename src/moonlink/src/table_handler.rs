@@ -214,6 +214,13 @@ impl TableHandler {
                         .await;
                 }
                 // ==============================
+                // Bulk ingestion events
+                // ==============================
+                TableEvent::LoadFiles { files, lsn } => {
+                    table.batch_ingest(files, lsn).await;
+                }
+
+                // ==============================
                 // Interactive blocking events
                 // ==============================
                 //
@@ -333,10 +340,11 @@ impl TableHandler {
                 }
                 TableEvent::FinishInitialCopy { start_lsn } => {
                     debug!("finishing initial copy");
-                    if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0) {
+                    if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, start_lsn)
+                    {
                         error!(error = %e, "failed to finish initial copy");
                     }
-                    // Force create the snapshot with LSN 0
+                    // Force create the snapshot with LSN `start_lsn`
                     assert!(table.create_snapshot(SnapshotOption {
                         id: None,
                         uuid: uuid::Uuid::new_v4(),
@@ -347,7 +355,7 @@ impl TableHandler {
                         data_compaction_option: MaintenanceOption::Skip,
                     }));
                     table_handler_state.mooncake_snapshot_ongoing = true;
-                    table_handler_state.finish_initial_copy();
+                    table_handler_state.finish_initial_copy(start_lsn);
 
                     // Drop any events that have LSN less than the start LSN during apply.
                     table_handler_state.initial_persistence_lsn = Some(start_lsn);

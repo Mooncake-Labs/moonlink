@@ -49,6 +49,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Boolean => {
                 if let Some(b) = value.as_bool() {
                     Ok(RowValue::Bool(b))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -56,6 +58,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Int32 => {
                 if let Some(i) = value.as_i64() {
                     Ok(RowValue::Int32(i as i32))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -63,6 +67,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Int64 => {
                 if let Some(i) = value.as_i64() {
                     Ok(RowValue::Int64(i))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -70,6 +76,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Float32 => {
                 if let Some(f) = value.as_f64() {
                     Ok(RowValue::Float32(f as f32))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -77,6 +85,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Float64 => {
                 if let Some(f) = value.as_f64() {
                     Ok(RowValue::Float64(f))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -85,6 +95,8 @@ impl JsonToMoonlinkRowConverter {
                 if let Some(s) = value.as_str() {
                     parse_date(s)
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -93,6 +105,8 @@ impl JsonToMoonlinkRowConverter {
                 if let Some(s) = value.as_str() {
                     parse_time(s)
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -101,6 +115,8 @@ impl JsonToMoonlinkRowConverter {
                 if let Some(s) = value.as_str() {
                     parse_timestamp_with_timezone(s, tz.as_deref())
                         .map_err(|_| JsonToMoonlinkRowError::InvalidValue(field.name().clone()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -108,6 +124,8 @@ impl JsonToMoonlinkRowConverter {
             DataType::Utf8 => {
                 if let Some(s) = value.as_str() {
                     Ok(RowValue::ByteArray(s.as_bytes().to_vec()))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -120,6 +138,8 @@ impl JsonToMoonlinkRowConverter {
                             Box::new(e),
                         )
                     })
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
                 } else {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
@@ -179,13 +199,17 @@ mod tests {
 
     fn make_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("is_active", DataType::Boolean, false),
-            Field::new("score", DataType::Float64, false),
-            Field::new("id_int64", DataType::Int64, false),
-            Field::new("score_float32", DataType::Float32, false),
-            Field::new("decimal128", DataType::Decimal128(5, 2), false),
+            Field::new("id", DataType::Int32, /*nullable=*/ true),
+            Field::new("name", DataType::Utf8, /*nullable=*/ true),
+            Field::new("is_active", DataType::Boolean, /*nullable=*/ true),
+            Field::new("score", DataType::Float64, /*nullable=*/ true),
+            Field::new("id_int64", DataType::Int64, /*nullable=*/ true),
+            Field::new("score_float32", DataType::Float32, /*nullable=*/ true),
+            Field::new(
+                "decimal128",
+                DataType::Decimal128(5, 2),
+                /*nullable=*/ true,
+            ),
         ]))
     }
 
@@ -285,6 +309,30 @@ mod tests {
         assert_eq!(row.values[4], RowValue::Int64(123));
         assert_eq!(row.values[5], RowValue::Float32(100.0));
         assert_eq!(row.values[6], RowValue::Decimal(12345));
+    }
+
+    #[test]
+    fn test_conversion_with_null() {
+        let schema = make_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": null,
+            "name": null,
+            "is_active": null,
+            "score": null,
+            "id_int64": null,
+            "score_float32": null,
+            "decimal128": null
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 7);
+        assert_eq!(row.values[0], RowValue::Null);
+        assert_eq!(row.values[1], RowValue::Null);
+        assert_eq!(row.values[2], RowValue::Null);
+        assert_eq!(row.values[3], RowValue::Null);
+        assert_eq!(row.values[4], RowValue::Null);
+        assert_eq!(row.values[5], RowValue::Null);
+        assert_eq!(row.values[6], RowValue::Null);
     }
 
     #[test]

@@ -70,7 +70,7 @@ async fn create_mooncake_table_for_replay(
 ) -> MooncakeTable {
     let line = lines.next_line().await.unwrap().unwrap();
     let replay_table_metadata: ReplayTableMetadata = serde_json::from_str(&line).unwrap();
-    let table_metadata = create_test_table_metadata_disable_flush(
+    let table_metadata = create_test_table_metadata_disable_flush_with_full_config(
         replay_env
             .table_temp_dir
             .path()
@@ -78,6 +78,8 @@ async fn create_mooncake_table_for_replay(
             .unwrap()
             .to_string(),
         create_disk_writer_config(),
+        replay_table_metadata.config.file_index_config,
+        replay_table_metadata.config.data_compaction_config,
         replay_table_metadata.identity.clone(),
     );
     let object_storage_cache = if replay_table_metadata.local_filesystem_optimization_enabled {
@@ -116,7 +118,7 @@ async fn create_mooncake_table_for_replay(
 
 pub(crate) async fn replay() {
     // TODO(hjiang): Take an command line argument.
-    let replay_filepath = "/tmp/chaos_test_jld110a1ijs3";
+    let replay_filepath = "/tmp/chaos_test_5fl4gg617x7v";
     let cache_temp_dir = tempdir().unwrap();
     let table_temp_dir = tempdir().unwrap();
     let iceberg_temp_dir = tempdir().unwrap();
@@ -287,7 +289,6 @@ pub(crate) async fn replay() {
                         .is_none());
                     event_notification.notify_waiters();
                 }
-                // TODO(hjiang): Implement other background events.
                 _ => {}
             }
         }

@@ -1187,18 +1187,7 @@ async fn test_data_compaction_and_create_snapshot_with_s3() {
     // Common testing logic.
     test_data_compaction_and_create_snapshot_impl(iceberg_table_config.clone()).await;
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_data_compaction_and_create_snapshot_with_gcs() {
-    // Remote object storage for iceberg.
-    let (bucket, warehouse_uri) = gcs_test_utils::get_test_gcs_bucket_and_warehouse();
-    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
-    let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
-
-    // Common testing logic.
-    test_data_compaction_and_create_snapshot_impl(iceberg_table_config.clone()).await;
-}
+// No GCS test since fake GCS doesn't seem to support multi-part upload with over 6MiB.
 
 /// ================================
 /// Test data compaction by deletion
@@ -1322,18 +1311,7 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_with_s3() {
     // Common testing logic.
     test_data_compaction_by_deletion_and_create_snapshot_impl(iceberg_table_config.clone()).await;
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_data_compaction_by_deletion_and_create_snapshot_with_gcs() {
-    // Remote object storage for iceberg.
-    let (bucket, warehouse_uri) = gcs_test_utils::get_test_gcs_bucket_and_warehouse();
-    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
-    let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
-
-    // Common testing logic.
-    test_data_compaction_by_deletion_and_create_snapshot_impl(iceberg_table_config.clone()).await;
-}
+// No GCS test since fake GCS doesn't seem to support multi-part upload with over 6MiB.
 
 /// ================================
 /// Test empty snapshot creation
@@ -1449,6 +1427,7 @@ async fn test_small_batch_size_and_large_parquet_size() {
     let wal_manager = WalManager::new(&wal_config);
     let schema = create_test_arrow_schema();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         batch_size: 1,
         disk_slice_writer_config: DiskSliceWriterConfig {
             parquet_file_size: 1000,
@@ -1530,6 +1509,7 @@ async fn test_multiple_table_ids_for_deletion_vector() {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_path_buf();
     let mooncake_table_config = MooncakeTableConfig {
+        append_only: false,
         // Flush as long as there's new rows appended at commit.
         mem_slice_size: 1,
         // At flush, place each row in a separate parquet file.

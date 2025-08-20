@@ -119,6 +119,20 @@ impl FileSystemAccessor {
         dst_file.flush().await?;
         Ok(ObjectMetadata { size: file_size })
     }
+
+    fn get_write_option(&self) -> WriteOptions {
+        match self.config.storage_config {
+            #[cfg(feature = "storage-gcs")]
+            crate::storage::filesystem::storage_config::StorageConfig::Gcs {
+                multipart_upload_threshold,
+                ..
+            } => WriteOptions {
+                chunk: multipart_upload_threshold,
+                ..Default::default()
+            },
+            _ => WriteOptions::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -360,9 +374,11 @@ impl BaseFileSystemAccess for FileSystemAccessor {
             Ok::<(), std::io::Error>(())
         });
 
-        // Write main task.
-        let mut writer = operator.writer(sanitized_dst).await?;
         let mut total_size = 0u64;
+
+        let mut writer = operator
+            .writer_options(sanitized_dst, self.get_write_option())
+            .await?;
         while let Some(cur_chunk) = rx.recv().await {
             let cur_byte_len = cur_chunk.len();
             writer.write(cur_chunk).await?;

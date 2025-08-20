@@ -316,6 +316,11 @@ impl UnpersistedRecords {
     /// Validate invariants for persistence buffer, panic if validation fails.
     #[cfg(any(test, debug_assertions))]
     pub(super) fn validate_invariants(&self) {
+        // Skip validation for append-only tables since they don't have file indices
+        if self.mooncake_table_config.append_only {
+            return;
+        }
+
         // Validate new data files and file indices.
         let new_data_files_empty = self.new_data_files.is_empty();
         let new_file_indices_empty = self.new_file_indices.is_empty();

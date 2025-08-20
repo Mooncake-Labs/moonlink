@@ -62,6 +62,7 @@ impl TestGuard {
             mooncake_config: MooncakeConfig {
                 skip_index_merge: true,
                 skip_data_compaction: true,
+                append_only: false,
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
                 StorageConfig::FileSystem {
@@ -191,12 +192,12 @@ pub async fn create_backend_from_tempdir(tempdir: &TempDir) -> MoonlinkBackend {
 #[allow(dead_code)]
 pub async fn scan_ids(
     backend: &MoonlinkBackend,
-    mooncake_database: String,
-    mooncake_table: String,
+    database: String,
+    table: String,
     lsn: u64,
 ) -> HashSet<i64> {
     let state = backend
-        .scan_table(mooncake_database, mooncake_table, Some(lsn))
+        .scan_table(database, table, Some(lsn))
         .await
         .unwrap();
     ids_from_state(&state)
@@ -207,12 +208,12 @@ pub async fn scan_ids(
 #[allow(dead_code)]
 pub async fn scan_id_counts(
     backend: &MoonlinkBackend,
-    mooncake_database: String,
-    mooncake_table: String,
+    database: String,
+    table: String,
     lsn: u64,
 ) -> HashMap<i64, u64> {
     let state = backend
-        .scan_table(mooncake_database, mooncake_table, Some(lsn))
+        .scan_table(database, table, Some(lsn))
         .await
         .unwrap();
     nonunique_ids_from_state(&state)
@@ -223,13 +224,13 @@ pub async fn scan_id_counts(
 #[allow(dead_code)]
 pub async fn assert_scan_ids_eq(
     backend: &MoonlinkBackend,
-    mooncake_database: String,
-    mooncake_table: String,
+    database: String,
+    table: String,
     lsn: u64,
     expected: impl IntoIterator<Item = i64>,
 ) {
     let expected: HashSet<i64> = expected.into_iter().collect();
-    let actual = scan_ids(backend, mooncake_database, mooncake_table, lsn).await;
+    let actual = scan_ids(backend, database, table, lsn).await;
     assert_eq!(actual, expected);
 }
 
@@ -240,12 +241,12 @@ pub async fn assert_scan_ids_eq(
 #[allow(dead_code)]
 pub async fn assert_scan_nonunique_ids_eq(
     backend: &MoonlinkBackend,
-    mooncake_database: String,
-    mooncake_table: String,
+    database: String,
+    table: String,
     lsn: u64,
     expected_counts: &HashMap<i64, u64>,
 ) {
-    let actual = scan_id_counts(backend, mooncake_database, mooncake_table, lsn).await;
+    let actual = scan_id_counts(backend, database, table, lsn).await;
     assert_eq!(actual, *expected_counts);
 }
 
@@ -254,26 +255,18 @@ pub async fn assert_scan_nonunique_ids_eq(
 #[allow(dead_code)]
 pub async fn create_updated_iceberg_snapshot(
     backend: &MoonlinkBackend,
-    mooncake_database: &str,
-    mooncake_table: &str,
+    database: &str,
+    table: &str,
     client: &Client,
 ) -> u64 {
     let lsn = current_wal_lsn(client).await;
     // Ensure changes are reflected in Mooncake snapshot first
     backend
-        .scan_table(
-            mooncake_database.to_string(),
-            mooncake_table.to_string(),
-            Some(lsn),
-        )
+        .scan_table(database.to_string(), table.to_string(), Some(lsn))
         .await
         .unwrap();
     backend
-        .create_snapshot(
-            mooncake_database.to_string(),
-            mooncake_table.to_string(),
-            lsn,
-        )
+        .create_snapshot(database.to_string(), table.to_string(), lsn)
         .await
         .unwrap();
     lsn
@@ -416,6 +409,7 @@ fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
         mooncake_config: MooncakeConfig {
             skip_index_merge: true,
             skip_data_compaction: true,
+            append_only: false,
         },
         iceberg_config: Some(AccessorConfig::new_with_storage_config(
             StorageConfig::FileSystem {

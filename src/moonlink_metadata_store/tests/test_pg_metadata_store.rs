@@ -35,7 +35,7 @@ mod tests {
             .unwrap();
         assert_eq!(metadata_entries.len(), 1);
         let table_metadata_entry = &metadata_entries[0];
-        assert_eq!(table_metadata_entry.mooncake_table, TABLE);
+        assert_eq!(table_metadata_entry.table, TABLE);
         assert_eq!(table_metadata_entry.src_table_name, SRC_TABLE_NAME);
         assert_eq!(table_metadata_entry.src_table_uri, get_table_uri());
         assert_eq!(

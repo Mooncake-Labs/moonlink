@@ -25,14 +25,15 @@ macro_rules! rpcs {
 }
 
 rpcs! {
-    create_snapshot(mooncake_database: String, mooncake_table: String, lsn: u64) -> ();
-    create_table(mooncake_database: String, mooncake_table: String, src: String, src_uri: String, table_config: String) -> ();
-    drop_table(mooncake_database: String, mooncake_table: String) -> ();
-    get_table_schema(mooncake_database: String, mooncake_table: String) -> Vec<u8>;
+    create_snapshot(database: String, table: String, lsn: u64) -> ();
+    create_table(database: String, table: String, src: String, src_uri: String, table_config: String) -> ();
+    drop_table(database: String, table: String) -> ();
+    get_table_schema(database: String, table: String) -> Vec<u8>;
     list_tables() -> Vec<Table>;
-    optimize_table(mooncake_database: String, mooncake_table: String, mode: String) -> ();
-    scan_table_begin(mooncake_database: String, mooncake_table: String, lsn: u64) -> Vec<u8>;
-    scan_table_end(mooncake_database: String, mooncake_table: String) -> ();
+    load_files(database: String, table: String, files: Vec<String>) -> ();
+    optimize_table(database: String, table: String, mode: String) -> ();
+    scan_table_begin(database: String, table: String, lsn: u64) -> Vec<u8>;
+    scan_table_end(database: String, table: String) -> ();
 }
 
 pub async fn write<W: AsyncWrite + Unpin, S: Serialize>(writer: &mut W, data: &S) -> Result<()> {
@@ -56,8 +57,8 @@ const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Table {
-    pub mooncake_database: String,
-    pub mooncake_table: String,
+    pub database: String,
+    pub table: String,
     pub commit_lsn: u64,
     pub flush_lsn: Option<u64>,
     pub iceberg_warehouse_location: String,

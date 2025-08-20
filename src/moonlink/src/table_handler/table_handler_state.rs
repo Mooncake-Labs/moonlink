@@ -427,11 +427,11 @@ impl TableHandlerState {
         self.special_table_state = SpecialTableState::InitialCopy;
     }
 
-    pub(crate) fn finish_initial_copy(&mut self) {
+    pub(crate) fn finish_initial_copy(&mut self, lsn: u64) {
         assert_eq!(self.special_table_state, SpecialTableState::InitialCopy);
         self.special_table_state = SpecialTableState::Normal;
-        self.latest_commit_lsn = Some(0);
-        self.table_consistent_view_lsn = Some(0);
+        self.latest_commit_lsn = Some(lsn);
+        self.table_consistent_view_lsn = Some(lsn);
     }
 
     /// ============================

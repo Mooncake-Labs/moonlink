@@ -1,4 +1,5 @@
 mod batch_id_counter;
+mod batch_ingestion;
 mod data_batches;
 pub(crate) mod delete_vector;
 mod disk_slice;
@@ -324,6 +325,8 @@ impl SnapshotTask {
         // If mooncake has new transaction commits.
         (self.commit_lsn_baseline > 0 && self.commit_lsn_baseline != self.prev_commit_lsn_baseline)
             || self.force_empty_iceberg_payload
+        // If mooncake table has completed streaming transactions.
+            || !self.new_streaming_xact.is_empty()
         // If mooncake table accumulated large enough writes.
             || !self.new_disk_slices.is_empty()
             || self.new_deletions.len()
@@ -1118,6 +1121,12 @@ impl MooncakeTable {
     }
 
     pub async fn delete(&mut self, row: MoonlinkRow, lsn: u64) {
+        // Check if this is an append-only table
+        if matches!(self.metadata.identity, IdentityProp::None) {
+            tracing::error!("Delete operation not supported for append-only tables");
+            return;
+        }
+
         // Record events for replay.
         if let Some(event_replay_tx) = &self.event_replay_tx {
             let table_event = replay_events::create_delete_event(

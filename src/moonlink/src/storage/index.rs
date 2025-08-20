@@ -37,6 +37,7 @@ pub enum MemIndex {
     SinglePrimitive(hashbrown::HashTable<SinglePrimitiveKey>),
     Key(hashbrown::HashTable<KeyWithIdentity>),
     FullRow(MultiMap<PrimaryKey, RecordLocation>),
+    None, // No index needed for append-only tables
 }
 
 /// Index containing records in files
