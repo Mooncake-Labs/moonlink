@@ -15,6 +15,7 @@ use tokio_postgres::{connect, NoTls};
 
 const STREAM_NEXT_TIMEOUT_MS: u64 = 100;
 const EVENT_COLLECTION_SECS: u64 = 5;
+const PUBLIC_SCHEMA: &str = "public";
 
 async fn fetch_table_schema(publication: &str, table_name_str: &str) -> TableSchema {
     let url = database_url();
@@ -26,7 +27,7 @@ async fn fetch_table_schema(publication: &str, table_name_str: &str) -> TableSch
     });
     let mut schema_client = ReplicationClient::from_client(schema_pg_client);
     let table_name = TableName {
-        schema: "public".to_string(),
+        schema: PUBLIC_SCHEMA.to_string(),
         name: table_name_str.to_string(),
     };
     let src_table_id = schema_client
@@ -46,15 +47,11 @@ fn spawn_sql_executor(database_url: String) -> mpsc::UnboundedSender<String> {
     tokio::spawn(async move {
         let (bg_client, bg_connection) = connect(&database_url, NoTls).await.unwrap();
         tokio::spawn(async move {
-            if let Err(e) = bg_connection.await {
-                eprintln!("Background connection error: {e}");
-            }
+            bg_connection.await.unwrap();
         });
 
         while let Some(sql) = rx.recv().await {
-            if let Err(e) = bg_client.simple_query(&sql).await {
-                eprintln!("background SQL failed: {e}; sql: {sql}");
-            }
+            bg_client.simple_query(&sql).await.unwrap();
         }
     });
     tx
@@ -141,6 +138,7 @@ async fn test_composite_types() {
     let mut replication_client = create_replication_client().await;
 
     // Create replication slot using the replication client
+    // https://github.com/supabase/etl/blob/4da956c6b9be8476a1dbe87a4d88689e0671b7c1/etl/docs/Replication%20in%20Postgres.md?plain=1#L70
     replication_client
         .begin_readonly_transaction()
         .await
@@ -429,6 +427,7 @@ async fn test_null() {
         .unwrap();
 
     let mut replication_client = create_replication_client().await;
+    // https://github.com/supabase/etl/blob/4da956c6b9be8476a1dbe87a4d88689e0671b7c1/etl/docs/Replication%20in%20Postgres.md?plain=1#L70
     replication_client
         .begin_readonly_transaction()
         .await
