@@ -1,61 +1,21 @@
 #![cfg(feature = "connector-pg")]
 
-use super::test_utils::{create_replication_client, database_url, setup_connection, TestResources};
-use crate::pg_replicate::clients::postgres::ReplicationClient;
+use super::test_utils::{
+    create_publication_for_table, create_replication_client_and_slot, database_url,
+    fetch_table_schema, set_replica_identity_full, setup_connection, spawn_sql_executor,
+    TestResources,
+};
 use crate::pg_replicate::conversions::cdc_event::CdcEvent;
 use crate::pg_replicate::conversions::Cell;
 use crate::pg_replicate::postgres_source::{CdcStreamConfig, PostgresSource};
-use crate::pg_replicate::table::{TableName, TableSchema};
 use futures::StreamExt;
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio_postgres::{connect, NoTls};
 
 const STREAM_NEXT_TIMEOUT_MS: u64 = 100;
 const EVENT_COLLECTION_SECS: u64 = 5;
-const PUBLIC_SCHEMA: &str = "public";
-
-async fn fetch_table_schema(publication: &str, table_name_str: &str) -> TableSchema {
-    let url = database_url();
-    let (schema_pg_client, schema_conn) = connect(&url, NoTls).await.unwrap();
-    tokio::spawn(async move {
-        if let Err(e) = schema_conn.await {
-            eprintln!("Schema connection error: {e}");
-        }
-    });
-    let mut schema_client = ReplicationClient::from_client(schema_pg_client);
-    let table_name = TableName {
-        schema: PUBLIC_SCHEMA.to_string(),
-        name: table_name_str.to_string(),
-    };
-    let src_table_id = schema_client
-        .get_src_table_id(&table_name)
-        .await
-        .unwrap()
-        .expect("missing table id for table {table_name}");
-    schema_client
-        .get_table_schema(src_table_id, table_name, Some(publication))
-        .await
-        .unwrap()
-}
-
-/// Spawns a background SQL executor that can be used to submit arbitrary SQL in desired order with optional delays between them
-fn spawn_sql_executor(database_url: String) -> mpsc::UnboundedSender<String> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    tokio::spawn(async move {
-        let (bg_client, bg_connection) = connect(&database_url, NoTls).await.unwrap();
-        tokio::spawn(async move {
-            bg_connection.await.unwrap();
-        });
-
-        while let Some(sql) = rx.recv().await {
-            bg_client.simple_query(&sql).await.unwrap();
-        }
-    });
-    tx
-}
+// Common helpers moved to tests/test_utils.rs
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -102,20 +62,10 @@ async fn test_composite_types() {
         .unwrap();
 
     // Ensure replica identity is FULL so replication uses full row images
-    resources
-        .client()
-        .simple_query(&format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;"))
-        .await
-        .unwrap();
+    set_replica_identity_full(resources.client(), &table_name).await;
 
     // Create publication
-    resources
-        .client()
-        .simple_query(&format!(
-            "CREATE PUBLICATION {publication} FOR TABLE {table_name};"
-        ))
-        .await
-        .unwrap();
+    create_publication_for_table(resources.client(), &publication, &table_name).await;
     resources
         .client()
         .simple_query(&format!(
@@ -135,27 +85,14 @@ async fn test_composite_types() {
         .await
         .unwrap();
 
-    let mut replication_client = create_replication_client().await;
-
-    // Create replication slot using the replication client
-    // https://github.com/supabase/etl/blob/4da956c6b9be8476a1dbe87a4d88689e0671b7c1/etl/docs/Replication%20in%20Postgres.md?plain=1#L70
-    replication_client
-        .begin_readonly_transaction()
-        .await
-        .unwrap();
-    let slot_info = replication_client
-        .get_or_create_slot(&slot_name)
-        .await
-        .unwrap();
-
-    // Commit the transaction after creating the slot
-    replication_client.commit_txn().await.unwrap();
+    let (replication_client, confirmed_flush_lsn) =
+        create_replication_client_and_slot(&slot_name).await;
 
     // Create CDC stream configuration
     let cdc_config = CdcStreamConfig {
         publication: publication.clone(),
         slot_name: slot_name.clone(),
-        confirmed_flush_lsn: slot_info.confirmed_flush_lsn,
+        confirmed_flush_lsn: confirmed_flush_lsn,
     };
 
     // Create CDC stream (converted events) and attach table schema for conversion
@@ -411,37 +348,18 @@ async fn test_null() {
         ))
         .await
         .unwrap();
-    resources
-        .client()
-        .simple_query(&format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;"))
-        .await
-        .unwrap();
+    set_replica_identity_full(resources.client(), &table_name).await;
 
     // Publication
-    resources
-        .client()
-        .simple_query(&format!(
-            "CREATE PUBLICATION {publication} FOR TABLE {table_name};"
-        ))
-        .await
-        .unwrap();
+    create_publication_for_table(resources.client(), &publication, &table_name).await;
 
-    let mut replication_client = create_replication_client().await;
-    // https://github.com/supabase/etl/blob/4da956c6b9be8476a1dbe87a4d88689e0671b7c1/etl/docs/Replication%20in%20Postgres.md?plain=1#L70
-    replication_client
-        .begin_readonly_transaction()
-        .await
-        .unwrap();
-    let slot_info = replication_client
-        .get_or_create_slot(&slot_name)
-        .await
-        .unwrap();
-    replication_client.commit_txn().await.unwrap();
+    let (replication_client, confirmed_flush_lsn) =
+        create_replication_client_and_slot(&slot_name).await;
 
     let cdc_config = CdcStreamConfig {
         publication: publication.clone(),
         slot_name: slot_name.clone(),
-        confirmed_flush_lsn: slot_info.confirmed_flush_lsn,
+        confirmed_flush_lsn: confirmed_flush_lsn,
     };
 
     let mut cdc_stream = PostgresSource::create_cdc_stream(replication_client, cdc_config.clone())
