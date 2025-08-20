@@ -62,7 +62,7 @@ async fn test_replace_entry_when_max_size_exceeds() {
         .await;
 
     cache.put("key3".to_string(), "value3".to_string()).await;
-    cache.force_cleanup_for_test().await;
+    cache.run_pending_tasks().await;
 
     let all_entries = cache.dump_all_for_test().await;
 
@@ -84,7 +84,7 @@ async fn test_evict_value() {
 
     let removed = cache.evict(&"key1".to_string()).await;
 
-    cache.force_cleanup_for_test().await;
+    cache.run_pending_tasks().await;
 
     let all_entries = cache.dump_all_for_test().await;
     assert_eq!(removed, Some("value1".to_string()));
@@ -126,7 +126,7 @@ async fn test_clear_all_values() {
         .await;
 
     cache.clear().await;
-    cache.force_cleanup_for_test().await;
+    cache.run_pending_tasks().await;
 
     assert_eq!(cache.len().await, 0);
 }

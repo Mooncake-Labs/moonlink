@@ -19,7 +19,7 @@ where
             .collect()
     }
 
-    pub async fn force_cleanup_for_test(&self) {
+    pub async fn run_pending_tasks(&self) {
         self.cache.run_pending_tasks().await;
     }
 }
