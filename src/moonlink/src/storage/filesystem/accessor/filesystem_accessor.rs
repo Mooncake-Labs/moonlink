@@ -323,7 +323,12 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(())
     }
 
-    async fn copy_from_local_to_remote(&self, src: &str, dst: &str) -> Result<ObjectMetadata> {
+    async fn copy_from_local_to_remote(
+        &self,
+        src: &str,
+        dst: &str,
+        write_options: WriteOptions,
+    ) -> Result<ObjectMetadata> {
         // For small files, no need to parallelize IO operations.
         let sanitized_dst = self.sanitize_path(dst);
         let file_size = Self::get_local_file_size(src).await?;
@@ -360,9 +365,10 @@ impl BaseFileSystemAccess for FileSystemAccessor {
             Ok::<(), std::io::Error>(())
         });
 
-        // Write main task.
-        let mut writer = operator.writer(sanitized_dst).await?;
         let mut total_size = 0u64;
+        let mut writer = operator
+            .writer_options(sanitized_dst, write_options)
+            .await?;
         while let Some(cur_chunk) = rx.recv().await {
             let cur_byte_len = cur_chunk.len();
             writer.write(cur_chunk).await?;
@@ -602,8 +608,9 @@ mod tests {
 
         // Copy from src to dst.
         let dst_filepath = format!("{}/dst", &root_directory);
+        let options = WriteOptions::default();
         filesystem_accessor
-            .copy_from_local_to_remote(&src_filepath, &dst_filepath)
+            .copy_from_local_to_remote(&src_filepath, &dst_filepath, options)
             .await
             .unwrap();
 

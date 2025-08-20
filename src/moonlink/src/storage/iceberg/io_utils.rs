@@ -1,3 +1,5 @@
+use opendal::options::WriteOptions;
+
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::filesystem::storage_config::StorageConfig;
@@ -29,10 +31,10 @@ pub(crate) async fn write_record_batch_to_iceberg(
         .to_string();
     let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
     let remote_filepath = location_generator.generate_location(&filename);
-
+    let write_options = WriteOptions::default();
     // Import local parquet file to remote.
     filesystem_accessor
-        .copy_from_local_to_remote(local_filepath, &remote_filepath)
+        .copy_from_local_to_remote(local_filepath, &remote_filepath, write_options)
         .await
         .map_err(|e| {
             IcebergError::new(
@@ -67,8 +69,9 @@ pub(crate) async fn upload_index_file(
         .to_string();
     let location_generator = DefaultLocationGenerator::new(table.metadata().clone()).unwrap();
     let remote_filepath = location_generator.generate_location(&filename);
+    let write_options = WriteOptions::default();
     filesystem_accessor
-        .copy_from_local_to_remote(local_index_filepath, &remote_filepath)
+        .copy_from_local_to_remote(local_index_filepath, &remote_filepath, write_options)
         .await
         .map_err(|e| {
             IcebergError::new(
