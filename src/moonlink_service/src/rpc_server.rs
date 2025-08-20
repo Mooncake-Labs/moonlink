@@ -29,17 +29,15 @@ fn is_closed_connection(err: &Error) -> bool {
 
     // RPC wraps an RPC error which can wrap an IO error
     if let Error::Rpc(error_struct) = err {
-        if let Some(rpc_err) = error_struct
+        if let Some(moonlink_rpc::Error::Io(inner)) = error_struct
             .source()
             .and_then(|e| e.downcast_ref::<moonlink_rpc::Error>())
         {
-            if let moonlink_rpc::Error::Io(inner) = rpc_err {
-                if let Some(io_err) = inner
-                    .source()
-                    .and_then(|e| e.downcast_ref::<std::io::Error>())
-                {
-                    return is_disconnect(io_err);
-                }
+            if let Some(io_err) = inner
+                .source()
+                .and_then(|e| e.downcast_ref::<std::io::Error>())
+            {
+                return is_disconnect(io_err);
             }
         }
     }
