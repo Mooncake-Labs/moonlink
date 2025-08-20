@@ -3,6 +3,7 @@ use moonlink::{AccessorConfig, IcebergTableConfig, MoonlinkTableConfig, StorageC
 /// Test utils for postgres metadata storage tests.
 ///
 /// Create a moonlink table config for test.
+#[allow(dead_code)]
 pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
     MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {

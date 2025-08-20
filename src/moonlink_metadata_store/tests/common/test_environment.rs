@@ -3,11 +3,13 @@ use postgres_native_tls::MakeTlsConnector;
 /// Test environment to setup and cleanup a test case.
 use tokio_postgres::{connect, Client};
 
+#[allow(dead_code)]
 pub(crate) struct TestEnvironment {
     postgres_client: Client,
     _connection_handle: tokio::task::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl TestEnvironment {
     async fn delete_tables_if_exists(postgres_client: &Client) {
         postgres_client
