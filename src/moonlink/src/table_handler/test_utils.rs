@@ -22,12 +22,13 @@ use crate::{
     WalConfig, WalTransactionState,
 };
 
-use arrow_array::RecordBatch;
+use arrow_array::{Int32Array, RecordBatch, StringArray};
 use futures::StreamExt;
 use iceberg::io::FileIOBuilder;
 use iceberg::io::FileRead;
 use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::AsyncArrowWriter;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::{mpsc, watch};
@@ -353,6 +354,10 @@ impl TestEnvironment {
         .await;
     }
 
+    pub async fn bulk_upload_files(&self, files: Vec<String>, lsn: u64) {
+        self.send_event(TableEvent::LoadFiles { files, lsn }).await;
+    }
+
     // --- LSN and Verification Helpers ---
 
     /// Sets both table commit and replication LSN to the same value.
@@ -628,4 +633,25 @@ pub(crate) async fn load_one_arrow_batch(filepath: &str) -> RecordBatch {
         .transpose()
         .unwrap()
         .expect("Should have one batch")
+}
+
+/// Test util function to generate a parquet under the given [`tempdir`].
+pub(crate) async fn generate_parquet_file(tempdir: &TempDir) -> String {
+    let schema = create_test_arrow_schema();
+    let ids = Int32Array::from(vec![1, 2, 3]);
+    let names = StringArray::from(vec!["Alice", "Bob", "Charlie"]);
+    let ages = Int32Array::from(vec![10, 20, 30]);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(ids), Arc::new(names), Arc::new(ages)],
+    )
+    .unwrap();
+    let file_path = tempdir.path().join("test.parquet");
+    let file_path_str = file_path.to_str().unwrap().to_string();
+    let file = tokio::fs::File::create(file_path).await.unwrap();
+    let mut writer: AsyncArrowWriter<tokio::fs::File> =
+        AsyncArrowWriter::try_new(file, schema, /*props=*/ None).unwrap();
+    writer.write(&batch).await.unwrap();
+    writer.close().await.unwrap();
+    file_path_str
 }

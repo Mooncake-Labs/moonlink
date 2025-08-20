@@ -47,6 +47,7 @@ backon = { workspace = true }
 base64 = { version = "0.22", optional = true }
 bincode = { workspace = true }
 bitstream-io = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 crc32fast = { workspace = true }
 fastbloom = { workspace = true }

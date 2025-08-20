@@ -103,6 +103,18 @@ pub enum TableEvent {
         /// Result for mem slice flush.
         flush_result: Option<Result<DiskSliceWriter>>,
     },
+
+    /// ==============================
+    /// Bulk ingestion events
+    /// ==============================
+    ///
+    LoadFiles {
+        /// Parquet files to directly load into mooncake table, without schema validation, index construction, etc.
+        files: Vec<String>,
+        /// LSN for the bulk upload operation.
+        lsn: u64,
+    },
+
     /// ==============================
     /// Test events
     /// ==============================
@@ -118,6 +130,7 @@ pub enum TableEvent {
         xact_id: u32,
         is_recovery: bool,
     },
+
     /// ==============================
     /// Interactive blocking events
     /// ==============================
@@ -149,6 +162,7 @@ pub enum TableEvent {
     FinishInitialCopy {
         start_lsn: u64,
     },
+
     /// ==============================
     /// Table internal events
     /// ==============================

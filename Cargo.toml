@@ -28,6 +28,7 @@ async-trait = "0.1"
 backon = { version = "1.5" }
 bincode = { version = "2", features = ["serde"] }
 bitstream-io = "4.5"
+bytes = "1.0"
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"

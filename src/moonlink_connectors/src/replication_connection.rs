@@ -215,7 +215,8 @@ impl ReplicationConnection {
                     moonlink_table_config,
                 };
 
-                // Create MooncakeTable resources using the table init function
+                // Create MooncakeTable resources using the table init function.
+                let replication_state = conn.get_replication_state();
                 let mut table_resources = build_table_components(
                     mooncake_table_id.to_string(),
                     arrow_schema.clone(),
@@ -223,8 +224,7 @@ impl ReplicationConnection {
                     src_table_name.to_string(),
                     src_table_id,
                     &self.table_base_path,
-                    // REST API doesn't have replication state, create a dummy one
-                    &crate::pg_replicate::replication_state::ReplicationState::new(),
+                    &replication_state,
                     table_components,
                     is_recovery,
                 )

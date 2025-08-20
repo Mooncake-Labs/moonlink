@@ -56,6 +56,9 @@ pub struct RowEventRequest {
 ///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileEventOperation {
+    /// Insert by rows.
+    Insert,
+    /// Upload by files.
     Upload,
 }
 
@@ -63,6 +66,8 @@ pub enum FileEventOperation {
 pub struct FileEventRequest {
     /// Src table name.
     pub src_table_name: String,
+    /// File event operation.
+    pub operation: FileEventOperation,
     /// Storage config, which provides access to storage backend.
     pub storage_config: StorageConfig,
     /// Parquet files to upload, which will be processed in order.
@@ -92,13 +97,23 @@ pub enum RestEvent {
         lsn: u64,
         timestamp: SystemTime,
     },
-    FileEvent {
-        operation: FileEventOperation,
-        table_events: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<RestEvent>>>>,
-    },
     Commit {
         lsn: u64,
         timestamp: SystemTime,
+    },
+    FileInsertEvent {
+        /// Source table id.
+        src_table_id: SrcTableId,
+        /// Used for file row insertion operation.
+        table_events: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<RestEvent>>>>,
+    },
+    FileUploadEvent {
+        /// Source table id.
+        src_table_id: SrcTableId,
+        /// Used to directly ingest into mooncake table.
+        files: Vec<String>,
+        /// LSN for the ingestion event.
+        lsn: u64,
     },
 }
 
@@ -235,28 +250,42 @@ impl RestSource {
             .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
         let src_table_id = *src_table_id;
 
-        let (file_upload_row_tx, file_upload_row_rx) = tokio::sync::mpsc::unbounded_channel();
-        let lsn_generator = self.lsn_generator.clone();
-        let storage_config = request.storage_config.clone();
-        let parquet_files = request.files.clone();
+        match request.operation {
+            FileEventOperation::Insert => {
+                let (file_upload_row_tx, file_upload_row_rx) =
+                    tokio::sync::mpsc::unbounded_channel();
+                let lsn_generator = self.lsn_generator.clone();
+                let storage_config = request.storage_config.clone();
+                let parquet_files = request.files.clone();
 
-        tokio::task::spawn(async move {
-            Self::generate_table_events_for_file_upload(
-                src_table_id,
-                lsn_generator,
-                storage_config,
-                parquet_files,
-                file_upload_row_tx,
-            )
-            .await;
-        });
+                tokio::task::spawn(async move {
+                    Self::generate_table_events_for_file_upload(
+                        src_table_id,
+                        lsn_generator,
+                        storage_config,
+                        parquet_files,
+                        file_upload_row_tx,
+                    )
+                    .await;
+                });
 
-        let file_upload_row_rx = Arc::new(Mutex::new(file_upload_row_rx));
-        let file_rest_event = RestEvent::FileEvent {
-            operation: FileEventOperation::Upload,
-            table_events: file_upload_row_rx,
-        };
-        Ok(vec![file_rest_event])
+                let file_upload_row_rx = Arc::new(Mutex::new(file_upload_row_rx));
+                let file_rest_event = RestEvent::FileInsertEvent {
+                    src_table_id,
+                    table_events: file_upload_row_rx,
+                };
+                Ok(vec![file_rest_event])
+            }
+            FileEventOperation::Upload => {
+                let lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
+                let file_rest_event = RestEvent::FileUploadEvent {
+                    src_table_id,
+                    files: request.files.clone(),
+                    lsn,
+                };
+                Ok(vec![file_rest_event])
+            }
+        }
     }
 
     /// Process an event request, which is operated on a row.
@@ -434,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_file_upload_request_success() {
+    async fn test_process_file_insertion_request_success() {
         let tempdir = TempDir::new().unwrap();
         let filepath = generate_parquet_file(&tempdir).await;
 
@@ -450,6 +479,7 @@ mod tests {
 
         let request = FileEventRequest {
             src_table_name: "test_table".to_string(),
+            operation: FileEventOperation::Insert,
             storage_config: StorageConfig::FileSystem {
                 root_directory: tempdir.path().to_str().unwrap().to_string(),
                 atomic_write_dir: None,
@@ -462,11 +492,7 @@ mod tests {
 
         // Check file events.
         match &events[0] {
-            RestEvent::FileEvent {
-                operation,
-                table_events,
-            } => {
-                assert_eq!(*operation, FileEventOperation::Upload);
+            RestEvent::FileInsertEvent { table_events, .. } => {
                 let rest_events = get_all_rest_events(table_events.clone()).await.unwrap();
                 // There're 3 append events and 1 commit event.
                 assert_eq!(rest_events.len(), 4);
@@ -501,6 +527,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_process_file_upload_request_success() {
+        let tempdir = TempDir::new().unwrap();
+        let filepath = generate_parquet_file(&tempdir).await;
+
+        let mut source = RestSource::new();
+        let schema = make_test_schema();
+        source
+            .add_table(
+                /*src_table_name=*/ "test_table".to_string(),
+                /*src_table_id=*/ 1,
+                schema,
+            )
+            .unwrap();
+
+        let request = FileEventRequest {
+            src_table_name: "test_table".to_string(),
+            operation: FileEventOperation::Upload,
+            storage_config: StorageConfig::FileSystem {
+                root_directory: tempdir.path().to_str().unwrap().to_string(),
+                atomic_write_dir: None,
+            },
+            files: vec![filepath.clone()],
+        };
+        let events = source.process_file_request(&request).unwrap();
+        assert_eq!(events.len(), 1);
+
+        // Check file events.
+        match &events[0] {
+            RestEvent::FileUploadEvent {
+                src_table_id,
+                files,
+                lsn,
+            } => {
+                assert_eq!(*src_table_id, 1);
+                assert_eq!(*files, vec![filepath]);
+                assert_eq!(*lsn, 1);
+            }
+            _ => panic!("Receive unexpected rest event {:?}", events[0]),
+        }
+    }
+
+    #[tokio::test]
     async fn test_process_file_upload_request_failed() {
         let mut source = RestSource::new();
         let schema = make_test_schema();
@@ -514,6 +582,7 @@ mod tests {
 
         let request = FileEventRequest {
             src_table_name: "test_table".to_string(),
+            operation: FileEventOperation::Insert,
             storage_config: StorageConfig::FileSystem {
                 root_directory: "/non_existent_dir".to_string(),
                 atomic_write_dir: None,
@@ -525,11 +594,7 @@ mod tests {
 
         // Check file events.
         match &events[0] {
-            RestEvent::FileEvent {
-                operation,
-                table_events,
-            } => {
-                assert_eq!(*operation, FileEventOperation::Upload);
+            RestEvent::FileInsertEvent { table_events, .. } => {
                 let rest_events = get_all_rest_events(table_events.clone()).await;
                 assert!(rest_events.is_err());
             }

@@ -28,7 +28,7 @@ pub(crate) struct TransactionStreamState {
     /// Only safe to remove transaction stream state when there are no pending flushes.
     ongoing_flush_count: u32,
     /// Commit LSN for this transaction, set when transaction is committed.
-    commit_lsn: Option<u64>,
+    pub(crate) commit_lsn: Option<u64>,
 }
 
 /// Determines the state of a transaction stream.
@@ -65,6 +65,24 @@ pub struct TransactionStreamCommit {
 }
 
 impl TransactionStreamCommit {
+    /// Create a stream commit from disk files.
+    pub(crate) fn from_disk_files(
+        disk_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+        lsn: u64,
+    ) -> Self {
+        Self {
+            xact_id: 0, // Unused.
+            commit_lsn: lsn,
+            flushed_file_index: MooncakeIndex {
+                in_memory_index: HashSet::new(),
+                file_indices: Vec::new(),
+            },
+            flushed_files: disk_files,
+            local_deletions: Vec::new(),
+            pending_deletions: Vec::new(),
+        }
+    }
+
     /// Get flushed data files for the current streaming commit.
     pub(crate) fn get_flushed_data_files(&self) -> Vec<MooncakeDataFileRef> {
         self.flushed_files.keys().cloned().collect::<Vec<_>>()
@@ -91,7 +109,7 @@ impl TransactionStreamCommit {
 }
 
 impl TransactionStreamState {
-    fn new(
+    pub(crate) fn new(
         schema: Arc<Schema>,
         batch_size: usize,
         identity: IdentityProp,

@@ -122,7 +122,6 @@ impl ReadStateManager {
                     )
                     .await;
             }
-
             self.wait_for_relevant_lsn_change(
                 requested_lsn.unwrap(),
                 current_replication_lsn,

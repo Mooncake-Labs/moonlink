@@ -3,6 +3,13 @@ use crate::MoonlinkSecretType;
 use crate::MoonlinkTableSecret;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct WriteOption {
+    /// Used to overwrite write option.
+    #[serde(default)]
+    pub multipart_upload_threshold: Option<usize>,
+}
+
 /// StorageConfig contains configuration for multiple storage backends.
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub enum StorageConfig {
@@ -45,6 +52,9 @@ pub enum StorageConfig {
         /// Used for fake GCS server.
         #[serde(default)]
         disable_auth: bool,
+        /// Write options, only overwrite if specified.
+        #[serde(default)]
+        write_option: Option<WriteOption>,
     },
 }
 
@@ -84,6 +94,7 @@ impl std::fmt::Debug for StorageConfig {
                 bucket,
                 endpoint,
                 disable_auth,
+                write_option,
                 access_key_id: _,
                 secret_access_key: _,
             } => f
@@ -93,6 +104,7 @@ impl std::fmt::Debug for StorageConfig {
                 .field("bucket", bucket)
                 .field("endpoint", endpoint)
                 .field("disable_auth", disable_auth)
+                .field("write_option", write_option)
                 .field("access key id", &"xxxxx")
                 .field("secret access key", &"xxxxx")
                 .finish(),
@@ -183,6 +195,7 @@ mod tests {
                 secret_access_key: "fake-secret-key".to_string(),
                 endpoint: None,
                 disable_auth: false,
+                write_option: None,
             }
         );
     }

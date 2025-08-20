@@ -1187,7 +1187,18 @@ async fn test_data_compaction_and_create_snapshot_with_s3() {
     // Common testing logic.
     test_data_compaction_and_create_snapshot_impl(iceberg_table_config.clone()).await;
 }
-// No GCS test since fake GCS doesn't seem to support multi-part upload with over 6MiB.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "storage-gcs")]
+async fn test_data_compaction_and_create_snapshot_with_gcs() {
+    // Remote object storage for iceberg.
+    let (bucket, warehouse_uri) = gcs_test_utils::get_test_gcs_bucket_and_warehouse();
+    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
+    let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
+
+    // Common testing logic.
+    test_data_compaction_and_create_snapshot_impl(iceberg_table_config.clone()).await;
+}
 
 /// ================================
 /// Test data compaction by deletion
@@ -1311,7 +1322,18 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_with_s3() {
     // Common testing logic.
     test_data_compaction_by_deletion_and_create_snapshot_impl(iceberg_table_config.clone()).await;
 }
-// No GCS test since fake GCS doesn't seem to support multi-part upload with over 6MiB.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "storage-gcs")]
+async fn test_data_compaction_by_deletion_and_create_snapshot_with_gcs() {
+    // Remote object storage for iceberg.
+    let (bucket, warehouse_uri) = gcs_test_utils::get_test_gcs_bucket_and_warehouse();
+    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
+    let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
+
+    // Common testing logic.
+    test_data_compaction_by_deletion_and_create_snapshot_impl(iceberg_table_config.clone()).await;
+}
 
 /// ================================
 /// Test empty snapshot creation

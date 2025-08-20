@@ -72,7 +72,7 @@ impl SnapshotTableState {
     /// Util function to validate data files and file indices match each other.
     #[cfg(any(test, debug_assertions))]
     fn assert_data_files_and_file_indices_match(&self) {
-        // Skip validation for append-only tables since they don't have file indices
+        // Skip validation for append-only tables since they don't have file indices.
         if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
             return;
         }

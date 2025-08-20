@@ -12,7 +12,7 @@ use mooncake_table_id::MooncakeTableId;
 pub use moonlink::ReadState;
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 pub use moonlink_connectors::rest_ingest::rest_source::{
-    EventRequest, FileEventOperation, RowEventOperation, RowEventRequest,
+    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
 };
 use moonlink_connectors::ReplicationManager;
 pub use moonlink_connectors::REST_API_URI;

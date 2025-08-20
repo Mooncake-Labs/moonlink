@@ -84,7 +84,7 @@ where
                 table,
                 lsn,
             } => {
-                backend.create_snapshot(database, table, lsn).await.unwrap();
+                backend.create_snapshot(database, table, lsn).await?;
                 write(&mut stream, &()).await?;
             }
             Request::CreateTable {
@@ -104,8 +104,7 @@ where
                         table_config,
                         None, /* input_database */
                     )
-                    .await
-                    .unwrap();
+                    .await?;
                 write(&mut stream, &()).await?;
             }
             Request::DropTable { database, table } => {
@@ -137,10 +136,7 @@ where
                 table,
                 mode,
             } => {
-                backend
-                    .optimize_table(database, table, &mode)
-                    .await
-                    .unwrap();
+                backend.optimize_table(database, table, &mode).await?;
                 write(&mut stream, &()).await?;
             }
             Request::ScanTableBegin {
@@ -150,8 +146,7 @@ where
             } => {
                 let state = backend
                     .scan_table(database.to_string(), table.to_string(), Some(lsn))
-                    .await
-                    .unwrap();
+                    .await?;
                 write(&mut stream, &state.data).await?;
                 assert!(map.insert((database, table), state).is_none());
             }
@@ -164,7 +159,7 @@ where
                 table,
                 files,
             } => {
-                backend.load_files(database, table, files).await.unwrap();
+                backend.load_files(database, table, files).await?;
                 write(&mut stream, &()).await?;
             }
         }

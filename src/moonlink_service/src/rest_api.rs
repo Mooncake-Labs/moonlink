@@ -5,9 +5,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use moonlink::StorageConfig;
+use moonlink_backend::table_config::TableConfig;
 use moonlink_backend::{
-    table_config::{MooncakeConfig, TableConfig},
-    EventRequest, RowEventOperation, RowEventRequest, REST_API_URI,
+    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
+    REST_API_URI,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,16 +32,32 @@ impl ApiState {
     }
 }
 
+/// ====================
+/// Error message
+/// ====================
+///
+/// Error response structure
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    pub error: String,
+    pub message: String,
+}
+
+/// ====================
+/// Create table
+/// ====================
+///
 /// Request structure for table creation
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableRequest {
     pub database: String,
     pub table: String,
     pub schema: Vec<FieldSchema>,
+    pub table_config: TableConfig,
 }
 
 /// Field schema definition
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FieldSchema {
     pub name: String,
     pub data_type: String,
@@ -55,6 +73,10 @@ pub struct CreateTableResponse {
     pub schema: String,
 }
 
+/// ====================
+/// Data ingestion
+/// ====================
+///
 /// Request structure for data ingestion
 #[derive(Debug, Deserialize)]
 pub struct IngestRequest {
@@ -71,13 +93,30 @@ pub struct IngestResponse {
     pub operation: String,
 }
 
-/// Error response structure
+/// ====================
+/// File upload
+/// ====================
+///
+#[derive(Debug, Deserialize)]
+pub struct FileUploadRequest {
+    /// Ingestion operation.
+    pub operation: String,
+    /// Files to ingest into mooncake table.
+    pub files: Vec<String>,
+    /// Storage configuration to access files.
+    pub storage_config: StorageConfig,
+}
+
 #[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
+pub struct FileUploadResponse {
+    pub status: String,
     pub message: String,
 }
 
+/// ====================
+/// Health check
+/// ====================
+///
 /// Health check response
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -92,6 +131,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/health", get(health_check))
         .route("/tables/{table}", post(create_table))
         .route("/ingest/{table}", post(ingest_data))
+        .route("/upload/{table}", post(upload_files))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -169,19 +209,8 @@ async fn create_table(
 
     let arrow_schema = Schema::new(fields);
 
-    // TODO(hjiang):
-    // 1. Moonlink compaction doesn't support sort key, which breaks ordering for bulk ingestion.
-    // 2. A better API is to enable config in `CreateTableRequest`, but that requires moonlink repo to extract all configs out of "moonlink" crate.
-    let table_config = TableConfig {
-        mooncake_config: MooncakeConfig {
-            skip_data_compaction: true,
-            skip_index_merge: true,
-            append_only: true,
-        },
-        iceberg_config: None,
-    };
     // Serialization not expect to fail.
-    let serialized_table_config = serde_json::to_string(&table_config).unwrap();
+    let serialized_table_config = serde_json::to_string(&payload.table_config).unwrap();
 
     // Create table in backend
     match state
@@ -219,6 +248,62 @@ async fn create_table(
             ))
         }
     }
+}
+
+/// File upload endpoint.
+async fn upload_files(
+    Path(src_table_name): Path<String>,
+    State(state): State<ApiState>,
+    Json(payload): Json<FileUploadRequest>,
+) -> Result<Json<FileUploadResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received file upload request for table '{}': {:?}",
+        src_table_name, payload
+    );
+
+    let operation = match payload.operation.as_str() {
+        "insert" => FileEventOperation::Insert,
+        "upload" => FileEventOperation::Upload,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_operation".to_string(),
+                    message: format!(
+                        "Invalid operation '{}'. Must be 'insert' or 'upload'",
+                        payload.operation
+                    ),
+                }),
+            ));
+        }
+    };
+
+    // Create REST request.
+    let file_event_request = FileEventRequest {
+        src_table_name: src_table_name.clone(),
+        operation,
+        storage_config: payload.storage_config,
+        files: payload.files,
+    };
+    let rest_event_request = EventRequest::FileRequest(file_event_request);
+    state
+        .backend
+        .send_event_request(rest_event_request)
+        .await
+        .map_err(|e| {
+            error!("Failed to send event request: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "file_upload_failed".to_string(),
+                    message: format!("Failed to process request: {e}"),
+                }),
+            )
+        })?;
+    Ok(Json(FileUploadResponse {
+        status: "success".to_string(),
+        message: "File queued for ingestion".to_string(),
+    }))
 }
 
 /// Data ingestion endpoint

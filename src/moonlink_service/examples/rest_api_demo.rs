@@ -66,7 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             {"name": "name", "data_type": "string", "nullable": false},
             {"name": "email", "data_type": "string", "nullable": true},
             {"name": "age", "data_type": "int32", "nullable": true}
-        ]
+        ],
+        "table_config": {}
     });
 
     let response = client

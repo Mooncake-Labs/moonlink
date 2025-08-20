@@ -2345,3 +2345,28 @@ async fn test_append_only_table_basic() {
     env.shutdown().await;
     println!("Basic append-only table test passed!");
 }
+
+/// Testing scenario: batch upload parquet files into mooncake table.
+#[tokio::test]
+async fn test_batch_ingestion() {
+    let temp_dir = tempdir().unwrap();
+    let mooncake_table_config = MooncakeTableConfig {
+        append_only: true, // Enable append-only mode
+        batch_size: 2,
+        mem_slice_size: 1000,
+        snapshot_deletion_record_count: 1000,
+        temp_files_directory: temp_dir.path().to_str().unwrap().to_string(),
+        disk_slice_writer_config: DiskSliceWriterConfig::default(),
+        data_compaction_config: DataCompactionConfig::default(),
+        file_index_config: FileIndexMergeConfig::default(),
+        persistence_config: IcebergPersistenceConfig::default(),
+    };
+    let env = TestEnvironment::new(temp_dir, mooncake_table_config).await;
+
+    let disk_file = generate_parquet_file(&env.temp_dir).await;
+    env.bulk_upload_files(vec![disk_file], /*lsn=*/ 10).await;
+
+    // Validate bulk ingestion result.
+    env.set_readable_lsn(10);
+    env.verify_snapshot(10, &[1, 2, 3]).await;
+}

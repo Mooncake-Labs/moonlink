@@ -166,3 +166,6 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
 
 #[cfg(all(test, feature = "standalone-test"))]
 mod test;
+
+#[cfg(all(test, feature = "standalone-test"))]
+mod test_utils;

@@ -2,6 +2,7 @@ pub mod error;
 mod pg_replicate;
 mod replication_connection;
 mod replication_manager;
+pub mod replication_state;
 pub mod rest_ingest;
 
 pub use error::*;

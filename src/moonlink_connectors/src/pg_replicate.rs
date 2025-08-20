@@ -5,7 +5,6 @@ pub mod conversions;
 pub mod initial_copy;
 pub mod moonlink_sink;
 pub mod postgres_source;
-pub mod replication_state;
 pub mod table;
 pub mod table_init;
 pub mod util;
@@ -17,9 +16,9 @@ use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
-use crate::pg_replicate::replication_state::ReplicationState;
 use crate::pg_replicate::table::{SrcTableId, TableSchema};
 use crate::pg_replicate::table_init::{build_table_components, TableComponents};
+use crate::replication_state::ReplicationState;
 use crate::Result;
 use futures::StreamExt;
 use moonlink::{
