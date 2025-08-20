@@ -12,6 +12,37 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tracing::info;
 
+fn is_closed_connection(err: &Error) -> bool {
+    // Direct IO error path
+    if let Error::Io(error_struct) = err {
+        if let Some(io_err) = error_struct
+            .source()
+            .and_then(|e| e.downcast_ref::<std::io::Error>())
+        {
+            return matches!(io_err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof);
+        }
+    }
+
+    // RPC wraps an RPC error which can wrap an IO error
+    if let Error::Rpc(error_struct) = err {
+        if let Some(rpc_err) = error_struct
+            .source()
+            .and_then(|e| e.downcast_ref::<moonlink_rpc::Error>())
+        {
+            if let moonlink_rpc::Error::Io(inner) = rpc_err {
+                if let Some(io_err) = inner
+                    .source()
+                    .and_then(|e| e.downcast_ref::<std::io::Error>())
+                {
+                    return matches!(io_err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof);
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Start the Unix socket RPC server and serve requests until the task is aborted.
 pub async fn start_unix_server(
     backend: Arc<MoonlinkBackend>,
@@ -31,14 +62,7 @@ pub async fn start_unix_server(
         let backend = Arc::clone(&backend);
         tokio::spawn(async move {
             match handle_stream(backend, stream).await {
-                Err(Error::Rpc(error_struct))
-                    if error_struct
-                        .source()
-                        .and_then(|src| src.downcast_ref::<std::io::Error>())
-                        .map(|io_err| {
-                            matches!(io_err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
-                        })
-                        .unwrap_or(false) => {}
+                Err(e) if is_closed_connection(&e) => {}
                 Err(e) => panic!("Unexpected Unix RPC server error: {e}"),
                 Ok(()) => {}
             }
@@ -56,14 +80,7 @@ pub async fn start_tcp_server(backend: Arc<MoonlinkBackend>, addr: SocketAddr) -
         let backend = Arc::clone(&backend);
         tokio::spawn(async move {
             match handle_stream(backend, stream).await {
-                Err(Error::Rpc(error_struct))
-                    if error_struct
-                        .source()
-                        .and_then(|src| src.downcast_ref::<std::io::Error>())
-                        .map(|io_err| {
-                            matches!(io_err.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
-                        })
-                        .unwrap_or(false) => {}
+                Err(e) if is_closed_connection(&e) => {}
                 Err(e) => panic!("Unexpected TCP RPC server error: {e}"),
                 Ok(()) => {}
             }
