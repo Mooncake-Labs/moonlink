@@ -1,11 +1,18 @@
+use crate::pg_replicate::clients::postgres::build_tls_connector;
 use crate::pg_replicate::table::{TableName, TableSchema};
 use crate::pg_replicate::ReplicationClient;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_postgres::connect;
 use tokio_postgres::types::PgLsn;
-use tokio_postgres::{connect, NoTls};
 
-const DEFAULT_DB_URL: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+#[cfg(feature = "test-tls")]
+const DEFAULT_DB_URL: &str =
+    "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
+
+#[cfg(not(feature = "test-tls"))]
+const DEFAULT_DB_URL: &str =
+    "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable";
 
 pub fn database_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DB_URL.to_string())
@@ -13,7 +20,8 @@ pub fn database_url() -> String {
 
 pub async fn setup_connection() -> tokio_postgres::Client {
     let database_url = database_url();
-    let (client, connection) = connect(&database_url, NoTls).await.unwrap();
+    let tls = build_tls_connector().unwrap();
+    let (client, connection) = connect(&database_url, tls).await.unwrap();
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("Postgres connection error: {e}");
@@ -38,7 +46,8 @@ pub async fn create_replication_client() -> ReplicationClient {
 /// using an optional publication context for column filtering.
 pub async fn fetch_table_schema(publication: &str, table_name_str: &str) -> TableSchema {
     let url = database_url();
-    let (schema_pg_client, schema_conn) = connect(&url, NoTls).await.unwrap();
+    let tls = build_tls_connector().unwrap();
+    let (schema_pg_client, schema_conn) = connect(&url, tls).await.unwrap();
     tokio::spawn(async move {
         if let Err(e) = schema_conn.await {
             eprintln!("Schema connection error: {e}");
@@ -65,7 +74,8 @@ pub async fn fetch_table_schema(publication: &str, table_name_str: &str) -> Tabl
 pub fn spawn_sql_executor(database_url: String) -> mpsc::UnboundedSender<String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let (bg_client, bg_connection) = connect(&database_url, NoTls).await.unwrap();
+        let tls = build_tls_connector().unwrap();
+        let (bg_client, bg_connection) = connect(&database_url, tls).await.unwrap();
         tokio::spawn(async move {
             bg_connection.await.unwrap();
         });
