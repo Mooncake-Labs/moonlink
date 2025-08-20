@@ -82,12 +82,35 @@ async fn test_evict_value() {
         ])
         .await;
 
-    cache.evict(&"key1".to_string()).await;
+    let removed = cache.evict(&"key1".to_string()).await;
+
     cache.force_cleanup_for_test().await;
 
     let all_entries = cache.dump_all_for_test().await;
-
+    assert_eq!(removed, Some("value1".to_string()));
     assert_eq!(cache.len().await, 1);
+    assert!(all_entries.contains(&("key2".to_string(), "value2".to_string())));
+}
+
+#[tokio::test]
+async fn test_evict_non_existing_key() {
+    use crate::storage::cache::metadata::test_utils::MokaCacheTestBuilder;
+
+    let cache = MokaCacheTestBuilder::new().build::<String, String>();
+
+    cache
+        .initialize_for_test(vec![
+            ("key1".to_string(), "value1".to_string()),
+            ("key2".to_string(), "value2".to_string()),
+        ])
+        .await;
+
+    let removed = cache.evict(&"not_exist".to_string()).await;
+
+    let all_entries = cache.dump_all_for_test().await;
+    assert_eq!(cache.len().await, 2);
+    assert_eq!(removed, None);
+    assert!(all_entries.contains(&("key1".to_string(), "value1".to_string())));
     assert!(all_entries.contains(&("key2".to_string(), "value2".to_string())));
 }
 

@@ -86,8 +86,30 @@ where
         self.cache.invalidate_all();
     }
 
-    async fn evict(&self, key: &K) {
-        self.cache.invalidate(key).await;
+    /// Removes the entry for the specified `key` from the cache.
+    ///
+    /// # Behavior
+    /// - If the key **exists**:
+    ///   The entry is removed and the previous value is returned as `Some(V)`.
+    ///
+    /// - If the key **does not exist**:
+    ///   Returns `None`.
+    ///   No panic, no error, no log - the operation silently passes.
+    ///
+    /// # Example
+    /// ```
+    /// use your_crate::MokaCache;
+    ///
+    /// # async fn example() {
+    ///     let cache = MokaCache::new();
+    ///     cache.insert("a", 1).await;
+    ///
+    ///     assert_eq!(cache.evict(&"a").await, Some(1)); // removed value
+    ///     assert_eq!(cache.evict(&"a").await, None);    // already gone, silently ignored
+    /// # }
+    /// ``
+    async fn evict(&self, key: &K) -> Option<V> {
+        self.cache.remove(key).await
     }
 
     async fn len(&self) -> u64 {

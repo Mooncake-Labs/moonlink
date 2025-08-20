@@ -19,7 +19,9 @@ where
 
     async fn clear(&self);
 
-    async fn evict(&self, key: &K);
+    async fn evict(&self, key: &K) -> Option<V>
+    where
+        V: Clone;
 
     async fn len(&self) -> u64;
 }
