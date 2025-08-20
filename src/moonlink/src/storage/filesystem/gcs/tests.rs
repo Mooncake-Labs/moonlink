@@ -88,8 +88,10 @@ async fn test_copy_from_local_to_remote(#[case] file_size: usize) {
     let dst_filepath = format!("{warehouse_uri}/dst");
 
     // Use max chunk size to avoid triggering the opendal's multi-part upload, which fails for falke-GCS.
-    let mut write_options = WriteOptions::default();
-    write_options.chunk = Some(usize::MAX);
+    let write_options = WriteOptions {
+        chunk: Some(usize::MAX),
+        ..Default::default()
+    };
     filesystem_accessor
         .copy_from_local_to_remote(&src_filepath, &dst_filepath, write_options)
         .await
