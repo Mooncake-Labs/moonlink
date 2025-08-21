@@ -269,9 +269,13 @@ impl MoonlinkBackend {
                 "index" => writer.initiate_index_merge().await,
                 "full" => writer.initiate_full_compaction().await,
                 _ => {
-                    return Err(Error::InvalidArgumentError(format!(
+                    // return Err(Error::InvalidArgumentError(format!(
+                    //     "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"
+                    // )))
+                    //
+                    return Err(format!(
                         "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"
-                    )))
+                    ).into());
                 }
             }
         };

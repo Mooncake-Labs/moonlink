@@ -7,6 +7,7 @@ use moonlink_metadata_store::error::Error as MoonlinkMetadataStoreError;
 use std::num::ParseIntError;
 use std::panic::Location;
 use std::result;
+use std::string::String;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -31,8 +32,8 @@ pub enum Error {
     #[error("{0}")]
     MoonlinkMetadataStoreError(ErrorStruct),
 
-    #[error("Invalid argument: {0}")]
-    InvalidArgumentError(String),
+    #[error("{0}")]
+    InvalidArgumentError(ErrorStruct),
 
     #[error("{0}")]
     TokioWatchRecvError(ErrorStruct),
@@ -66,6 +67,19 @@ impl From<ParseIntError> for Error {
             message: "Parse integer error".to_string(),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
+            location: Some(Location::caller().to_string()),
+        })
+    }
+}
+
+/// Any `String` converted into `Error` is always an InvalidArgumentError.
+impl From<String> for Error {
+    #[track_caller]
+    fn from(message: String) -> Self {
+        Error::InvalidArgumentError(ErrorStruct {
+            message,
+            status: ErrorStatus::Permanent,
+            source: None,
             location: Some(Location::caller().to_string()),
         })
     }
