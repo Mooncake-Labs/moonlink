@@ -189,10 +189,6 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
     (Schema::new(fields), identity)
 }
 
-pub fn _table_schema_to_iceberg_schema(_table_schema: &TableSchema) -> Schema {
-    todo!("Iceberg: convert postgres table schema to iceberg schema!")
-}
-
 pub(crate) struct PostgresTableRow(pub TableRow);
 
 const ARROW_EPOCH: chrono::NaiveDate = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();

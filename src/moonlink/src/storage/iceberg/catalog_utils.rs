@@ -18,6 +18,13 @@ pub fn create_catalog(
     Ok(Box::new(FileCatalog::new(accessor_config, iceberg_schema)?))
 }
 
+/// Create a catalog with no schema provided.
+pub fn create_catalog_without_schema(
+    accessor_config: AccessorConfig,
+) -> IcebergResult<Box<dyn MoonlinkCatalog>> {
+    Ok(Box::new(FileCatalog::new_without_schema(accessor_config)?))
+}
+
 /// Test util function to create catalog with provided filesystem accessor.
 #[cfg(test)]
 pub fn create_catalog_with_filesystem_accessor(

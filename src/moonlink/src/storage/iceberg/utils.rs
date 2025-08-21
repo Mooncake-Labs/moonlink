@@ -126,7 +126,7 @@ pub(crate) async fn get_table_if_exists<C: MoonlinkCatalog + ?Sized>(
     table_name: &str,
 ) -> IcebergResult<Option<IcebergTable>> {
     let namespace_ident = NamespaceIdent::from_strs(namespace).unwrap();
-    let table_ident = TableIdent::new(namespace_ident.clone(), table_name.to_string());
+    let table_ident = TableIdent::new(namespace_ident, table_name.to_string());
 
     let table_exists = catalog.table_exists(&table_ident).await?;
     if !table_exists {

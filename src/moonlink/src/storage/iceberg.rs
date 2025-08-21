@@ -1,9 +1,11 @@
+pub mod base_iceberg_schema_fetcher;
 pub(super) mod catalog_utils;
 mod data_file_manifest_manager;
 pub(super) mod deletion_vector;
 mod deletion_vector_manifest_manager;
 pub(super) mod file_catalog;
 mod file_index_manifest_manager;
+pub mod iceberg_schema_fetcher;
 mod iceberg_schema_manager;
 pub(super) mod iceberg_table_config;
 mod iceberg_table_loader;
@@ -58,3 +60,6 @@ mod file_catalog_test;
 
 #[cfg(test)]
 mod mock_filesystem_test;
+
+#[cfg(test)]
+mod schema_fetcher_test;
