@@ -48,11 +48,8 @@ pub type Result<T> = result::Result<T, Error>;
 
 impl Error {
     #[track_caller]
-    pub fn invalid_argument(mode: &str) -> Self {
-        Self::InvalidArgumentError(
-            ErrorStruct::new(format!(
-            "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"), ErrorStatus::Permanent)
-        )
+    pub fn invalid_argument(message: String) -> Self {
+        Self::InvalidArgumentError(ErrorStruct::new(message, ErrorStatus::Permanent))
     }
 }
 
