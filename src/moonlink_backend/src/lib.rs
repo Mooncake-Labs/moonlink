@@ -273,9 +273,7 @@ impl MoonlinkBackend {
                     //     "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"
                     // )))
                     //
-                    return Err(format!(
-                        "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"
-                    ).into());
+                    return Err(Error::invalid_argument(mode));
                 }
             }
         };

@@ -7,7 +7,6 @@ use moonlink_metadata_store::error::Error as MoonlinkMetadataStoreError;
 use std::num::ParseIntError;
 use std::panic::Location;
 use std::result;
-use std::string::String;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -47,6 +46,16 @@ pub enum Error {
 
 pub type Result<T> = result::Result<T, Error>;
 
+impl Error {
+    #[track_caller]
+    pub fn invalid_argument(mode: &str) -> Self {
+        Self::InvalidArgumentError(
+            ErrorStruct::new(format!(
+            "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"), ErrorStatus::Permanent)
+        )
+    }
+}
+
 impl From<PostgresSourceError> for Error {
     #[track_caller]
     fn from(source: PostgresSourceError) -> Self {
@@ -67,19 +76,6 @@ impl From<ParseIntError> for Error {
             message: "Parse integer error".to_string(),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
-            location: Some(Location::caller().to_string()),
-        })
-    }
-}
-
-/// Any `String` converted into `Error` is always an InvalidArgumentError.
-impl From<String> for Error {
-    #[track_caller]
-    fn from(message: String) -> Self {
-        Error::InvalidArgumentError(ErrorStruct {
-            message,
-            status: ErrorStatus::Permanent,
-            source: None,
             location: Some(Location::caller().to_string()),
         })
     }
