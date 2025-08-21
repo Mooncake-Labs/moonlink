@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::schema_provider::MooncakeSchemaProvider;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use std::any::Any;
@@ -12,8 +12,10 @@ pub struct MooncakeCatalogProvider {
 
 impl MooncakeCatalogProvider {
     pub async fn try_new(uri: String) -> Result<Self> {
-        UnixStream::connect(&uri).await?;
-        Ok(Self { uri })
+        match UnixStream::connect(&uri).await {
+            Ok(_) => Ok(Self { uri }),
+            Err(e) => Err(Error::Io(e)),
+        }
     }
 }
 
