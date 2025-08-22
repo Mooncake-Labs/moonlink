@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::rest_api::ListTablesResponse;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use bytes::Bytes;
 use moonlink::decode_serialized_read_state_for_testing;
+use moonlink_backend::table_status::TableStatus;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use serial_test::serial;
@@ -10,7 +12,7 @@ use tokio::net::TcpStream;
 
 use crate::test_utils::*;
 use crate::{start_with_config, ServiceConfig, READINESS_PROBE_PORT};
-use moonlink_rpc::{list_tables, load_files, scan_table_begin, scan_table_end};
+use moonlink_rpc::{load_files, scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
 fn get_moonlink_backend_dir() -> String {
@@ -134,8 +136,7 @@ async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
     );
 }
 
-/// Util function to list tables via REST API.
-async fn list_tables(client: &reqwest::Client) {
+async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
     let response = client
         .get(format!("{REST_ADDR}/tables"))
         .header("content-type", "application/json")
@@ -146,6 +147,8 @@ async fn list_tables(client: &reqwest::Client) {
         response.status().is_success(),
         "Response status is {response:?}"
     );
+    let payload: ListTablesResponse = response.json().await.unwrap();
+    payload.tables
 }
 
 /// Util function to load all record batches inside of the given [`path`].
@@ -506,15 +509,14 @@ async fn test_drop_table() {
     create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
 
     // List table before drop.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let list_results = list_tables(&mut moonlink_stream).await.unwrap();
+    let list_results = list_tables(&client).await;
     assert_eq!(list_results.len(), 1);
 
     // Drop test table.
     drop_table(&client, DATABASE, TABLE).await;
 
     // List table before drop.
-    let list_results = list_tables(&mut moonlink_stream).await.unwrap();
+    let list_results = list_tables(&client).await;
     assert_eq!(list_results.len(), 0);
 }
 
@@ -547,8 +549,7 @@ async fn test_list_tables() {
     .await;
 
     // List test tables.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let mut list_results = list_tables(&mut moonlink_stream).await.unwrap();
+    let mut list_results = list_tables(&client).await;
     assert_eq!(list_results.len(), 2);
     list_results.sort_by(|a, b| {
         (

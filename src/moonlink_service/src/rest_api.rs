@@ -95,9 +95,9 @@ pub struct DropTableResponse {
 /// List table
 /// ====================
 ///
-/// Response structure for table drop.
-#[derive(Debug, Serialize)]
-pub struct ListTableResponse {
+/// Response structure for table list.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListTablesResponse {
     pub status: String,
     pub message: String,
     pub tables: Vec<TableStatus>,
@@ -340,9 +340,9 @@ async fn drop_table(
 /// Table list endpoint
 async fn list_tables(
     State(state): State<ApiState>,
-) -> Result<Json<ListTableResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ListTablesResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.backend.list_tables().await {
-        Ok(tables) => Ok(Json(ListTableResponse {
+        Ok(tables) => Ok(Json(ListTablesResponse {
             status: "success".into(),
             message: "Tables listed successfully".into(),
             tables,
