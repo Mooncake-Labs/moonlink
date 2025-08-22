@@ -1,3 +1,4 @@
+# to deploy: kubectl apply -f deploy/aws/dev/deployment/moonlink_deployment.yaml && kubectl set env -n default deploy/moonlink-deployment-dev DATA_SERVER_URI=<moonlink_service_uri>:8080
 apiVersion: apps/v1
 kind: Deployment
 metadata:
