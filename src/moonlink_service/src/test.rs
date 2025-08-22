@@ -134,6 +134,20 @@ async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
     );
 }
 
+/// Util function to list tables via REST API.
+async fn list_tables(client: &reqwest::Client) {
+    let response = client
+        .get(format!("{REST_ADDR}/tables"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+}
+
 /// Util function to load all record batches inside of the given [`path`].
 async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
     let resp = reqwest::get(url).await.unwrap();

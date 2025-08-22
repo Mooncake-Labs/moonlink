@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// Current table status.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableStatus {
     /// Mooncake database name.
     pub database: String,

@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use moonlink::StorageConfig;
-use moonlink_backend::table_config::TableConfig;
+use moonlink_backend::{table_config::TableConfig, table_status::TableStatus};
 use moonlink_backend::{
     EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
     REST_API_URI,
@@ -92,6 +92,18 @@ pub struct DropTableResponse {
 }
 
 /// ====================
+/// List table
+/// ====================
+///
+/// Response structure for table drop.
+#[derive(Debug, Serialize)]
+pub struct ListTableResponse {
+    pub status: String,
+    pub message: String,
+    pub tables: Vec<TableStatus>,
+}
+
+/// ====================
 /// Data ingestion
 /// ====================
 ///
@@ -147,6 +159,7 @@ pub struct HealthResponse {
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .route("/tables", get(list_tables))
         .route("/tables/{table}", post(create_table))
         .route("/tables/{table}", delete(drop_table))
         .route("/ingest/{table}", post(ingest_data))
@@ -322,6 +335,26 @@ async fn drop_table(
         status: "success".to_string(),
         message: "Table dropped successfully".to_string(),
     }))
+}
+
+/// Table list endpoint
+async fn list_tables(
+    State(state): State<ApiState>,
+) -> Result<Json<ListTableResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state.backend.list_tables().await {
+        Ok(tables) => Ok(Json(ListTableResponse {
+            status: "success".into(),
+            message: "Tables listed successfully".into(),
+            tables,
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "table_list_failed".to_string(),
+                message: format!("Failed to list table: {e}"),
+            }),
+        )),
+    }
 }
 
 /// File upload endpoint.
