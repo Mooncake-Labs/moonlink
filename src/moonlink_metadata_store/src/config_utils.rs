@@ -101,11 +101,11 @@ impl MoonlinkTableConfigForPersistence {
 }
 
 /// Parse moonlink table config into json value to persist into postgres, and return the secret entry.
+/// TODO(hjiang): Handle namespace better.
 /// Returns:
 /// - serialized json value of the persisted config
 /// - iceberg secret entry
 /// - wal secret entry
-/// TODO(hjiang): Handle namespace better.
 pub(crate) fn parse_moonlink_table_config(
     moonlink_table_config: MoonlinkTableConfig,
 ) -> Result<(

@@ -1,6 +1,5 @@
 use crate::base_metadata_store::MetadataStoreTrait;
 use crate::sqlite::sqlite_metadata_store::SqliteMetadataStore;
-use crate::test_utils::{get_gcs_moonlink_table_config, get_s3_moonlink_table_config};
 use moonlink::{AccessorConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig, WalConfig};
 
 use tempfile::{tempdir, TempDir};
@@ -167,6 +166,7 @@ async fn test_table_metadata_store_and_load() {
 #[cfg(feature = "storage-s3")]
 #[tokio::test]
 async fn test_table_metadata_store_and_load_s3() {
+    use crate::test_utils::get_s3_moonlink_table_config;
     let tmp_dir = tempdir().unwrap();
     let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
 
@@ -195,6 +195,7 @@ async fn test_table_metadata_store_and_load_s3() {
 #[cfg(feature = "storage-gcs")]
 #[tokio::test]
 async fn test_table_metadata_store_and_load_gcs() {
+    use crate::test_utils::get_gcs_moonlink_table_config;
     let tmp_dir = tempdir().unwrap();
     let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
 
