@@ -1,8 +1,8 @@
 use crate::error::Result;
 use moonlink::{
     AccessorConfig, DataCompactionConfig, DiskSliceWriterConfig, FileIndexMergeConfig,
-    IcebergPersistenceConfig, IcebergTableConfig, MooncakeTableConfig, MoonlinkSecretType,
-    MoonlinkTableConfig, MoonlinkTableSecret, StorageConfig,
+    IcebergPersistenceConfig, IcebergTableConfig, MooncakeTableConfig, MooncakeTableId,
+    MoonlinkSecretType, MoonlinkTableConfig, MoonlinkTableSecret, StorageConfig, WalConfig,
 };
 /// This module contains util functions related to moonlink config.
 use serde::{Deserialize, Serialize};
@@ -21,15 +21,12 @@ struct IcebergTableConfigForPersistence {
     table_name: String,
 }
 
-impl IcebergTableConfigForPersistence {
-    /// Get bucket for iceberg table config, only applies to object storage backend.
-    #[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
-    fn get_bucket_name(&self) -> Option<String> {
-        if let Ok(url) = Url::parse(&self.warehouse_uri) {
-            return Some(url.host_str()?.to_string());
-        }
-        None
+#[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
+fn get_bucket_name(warehouse_uri: &str) -> Option<String> {
+    if let Ok(url) = Url::parse(warehouse_uri) {
+        return Some(url.host_str()?.to_string());
     }
+    None
 }
 
 /// Struct for mooncake table config.
@@ -77,6 +74,8 @@ struct MoonlinkTableConfigForPersistence {
     mooncake_table_config: MooncakeTableConfigForPersistence,
     /// Iceberg table configuration.
     iceberg_table_config: IcebergTableConfigForPersistence,
+    /// WAL root URI
+    wal_root_uri: String,
 }
 
 impl MoonlinkTableConfigForPersistence {
@@ -105,9 +104,14 @@ impl MoonlinkTableConfigForPersistence {
 /// TODO(hjiang): Handle namespace better.
 pub(crate) fn parse_moonlink_table_config(
     moonlink_table_config: MoonlinkTableConfig,
-) -> Result<(serde_json::Value, Option<MoonlinkTableSecret>)> {
+) -> Result<(
+    serde_json::Value,
+    Option<MoonlinkTableSecret>,
+    Option<MoonlinkTableSecret>,
+)> {
     // Serialize mooncake table config.
     let iceberg_config = moonlink_table_config.iceberg_table_config;
+    let wal_config = moonlink_table_config.wal_table_config;
     let mooncake_config = moonlink_table_config.mooncake_table_config;
     let persisted = MoonlinkTableConfigForPersistence {
         iceberg_table_config: IcebergTableConfigForPersistence {
@@ -127,22 +131,26 @@ pub(crate) fn parse_moonlink_table_config(
             persistence_config: mooncake_config.persistence_config.clone(),
             append_only: mooncake_config.append_only,
         },
+        wal_root_uri: wal_config.get_accessor_config().get_root_path(),
     };
     let config_json = serde_json::to_value(&persisted)?;
 
     // Extract table secret entry.
-    let security_metadata_entry = iceberg_config
+    let iceberg_secret_entry = iceberg_config
         .accessor_config
         .extract_security_metadata_entry();
+    let wal_secret_entry = wal_config
+        .get_accessor_config()
+        .extract_security_metadata_entry();
 
-    Ok((config_json, security_metadata_entry))
+    Ok((config_json, iceberg_secret_entry, wal_secret_entry))
 }
 
 /// Recover filesystem config from persisted config and secret.
 ///
 /// For local filesystem, atomic write option is by default disabled, and it's caller's responsibility to enable if necessary.
-fn recover_storage_config(
-    persisted_config: &MoonlinkTableConfigForPersistence,
+fn reconstruct_storage_config_from_root(
+    root_uri: &str,
     secret_entry: Option<MoonlinkTableSecret>,
 ) -> StorageConfig {
     if let Some(secret_entry) = secret_entry {
@@ -152,10 +160,7 @@ fn recover_storage_config(
                 return StorageConfig::Gcs {
                     project: secret_entry.project.unwrap(),
                     region: secret_entry.region.unwrap(),
-                    bucket: persisted_config
-                        .iceberg_table_config
-                        .get_bucket_name()
-                        .unwrap(),
+                    bucket: get_bucket_name(root_uri).unwrap(),
                     access_key_id: secret_entry.key_id,
                     secret_access_key: secret_entry.secret,
                     endpoint: secret_entry.endpoint,
@@ -169,24 +174,21 @@ fn recover_storage_config(
                     access_key_id: secret_entry.key_id,
                     secret_access_key: secret_entry.secret,
                     region: secret_entry.region.unwrap(),
-                    bucket: persisted_config
-                        .iceberg_table_config
-                        .get_bucket_name()
-                        .unwrap(),
+                    bucket: get_bucket_name(root_uri).unwrap(),
                     endpoint: secret_entry.endpoint,
                 };
             }
             #[cfg(feature = "storage-fs")]
             MoonlinkSecretType::FileSystem => {
                 return StorageConfig::FileSystem {
-                    root_directory: persisted_config.iceberg_table_config.warehouse_uri.clone(),
+                    root_directory: root_uri.to_string(),
                     atomic_write_dir: None,
                 };
             }
         }
     }
     StorageConfig::FileSystem {
-        root_directory: persisted_config.iceberg_table_config.warehouse_uri.clone(),
+        root_directory: root_uri.to_string(),
         atomic_write_dir: None,
     }
 }
@@ -194,11 +196,24 @@ fn recover_storage_config(
 /// Deserialize json value to moonlink table config.
 pub(crate) fn deserialize_moonlink_table_config(
     serialized_config: serde_json::Value,
-    secret_entry: Option<MoonlinkTableSecret>,
+    iceberg_secret_entry: Option<MoonlinkTableSecret>,
+    wal_secret_entry: Option<MoonlinkTableSecret>,
+    database: &str,
+    table: &str,
 ) -> Result<MoonlinkTableConfig> {
     let parsed: MoonlinkTableConfigForPersistence = serde_json::from_value(serialized_config)?;
-    let storage_config = recover_storage_config(&parsed, secret_entry);
+    let storage_config = reconstruct_storage_config_from_root(
+        &parsed.iceberg_table_config.warehouse_uri,
+        iceberg_secret_entry,
+    );
     let mooncake_table_config = parsed.get_mooncake_table_config();
+
+    let wal_root = parsed.wal_root_uri.clone();
+    let wal_storage_config = reconstruct_storage_config_from_root(&wal_root, wal_secret_entry);
+    let mooncake_table_id = MooncakeTableId {
+        database: database.to_string(),
+        table: table.to_string(),
+    };
 
     let moonlink_table_config = MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {
@@ -207,6 +222,10 @@ pub(crate) fn deserialize_moonlink_table_config(
             accessor_config: AccessorConfig::new_with_storage_config(storage_config),
         },
         mooncake_table_config,
+        wal_table_config: WalConfig::new(
+            AccessorConfig::new_with_storage_config(wal_storage_config),
+            &mooncake_table_id.to_string(),
+        ),
     };
 
     Ok(moonlink_table_config)
@@ -223,12 +242,26 @@ mod tests {
         let old_moonlink_table_config = MoonlinkTableConfig {
             iceberg_table_config: IcebergTableConfig::default(),
             mooncake_table_config: MooncakeTableConfig::default(),
+            wal_table_config: WalConfig::default(),
         };
-        let (serialized_persisted_config, secret_entry) =
+        let (serialized_persisted_config, iceberg_secret, wal_secret) =
             parse_moonlink_table_config(old_moonlink_table_config.clone()).unwrap();
-        let new_moonlink_table_config =
-            deserialize_moonlink_table_config(serialized_persisted_config, secret_entry).unwrap();
-        assert_eq!(old_moonlink_table_config, new_moonlink_table_config);
+        let new_moonlink_table_config = deserialize_moonlink_table_config(
+            serialized_persisted_config,
+            iceberg_secret,
+            wal_secret,
+            "db",
+            "tbl",
+        )
+        .unwrap();
+        assert_eq!(
+            new_moonlink_table_config.mooncake_table_config,
+            old_moonlink_table_config.mooncake_table_config
+        );
+        assert_eq!(
+            new_moonlink_table_config.iceberg_table_config,
+            old_moonlink_table_config.iceberg_table_config
+        );
     }
 
     #[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
@@ -240,7 +273,10 @@ mod tests {
             namespace: "test_ns".to_string(),
             table_name: "test_table".to_string(),
         };
-        assert_eq!(config.get_bucket_name(), Some("my-bucket-name".to_string()));
+        assert_eq!(
+            get_bucket_name(&config.warehouse_uri),
+            Some("my-bucket-name".to_string())
+        );
 
         // Test on GCS bucket.
         let config = IcebergTableConfigForPersistence {
@@ -248,7 +284,10 @@ mod tests {
             namespace: "test_ns".to_string(),
             table_name: "test_table".to_string(),
         };
-        assert_eq!(config.get_bucket_name(), Some("my-bucket-name".to_string()));
+        assert_eq!(
+            get_bucket_name(&config.warehouse_uri),
+            Some("my-bucket-name".to_string())
+        );
     }
 
     // Testing scenario: serialized json config only contains partial fields, check whether json deserialization succeeds, and populates default value correctly.

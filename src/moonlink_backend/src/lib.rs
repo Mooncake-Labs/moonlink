@@ -1,14 +1,13 @@
 mod error;
 pub mod file_utils;
 mod logging;
-pub mod mooncake_table_id;
 mod recovery_utils;
 pub mod table_config;
 pub mod table_status;
 
 use arrow_schema::Schema;
 pub use error::{Error, Result};
-use mooncake_table_id::MooncakeTableId;
+use moonlink::MooncakeTableId;
 pub use moonlink::ReadState;
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 pub use moonlink_connectors::rest_ingest::event_request::{

@@ -12,9 +12,10 @@ test-utils = ["moonlink/test-utils"]
 metadata-postgres = ["moonlink_metadata_store/metadata-postgres"]
 test-tls = ["moonlink_connectors/test-tls", "moonlink_metadata_store/test-tls"]
 
-storage-s3 = ["moonlink/storage-s3"]
-storage-gcs = ["moonlink/storage-gcs"]
-storage-fs = ["moonlink/storage-fs"]
+storage-s3 = ["moonlink/storage-s3", "moonlink_metadata_store/storage-s3"]
+storage-gcs = ["moonlink/storage-gcs", "moonlink_metadata_store/storage-gcs"]
+storage-fs = ["moonlink/storage-fs", "moonlink_metadata_store/storage-fs"]
+storage-all = ["storage-s3", "storage-gcs", "storage-fs"]
 
 [dependencies]
 arrow = { workspace = true }

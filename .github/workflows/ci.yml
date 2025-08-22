@@ -475,7 +475,10 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           cargo test --package moonlink_connectors --lib --features connector-pg
-          cargo test --package moonlink_metadata_store --tests --features metadata-postgres
+          # want to test storing and retrieving different types of storage configs
+          cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3 storage-gcs"
+          # want to test integration on different storage backends
+          cargo test --package moonlink_backend --tests --features "test-utils storage-all"
 
   # ───────────── 11 · Moonlink Service Integration Tests ─────────────
   moonlink_service_tests:

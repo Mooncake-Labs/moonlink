@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::mooncake_table_id::MooncakeTableId;
+use moonlink::MooncakeTableId;
 use moonlink::ReadStateFilepathRemap;
 use moonlink::{BaseIcebergSnapshotFetcher, IcebergSnapshotFetcher};
 use moonlink_connectors::{ReplicationManager, REST_API_URI};
