@@ -4335,6 +4335,8 @@ dependencies = [
  "clap",
  "datafusion",
  "datafusion-cli",
+ "moonlink",
+ "moonlink_error",
  "moonlink_rpc",
  "object_store",
  "parquet",
