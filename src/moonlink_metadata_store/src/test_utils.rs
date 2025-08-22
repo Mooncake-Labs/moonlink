@@ -1,3 +1,4 @@
+#[cfg(any(feature = "storage-s3", feature = "storage-gcs"))]
 use moonlink::{AccessorConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig, WalConfig};
 
 #[cfg(feature = "storage-s3")]
