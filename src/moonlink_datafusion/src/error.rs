@@ -26,9 +26,13 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 impl From<ArrowError> for Error {
     #[track_caller]
     fn from(source: ArrowError) -> Self {
+        let status = match source {
+            ArrowError::IoError(_, _) => ErrorStatus::Temporary,
+            _ => ErrorStatus::Permanent,
+        };
         Error::Arrow(ErrorStruct {
             message: "Arrow error".to_string(),
-            status: ErrorStatus::Permanent,
+            status: status,
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })
