@@ -1,7 +1,11 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+#[cfg(feature = "storage-gcs")]
 use crate::storage::filesystem::gcs::gcs_test_utils;
+#[cfg(feature = "storage-gcs")]
 use crate::storage::filesystem::gcs::test_guard::TestGuard as GcsTestGuard;
+#[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils;
+#[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::test_guard::TestGuard as S3TestGuard;
 use crate::storage::mooncake_table::test_utils::test_row;
 use crate::storage::wal::{WalEvent, WalManager};
