@@ -1,9 +1,8 @@
-use std::panic::Location;
-use std::sync::Arc;
+use std::{panic::Location, sync::Arc};
 
 use arrow::error::ArrowError;
 use bincode::error::DecodeError;
-use datafusion::common::DataFusionError;
+use datafusion::error::DataFusionError;
 use moonlink_error::{io_error_utils, ErrorStatus, ErrorStruct};
 use moonlink_rpc::Error as MoonlinkRPCError;
 use thiserror::Error;
@@ -17,9 +16,9 @@ pub enum Error {
     #[error("{0}")]
     Io(ErrorStruct),
     #[error("{0}")]
-    MoonlinkRPCError(ErrorStruct),
+    Rpc(ErrorStruct),
     #[error("{0}")]
-    DataFusionError(ErrorStruct),
+    Datafusion(ErrorStruct),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -39,7 +38,7 @@ impl From<ArrowError> for Error {
 impl From<DataFusionError> for Error {
     #[track_caller]
     fn from(source: DataFusionError) -> Self {
-        Error::DataFusionError(ErrorStruct {
+        Error::Datafusion(ErrorStruct {
             message: "Datafusion error".to_string(),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
@@ -74,13 +73,8 @@ impl From<std::io::Error> for Error {
 impl From<MoonlinkRPCError> for Error {
     #[track_caller]
     fn from(source: MoonlinkRPCError) -> Self {
-        let status = match &source {
-            MoonlinkRPCError::Decode(es)
-            | MoonlinkRPCError::Encode(es)
-            | MoonlinkRPCError::Io(es)
-            | MoonlinkRPCError::PacketTooLong(es) => es.status,
-        };
-        Error::MoonlinkRPCError(ErrorStruct {
+        let status = source.get_status();
+        Error::Rpc(ErrorStruct {
             message: "Moonlink RPC error".to_string(),
             status,
             source: Some(Arc::new(source.into())),
