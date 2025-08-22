@@ -57,18 +57,104 @@ pub enum DecimalConversionError {
     },
 }
 
-pub fn convert_decimal_to_row_value(
-    value: &str,
-    precision: u8,
+fn convert_mantissa_to_row_value(mantissa: BigInt) -> Result<RowValue, DecimalConversionError> {
+    let actual_decimal_mantissa: i128 =
+        (&mantissa)
+            .try_into()
+            .map_err(
+                |e: TryFromBigIntError<()>| DecimalConversionError::Overflow {
+                    mantissa: mantissa.to_string(),
+                    error: Box::new(e),
+                },
+            )?;
+    Ok(RowValue::Decimal(actual_decimal_mantissa))
+}
+
+fn handle_negative_scale(
+    value: BigDecimal,
     scale: i8,
+    precision: u8,
 ) -> Result<RowValue, DecimalConversionError> {
-    let decimal = BigDecimal::from_str(value).map_err(|e: bigdecimal::ParseBigDecimalError| {
-        DecimalConversionError::InvalidValue {
+    let (mantissa, _) = value.as_bigint_and_exponent();
+    let power_of_10 = BigInt::from(10).pow(scale.unsigned_abs() as u32);
+    let half_power = &power_of_10 / 2;
+    let max_precision = precision as usize + scale.unsigned_abs() as usize;
+
+    // Proper rounding for negative scale
+    let rounded_mantissa: BigInt = if mantissa >= BigInt::from(0) {
+        (&mantissa + &half_power) / &power_of_10 * &power_of_10
+    } else {
+        (&mantissa - &half_power) / &power_of_10 * &power_of_10
+    };
+
+    // Calculate the actual precision (number of significant digits)
+    let rounded_precision = if rounded_mantissa == BigInt::from(0) {
+        1 // Zero has precision 1
+    } else {
+        // Count the number of digits, excluding the negative sign
+        let abs_mantissa = rounded_mantissa.abs();
+        abs_mantissa.to_string().len()
+    };
+
+    if rounded_precision > max_precision {
+        return Err(DecimalConversionError::PrecisionOutOfRange {
+            value: rounded_mantissa.to_string(),
+            expected_precision: precision,
+            actual_precision: rounded_precision as u8,
+        });
+    }
+    convert_mantissa_to_row_value(rounded_mantissa)
+}
+
+fn handle_fractional_only(
+    value: BigDecimal,
+    scale: i8,
+    precision: u8,
+) -> Result<RowValue, DecimalConversionError> {
+    use bigdecimal::RoundingMode;
+    let rounded_decimal = value.with_scale_round(scale as i64, RoundingMode::HalfUp);
+
+    let (rounded_mantissa, rounded_exponent) = rounded_decimal.as_bigint_and_exponent();
+    let rounded_precision = if rounded_mantissa == BigInt::from(0) {
+        1
+    } else {
+        rounded_mantissa.abs().to_string().len()
+    };
+
+    let actual_scale = rounded_exponent as i8;
+    let integer_part_length = rounded_precision as i8 - actual_scale;
+
+    if integer_part_length > 0 {
+        return Err(DecimalConversionError::IntegerPartOutOfRange {
             value: value.to_string(),
-            error: Box::new(e),
-        }
-    })?;
-    let (mut decimal_mantissa, decimal_scale) = decimal.as_bigint_and_exponent();
+            expected_len: 0,
+            actual_len: integer_part_length,
+        });
+    }
+
+    if rounded_precision > precision as usize {
+        return Err(DecimalConversionError::PrecisionOutOfRange {
+            value: value.to_string(),
+            expected_precision: precision,
+            actual_precision: rounded_precision as u8,
+        });
+    }
+
+    let mut final_mantissa = rounded_mantissa;
+    if scale > actual_scale {
+        let scale_diff = scale - actual_scale;
+        final_mantissa *= BigInt::from(10).pow(scale_diff as u32);
+    }
+
+    convert_mantissa_to_row_value(final_mantissa)
+}
+
+fn handle_standard(
+    value: BigDecimal,
+    scale: i8,
+    precision: u8,
+) -> Result<RowValue, DecimalConversionError> {
+    let (mut decimal_mantissa, decimal_scale) = value.as_bigint_and_exponent();
     // Consider the negative sign
     let decimal_precision = if decimal_mantissa.is_negative() {
         decimal_mantissa.to_string().len() - 1
@@ -91,13 +177,6 @@ pub fn convert_decimal_to_row_value(
             error: Box::new(e),
         }
     })?;
-
-    // TODO: block the scale if it is negative
-    if scale <= 0 {
-        return Err(DecimalConversionError::UnsupportedScale {
-            value: value.to_string(),
-        });
-    }
 
     if actual_decimal_precision > precision {
         return Err(DecimalConversionError::PrecisionOutOfRange {
@@ -131,16 +210,34 @@ pub fn convert_decimal_to_row_value(
         decimal_mantissa *= BigInt::from(10).pow((scale - actual_decimal_scale) as u32);
     }
 
-    let actual_decimal_mantissa: i128 =
-        (&decimal_mantissa)
-            .try_into()
-            .map_err(
-                |e: TryFromBigIntError<()>| DecimalConversionError::Overflow {
-                    mantissa: decimal_mantissa.to_string(),
-                    error: Box::new(e),
-                },
-            )?;
-    Ok(RowValue::Decimal(actual_decimal_mantissa))
+    convert_mantissa_to_row_value(decimal_mantissa)
+}
+
+// handle usual case
+pub fn convert_decimal_to_row_value(
+    value: &str,
+    precision: u8,
+    scale: i8,
+) -> Result<RowValue, DecimalConversionError> {
+    let decimal = BigDecimal::from_str(value).map_err(|e: bigdecimal::ParseBigDecimalError| {
+        DecimalConversionError::InvalidValue {
+            value: value.to_string(),
+            error: Box::new(e),
+        }
+    })?;
+
+    // Based on https://www.postgresql.org/docs/17/datatype-numeric.html, we can handle the decimal value in 3 cases:
+    // 1. scale < 0: negative scale, we need to handle the negative scale
+    // 2. scale > precision: fractional only, we need to handle the fractional only
+    // 3. scale <= precision: standard cases
+    // Currently, Ignore Infinity / NaN for now, unless we see a strong use case.
+    if scale < 0 {
+        handle_negative_scale(decimal, scale, precision)
+    } else if scale > precision as i8 {
+        return handle_fractional_only(decimal, scale, precision);
+    } else {
+        return handle_standard(decimal, scale, precision);
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +282,108 @@ mod tests {
                 panic!("Expected a PrecisionOutOfRange error, but got a different variant: {err:?}")
             }
         }
+
+        // Testing decimal precision exceeding the specified limit (4 digits > 3 precision)
+        let value = "0.009999";
+        let precision = 3;
+        let scale = 5;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::PrecisionOutOfRange {
+                expected_precision,
+                actual_precision,
+                ..
+            } => {
+                assert_eq!(expected_precision, 3);
+                assert_eq!(actual_precision, 4);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
+
+        // Test NUMERIC(3, 5) - only fractional values allowed
+        let value = "0.12345";
+        let precision = 3;
+        let scale = 5;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::PrecisionOutOfRange {
+                expected_precision,
+                actual_precision,
+                ..
+            } => {
+                assert_eq!(expected_precision, 3);
+                assert_eq!(actual_precision, 5);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
+
+        // Testing decimal precision exceeding the specified limit (6 digits > 2 precision)
+        let value = "99500";
+        let precision = 2;
+        let scale = -3;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::PrecisionOutOfRange {
+                expected_precision,
+                actual_precision,
+                ..
+            } => {
+                assert_eq!(expected_precision, 2);
+                assert_eq!(actual_precision, 6);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
+
+        // Testing negative decimal precision exceeding the specified limit (6 digits > 2 precision)
+        let value = "-99500";
+        let precision = 2;
+        let scale = -3;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::PrecisionOutOfRange {
+                expected_precision,
+                actual_precision,
+                ..
+            } => {
+                assert_eq!(expected_precision, 2);
+                assert_eq!(actual_precision, 6);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
+
+        // Testing decimal precision exceeding the specified limit (6 digits > 2 precision)
+        let value = "990010";
+        let precision = 2;
+        let scale = -3;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::PrecisionOutOfRange {
+                expected_precision,
+                actual_precision,
+                ..
+            } => {
+                assert_eq!(expected_precision, 2);
+                assert_eq!(actual_precision, 6);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
+
+        // Testing negative decimal precision exceeding the specified limit (6 digits > 2 precision)
+        let value = "-990010";
+        let precision = 2;
+        let scale = -3;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::PrecisionOutOfRange {
+                expected_precision,
+                actual_precision,
+                ..
+            } => {
+                assert_eq!(expected_precision, 2);
+                assert_eq!(actual_precision, 6);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
     }
 
     #[test]
@@ -206,18 +405,6 @@ mod tests {
                 assert_eq!(actual_scale, 4);
             }
             _ => panic!("Expected a ScaleOutOfRange error, but got a different variant: {err:?}"),
-        }
-
-        // Testing negative scale with positive fractional digits (2 fractional digits > -2 scale)
-        let negative_scale_value = "-123.45";
-        let precision = 5;
-        let scale = -2;
-        let err = convert_decimal_to_row_value(negative_scale_value, precision, scale).unwrap_err();
-        match err {
-            DecimalConversionError::UnsupportedScale { value } => {
-                assert_eq!(value, negative_scale_value.to_string());
-            }
-            _ => panic!("Expected an UnsupportedScale error, but got a different variant: {err:?}"),
         }
     }
 
@@ -267,6 +454,40 @@ mod tests {
                 "Expected an IntegerPartOutOfRange error, but got a different variant: {err:?}"
             ),
         }
+
+        // Testing decimal integer part should be 0
+        let value = "1.009999";
+        let precision = 3;
+        let scale = 5;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::IntegerPartOutOfRange {
+                expected_len,
+                actual_len,
+                ..
+            } => {
+                assert_eq!(expected_len, 0);
+                assert_eq!(actual_len, 1);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
+
+        // Testing decimal integer part should be 0
+        let value = "89.009999";
+        let precision = 3;
+        let scale = 5;
+        let err = convert_decimal_to_row_value(value, precision, scale).unwrap_err();
+        match err {
+            DecimalConversionError::IntegerPartOutOfRange {
+                expected_len,
+                actual_len,
+                ..
+            } => {
+                assert_eq!(expected_len, 0);
+                assert_eq!(actual_len, 2);
+            }
+            _ => panic!("Expected PrecisionOutOfRange error, got {err:?}"),
+        }
     }
 
     #[test]
@@ -306,11 +527,11 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_decimal_to_row_value_valid() {
-        let valid_value_1 = "123.45";
+    fn test_convert_decimal_to_row_value_valid_standard() {
+        let value = "123.45";
         let precision = 5;
         let scale = 2;
-        let result = convert_decimal_to_row_value(valid_value_1, precision, scale).unwrap();
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
         assert_eq!(result, RowValue::Decimal(12345));
 
         let valid_value_2 = "12.4";
@@ -343,5 +564,116 @@ mod tests {
             result,
             RowValue::Decimal(-123456789012345678901234567890123456789)
         );
+    }
+
+    #[test]
+    fn test_convert_decimal_to_row_value_valid_negative_scale() {
+        // Test NUMERIC(2, -3) - values rounded to nearest thousand
+        // Test Positive values
+        let value = "444";
+        let precision = 2;
+        let scale = -3;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(0));
+
+        let value = "500";
+        let precision = 2;
+        let scale = -3;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(1000));
+
+        let value = "9976";
+        let precision = 3;
+        let scale = -2;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(10000));
+
+        let value = "12345";
+        let precision = 3;
+        let scale = -2;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(12300));
+
+        // Test negative values
+        let value = "-444";
+        let precision = 2;
+        let scale = -3;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(0));
+
+        let value = "-500";
+        let precision = 2;
+        let scale = -3;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-1000));
+
+        let value = "-9976";
+        let precision = 3;
+        let scale = -2;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-10000));
+
+        let value = "-12345";
+        let precision = 3;
+        let scale = -2;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-12300));
+    }
+
+    #[test]
+    fn test_convert_decimal_to_row_value_valid_fractional_only() {
+        let value = "0";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(0));
+
+        let value = "0.0099945";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(999));
+
+        let value = "0.009945";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(995));
+
+        let value = "0.00994";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(994));
+
+        let value = "0.0099";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(990));
+
+        let value = "-0.0099945";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-999));
+
+        let value = "-0.009945";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-995));
+
+        let value = "-0.00994";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-994));
+
+        let value = "-0.0099";
+        let precision = 3;
+        let scale = 5;
+        let result = convert_decimal_to_row_value(value, precision, scale).unwrap();
+        assert_eq!(result, RowValue::Decimal(-990));
     }
 }
