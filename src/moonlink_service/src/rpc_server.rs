@@ -1,6 +1,8 @@
+use crate::util::{create_row_event_request, field_schemas_to_arrow_schema};
 use crate::{error::Error, Result};
 use arrow_ipc::writer::StreamWriter;
-use moonlink_backend::MoonlinkBackend;
+use moonlink_backend::{EventRequest, MoonlinkBackend, REST_API_URI};
+use moonlink_error::{ErrorStatus, ErrorStruct};
 use moonlink_rpc::{read, write, Request, Table};
 use std::collections::HashMap;
 use std::error::Error as _;
@@ -131,8 +133,8 @@ where
                 write(&mut stream, &()).await?;
             }
             Request::GetTableSchema { database, table } => {
-                let database = backend.get_table_schema(database, table).await?;
-                let writer = StreamWriter::try_new(vec![], &database)?;
+                let schema = backend.get_table_schema(database, table).await?;
+                let writer = StreamWriter::try_new(vec![], &schema)?;
                 let data = writer.into_inner()?;
                 write(&mut stream, &data).await?;
             }
@@ -172,6 +174,41 @@ where
             }
             Request::ScanTableEnd { database, table } => {
                 assert!(map.remove(&(database, table)).is_some());
+                write(&mut stream, &()).await?;
+            }
+            Request::CreateEventTable {
+                database,
+                table,
+                src_table,
+                schema_fields,
+            } => {
+                let arrow_schema =
+                    field_schemas_to_arrow_schema(&schema_fields).map_err(|msg| {
+                        Error::InvalidArgument(ErrorStruct::new(msg, ErrorStatus::Permanent))
+                    })?;
+                backend
+                    .create_table(
+                        database,
+                        table,
+                        src_table,
+                        REST_API_URI.to_string(),
+                        /*table_config=*/ "{}".to_string(),
+                        Some(arrow_schema),
+                    )
+                    .await?;
+                write(&mut stream, &()).await?;
+            }
+            Request::WriteEvent {
+                src_table,
+                operation,
+                payload,
+            } => {
+                let row_event_request = create_row_event_request(src_table, &operation, payload)
+                    .map_err(|e| {
+                        Error::InvalidArgument(ErrorStruct::new(e, ErrorStatus::Permanent))
+                    })?;
+                let request = EventRequest::RowRequest(row_event_request);
+                backend.send_event_request(request).await?;
                 write(&mut stream, &()).await?;
             }
             Request::LoadFiles {

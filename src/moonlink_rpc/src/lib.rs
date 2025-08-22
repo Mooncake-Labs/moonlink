@@ -34,6 +34,8 @@ rpcs! {
     optimize_table(database: String, table: String, mode: String) -> ();
     scan_table_begin(database: String, table: String, lsn: u64) -> Vec<u8>;
     scan_table_end(database: String, table: String) -> ();
+    create_event_table(database: String, table: String, src_table: String, schema_fields: Vec<FieldSchema>) -> ();
+    write_event(src_table: String, operation: String, payload: serde_json::Value) -> ();
 }
 
 pub async fn write<W: AsyncWrite + Unpin, S: Serialize>(writer: &mut W, data: &S) -> Result<()> {
@@ -63,4 +65,11 @@ pub struct Table {
     pub commit_lsn: u64,
     pub flush_lsn: Option<u64>,
     pub iceberg_warehouse_location: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FieldSchema {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
 }

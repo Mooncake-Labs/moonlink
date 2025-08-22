@@ -4384,6 +4384,7 @@ dependencies = [
  "moonlink_error",
  "paste",
  "serde",
+ "serde_json",
  "thiserror 2.0.15",
  "tokio",
 ]

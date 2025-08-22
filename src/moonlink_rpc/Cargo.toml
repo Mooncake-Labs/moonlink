@@ -9,5 +9,6 @@ bincode = { workspace = true }
 moonlink_error = { path = "../moonlink_error" }
 paste = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

@@ -22,6 +22,9 @@ pub enum Error {
 
     #[error("{0}")]
     TaskJoin(ErrorStruct),
+
+    #[error("{0}")]
+    InvalidArgument(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
