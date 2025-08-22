@@ -1,10 +1,8 @@
-use std::{panic::Location, sync::Arc};
-
 use arrow::error::ArrowError;
 use bincode::error::DecodeError;
-use datafusion::error::DataFusionError;
 use moonlink_error::{io_error_utils, ErrorStatus, ErrorStruct};
 use moonlink_rpc::Error as MoonlinkRPCError;
+use std::{panic::Location, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,8 +15,6 @@ pub enum Error {
     Io(ErrorStruct),
     #[error("{0}")]
     Rpc(ErrorStruct),
-    #[error("{0}")]
-    Datafusion(ErrorStruct),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -33,18 +29,6 @@ impl From<ArrowError> for Error {
         Error::Arrow(ErrorStruct {
             message: "Arrow error".to_string(),
             status: status,
-            source: Some(Arc::new(source.into())),
-            location: Some(Location::caller().to_string()),
-        })
-    }
-}
-
-impl From<DataFusionError> for Error {
-    #[track_caller]
-    fn from(source: DataFusionError) -> Self {
-        Error::Datafusion(ErrorStruct {
-            message: "Datafusion error".to_string(),
-            status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })
