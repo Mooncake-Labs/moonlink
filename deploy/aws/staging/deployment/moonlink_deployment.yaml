@@ -80,5 +80,3 @@ spec:
       # Shared cache directory between data server and moonlink.
       - name: shared-cache-directory
         emptyDir: {}
-
-
