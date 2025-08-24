@@ -81,7 +81,7 @@ fn handle_negative_scale(
     let max_precision = precision as usize + scale.unsigned_abs() as usize;
 
     // Proper rounding for negative scale
-    let rounded_mantissa: BigInt = if mantissa >= BigInt::from(0) {
+    let rounded_mantissa: BigInt = if !mantissa.is_negative() {
         (&mantissa + &half_power) / &power_of_10 * &power_of_10
     } else {
         (&mantissa - &half_power) / &power_of_10 * &power_of_10
@@ -213,7 +213,20 @@ fn handle_standard(
     convert_mantissa_to_row_value(decimal_mantissa)
 }
 
-// handle usual case
+// Based on https://www.postgresql.org/docs/17/datatype-numeric.html,
+// Decimal values fall into 3 categories:
+//
+// 1. scale < 0
+//    Negative scale → requires rounding to the nearest 10^|scale|
+//    (e.g. NUMERIC(2, -3): 9976 → 10000).
+//
+// 2. scale > precision
+//    Pure fractional case (no integer part). Validate exactness or error if rounding needed.
+//
+// 3. 0 <= scale <= precision
+//    Normal case: integer and fractional parts handled directly.
+//
+// TODO: Infinity / NaN not supported yet — open issue if needed.
 pub fn convert_decimal_to_row_value(
     value: &str,
     precision: u8,
@@ -226,11 +239,6 @@ pub fn convert_decimal_to_row_value(
         }
     })?;
 
-    // Based on https://www.postgresql.org/docs/17/datatype-numeric.html, we can handle the decimal value in 3 cases:
-    // 1. scale < 0: negative scale
-    // 2. scale > precision: fractional only
-    // 3. scale <= precision: standard cases
-    // Currently, Ignore Infinity / NaN for now, unless we see a strong use case.
     if scale < 0 {
         handle_negative_scale(decimal, scale, precision)
     } else if scale > precision as i8 {
