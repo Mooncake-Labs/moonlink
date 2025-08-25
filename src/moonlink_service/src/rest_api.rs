@@ -9,6 +9,7 @@ use moonlink::StorageConfig;
 use moonlink_backend::{table_config::TableConfig, table_status::TableStatus};
 use moonlink_backend::{EventRequest, FileEventOperation, RowEventOperation};
 use moonlink_backend::{FileEventRequest, RowEventRequest, REST_API_URI};
+use moonlink_error::ErrorStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -161,7 +162,21 @@ pub struct HealthResponse {
     pub timestamp: u64,
 }
 
-/// Create the router with all API endpoints
+/// Map backend error to appropriate HTTP status code based on error type
+fn get_backend_error_status_code(error: &moonlink_backend::Error) -> StatusCode {
+    match error {
+        moonlink_backend::Error::InvalidArgumentError(_)
+        | moonlink_backend::Error::ParseIntError(_)
+        | moonlink_backend::Error::Json(_) => StatusCode::BAD_REQUEST,
+
+        _ => match error.get_status() {
+            ErrorStatus::Temporary => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorStatus::Permanent => StatusCode::INTERNAL_SERVER_ERROR,
+        },
+    }
+}
+
+/// Create the router with all API endpoints    
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health_check))
@@ -314,7 +329,7 @@ async fn create_table(
         Err(e) => {
             error!("Failed to create table '{}': {}", table, e);
             Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+                get_backend_error_status_code(&e),
                 Json(ErrorResponse {
                     error: "table_creation_failed".to_string(),
                     message: format!("Failed to create table: {e}"),
@@ -347,7 +362,7 @@ async fn list_tables(
     match state.backend.list_tables().await {
         Ok(tables) => Ok(Json(ListTablesResponse { tables })),
         Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
+            get_backend_error_status_code(&e),
             Json(ErrorResponse {
                 error: "table_list_failed".to_string(),
                 message: format!("Failed to list tables: {e}"),
