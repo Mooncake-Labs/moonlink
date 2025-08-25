@@ -65,10 +65,12 @@ use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
+use prometheus_client::metrics::histogram::{linear_buckets, Histogram};
 pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResult};
 #[cfg(test)]
 use tokio::sync::mpsc::Receiver;
@@ -212,6 +214,22 @@ impl Snapshot {
             self.metadata.name, self.metadata.table_id, self.snapshot_version
         ));
         directory
+    }
+}
+
+struct SnapshotStats {
+    creation_latency: Histogram,
+}
+
+impl SnapshotStats {
+    fn new() -> Self {
+        Self {
+            creation_latency: Histogram::new(linear_buckets(0.0, 3.0, 100)),
+        }
+    }
+
+    fn update_creation_latency(&mut self, time: f64) {
+        self.creation_latency.observe(time);
     }
 }
 
@@ -465,6 +483,9 @@ pub struct MooncakeTable {
     /// LSN of ongoing flushes.
     pub ongoing_flush_lsns: BTreeSet<u64>,
 
+    /// snapshot stats
+    snapshot_stats: SnapshotStats,
+
     /// Table replay sender.
     event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
 
@@ -537,6 +558,7 @@ impl MooncakeTable {
 
         let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
         let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
+        let snapshot_stats = SnapshotStats::new();
         let event_id_assigner = EventIdAssigner::new();
 
         Ok(Self {
@@ -572,6 +594,7 @@ impl MooncakeTable {
             table_notify: None,
             wal_manager,
             ongoing_flush_lsns: BTreeSet::new(),
+            snapshot_stats,
             event_replay_tx: None,
             event_id_assigner,
         })
@@ -1359,7 +1382,10 @@ impl MooncakeTable {
         if !self.next_snapshot_task.should_create_snapshot() && !opt.force_create {
             return false;
         }
+        let start = Instant::now();
         self.create_snapshot_impl(opt);
+        let elapsed = start.elapsed().as_secs_f64();
+        self.snapshot_stats.update_creation_latency(elapsed);
         true
     }
 
