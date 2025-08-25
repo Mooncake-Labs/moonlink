@@ -133,7 +133,7 @@ impl CompactionBuilder {
         self.cur_new_data_file = Some(self.create_new_data_file());
         let write_file =
             tokio::fs::File::create(self.cur_new_data_file.as_ref().unwrap().file_path()).await?;
-        let properties = parquet_utils::get_parquet_properties_for_compaction();
+        let properties = parquet_utils::get_parquet_properties_for_compaction(self.cur_row_num);
         let writer: AsyncArrowWriter<tokio::fs::File> =
             AsyncArrowWriter::try_new(write_file, self.schema.clone(), Some(properties))?;
         self.cur_arrow_writer = Some(writer);
