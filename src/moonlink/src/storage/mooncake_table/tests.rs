@@ -175,7 +175,7 @@ async fn test_deletion_after_flush(#[case] identity: IdentityProp) -> Result<()>
     let mut ids = read_ids_from_parquet(&data_file_paths[0].get_file_path());
 
     for deletion in position_deletes {
-        ids[deletion.1 as usize] = None;
+        ids[deletion.data_file_row_number as usize] = None;
     }
     let ids = ids.into_iter().flatten().collect::<Vec<_>>();
 

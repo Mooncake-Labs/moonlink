@@ -1,10 +1,9 @@
 use super::*;
 use crate::row::{IdentityProp, RowValue};
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-use crate::storage::iceberg::deletion_vector::DeletionVector;
+use crate::storage::iceberg::deletion_vector::DeletionVector as IcebergDeletionVector;
 use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::puffin_utils;
-use crate::storage::mooncake_table::snapshot::PuffinDeletionBlobAtRead;
 use crate::storage::mooncake_table::snapshot_read_output::DataFileForRead;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
@@ -14,6 +13,8 @@ use crate::{StorageConfig, WalConfig};
 use arrow::array::Int32Array;
 use futures::future::join_all;
 use iceberg::io::FileIOBuilder;
+use moonlink_table_metadata::table_metadata::PositionDelete;
+use moonlink_table_metadata::DeletionVector;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use std::collections::HashSet;
 use std::fs::{create_dir_all, File};
@@ -163,15 +164,15 @@ pub async fn append_commit_flush_create_mooncake_snapshot_for_test(
 
 fn verify_files_and_deletions_impl(
     files: &[String],
-    deletions: &[(u32, u32)],
+    deletions: &[PositionDelete],
     expected_ids: &[i32],
 ) {
     let mut res = vec![];
     for (i, path) in files.iter().enumerate() {
         let mut ids = read_ids_from_parquet(path);
         for deletion in deletions {
-            if deletion.0 == i as u32 {
-                ids[deletion.1 as usize] = None;
+            if deletion.data_file_number == i as u32 {
+                ids[deletion.data_file_row_number as usize] = None;
             }
         }
         res.extend(ids.into_iter().flatten());
@@ -199,8 +200,8 @@ pub fn get_deletion_puffin_files_for_read(
 pub async fn verify_files_and_deletions(
     data_file_paths: &[String],
     puffin_file_paths: &[String],
-    position_deletes: Vec<(u32, u32)>,
-    deletion_vectors: Vec<PuffinDeletionBlobAtRead>,
+    position_deletes: Vec<PositionDelete>,
+    deletion_vectors: Vec<DeletionVector>,
     expected_ids: &[i32],
 ) {
     // Read deletion vector blobs and add to position deletes.
@@ -211,7 +212,7 @@ pub async fn verify_files_and_deletions(
         let get_blob_future = puffin_utils::load_blob_from_puffin_file(
             file_io.clone(),
             puffin_file_paths
-                .get(cur_blob.puffin_file_index as usize)
+                .get(cur_blob.puffin_file_number as usize)
                 .unwrap(),
         );
         load_blob_futures.push(get_blob_future);
@@ -220,15 +221,18 @@ pub async fn verify_files_and_deletions(
     let load_blob_results = join_all(load_blob_futures).await;
     for (idx, cur_load_blob_res) in load_blob_results.into_iter().enumerate() {
         let blob = cur_load_blob_res.unwrap();
-        let dv = DeletionVector::deserialize(blob).unwrap();
+        let dv = IcebergDeletionVector::deserialize(blob).unwrap();
         let batch_deletion_vector = dv.take_as_batch_delete_vector();
         let deleted_rows = batch_deletion_vector.collect_deleted_rows();
         assert!(!deleted_rows.is_empty());
         position_deletes.append(
             &mut deleted_rows
                 .iter()
-                .map(|row_idx| (deletion_vectors[idx].data_file_index, *row_idx as u32))
-                .collect::<Vec<(u32, u32)>>(),
+                .map(|row_idx| PositionDelete {
+                    data_file_number: deletion_vectors[idx].data_file_number,
+                    data_file_row_number: *row_idx as u32,
+                })
+                .collect::<Vec<PositionDelete>>(),
         );
     }
 

@@ -65,7 +65,7 @@ use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
-pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
+pub(crate) use snapshot::SnapshotTableState;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;

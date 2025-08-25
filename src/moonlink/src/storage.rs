@@ -41,7 +41,7 @@ pub use mooncake_table::table_status::TableSnapshotStatus;
 pub use mooncake_table::table_status_reader::TableStatusReader;
 pub use mooncake_table::MooncakeTable;
 pub use mooncake_table::SnapshotReadOutput;
-pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
+pub(crate) use mooncake_table::SnapshotTableState;
 pub use mooncake_table_config::DiskSliceWriterConfig;
 pub use mooncake_table_config::IcebergPersistenceConfig;
 pub use mooncake_table_config::MooncakeTableConfig;

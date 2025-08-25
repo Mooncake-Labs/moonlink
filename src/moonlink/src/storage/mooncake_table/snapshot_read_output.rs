@@ -1,11 +1,12 @@
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::storage_utils::TableUniqueFileId;
-use crate::storage::PuffinDeletionBlobAtRead;
 use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
 use crate::ReadStateFilepathRemap;
 use crate::{NonEvictableHandle, ReadState, Result};
+use moonlink_table_metadata::table_metadata::PositionDelete;
+use moonlink_table_metadata::DeletionVector;
 
 use std::sync::Arc;
 
@@ -42,9 +43,9 @@ pub struct ReadOutput {
     /// Puffin cache handles.
     pub puffin_cache_handles: Vec<NonEvictableHandle>,
     /// Deletion vectors persisted in puffin files.
-    pub deletion_vectors: Vec<PuffinDeletionBlobAtRead>,
+    pub deletion_vectors: Vec<DeletionVector>,
     /// Committed but un-persisted positional deletion records.
-    pub position_deletes: Vec<(u32 /*file_index*/, u32 /*row_index*/)>,
+    pub position_deletes: Vec<PositionDelete>,
     /// Contains committed but non-persisted record batches, which are persisted as temporary data files on local filesystem.
     pub associated_files: Vec<String>,
     /// Table notifier for query completion; could be none for empty read output.

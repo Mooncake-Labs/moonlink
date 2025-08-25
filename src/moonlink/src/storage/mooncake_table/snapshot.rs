@@ -87,16 +87,6 @@ pub(crate) struct SnapshotTableState {
     pub(super) event_id_assigner: EventIdAssigner,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PuffinDeletionBlobAtRead {
-    /// Index of local data files.
-    pub data_file_index: u32,
-    /// Index of puffin filepaths.
-    pub puffin_file_index: u32,
-    pub start_offset: u32,
-    pub blob_size: u32,
-}
-
 #[derive(Clone)]
 pub struct MooncakeSnapshotOutput {
     /// Table event id.

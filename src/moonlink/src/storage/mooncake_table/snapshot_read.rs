@@ -6,9 +6,10 @@ use crate::storage::mooncake_table::snapshot_read_output::{
 };
 use crate::storage::mooncake_table::table_status::TableSnapshotStatus;
 use crate::storage::storage_utils::RecordLocation;
-use crate::storage::PuffinDeletionBlobAtRead;
 use crate::NonEvictableHandle;
 use arrow_schema::Schema;
+use moonlink_table_metadata::table_metadata::PositionDelete;
+use moonlink_table_metadata::DeletionVector;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
@@ -83,12 +84,9 @@ impl SnapshotTableState {
     async fn get_deletion_records(
         &mut self,
     ) -> (
-        Vec<NonEvictableHandle>,       /*puffin file cache handles*/
-        Vec<PuffinDeletionBlobAtRead>, /*deletion vector puffin*/
-        Vec<(
-            u32, /*index of disk file in snapshot*/
-            u32, /*row id*/
-        )>,
+        Vec<NonEvictableHandle>, /*puffin file cache handles*/
+        Vec<DeletionVector>,     /*deletion vector puffin*/
+        Vec<PositionDelete>,
     ) {
         // Get puffin blobs for deletion vector.
         let mut puffin_cache_handles = vec![];
@@ -115,11 +113,11 @@ impl SnapshotTableState {
             puffin_cache_handles.push(new_puffin_cache_handle.unwrap());
 
             let puffin_file_index = puffin_cache_handles.len() - 1;
-            deletion_vector_blob_at_read.push(PuffinDeletionBlobAtRead {
-                data_file_index: idx as u32,
-                puffin_file_index: puffin_file_index as u32,
-                start_offset: puffin_deletion_blob.start_offset,
-                blob_size: puffin_deletion_blob.blob_size,
+            deletion_vector_blob_at_read.push(DeletionVector {
+                data_file_number: idx as u32,
+                puffin_file_number: puffin_file_index as u32,
+                offset: puffin_deletion_blob.start_offset,
+                size: puffin_deletion_blob.blob_size,
             });
         }
 
@@ -129,7 +127,10 @@ impl SnapshotTableState {
             if let RecordLocation::DiskFile(file_id, row_id) = &deletion.pos {
                 for (id, (file, _)) in self.current_snapshot.disk_files.iter().enumerate() {
                     if file.file_id() == *file_id {
-                        ret.push((id as u32, *row_id as u32));
+                        ret.push(PositionDelete {
+                            data_file_number: id as u32,
+                            data_file_row_number: *row_id as u32,
+                        });
                         break;
                     }
                 }

@@ -12,6 +12,7 @@ use std::{collections::HashSet, fs::File};
 use moonlink::{decode_read_state_for_testing, AccessorConfig, StorageConfig};
 use moonlink_backend::file_utils::{recreate_directory, DEFAULT_MOONLINK_TEMP_FILE_PATH};
 use moonlink_backend::{MoonlinkBackend, ReadState};
+use moonlink_table_metadata::PositionDelete;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 
@@ -330,7 +331,7 @@ pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64>
     let file_io = FileIOBuilder::new_fs_io().build().unwrap();
     for cur_blob in deletion_vectors.iter() {
         let puffin_file_path = puffin_files
-            .get(cur_blob.puffin_file_index as usize)
+            .get(cur_blob.puffin_file_number as usize)
             .unwrap();
 
         // Load puffin file and read blob
@@ -346,11 +347,10 @@ pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64>
         let deleted_row_indices = parse_deletion_vector_blob(blob.data());
 
         if !deleted_row_indices.is_empty() {
-            position_deletes.extend(
-                deleted_row_indices
-                    .iter()
-                    .map(|row_idx| (cur_blob.data_file_index, *row_idx as u32)),
-            );
+            position_deletes.extend(deleted_row_indices.iter().map(|row_idx| PositionDelete {
+                data_file_number: cur_blob.data_file_number,
+                data_file_row_number: *row_idx as u32,
+            }));
         }
     }
 
@@ -381,12 +381,26 @@ fn parse_deletion_vector_blob(blob_data: &[u8]) -> Vec<u64> {
 /// Helper function to apply position deletes to data files and return the remaining IDs
 fn apply_position_deletes_to_files(
     data_files: &[String],
-    position_deletes: &[(u32, u32)], // (file_index, row_index)
+    position_deletes: &[PositionDelete], // (file_index, row_index)
 ) -> HashSet<i64> {
     // Group deletes by file index
     let mut deletes_by_file: std::collections::HashMap<u32, HashSet<u32>> =
         std::collections::HashMap::new();
-    for (file_index, row_index) in position_deletes {
+    for PositionDelete {
+        data_file_number: file_index,
+        data_file_row_number: row_index,
+    } in position_deletes.iter()
+    {
+        deletes_by_file
+            .entry(*file_index)
+            .or_default()
+            .insert(*row_index);
+    }
+    for PositionDelete {
+        data_file_number: file_index,
+        data_file_row_number: row_index,
+    } in position_deletes.iter()
+    {
         deletes_by_file
             .entry(*file_index)
             .or_default()

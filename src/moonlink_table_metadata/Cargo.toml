@@ -1,0 +1,10 @@
+[package]
+name = "moonlink_table_metadata"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+bincode = { workspace = true }
+more-asserts = { workspace = true }
+serde = { workspace = true }
