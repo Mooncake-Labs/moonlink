@@ -332,7 +332,7 @@ impl CompactionBuilder {
         &mut self,
         old_file_indices: Vec<FileIndex>,
         old_to_new_remap: &HashMap<RecordLocation, RemappedRecordLocation>,
-    ) -> FileIndex {
+    ) -> Result<FileIndex> {
         let get_remapped_record_location =
             |old_record_location: RecordLocation| -> Option<RecordLocation> {
                 if let Some(remapped_record_location) = old_to_new_remap.get(&old_record_location) {
@@ -416,7 +416,7 @@ impl CompactionBuilder {
                     self.compaction_payload.file_indices.clone(),
                     &old_record_loc_to_new_mapping,
                 )
-                .await;
+                .await?;
             new_file_indices.push(cur_new_file_indices);
         }
 

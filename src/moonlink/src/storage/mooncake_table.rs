@@ -1282,23 +1282,31 @@ impl MooncakeTable {
 
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(async move {
-            let mut builder = GlobalIndexBuilder::new();
-            builder.set_directory(table_directory);
-            let merged = builder
-                .build_from_merge(file_indice_merge_payload.file_indices.clone(), cur_file_id)
-                .await;
-            let index_merge_result = FileIndiceMergeResult {
-                id: table_event_id,
-                uuid: file_indice_merge_payload.uuid,
-                old_file_indices: file_indice_merge_payload.file_indices,
-                new_file_indices: vec![merged],
-            };
+            let result: Result<()> = async move {
+                let mut builder = GlobalIndexBuilder::new();
+                builder.set_directory(table_directory);
+                let merged = builder
+                    .build_from_merge(file_indice_merge_payload.file_indices.clone(), cur_file_id)
+                    .await?;
+                let index_merge_result = FileIndiceMergeResult {
+                    id: table_event_id,
+                    uuid: file_indice_merge_payload.uuid,
+                    old_file_indices: file_indice_merge_payload.file_indices,
+                    new_file_indices: vec![merged],
+                };
 
-            // Send back completion notification to table handler.
-            table_notify_tx_copy
-                .send(TableEvent::IndexMergeResult { index_merge_result })
-                .await
-                .unwrap();
+                // Send back completion notification to table handler.
+                table_notify_tx_copy
+                    .send(TableEvent::IndexMergeResult { index_merge_result })
+                    .await
+                    .unwrap();
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = result {
+                tracing::error!("Index merge task failed: {}", e);
+            }
         });
     }
 

@@ -10,6 +10,7 @@ use crate::storage::storage_utils::{
     create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
     MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation, TableId,
 };
+// use crate::error::{Errko};
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -277,7 +278,7 @@ impl DiskSliceWriter {
         let mut index_builder = GlobalIndexBuilder::new();
         index_builder.set_files(self.files.iter().map(|(file, _)| file.clone()).collect());
         index_builder.set_directory(self.dir_path.clone());
-        self.new_index = Some(index_builder.build_from_flush(list, file_id).await);
+        self.new_index = Some(index_builder.build_from_flush(list, file_id).await?);
         Ok(())
     }
 
