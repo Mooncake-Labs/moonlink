@@ -100,8 +100,10 @@ pub async fn build_table_components(
     )
     .await?;
 
-    let wal_config =
-        WalConfig::default_wal_config_local(&mooncake_table_id, &PathBuf::from(base_path));
+    let wal_config = table_components
+        .moonlink_table_config
+        .wal_table_config
+        .clone();
     let wal_file_accessor = Arc::new(FileSystemAccessor::new(
         wal_config.get_accessor_config().clone(),
     ));

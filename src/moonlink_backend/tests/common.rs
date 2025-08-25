@@ -74,6 +74,12 @@ impl TestGuard {
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
                 StorageConfig::FileSystem {
+                    root_directory: root_directory.clone(),
+                    atomic_write_dir: None,
+                },
+            )),
+            wal_config: Some(AccessorConfig::new_with_storage_config(
+                StorageConfig::FileSystem {
                     root_directory,
                     atomic_write_dir: None,
                 },
@@ -420,6 +426,12 @@ pub fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
             append_only: false,
         },
         iceberg_config: Some(AccessorConfig::new_with_storage_config(
+            StorageConfig::FileSystem {
+                root_directory: root_directory.clone(),
+                atomic_write_dir: None,
+            },
+        )),
+        wal_config: Some(AccessorConfig::new_with_storage_config(
             StorageConfig::FileSystem {
                 root_directory,
                 atomic_write_dir: None,

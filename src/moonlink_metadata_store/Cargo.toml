@@ -17,6 +17,7 @@ metadata-postgres = ["postgres-types", "tokio-postgres"]
 metadata-sqlite = ["sqlx"]
 
 test-tls = []
+test-utils = []
 
 [dependencies]
 async-trait = { workspace = true }

@@ -1,17 +1,20 @@
-use crate::storage::mooncake_table::test_utils::TestContext;
-use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
+use rstest::rstest;
+
+use crate::storage::wal::test_utils::WalTestEnv;
 use crate::storage::wal::test_utils::*;
 use crate::storage::wal::WalManager;
 use crate::storage::wal::{PersistentWalMetadata, WalTransactionState};
 use crate::TableEvent;
-use crate::WalConfig;
 use crate::{assert_wal_file_does_not_exist, assert_wal_file_exists, assert_wal_logs_equal};
 
-#[tokio::test]
-async fn test_wal_insert_persist_files() {
-    let context = TestContext::new("wal_persist");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_persist")]
+async fn test_wal_insert_persist_files(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let (mut wal, expected_events) = create_test_wal(wal_config.clone()).await;
 
     // Persist and verify file number
@@ -29,11 +32,14 @@ async fn test_wal_insert_persist_files() {
     );
 }
 
-#[tokio::test]
-async fn test_wal_empty_persist() {
-    let context = TestContext::new("wal_empty_persist");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_empty_persist")]
+async fn test_wal_empty_persist(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     // Persist without any events
@@ -43,11 +49,14 @@ async fn test_wal_empty_persist() {
     assert!(!wal_file_exists(0, wal.get_file_system_accessor(), &wal_config).await);
 }
 
-#[tokio::test]
-async fn test_wal_file_numbering_sequence() {
-    let context = TestContext::new("wal_file_numbering");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_file_numbering")]
+async fn test_wal_file_numbering_sequence(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     let mut events = Vec::new();
@@ -71,11 +80,14 @@ async fn test_wal_file_numbering_sequence() {
     }
 }
 
-#[tokio::test]
-async fn test_wal_truncation_deletes_files() {
-    let context = TestContext::new("wal_truncation");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_truncation")]
+async fn test_wal_truncation_deletes_files(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     // first commit in files 0, 1, 2, complete_lsn is 101
@@ -118,11 +130,14 @@ async fn test_wal_truncation_deletes_files() {
     }
 }
 
-#[tokio::test]
-async fn test_wal_truncation_with_no_files() {
-    let context = TestContext::new("wal_truncation_no_files");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_truncation_no_files")]
+async fn test_wal_truncation_with_no_files(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     // Test truncation with no files - should not panic or error
@@ -131,11 +146,14 @@ async fn test_wal_truncation_with_no_files() {
         .unwrap();
 }
 
-#[tokio::test]
-async fn test_wal_truncation_deletes_all_files() {
-    let context = TestContext::new("wal_truncation_delete_all");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_truncation_delete_all")]
+async fn test_wal_truncation_deletes_all_files(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
     let mut events = Vec::new();
 
@@ -159,11 +177,14 @@ async fn test_wal_truncation_deletes_all_files() {
 // Truncation tests where the iceberg LSN is across xact boundaries
 // ------------------------------------------------------------
 
-#[tokio::test]
-async fn test_wal_truncate_incomplete_main_xact() {
-    let context = TestContext::new("wal_persist_truncate");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_persist_truncate")]
+async fn test_wal_truncate_incomplete_main_xact(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     let mut events = Vec::new();
@@ -187,11 +208,16 @@ async fn test_wal_truncate_incomplete_main_xact() {
     );
 }
 
-#[tokio::test]
-async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
-    let context = TestContext::new("wal_persist_truncate");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_persist_truncate")]
+async fn test_wal_truncate_unfinished_main_xact_multiple_commits(
+    #[case] path_or_obj_store_indicator: &str,
+) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     let mut events = Vec::new();
@@ -230,12 +256,17 @@ async fn test_wal_truncate_unfinished_main_xact_multiple_commits() {
     );
 }
 
-#[tokio::test]
-async fn test_wal_truncate_main_and_streaming_xact_interleave() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_truncate_main_and_streaming_xact_interleave")]
+async fn test_wal_truncate_main_and_streaming_xact_interleave(
+    #[case] path_or_obj_store_indicator: &str,
+) {
     // Testing case: main xact and streaming xact are interleaving and streaming xact prevents file cleanup
-    let context = TestContext::new("wal_truncate_main_and_streaming_xact_interleave");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     let mut events = Vec::new();
@@ -277,12 +308,15 @@ async fn test_wal_truncate_main_and_streaming_xact_interleave() {
     );
 }
 
-#[tokio::test]
-async fn test_wal_multiple_interleaved_truncations() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_multiple_interleaved_truncations")]
+async fn test_wal_multiple_interleaved_truncations(#[case] path_or_obj_store_indicator: &str) {
     // multiple truncations should behave
-    let context = TestContext::new("wal_multiple_interleaved_truncations");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     let mut events = Vec::new();
@@ -342,12 +376,15 @@ async fn test_wal_multiple_interleaved_truncations() {
     );
 }
 
-#[tokio::test]
-async fn test_wal_stream_abort() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_stream_abort")]
+async fn test_wal_stream_abort(#[case] path_or_obj_store_indicator: &str) {
     // Testing case: streaming xact is not finished and prevents file cleanup
-    let context = TestContext::new("wal_stream_abort");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     let mut events = Vec::new();
@@ -389,11 +426,14 @@ async fn test_wal_stream_abort() {
     );
 }
 
-#[tokio::test]
-async fn test_wal_recovery_basic() {
-    let context = TestContext::new("wal_recovery_basic");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_recovery_basic")]
+async fn test_wal_recovery_basic(#[case] path_or_obj_store_indicator: &str) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let (mut wal, expected_events) = create_test_wal(wal_config.clone()).await;
 
     // Persist the events first
@@ -412,11 +452,16 @@ async fn test_wal_recovery_basic() {
     assert_ingestion_events_vectors_equal(&recovered_events, &expected_events);
 }
 
-#[tokio::test]
-async fn test_main_tracker_merges_multiple_subset_commits_in_same_file() {
-    let context = TestContext::new("wal_main_tracker_merge_subset");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_main_tracker_merge_subset")]
+async fn test_main_tracker_merges_multiple_subset_commits_in_same_file(
+    #[case] path_or_obj_store_indicator: &str,
+) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     // Create two main commits in the same file (file 0). Only the highest LSN subset commit should remain.
@@ -456,11 +501,16 @@ async fn test_main_tracker_merges_multiple_subset_commits_in_same_file() {
     }
 }
 
-#[tokio::test]
-async fn test_main_tracker_allows_one_spanning_and_one_subset_per_file() {
-    let context = TestContext::new("wal_main_tracker_spanning_and_subset");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_main_tracker_spanning_and_subset")]
+async fn test_main_tracker_allows_one_spanning_and_one_subset_per_file(
+    #[case] path_or_obj_store_indicator: &str,
+) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     // File 0: start a main txn but do not commit yet
@@ -510,11 +560,16 @@ async fn test_main_tracker_allows_one_spanning_and_one_subset_per_file() {
     }
 }
 
-#[tokio::test]
-async fn test_main_tracker_keeps_highest_subset_commit_per_file() {
-    let context = TestContext::new("wal_main_tracker_highest_subset");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_main_tracker_highest_subset")]
+async fn test_main_tracker_keeps_highest_subset_commit_per_file(
+    #[case] path_or_obj_store_indicator: &str,
+) {
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
     let mut wal = WalManager::new(&wal_config);
 
     // File 0: start main txn but don't commit yet, then persist
@@ -574,17 +629,22 @@ async fn test_main_tracker_keeps_highest_subset_commit_per_file() {
 /// reapplying untracked events (which could cause duplication or order violations).
 /// This test simulates that crash window and asserts that recovery only replays events
 /// referenced by persisted metadata.
-#[tokio::test]
-async fn test_recovery_uses_metadata_as_source_of_truth_when_file_persisted_but_metadata_not() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[rstest]
+#[cfg_attr(feature = "storage-gcs", case::gcs("gcs"))]
+#[cfg_attr(feature = "storage-s3", case::s3("s3"))]
+#[case::local("wal_recovery_metadata_source_of_truth")]
+async fn test_recovery_uses_metadata_as_source_of_truth_when_file_persisted_but_metadata_not(
+    #[case] path_or_obj_store_indicator: &str,
+) {
     // Scenario:
     // - First round: persist file 0 and metadata
     // - Second round: persist file 1 only (simulate crash before metadata/truncation)
     // Expectation: recovery should only replay events tracked by metadata (i.e., file 0),
     // ignoring events from file 1 that are not yet referenced in metadata.
 
-    let context = TestContext::new("wal_recovery_metadata_source_of_truth");
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path().to_path_buf());
+    let wal_test_env = WalTestEnv::new_from_string(path_or_obj_store_indicator).await;
+    let wal_config = wal_test_env.get_wal_config();
 
     // Create initial WAL with a batch of events and persist (writes file 0 + metadata)
     let (mut wal, expected_events_file0) = create_test_wal(wal_config.clone()).await;

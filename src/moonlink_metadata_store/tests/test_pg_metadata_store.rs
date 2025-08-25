@@ -76,6 +76,66 @@ mod tests {
         check_persisted_metadata(&metadata_store).await;
     }
 
+    #[cfg(all(feature = "storage-s3", feature = "test-utils"))]
+    #[tokio::test]
+    #[serial]
+    async fn test_table_metadata_store_and_load_s3() {
+        let table_uri = get_table_uri();
+        let _test_environment = TestEnvironment::new(&table_uri).await;
+        let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
+
+        let moonlink_table_config =
+            moonlink_metadata_store::test_utils::get_s3_moonlink_table_config(DATABASE, TABLE);
+
+        metadata_store
+            .store_table_metadata(
+                DATABASE,
+                TABLE,
+                SRC_TABLE_NAME,
+                &table_uri,
+                moonlink_table_config.clone(),
+            )
+            .await
+            .unwrap();
+
+        let entries = metadata_store
+            .get_all_table_metadata_entries()
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].moonlink_table_config, moonlink_table_config);
+    }
+
+    #[cfg(all(feature = "storage-gcs", feature = "test-utils"))]
+    #[tokio::test]
+    #[serial]
+    async fn test_table_metadata_store_and_load_gcs() {
+        let table_uri = get_table_uri();
+        let _test_environment = TestEnvironment::new(&table_uri).await;
+        let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
+
+        let moonlink_table_config =
+            moonlink_metadata_store::test_utils::get_gcs_moonlink_table_config(DATABASE, TABLE);
+
+        metadata_store
+            .store_table_metadata(
+                DATABASE,
+                TABLE,
+                SRC_TABLE_NAME,
+                &table_uri,
+                moonlink_table_config.clone(),
+            )
+            .await
+            .unwrap();
+
+        let entries = metadata_store
+            .get_all_table_metadata_entries()
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].moonlink_table_config, moonlink_table_config);
+    }
+
     /// Test scenario: load from non-existent schema.
     #[tokio::test]
     #[serial]

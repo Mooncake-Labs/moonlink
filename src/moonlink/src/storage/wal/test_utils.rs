@@ -1,6 +1,15 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+#[cfg(feature = "storage-gcs")]
+use crate::storage::filesystem::gcs::gcs_test_utils;
+#[cfg(feature = "storage-gcs")]
+use crate::storage::filesystem::gcs::test_guard::TestGuard as GcsTestGuard;
+#[cfg(feature = "storage-s3")]
+use crate::storage::filesystem::s3::s3_test_utils;
+#[cfg(feature = "storage-s3")]
+use crate::storage::filesystem::s3::test_guard::TestGuard as S3TestGuard;
 use crate::storage::mooncake_table::test_utils::test_row;
 use crate::storage::wal::{WalEvent, WalManager};
+use crate::storage::TestContext;
 use crate::table_notify::TableEvent;
 use crate::{PersistentWalMetadata, Result, WalConfig};
 use futures::StreamExt;
@@ -50,6 +59,58 @@ impl WalManager {
 // ================================================
 // Helper functions for WAL file manipulation
 // ================================================
+
+// Used in conjunction with rstest to test WAL persistence in different environments.
+pub enum WalTestEnv {
+    // ownership needed for test guards even if unused
+    #[allow(dead_code)]
+    Local(WalConfig, TestContext),
+    #[cfg(feature = "storage-gcs")]
+    Gcs((WalConfig, GcsTestGuard)),
+    #[cfg(feature = "storage-s3")]
+    S3((WalConfig, S3TestGuard)),
+}
+
+impl WalTestEnv {
+    pub async fn new_from_string(path_or_obj_store_indicator: &str) -> WalTestEnv {
+        #[cfg(feature = "storage-gcs")]
+        if path_or_obj_store_indicator == "gcs" {
+            let (bucket, warehouse_uri) = gcs_test_utils::get_test_gcs_bucket_and_warehouse();
+            let test_guard = GcsTestGuard::new(bucket.clone()).await;
+            let gcs_storage_config = gcs_test_utils::create_gcs_storage_config(&warehouse_uri);
+            let wal_config = WalConfig::new(gcs_storage_config, WAL_TEST_TABLE_ID);
+            return WalTestEnv::Gcs((wal_config, test_guard));
+        }
+
+        #[cfg(feature = "storage-s3")]
+        if path_or_obj_store_indicator == "s3" {
+            let (bucket, warehouse_uri) = s3_test_utils::get_test_s3_bucket_and_warehouse();
+            let test_guard = S3TestGuard::new(bucket.clone()).await;
+            let s3_storage_config = s3_test_utils::create_s3_storage_config(&warehouse_uri);
+            let wal_config = WalConfig::new(s3_storage_config, WAL_TEST_TABLE_ID);
+            return WalTestEnv::S3((wal_config, test_guard));
+        }
+
+        let test_context = TestContext::new(path_or_obj_store_indicator);
+        WalTestEnv::Local(
+            WalConfig::default_wal_config_local(
+                WAL_TEST_TABLE_ID,
+                &test_context.path().to_path_buf(),
+            ),
+            test_context,
+        )
+    }
+
+    pub fn get_wal_config(&self) -> WalConfig {
+        match self {
+            WalTestEnv::Local(wal_config, _) => wal_config.clone(),
+            #[cfg(feature = "storage-gcs")]
+            WalTestEnv::Gcs((wal_config, _)) => wal_config.clone(),
+            #[cfg(feature = "storage-s3")]
+            WalTestEnv::S3((wal_config, _)) => wal_config.clone(),
+        }
+    }
+}
 
 pub async fn extract_file_contents(
     file_path: &str,
