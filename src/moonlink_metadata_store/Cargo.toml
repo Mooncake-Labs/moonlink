@@ -17,7 +17,7 @@ metadata-postgres = ["postgres-types", "tokio-postgres"]
 metadata-sqlite = ["sqlx"]
 
 test-tls = []
-test-utils = []
+test-utils = ["moonlink/test-utils"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -42,9 +42,9 @@ serial_test = { workspace = true }
 [[test]]
 name = "test_pg_metadata_store_utils"
 path = "tests/test_pg_metadata_store_utils.rs"
-required-features = ["metadata-postgres"]
+required-features = ["metadata-postgres", "test-utils"]
 
 [[test]]
 name = "test_pg_metadata_store"
 path = "tests/test_pg_metadata_store.rs"
-required-features = ["metadata-postgres"]
+required-features = ["metadata-postgres", "test-utils"]
