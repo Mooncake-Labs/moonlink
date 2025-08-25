@@ -42,6 +42,7 @@ iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "7cde26a7d
 ] }
 itertools = { version = "0.14" }
 lru = { version = "0.14" }
+moka = { version = "0.12.10", features = ["future"] }
 more-asserts = "0.3"
 multimap = { version = "0.10", default-features = false }
 native-tls = "0.2"

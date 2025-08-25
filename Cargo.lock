@@ -4231,6 +4231,7 @@ dependencies = [
  "lru",
  "memmap2",
  "mockall",
+ "moka",
  "moonlink_error",
  "more-asserts",
  "multimap",
