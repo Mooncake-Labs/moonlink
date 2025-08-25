@@ -83,7 +83,7 @@ impl MoonlinkTableConfigForPersistence {
     /// Get mooncake table config from persisted moonlink config.
     fn get_mooncake_table_config(&self) -> MooncakeTableConfig {
         MooncakeTableConfig {
-            append_only: false,
+            append_only: self.mooncake_table_config.append_only,
             mem_slice_size: self.mooncake_table_config.mem_slice_size,
             snapshot_deletion_record_count: self
                 .mooncake_table_config

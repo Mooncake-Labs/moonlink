@@ -136,6 +136,9 @@ impl TableMetadata {
         if self.identity == IdentityProp::None {
             assert!(self.config.append_only);
         }
+        if self.config.append_only {
+            assert_eq!(self.identity, IdentityProp::None);
+        }
         // Validate table config.
         self.config.validate();
     }

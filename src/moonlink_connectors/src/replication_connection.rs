@@ -261,6 +261,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationConnection<T> {
                 debug!(src_table_name, "adding REST API table");
 
                 let src_table_id = conn.next_src_table_id();
+                let append_only = moonlink_table_config.mooncake_table_config.append_only;
                 let table_components = TableComponents {
                     read_state_filepath_remap,
                     object_storage_cache: self.object_storage_cache.clone(),
@@ -269,10 +270,16 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationConnection<T> {
 
                 // Create MooncakeTable resources using the table init function.
                 let replication_state = conn.get_replication_state();
+                // REST API doesn't need identity.
+                let identity = if append_only {
+                    moonlink::row::IdentityProp::None
+                } else {
+                    moonlink::row::IdentityProp::FullRow
+                };
                 let mut table_resources = build_table_components(
                     mooncake_table_id.to_string(),
                     arrow_schema.clone(),
-                    moonlink::row::IdentityProp::FullRow, // REST API doesn't need identity
+                    identity,
                     src_table_name.to_string(),
                     src_table_id,
                     &self.table_base_path,
