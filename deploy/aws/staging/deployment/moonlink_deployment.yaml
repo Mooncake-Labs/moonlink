@@ -1,4 +1,4 @@
-# to deploy: kubectl apply -f deploy/aws/staging/deployment/moonlink_deployment.yaml && kubectl set env -n default deploy/moonlink-deployment-staging DATA_SERVER_URI=<moonlink_service_uri>:8080
+# to deploy: DATA_SERVER_URI=http://myserver:8080 envsubst < deploy/aws/staging/deployment/moonlink_deployment.yaml | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,7 +46,7 @@ spec:
             memory: "1Gi"
         env:
         - name: DATA_SERVER_URI
-          value: "http://<your-server-uri>:8080"
+          value: "${DATA_SERVER_URI}"
         volumeMounts:
         - name: shared-cache-directory
           mountPath: /tmp/moonlink
