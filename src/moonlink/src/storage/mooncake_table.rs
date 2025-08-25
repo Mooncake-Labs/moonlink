@@ -22,6 +22,8 @@ pub mod table_status;
 pub mod table_status_reader;
 mod transaction_stream;
 
+use std::io::Result as IoResult;
+
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
@@ -1281,11 +1283,18 @@ impl MooncakeTable {
                 new_file_indices: vec![merged],
             };
 
-            // Send back completion notification to table handler.
-            table_notify_tx_copy
-                .send(TableEvent::IndexMergeResult { index_merge_result })
-                .await
-                .unwrap();
+                // Send back completion notification to table handler.
+                table_notify_tx_copy
+                    .send(TableEvent::IndexMergeResult { index_merge_result })
+                    .await
+                    .unwrap();
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = result {
+                tracing::error!("Index merge task failed: {}", e);
+            }
         });
     }
 

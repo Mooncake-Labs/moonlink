@@ -72,7 +72,7 @@ async fn test_data_file_compaction_1() {
         disk_files: vec![get_single_file_to_compact(
             &data_file, /*deletion_vector=*/ None,
         )],
-        file_indices: vec![file_index],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 2;
     let file_params = CompactionFileParams {
@@ -157,7 +157,7 @@ async fn test_data_file_compaction_2() {
             &data_file,
             Some(puffin_blob_ref),
         )],
-        file_indices: vec![file_index.clone()],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 2;
     let file_params = CompactionFileParams {
@@ -245,7 +245,7 @@ async fn test_data_file_compaction_3() {
             &data_file,
             Some(puffin_blob_ref),
         )],
-        file_indices: vec![file_index.clone()],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 2;
     let file_params = CompactionFileParams {
@@ -326,7 +326,7 @@ async fn test_data_file_compaction_4() {
             get_single_file_to_compact(&data_file_1, /*deletion_vector=*/ None),
             get_single_file_to_compact(&data_file_2, /*deletion_vector=*/ None),
         ],
-        file_indices: vec![file_index_1.clone(), file_index_2.clone()],
+        file_indices: vec![file_index_1.unwrap(), file_index_2.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -442,7 +442,7 @@ async fn test_data_file_compaction_5() {
             get_single_file_to_compact(&data_file_1, Some(puffin_blob_ref_1)),
             get_single_file_to_compact(&data_file_2, Some(puffin_blob_ref_2)),
         ],
-        file_indices: vec![file_index_1.clone(), file_index_2.clone()],
+        file_indices: vec![file_index_1.unwrap(), file_index_2.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -565,7 +565,7 @@ async fn test_data_file_compaction_6() {
             get_single_file_to_compact(&data_file_1, Some(puffin_blob_ref_1)),
             get_single_file_to_compact(&data_file_2, Some(puffin_blob_ref_2)),
         ],
-        file_indices: vec![file_index_1.clone(), file_index_2.clone()],
+        file_indices: vec![file_index_1.unwrap(), file_index_2.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -655,7 +655,7 @@ async fn test_data_file_compaction_7() {
             &data_file,
             Some(puffin_blob_ref),
         )],
-        file_indices: vec![file_index.clone()],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -727,7 +727,7 @@ async fn test_data_file_compaction_8() {
         disk_files: vec![get_single_file_to_compact(
             &data_file, /*deletion_vector=*/ None,
         )],
-        file_indices: vec![file_index.clone()],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -822,7 +822,7 @@ async fn test_data_file_compaction_9() {
             &data_file,
             /*deletion_vector=*/ Some(puffin_blob_ref),
         )],
-        file_indices: vec![file_index.clone()],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -918,7 +918,7 @@ async fn test_data_file_compaction_10() {
             &data_file,
             /*deletion_vector=*/ Some(puffin_blob_ref),
         )],
-        file_indices: vec![file_index.clone()],
+        file_indices: vec![file_index.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -1038,7 +1038,7 @@ async fn test_multiple_compacted_data_files_1() {
             get_single_file_to_compact(&data_file_1, Some(puffin_blob_ref_1)),
             get_single_file_to_compact(&data_file_2, Some(puffin_blob_ref_2)),
         ],
-        file_indices: vec![file_index_1.clone(), file_index_2.clone()],
+        file_indices: vec![file_index_1.unwrap(), file_index_2.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -1174,7 +1174,7 @@ async fn test_multiple_compacted_data_files_2() {
             get_single_file_to_compact(&data_file_1, Some(puffin_blob_ref_1)),
             get_single_file_to_compact(&data_file_2, Some(puffin_blob_ref_2)),
         ],
-        file_indices: vec![file_index_1.clone(), file_index_2.clone()],
+        file_indices: vec![file_index_1.unwrap(), file_index_2.unwrap()],
     };
     let table_auto_incr_id: u64 = 4;
     let file_params = CompactionFileParams {
@@ -1224,7 +1224,8 @@ async fn test_large_number_of_data_files() {
             data_file.clone(),
             index_block_file_id,
         )
-        .await;
+        .await
+        .unwrap();
         old_file_indices_to_compact.push(file_index);
     }
 

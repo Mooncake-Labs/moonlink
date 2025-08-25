@@ -30,6 +30,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use std::io::Result as IoResult;
+
 /// Test data.
 const NUM_ROWS: usize = 6;
 const ID_VALUES: [i32; 6] = [1, 2, 3, 4, 5, 6];
@@ -95,7 +97,7 @@ pub(crate) async fn create_file_index_1(
     directory: std::path::PathBuf,
     data_file: MooncakeDataFileRef,
     start_file_id: u64,
-) -> FileIndex {
+) -> IoResult<FileIndex> {
     let entries = vec![
         (
             get_hash_for_row(ID_VALUES[0], NAME_VALUES[0], AGE_VALUES[0]),
@@ -123,7 +125,7 @@ pub(crate) async fn create_file_index_2(
     directory: std::path::PathBuf,
     data_file: MooncakeDataFileRef,
     start_file_id: u64,
-) -> FileIndex {
+) -> IoResult<FileIndex> {
     let entries = vec![
         (
             get_hash_for_row(ID_VALUES[3], NAME_VALUES[3], AGE_VALUES[3]),
@@ -151,7 +153,7 @@ pub(crate) async fn create_file_index_for_both_batches(
     directory: std::path::PathBuf,
     data_file: MooncakeDataFileRef,
     start_file_id: u64,
-) -> FileIndex {
+) -> IoResult<FileIndex> {
     let mut entries = vec![];
     for idx in 0..NUM_ROWS {
         entries.push((
