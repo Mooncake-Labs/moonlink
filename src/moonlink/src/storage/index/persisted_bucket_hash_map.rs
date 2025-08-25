@@ -1,4 +1,5 @@
 use crate::create_data_file;
+use crate::error::Result;
 use crate::storage::async_bitwriter::BitWriter as AsyncBitWriter;
 use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
 use crate::NonEvictableHandle;
@@ -8,7 +9,6 @@ use std::collections::{BinaryHeap, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
-use std::io::Result as IoResult;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -332,7 +332,7 @@ impl IndexBlockBuilder {
         bucket_start_idx: u32,
         bucket_end_idx: u32,
         directory: PathBuf,
-    ) -> IoResult<Self> {
+    ) -> Result<Self> {
         let file_name = format!("index_block_{}.bin", uuid::Uuid::now_v7());
         let file_path = directory.join(&file_name);
 
@@ -357,7 +357,7 @@ impl IndexBlockBuilder {
         seg_idx: usize,
         row_idx: usize,
         metadata: &GlobalIndex,
-    ) -> IoResult<bool> {
+    ) -> Result<bool> {
         while (hash >> metadata.hash_lower_bits) != self.current_bucket as u64 {
             self.current_bucket += 1;
             self.buckets[self.current_bucket as usize] = self.current_entry;
@@ -378,11 +378,12 @@ impl IndexBlockBuilder {
     }
 
     /// Flush buffered entries written to disk.
-    pub async fn flush(&mut self) -> IoResult<()> {
-        self.entry_writer.flush().await
+    pub async fn flush(&mut self) -> Result<()> {
+        self.entry_writer.flush().await?;
+        Ok(())
     }
 
-    pub async fn build(mut self, metadata: &GlobalIndex, file_id: u64) -> IoResult<IndexBlock> {
+    pub async fn build(mut self, metadata: &GlobalIndex, file_id: u64) -> Result<IndexBlock> {
         for i in self.current_bucket + 1..self.bucket_end_idx {
             self.buckets[i as usize] = self.current_entry;
         }
@@ -487,7 +488,7 @@ impl GlobalIndexBuilder {
         mut self,
         mut entries: Vec<(u64, usize, usize)>,
         file_id: u64,
-    ) -> IoResult<GlobalIndex> {
+    ) -> Result<GlobalIndex> {
         self.num_rows = entries.len() as u32;
         for entry in &mut entries {
             entry.0 = splitmix64(entry.0);
@@ -501,7 +502,7 @@ impl GlobalIndexBuilder {
         mut self,
         iter: impl Iterator<Item = (u64, usize, usize)>,
         file_id: u64,
-    ) -> IoResult<GlobalIndex> {
+    ) -> Result<GlobalIndex> {
         let (num_buckets, mut global_index) = self.create_global_index();
         let mut index_blocks = Vec::new();
         let mut index_block_builder =
@@ -526,7 +527,7 @@ impl GlobalIndexBuilder {
         mut self,
         indices: HashSet<GlobalIndex>,
         file_id: u64,
-    ) -> IoResult<GlobalIndex> {
+    ) -> Result<GlobalIndex> {
         self.num_rows = indices.iter().map(|index| index.num_rows).sum();
         self.files = indices
             .iter()
@@ -545,7 +546,7 @@ impl GlobalIndexBuilder {
         mut self,
         mut iter: GlobalIndexMergingIterator<'_>,
         file_id: u64,
-    ) -> IoResult<GlobalIndex> {
+    ) -> Result<GlobalIndex> {
         let (num_buckets, mut global_index) = self.create_global_index();
         let mut index_block_builder =
             IndexBlockBuilder::new(0, num_buckets + 1, self.directory.clone()).await?;
@@ -581,7 +582,7 @@ impl GlobalIndexBuilder {
         new_data_files: Vec<MooncakeDataFileRef>,
         get_remapped_record_location: GetRemappedRecLoc,
         get_seg_idx: GetSegIdx,
-    ) -> IoResult<GlobalIndex>
+    ) -> Result<GlobalIndex>
     where
         GetRemappedRecLoc: FnMut(RecordLocation) -> Option<RecordLocation>,
         GetSegIdx: FnMut(RecordLocation) -> usize, /*seg_idx*/
@@ -616,7 +617,7 @@ impl GlobalIndexBuilder {
         new_data_files: Vec<MooncakeDataFileRef>,
         mut get_remapped_record_location: GetRemappedRecLoc,
         mut get_seg_idx: GetSegIdx,
-    ) -> IoResult<GlobalIndex>
+    ) -> Result<GlobalIndex>
     where
         GetRemappedRecLoc: FnMut(RecordLocation) -> Option<RecordLocation>,
         GetSegIdx: FnMut(RecordLocation) -> usize, /*seg_idx*/
