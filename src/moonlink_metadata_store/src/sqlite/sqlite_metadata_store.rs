@@ -42,27 +42,27 @@ impl MetadataStoreTrait for SqliteMetadataStore {
                 t.src_table_name,
                 t.src_table_uri,
                 t.config,
-                s_ice.secret_type AS iceberg_secret_type,
-                s_ice.key_id       AS iceberg_key_id,
-                s_ice.secret       AS iceberg_secret,
-                s_ice.endpoint     AS iceberg_endpoint,
-                s_ice.region       AS iceberg_region,
-                s_ice.project      AS iceberg_project,
-                s_wal.secret_type  AS wal_secret_type,
-                s_wal.key_id       AS wal_key_id,
-                s_wal.secret       AS wal_secret,
-                s_wal.endpoint     AS wal_endpoint,
-                s_wal.region       AS wal_region,
-                s_wal.project      AS wal_project
+                s_ice.storage_provider  AS iceberg_storage_provider,
+                s_ice.key_id            AS iceberg_key_id,
+                s_ice.secret            AS iceberg_secret,
+                s_ice.endpoint          AS iceberg_endpoint,
+                s_ice.region            AS iceberg_region,
+                s_ice.project           AS iceberg_project,
+                s_wal.storage_provider  AS wal_storage_provider,
+                s_wal.key_id            AS wal_key_id,
+                s_wal.secret            AS wal_secret,
+                s_wal.endpoint          AS wal_endpoint,
+                s_wal.region            AS wal_region,
+                s_wal.project           AS wal_project
             FROM tables t
             LEFT JOIN secrets s_ice
                 ON t."database" = s_ice."database"
                 AND t."table" = s_ice."table"
-                AND s_ice.purpose = 'iceberg'
+                AND s_ice.usage_type = 'iceberg'
             LEFT JOIN secrets s_wal
                 ON t."database" = s_wal."database"
                 AND t."table" = s_wal."table"
-                AND s_wal.purpose = 'wal'
+                AND s_wal.usage_type = 'wal'
             "#,
         )
         .fetch_all(&sqlite_conn.pool)
@@ -77,9 +77,9 @@ impl MetadataStoreTrait for SqliteMetadataStore {
             let serialized_config: String = row.get("config");
             let json_value: serde_json::Value = serde_json::from_str(&serialized_config)?;
 
-            let iceberg_secret_type: Option<String> = row.get("iceberg_secret_type");
+            let iceberg_storage_provider: Option<String> = row.get("iceberg_storage_provider");
             let iceberg_secret_entry: Option<MoonlinkTableSecret> =
-                iceberg_secret_type.map(|t| MoonlinkTableSecret {
+                iceberg_storage_provider.map(|t| MoonlinkTableSecret {
                     secret_type: MoonlinkTableSecret::convert_secret_type(&t),
                     key_id: row.get("iceberg_key_id"),
                     secret: row.get("iceberg_secret"),
@@ -87,9 +87,9 @@ impl MetadataStoreTrait for SqliteMetadataStore {
                     region: row.get("iceberg_region"),
                     project: row.get("iceberg_project"),
                 });
-            let wal_secret_type: Option<String> = row.get("wal_secret_type");
+            let wal_storage_provider: Option<String> = row.get("wal_storage_provider");
             let wal_secret_entry: Option<MoonlinkTableSecret> =
-                wal_secret_type.map(|t| MoonlinkTableSecret {
+                wal_storage_provider.map(|t| MoonlinkTableSecret {
                     secret_type: MoonlinkTableSecret::convert_secret_type(&t),
                     key_id: row.get("wal_key_id"),
                     secret: row.get("wal_secret"),
@@ -177,7 +177,7 @@ impl MetadataStoreTrait for SqliteMetadataStore {
         if let Some(secret) = iceberg_secret {
             let rows_affected = sqlx::query(
                 r#"
-                INSERT INTO secrets ("database", "table", purpose, secret_type, key_id, secret, endpoint, region, project)
+                INSERT INTO secrets ("database", "table", usage_type, storage_provider, key_id, secret, endpoint, region, project)
                 VALUES (?, ?, 'iceberg', ?, ?, ?, ?, ?, ?);
                 "#,
             )
@@ -203,7 +203,7 @@ impl MetadataStoreTrait for SqliteMetadataStore {
         if let Some(secret) = wal_secret {
             let rows_affected = sqlx::query(
                 r#"
-                INSERT INTO secrets ("database", "table", purpose, secret_type, key_id, secret, endpoint, region, project)
+                INSERT INTO secrets ("database", "table", usage_type, storage_provider, key_id, secret, endpoint, region, project)
                 VALUES (?, ?, 'wal', ?, ?, ?, ?, ?, ?);
                 "#,
             )
