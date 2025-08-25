@@ -96,7 +96,8 @@ mod tests {
             .set_directory(tempfile::tempdir().unwrap().keep());
         let file_index_1 = builder
             .build_from_flush(/*hash_entries=*/ vec![(1, 0, 0)], /*file_id=*/ 1)
-            .await;
+            .await
+            .unwrap();
 
         // Create second file index.
         let mut builder = GlobalIndexBuilder::new();
@@ -108,20 +109,22 @@ mod tests {
             .set_directory(tempfile::tempdir().unwrap().keep());
         let file_index_2 = builder
             .build_from_flush(/*hash_entries=*/ vec![(2, 0, 0)], /*file_id=*/ 3)
-            .await;
+            .await
+            .unwrap();
 
-        let mut file_indices = vec![file_index_1.clone(), file_index_2.clone()];
+        let mut index_block_files = vec![
+            file_index_1.index_blocks[0].index_file.file_path().clone(),
+            file_index_2.index_blocks[0].index_file.file_path().clone(),
+        ];
+        index_block_files.sort();
+
+        let mut file_indices = vec![file_index_1, file_index_2];
         import_file_indices_to_cache(
             &mut file_indices,
             Arc::new(object_storage_cache.clone()),
             TableId(0),
         )
         .await;
-        let mut index_block_files = vec![
-            file_index_1.index_blocks[0].index_file.file_path().clone(),
-            file_index_2.index_blocks[0].index_file.file_path().clone(),
-        ];
-        index_block_files.sort();
 
         // Check both file indices are pinned in cache.
         assert_eq!(
