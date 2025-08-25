@@ -416,7 +416,7 @@ impl CompactionBuilder {
                     self.compaction_payload.file_indices.clone(),
                     &old_record_loc_to_new_mapping,
                 )
-                .await;
+                .await?;
             new_file_indices.push(cur_new_file_indices);
         }
 
@@ -426,7 +426,7 @@ impl CompactionBuilder {
             old_data_files,
             old_file_indices,
             new_data_files: self.new_data_files,
-            new_file_indices: vec![new_file_indices?],
+            new_file_indices,
             evicted_files_to_delete,
         })
     }
