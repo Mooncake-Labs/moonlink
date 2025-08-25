@@ -10,7 +10,6 @@ use crate::storage::storage_utils::{
     create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
     MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation, TableId,
 };
-use std::io::Result as IoResult;
 // use crate::error::{Errko};
 
 use arrow_array::RecordBatch;
@@ -256,7 +255,7 @@ impl DiskSliceWriter {
     }
 
     #[tracing::instrument(name = "remap_disk_index", skip_all)]
-    async fn remap_index(&mut self) -> IoResult<()> {
+    async fn remap_index(&mut self) -> Result<()> {
         if self.old_index().is_empty() {
             return Ok(());
         }

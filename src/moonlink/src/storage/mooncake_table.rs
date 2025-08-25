@@ -22,8 +22,6 @@ pub mod table_status;
 pub mod table_status_reader;
 mod transaction_stream;
 
-use std::io::Result as IoResult;
-
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
@@ -1284,7 +1282,7 @@ impl MooncakeTable {
 
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(async move {
-            let result: IoResult<()> = async move {
+            let result: Result<()> = async move {
                 let mut builder = GlobalIndexBuilder::new();
                 builder.set_directory(table_directory);
                 let merged = builder

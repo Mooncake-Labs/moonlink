@@ -24,7 +24,6 @@ use crate::storage::storage_utils::{
 use crate::storage::storage_utils::{FileId, RecordLocation};
 use crate::storage::{parquet_utils, storage_utils};
 use crate::{create_data_file, Result};
-use std::io::Result as IoResult;
 
 type DataFileRemap = HashMap<RecordLocation, RemappedRecordLocation>;
 
@@ -333,7 +332,7 @@ impl CompactionBuilder {
         &mut self,
         old_file_indices: Vec<FileIndex>,
         old_to_new_remap: &HashMap<RecordLocation, RemappedRecordLocation>,
-    ) -> IoResult<FileIndex> {
+    ) -> Result<FileIndex> {
         let get_remapped_record_location =
             |old_record_location: RecordLocation| -> Option<RecordLocation> {
                 if let Some(remapped_record_location) = old_to_new_remap.get(&old_record_location) {
