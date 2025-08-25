@@ -52,6 +52,20 @@ impl Error {
     pub fn invalid_argument(message: String) -> Self {
         Self::InvalidArgumentError(ErrorStruct::new(message, ErrorStatus::Permanent))
     }
+    pub fn get_status(&self) -> ErrorStatus {
+        match self {
+            Error::ParseIntError(es) => es.status,
+            Error::PostgresSource(es) => es.status,
+            Error::Io(es) => es.status,
+            Error::MoonlinkConnectorError(es) => es.status,
+            Error::MoonlinkError(es) => es.status,
+            Error::MoonlinkMetadataStoreError(es) => es.status,
+            Error::InvalidArgumentError(es) => es.status,
+            Error::TokioWatchRecvError(es) => es.status,
+            Error::Json(es) => es.status,
+            Error::MpscChannelSendError(es) => es.status,
+        }
+    }
 }
 
 impl From<PostgresSourceError> for Error {
