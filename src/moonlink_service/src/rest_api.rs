@@ -107,6 +107,22 @@ pub struct ListTablesResponse {
 }
 
 /// ====================
+/// Optimize table
+/// ====================
+///
+/// Request structure for table optimize.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OptimizeTableRequest {
+    pub database: String,
+    pub table: String,
+    pub mode: String,
+}
+
+/// Response structure for table optimize.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OptimizeTableResponse {}
+
+/// ====================
 /// Data ingestion
 /// ====================
 ///
@@ -185,6 +201,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/tables/{table}", delete(drop_table))
         .route("/ingest/{table}", post(ingest_data))
         .route("/upload/{table}", post(upload_files))
+        .route("/tables/{table}/optimize", post(optimize_table))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -434,6 +451,37 @@ async fn upload_files(
         None
     };
     Ok(Json(FileUploadResponse { lsn }))
+}
+
+async fn optimize_table(
+    Path(table): Path<String>,
+    State(state): State<ApiState>,
+    Json(payload): Json<OptimizeTableRequest>,
+) -> Result<Json<OptimizeTableResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received table optimize request for '{}': {:?}",
+        table, payload
+    );
+    match state
+        .backend
+        .optimize_table(payload.database, payload.table, payload.mode.as_str())
+        .await
+    {
+        Ok(_) => Ok(Json(OptimizeTableResponse {})),
+        Err(e) => {
+            error!("Failed to optimize table '{}': {}", table, e);
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_mode".to_string(),
+                    message: format!(
+                        "Invalid mode '{}'. Must be 'data', 'index' or 'full'",
+                        payload.mode
+                    ),
+                }),
+            ))
+        }
+    }
 }
 
 /// Data ingestion endpoint

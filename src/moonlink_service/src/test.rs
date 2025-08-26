@@ -100,6 +100,16 @@ fn get_drop_table_payload(database: &str, table: &str) -> serde_json::Value {
     drop_table_payload
 }
 
+/// Util function to get table optimize payload.
+fn get_optimize_table_payload(database: &str, table: &str, mode: &str) -> serde_json::Value {
+    let optimize_table_payload = json!({
+        "database": database,
+        "table": table,
+        "mode": mode
+    });
+    optimize_table_payload
+}
+
 /// Util function to create table via REST API.
 async fn create_table(client: &reqwest::Client, database: &str, table: &str, append_only: bool) {
     // REST API doesn't allow duplicate source table name.
@@ -212,6 +222,46 @@ async fn test_schema() {
         response.status().is_success(),
         "Response status is {response:?}"
     );
+}
+
+/// Util function to optimize table via REST API.
+async fn optimize_table(client: &reqwest::Client, database: &str, table: &str, mode: &str) {
+    let payload = get_optimize_table_payload(database, table, mode);
+    let crafted_src_table_name = format!("{database}.{table}");
+    let response = client
+        .post(format!(
+            "{REST_ADDR}/tables/{crafted_src_table_name}/optimize"
+        ))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+}
+
+/// Test table optimization
+#[tokio::test]
+#[serial]
+async fn test_optimize_table() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+
+    // test for optimize table
+    optimize_table(&client, DATABASE, TABLE, "full").await;
+    optimize_table(&client, DATABASE, TABLE, "index").await;
+    optimize_table(&client, DATABASE, TABLE, "data").await;
 }
 
 /// Test basic table creation, insertion and query.
