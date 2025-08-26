@@ -213,7 +213,7 @@ impl TestEnvironment {
         .unwrap()
     }
 
-    async fn send_event(&self, event: TableEvent) {
+    pub async fn send_event(&self, event: TableEvent) {
         self.event_sender
             .send(event)
             .await

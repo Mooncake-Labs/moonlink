@@ -5,6 +5,7 @@ use tokio::sync::watch;
 
 use super::test_utils::*;
 use super::TableEvent;
+use crate::row::{MoonlinkRow, RowValue};
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
@@ -2371,4 +2372,33 @@ async fn test_batch_ingestion() {
     // Validate bulk ingestion result.
     env.set_readable_lsn(10);
     env.verify_snapshot(10, &[1, 1, 2, 2, 3, 3]).await;
+}
+
+#[tokio::test]
+async fn test_alter_table() {
+    let mut env = TestEnvironment::default().await;
+
+    env.append_row(1, "Alice", 25, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.commit(1).await;
+
+    env.send_event(TableEvent::AlterTable {
+        columns_to_drop: vec!["name".to_string()],
+    })
+    .await;
+
+    env.send_event(TableEvent::Append {
+        is_copied: false,
+        row: MoonlinkRow::new(vec![RowValue::Int32(2), RowValue::Int32(30)]),
+        lsn: 1,
+        xact_id: None,
+        is_recovery: false,
+    })
+    .await;
+    env.commit(2).await;
+
+    env.set_readable_lsn(2);
+    env.verify_snapshot(2, &[1, 2]).await;
+
+    env.shutdown().await;
 }

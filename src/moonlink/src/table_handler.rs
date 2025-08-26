@@ -217,9 +217,6 @@ impl TableHandler {
                 if let Some(replay_tx) = &event_replay_tx {
                     replay_tx.send(event.clone()).unwrap();
                 }
-
-                table_handler_state.update_table_lsns(&event);
-
                 match event {
                     event if event.is_ingest_event() => {
                         Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
@@ -791,6 +788,8 @@ impl TableHandler {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
+        // Don't update the lsn if the event is not processed yet.
+        table_handler_state.update_table_lsns(&event);
 
         // In the case that this is an initial copy event we actually expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
         if table_handler_state.should_discard_event(&event)
