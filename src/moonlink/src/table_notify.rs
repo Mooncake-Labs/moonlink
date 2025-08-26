@@ -186,7 +186,7 @@ pub enum TableEvent {
     /// Index merge completes.
     IndexMergeResult {
         /// Result for index merge.
-        index_merge_result: FileIndiceMergeResult,
+        index_merge_result: Result<FileIndiceMergeResult>,
     },
     /// Data compaction completes.
     DataCompactionResult {

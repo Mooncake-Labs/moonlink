@@ -1282,7 +1282,9 @@ impl MooncakeTable {
 
                 // Send back completion notification to table handler.
                 table_notify_tx_copy
-                    .send(TableEvent::IndexMergeResult { index_merge_result })
+                    .send(TableEvent::IndexMergeResult {
+                        index_merge_result: Ok(index_merge_result),
+                    })
                     .await
                     .unwrap();
                 Ok(())

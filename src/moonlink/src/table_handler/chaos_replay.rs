@@ -269,6 +269,7 @@ pub(crate) async fn replay() {
                     event_notification.notify_waiters();
                 }
                 TableEvent::IndexMergeResult { index_merge_result } => {
+                    let index_merge_result = index_merge_result.unwrap();
                     let mut guard = completed_index_merge_clone.lock().await;
                     assert!(guard
                         .insert(

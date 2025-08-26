@@ -293,7 +293,7 @@ pub(crate) async fn sync_iceberg_snapshot(
 async fn sync_index_merge(receiver: &mut Receiver<TableEvent>) -> FileIndiceMergeResult {
     let notification = receiver.recv().await.unwrap();
     if let TableEvent::IndexMergeResult { index_merge_result } = notification {
-        index_merge_result
+        index_merge_result.unwrap()
     } else {
         panic!("Expected index merge completion notification, but get another one.");
     }
