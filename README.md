@@ -24,10 +24,10 @@ Moonlink buffers, caches, and indexes data so Iceberg tables stay read-optimized
 
              ┌──────────moonlink───────────┐                         
              │  ┌───────────────────────┐  │  ┌───────Iceberg───────┐
-             │  │                       │  │  │         s3          │
+             │  │                       │  │  │      obj. store     │
 Postgres ───►│  │┌ ─ ─ ─ ─ ┐ ┌ ─ ─ ─ ─ ┐│  │  │┌───────┐ ┌─────────┐│
              │  │                       │  │  ││       │ │         ││
-Kafka    ───►│  ││  index  │ │  cache  ││  ├──►│─index │ │ parquet ││
+Kafka    ───►│  ││  index  │ │  cache  ││  ├──►│ index │ │ parquet ││
              │  │                       │  │  ││       │ │         ││
 Events   ───►│  │└ ─ ─ ─ ─ ┘ └ ─ ─ ─ ─ ┘│  │  │└───────┘ └─────────┘│
              │  │                  nvme │  │  │                     │
@@ -50,7 +50,7 @@ which leads to:
 
 Moonlink minimizes write amplification and metadata churn by buffering incoming data, building indexes and caches on NVMe, and committing read-optimized files and deletion vectors to Iceberg.
 
-**Inserts** are buffered and flushed as size-tuned Parquet:
+**Inserts**: buffered and flushed as size-tuned Parquet
 
 ```
           ┌───moonlink───┐  ┌────iceberg───┐
@@ -62,7 +62,7 @@ raw insert│              │  │              │
           └──────────────┘  └──────────────┘
 ```
 
-**Deletes** are indexed and mapped to deletion vectors:
+**Deletes**: row positions indexed and mapped to deletion vectors
 
 ```
            ┌───moonlink───┐   ┌────iceberg───┐
@@ -102,56 +102,86 @@ Moonlink commits data as **Iceberg v3 tables with deletion vectors**. These tabl
 
 For workloads requiring sub-second visibility into new data, Moonlink supports real-time querying:
 
-1. **DuckDB** — with the Mooncake extension  
-2. **Postgres** — with the `pg_mooncake`.
+1. **DuckDB** — with the [`duckb_mooncake`](https://github.com/Mooncake-Labs/duckdb_mooncake)  extension.
+2. **Postgres** — with the [`pg_mooncake`](https://github.com/Mooncake-Labs/pg_mooncake) extension.
 
  
 ## Quick Start
 
-Prereqs: Rust (cargo) and Docker.
+### 1. Clone & Build
 
-1) Clone & build the service binary
+Clone the repository and build the service binary:
+
 ```bash
 git clone https://github.com/Mooncake-Labs/moonlink.git
 cd moonlink
 cargo build --release --bin moonlink_service
 ```
 
-2) Start nginx to serve your data dir
+### 2. Create Data Directory
 
-Pick a local folder where Moonlink will store table data. Use the same folder for Moonlink and nginx:
+Create a directory where Moonlink will store data:
+
 ```bash
-mkdir -p ~/data/mooncake
-docker run -d --name nginx-read-local-ssd \
-  -p 8080:80 \
-  -v ~/data/mooncake:/usr/share/nginx/html:ro \
-  --restart unless-stopped \
-  nginx:alpine
-
-# Optional: verify nginx is serving the directory
-curl -I http://localhost:8080/ | head -n 1
+mkdir -p ./data
 ```
 
-3) Run Moonlink
+### 3. Start the Service
 
-Point Moonlink at the same data dir and the nginx endpoint:
+Launch Moonlink and point it to your data directory:
+
 ```bash
-cargo run --release --bin moonlink_service -- \
-  ~/data/mooncake \
-  --data-server-uri http://localhost:8080
+./target/release/moonlink_service ./data
 ```
 
-4) Verify
-You should see logs like:
-```text
-Moonlink service started successfully
-RPC server listening on TCP: 0.0.0.0:3031
-RPC server listening on Unix socket: ".../moonlink.sock"
-Starting REST API server on 0.0.0.0:3030
+### 4. Verify Service Health
+
+Check that the service is running properly:
+
+```bash
+curl http://localhost:3030/health
 ```
 
-For advanced configuration, see the [docs](https://docs.mooncake.dev/moonlink/intro).
+### 5. Create a Table
 
+Create a table with a defined schema. Here's an example creating a `users` table:
+
+```bash
+curl -X POST http://localhost:3030/tables/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "database": "my_database",
+    "table": "users",
+    "schema": [
+      {"name": "id", "data_type": "int32", "nullable": false},
+      {"name": "name", "data_type": "string", "nullable": false},
+      {"name": "email", "data_type": "string", "nullable": true},
+      {"name": "age", "data_type": "int32", "nullable": true},
+      {"name": "created_at", "data_type": "date32", "nullable": true}
+    ],
+    "table_config": {}
+  }'
+```
+
+### 6. Insert Data
+
+Insert data into the created table:
+
+```bash
+curl -X POST http://localhost:3030/ingest/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "insert",
+    "request_mode": "async",
+    "data": {
+      "id": 1,
+      "name": "Alice Johnson",
+      "email": "alice@example.com",
+      "age": 30,
+      "created_at": "2024-01-01"
+    }
+  }'
+```
 
 ## Roadmap and Contributing
 Roadmap (near‑term):
