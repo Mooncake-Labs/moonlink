@@ -643,13 +643,12 @@ impl TableHandler {
                             return;
                         }
                     }
-                    // TODO: Unify error handling pattern with other background events (e.g. DataCompactionResult)
                     TableEvent::IndexMergeResult { index_merge_result } => {
+                        table_handler_state.mark_index_merge_completed().await;
                         match index_merge_result {
                             Ok(index_merge_result) => {
                                 table.record_index_merge_completion(&index_merge_result);
                                 table.set_file_indices_merge_res(index_merge_result);
-                                table_handler_state.mark_index_merge_completed().await;
                                 // Check whether need to drop table.
                                 if table_handler_state.special_table_state
                                     == SpecialTableState::DropTable
