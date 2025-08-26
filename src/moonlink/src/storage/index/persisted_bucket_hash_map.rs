@@ -357,7 +357,7 @@ impl IndexBlockBuilder {
         seg_idx: usize,
         row_idx: usize,
         metadata: &GlobalIndex,
-    ) -> Result<bool> {
+    ) -> bool {
         while (hash >> metadata.hash_lower_bits) != self.current_bucket as u64 {
             self.current_bucket += 1;
             self.buckets[self.current_bucket as usize] = self.current_entry;
@@ -374,7 +374,7 @@ impl IndexBlockBuilder {
             .write(metadata.row_id_bits, row_idx as u32);
         self.current_entry += 1;
 
-        Ok(to_flush)
+        to_flush
     }
 
     /// Flush buffered entries written to disk.
@@ -509,7 +509,7 @@ impl GlobalIndexBuilder {
             IndexBlockBuilder::new(0, num_buckets + 1, self.directory.clone()).await?;
         for entry in iter {
             let to_flush =
-                index_block_builder.write_entry(entry.0, entry.1, entry.2, &global_index)?;
+                index_block_builder.write_entry(entry.0, entry.1, entry.2, &global_index);
             if to_flush {
                 index_block_builder.flush().await?;
             }
@@ -552,7 +552,7 @@ impl GlobalIndexBuilder {
             IndexBlockBuilder::new(0, num_buckets + 1, self.directory.clone()).await?;
         while let Some(entry) = iter.next() {
             let to_flush =
-                index_block_builder.write_entry(entry.0, entry.1, entry.2, &global_index)?;
+                index_block_builder.write_entry(entry.0, entry.1, entry.2, &global_index);
             if to_flush {
                 index_block_builder.flush().await?;
             }
@@ -635,12 +635,8 @@ impl GlobalIndexBuilder {
                     _ => panic!("Expected DiskFile variant"),
                 };
                 let new_seg_idx = get_seg_idx(new_record_location);
-                let to_flush = index_block_builder.write_entry(
-                    hash,
-                    new_seg_idx,
-                    new_row_idx,
-                    &global_index,
-                )?;
+                let to_flush =
+                    index_block_builder.write_entry(hash, new_seg_idx, new_row_idx, &global_index);
                 if to_flush {
                     index_block_builder.flush().await?;
                 }

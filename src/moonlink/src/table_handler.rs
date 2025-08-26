@@ -638,6 +638,7 @@ impl TableHandler {
                             return;
                         }
                     }
+                    // TODO: Unify error handling pattern with other background events (e.g. DataCompactionResult)
                     TableEvent::IndexMergeResult { index_merge_result } => {
                         table.record_index_merge_completion(&index_merge_result);
                         table.set_file_indices_merge_res(index_merge_result);

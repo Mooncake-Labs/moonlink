@@ -10,7 +10,6 @@ use crate::storage::storage_utils::{
     create_data_file, get_random_file_name_in_dir, get_unique_file_id_for_flush,
     MooncakeDataFileRef, ProcessedDeletionRecord, RecordLocation, TableId,
 };
-// use crate::error::{Errko};
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;

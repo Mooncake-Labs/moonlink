@@ -1277,7 +1277,6 @@ impl MooncakeTable {
                     .build_from_merge(file_indice_merge_payload.file_indices.clone(), cur_file_id)
                     .await?;
                 let index_merge_result = FileIndiceMergeResult {
-                    id: table_event_id,
                     uuid: file_indice_merge_payload.uuid,
                     old_file_indices: file_indice_merge_payload.file_indices,
                     new_file_indices: vec![merged],
