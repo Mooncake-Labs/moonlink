@@ -193,7 +193,9 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
         atomic_write_dir: None,
     };
     let iceberg_table_config = IcebergTableConfig {
-        accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        catalog: crate::IcebergCatalogConfig::File {
+            accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        },
         ..Default::default()
     };
     let schema = create_test_arrow_schema();

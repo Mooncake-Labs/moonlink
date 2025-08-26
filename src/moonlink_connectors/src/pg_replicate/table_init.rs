@@ -151,8 +151,9 @@ pub async fn build_table_components(
             table_components
                 .moonlink_table_config
                 .iceberg_table_config
-                .accessor_config
-                .clone(),
+                .catalog
+                .get_file_catalog_accessor_config()
+                .unwrap(),
         )),
     )
     .await?;

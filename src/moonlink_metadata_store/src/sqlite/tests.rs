@@ -1,6 +1,8 @@
 use crate::base_metadata_store::MetadataStoreTrait;
 use crate::sqlite::sqlite_metadata_store::SqliteMetadataStore;
-use moonlink::{AccessorConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig, WalConfig};
+use moonlink::{
+    IcebergCatalogConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig, WalConfig,
+};
 
 use tempfile::{tempdir, TempDir};
 
@@ -76,7 +78,9 @@ pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
             table_name: "table".to_string(),
-            accessor_config: get_accessor_config(),
+            catalog: IcebergCatalogConfig::File {
+                accessor_config: get_accessor_config(),
+            },
         },
         wal_table_config: WalConfig::new(wal_accessor, &format!("{DATABASE}.{TABLE}")),
         ..Default::default()

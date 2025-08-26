@@ -16,6 +16,7 @@ use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
+use crate::IcebergCatalogConfig;
 use crate::Result;
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
@@ -52,7 +53,9 @@ pub fn get_iceberg_manager_config(table_name: String, warehouse_uri: String) -> 
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name,
-        accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        catalog: IcebergCatalogConfig::File {
+            accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        },
     }
 }
 

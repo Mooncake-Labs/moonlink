@@ -345,11 +345,14 @@ async fn test_compaction_1_1_1() {
     check_loaded_snapshot(&snapshot, /*row_indices=*/ vec![0, 1, 2, 3]).await;
     assert_eq!(snapshot.indices.file_indices.len(), 1);
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
+
     validate_recovered_snapshot(
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -415,7 +418,9 @@ async fn test_compaction_1_1_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -504,7 +509,9 @@ async fn test_compaction_1_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -593,7 +600,9 @@ async fn test_compaction_1_2_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -696,7 +705,9 @@ async fn test_compaction_2_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -788,7 +799,9 @@ async fn test_compaction_2_2_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -895,7 +908,9 @@ async fn test_compaction_2_3_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -974,7 +989,9 @@ async fn test_compaction_2_3_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -1081,7 +1098,9 @@ async fn test_compaction_3_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )
@@ -1179,7 +1198,9 @@ async fn test_compaction_3_3_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .accessor_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
             .get_root_path(),
         filesystem_accessor.as_ref(),
     )

@@ -18,7 +18,9 @@ pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
             table_name: "table".to_string(),
-            accessor_config: iceberg_accessor_config,
+            catalog: moonlink::IcebergCatalogConfig::File {
+                accessor_config: iceberg_accessor_config,
+            },
         },
         wal_table_config: WalConfig::new(wal_accessor_config, "dst-database.dst-schema.dst-table"),
         ..Default::default()

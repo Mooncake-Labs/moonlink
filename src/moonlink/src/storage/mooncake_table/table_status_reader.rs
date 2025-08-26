@@ -21,7 +21,11 @@ impl TableStatusReader {
     pub fn new(iceberg_table_config: &IcebergTableConfig, table: &MooncakeTable) -> Self {
         let (table_snapshot, _) = table.get_state_for_reader();
         Self {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .catalog
+                .get_file_catalog_accessor_config()
+                .unwrap()
+                .get_root_path(),
             table_snapshot,
         }
     }
@@ -84,7 +88,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .catalog
+                .get_file_catalog_accessor_config()
+                .unwrap()
+                .get_root_path(),
             commit_lsn: 0,
             cardinality: 0,
             flush_lsn: None,
@@ -107,7 +115,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .catalog
+                .get_file_catalog_accessor_config()
+                .unwrap()
+                .get_root_path(),
             commit_lsn: 0,
             cardinality: 0,
             flush_lsn: None,
@@ -134,7 +146,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .catalog
+                .get_file_catalog_accessor_config()
+                .unwrap()
+                .get_root_path(),
             commit_lsn: 10,
             cardinality: 1,
             flush_lsn: None,
@@ -162,7 +178,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .catalog
+                .get_file_catalog_accessor_config()
+                .unwrap()
+                .get_root_path(),
             commit_lsn: 10,
             flush_lsn: Some(10),
             cardinality: 1,

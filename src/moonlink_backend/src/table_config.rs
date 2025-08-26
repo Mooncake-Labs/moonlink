@@ -99,7 +99,9 @@ impl TableConfig {
             iceberg_table_config: IcebergTableConfig {
                 namespace: vec![mooncake_table_id.database.clone()],
                 table_name: mooncake_table_id.table.clone(),
-                accessor_config: self.iceberg_config.unwrap(),
+                catalog: moonlink::IcebergCatalogConfig::File {
+                    accessor_config: self.iceberg_config.unwrap(),
+                },
             },
             wal_table_config: WalConfig::new(
                 self.wal_config.unwrap(),

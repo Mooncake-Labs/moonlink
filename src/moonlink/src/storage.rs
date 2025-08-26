@@ -28,7 +28,7 @@ pub use filesystem::accessor_config::{
 pub use filesystem::storage_config::StorageConfig;
 pub use iceberg::base_iceberg_snapshot_fetcher::BaseIcebergSnapshotFetcher;
 pub use iceberg::iceberg_snapshot_fetcher::IcebergSnapshotFetcher;
-pub use iceberg::iceberg_table_config::IcebergTableConfig;
+pub use iceberg::iceberg_table_config::{IcebergCatalogConfig, IcebergTableConfig};
 pub use iceberg::iceberg_table_manager::IcebergTableManager;
 pub use iceberg::table_event_manager::TableEventManager;
 pub use iceberg::table_manager::TableManager;

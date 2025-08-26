@@ -20,7 +20,7 @@ pub struct IcebergSnapshotFetcher {
 
 impl IcebergSnapshotFetcher {
     pub fn new(config: IcebergTableConfig) -> Result<Self> {
-        let catalog = catalog_utils::create_catalog_without_schema(config.accessor_config.clone())?;
+        let catalog = catalog_utils::create_catalog_without_schema(config.catalog.clone())?;
         Ok(Self { config, catalog })
     }
 }

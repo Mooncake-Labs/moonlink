@@ -52,7 +52,7 @@ pub(crate) fn get_iceberg_table_config(temp_dir: &TempDir) -> IcebergTableConfig
     IcebergTableConfig {
         namespace: vec![ICEBERG_TEST_NAMESPACE.to_string()],
         table_name: ICEBERG_TEST_TABLE.to_string(),
-        accessor_config,
+        catalog: crate::IcebergCatalogConfig::File { accessor_config },
     }
 }
 
@@ -65,7 +65,7 @@ pub(crate) fn get_iceberg_table_config_with_storage_config(
     IcebergTableConfig {
         namespace: vec![ICEBERG_TEST_NAMESPACE.to_string()],
         table_name: ICEBERG_TEST_TABLE.to_string(),
-        accessor_config,
+        catalog: crate::IcebergCatalogConfig::File { accessor_config },
     }
 }
 
@@ -92,7 +92,7 @@ pub(crate) fn get_iceberg_table_config_with_chaos_injection(
     IcebergTableConfig {
         namespace: vec![ICEBERG_TEST_NAMESPACE.to_string()],
         table_name: ICEBERG_TEST_TABLE.to_string(),
-        accessor_config,
+        catalog: crate::IcebergCatalogConfig::File { accessor_config },
     }
 }
 
@@ -125,7 +125,7 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
     };
 
     IcebergTableConfig {
-        accessor_config,
+        catalog: crate::IcebergCatalogConfig::File { accessor_config },
         ..Default::default()
     }
 }
@@ -166,7 +166,13 @@ pub(crate) fn create_test_updated_arrow_schema_remove_age() -> Arc<ArrowSchema> 
 pub(crate) fn create_test_filesystem_accessor(
     iceberg_table_config: &IcebergTableConfig,
 ) -> Arc<dyn BaseFileSystemAccess> {
-    create_filesystem_accessor(iceberg_table_config.accessor_config.clone())
+    create_filesystem_accessor(
+        iceberg_table_config
+            .catalog
+            .get_file_catalog_accessor_config()
+            .unwrap()
+            .clone(),
+    )
 }
 
 /// Test util function to create mooncake table metadata.

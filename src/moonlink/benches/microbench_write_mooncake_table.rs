@@ -54,12 +54,14 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
     let iceberg_table_config = IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),
-        accessor_config: AccessorConfig::new_with_storage_config(
-            moonlink::StorageConfig::FileSystem {
-                root_directory: warehouse_location.clone(),
-                atomic_write_dir: None,
-            },
-        ),
+        catalog: moonlink::IcebergCatalogConfig::File {
+            accessor_config: AccessorConfig::new_with_storage_config(
+                moonlink::StorageConfig::FileSystem {
+                    root_directory: warehouse_location.clone(),
+                    atomic_write_dir: None,
+                },
+            ),
+        },
     };
     let rt = Runtime::new().unwrap();
     let table_config = MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
