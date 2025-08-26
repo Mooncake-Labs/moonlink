@@ -583,3 +583,68 @@ pub async fn start_server(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonlink_backend::MoonlinkBackend;
+    use moonlink_metadata_store::SqliteMetadataStore;
+    use reqwest::Client;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    async fn get_available_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn test_health_check_endpoint() {
+        let local_host = "http://localhost";
+        let test_path = "/tmp/rest_api_test";
+        let port = get_available_port().await;
+
+        // Initialize moonlink backend
+        let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(test_path)
+            .await
+            .unwrap();
+        let backend = MoonlinkBackend::new(
+            test_path.to_string(),
+            Some(local_host.to_string()),
+            Box::new(sqlite_metadata_accessor),
+        )
+        .await
+        .unwrap();
+        let backend = Arc::new(backend);
+
+        let api_state = ApiState::new(backend);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // Start server in background
+        let server_handle = tokio::spawn(async move {
+            start_server(api_state, port, shutdown_rx).await.unwrap();
+        });
+
+        // Wait for server to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Make request to health endpoint
+        let client = Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let health_data: HealthResponse = resp.json::<HealthResponse>().await.unwrap();
+        assert_eq!(health_data.service, "moonlink-rest-api");
+        assert_eq!(health_data.status, "healthy");
+        assert!(health_data.timestamp > 0);
+
+        // Clean up
+        shutdown_tx.send(()).unwrap();
+        server_handle.await.unwrap();
+    }
+}
