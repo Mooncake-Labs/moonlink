@@ -1273,20 +1273,33 @@ impl MooncakeTable {
                 builder.set_directory(table_directory);
                 let merged = builder
                     .build_from_merge(file_indice_merge_payload.file_indices.clone(), cur_file_id)
-                    .await?;
-                let index_merge_result = FileIndiceMergeResult {
-                    uuid: file_indice_merge_payload.uuid,
-                    old_file_indices: file_indice_merge_payload.file_indices,
-                    new_file_indices: vec![merged],
-                };
+                    .await;
 
-                // Send back completion notification to table handler.
-                table_notify_tx_copy
-                    .send(TableEvent::IndexMergeResult {
-                        index_merge_result: Ok(index_merge_result),
-                    })
-                    .await
-                    .unwrap();
+                match merged {
+                    Ok(merged) => {
+                        let index_merge_result = FileIndiceMergeResult {
+                            uuid: file_indice_merge_payload.uuid,
+                            old_file_indices: file_indice_merge_payload.file_indices,
+                            new_file_indices: vec![merged],
+                        };
+
+                        // Send back completion notification to table handler.
+                        table_notify_tx_copy
+                            .send(TableEvent::IndexMergeResult {
+                                index_merge_result: Ok(index_merge_result),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        table_notify_tx_copy
+                            .send(TableEvent::IndexMergeResult {
+                                index_merge_result: Err(e),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
                 Ok(())
             }
             .await;
