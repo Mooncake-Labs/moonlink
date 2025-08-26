@@ -1,7 +1,8 @@
 use crate::base_metadata_store::MetadataStoreTrait;
 use crate::sqlite::sqlite_metadata_store::SqliteMetadataStore;
 use moonlink::{
-    IcebergCatalogConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig, WalConfig,
+    AccessorConfig, IcebergCatalogConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig,
+    WalConfig,
 };
 
 use tempfile::{tempdir, TempDir};
