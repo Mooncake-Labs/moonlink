@@ -470,14 +470,12 @@ async fn optimize_table(
         Ok(_) => Ok(Json(OptimizeTableResponse {})),
         Err(e) => {
             error!("Failed to optimize table '{}': {}", table, e);
+            let status_code = get_backend_error_status_code(&e);
             Err((
-                StatusCode::BAD_REQUEST,
+                status_code,
                 Json(ErrorResponse {
-                    error: "invalid_mode".to_string(),
-                    message: format!(
-                        "Invalid mode '{}'. Must be 'data', 'index' or 'full'",
-                        payload.mode
-                    ),
+                    error: "table_optimize_failed".to_string(),
+                    message: format!("Failed to optimize table: {e}"),
                 }),
             ))
         }
