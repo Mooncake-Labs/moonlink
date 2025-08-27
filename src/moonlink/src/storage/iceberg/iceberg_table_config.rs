@@ -1,14 +1,15 @@
 use crate::{storage::filesystem::accessor_config::AccessorConfig, StorageConfig};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RestCatalogConfig {
     uri: String,
     warehouse: Option<String>,
     props: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GlueCatalogConfig {
     name: Option<String>,
     uri: Option<String>,
@@ -17,7 +18,7 @@ pub struct GlueCatalogConfig {
     props: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IcebergCatalogConfig {
     File {
         accessor_config: AccessorConfig,
@@ -67,13 +68,13 @@ impl IcebergCatalogConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IcebergTableConfig {
     /// Namespace for the iceberg table.
     pub namespace: Vec<String>,
     /// Iceberg table name.
     pub table_name: String,
-    /// Accessor config for writing data files.
+    /// Accessor config for accessing data files.
     pub data_accessor_config: AccessorConfig,
     /// Catalog configuration (defaults to File).
     pub metadata_accessor_config: IcebergCatalogConfig,

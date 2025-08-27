@@ -21,7 +21,7 @@ pub fn create_catalog(
         }
         IcebergCatalogConfig::Rest { .. } | IcebergCatalogConfig::Glue { .. } => {
             Err(iceberg::Error::new(
-                iceberg::ErrorKind::Unexpected,
+                iceberg::ErrorKind::FeatureUnsupported,
                 "Only File catalog is supported currently",
             ))
         }
@@ -38,7 +38,7 @@ pub fn create_catalog_without_schema(
         }
         IcebergCatalogConfig::Rest { .. } | IcebergCatalogConfig::Glue { .. } => {
             Err(iceberg::Error::new(
-                iceberg::ErrorKind::Unexpected,
+                iceberg::ErrorKind::FeatureUnsupported,
                 "Only File catalog is supported currently",
             ))
         }
