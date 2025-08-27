@@ -26,6 +26,7 @@ pub struct GlueCatalogConfig {
     #[serde(rename = "uri")]
     #[serde(default)]
     uri: Option<String>,
+
     #[serde(rename = "catalog_id")]
     #[serde(default)]
     catalog_id: Option<String>,
@@ -39,10 +40,12 @@ pub struct GlueCatalogConfig {
     props: HashMap<String, String>,
 }
 
+pub type FileCatalogConfig = AccessorConfig;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IcebergCatalogConfig {
     #[serde(rename = "file")]
-    File { accessor_config: AccessorConfig },
+    File { accessor_config: FileCatalogConfig },
 
     #[cfg(feature = "catalog-rest")]
     #[serde(rename = "rest")]
@@ -72,7 +75,7 @@ impl IcebergCatalogConfig {
         }
     }
 
-    pub fn get_file_catalog_accessor_config(&self) -> Option<AccessorConfig> {
+    pub fn get_file_catalog_accessor_config(&self) -> Option<FileCatalogConfig> {
         match self {
             IcebergCatalogConfig::File { accessor_config } => Some(accessor_config.clone()),
             #[cfg(any(feature = "catalog-rest", feature = "catalog-glue"))]
