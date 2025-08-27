@@ -77,6 +77,7 @@ pub enum TableEvent {
         row: MoonlinkRow,
         lsn: u64,
         xact_id: Option<u32>,
+        delete_if_exists: bool,
         is_recovery: bool,
     },
     /// Commit all pending operations with a given LSN and xact_id

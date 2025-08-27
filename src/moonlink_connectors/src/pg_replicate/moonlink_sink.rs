@@ -293,6 +293,7 @@ impl Sink {
                             row: PostgresTableRow(old_table_row.unwrap()).into(),
                             lsn: final_lsn,
                             xact_id,
+                            delete_if_exists: false,
                             is_recovery: false,
                         },
                     )
@@ -325,6 +326,7 @@ impl Sink {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
+                            delete_if_exists: false,
                             is_recovery: false,
                         },
                     )

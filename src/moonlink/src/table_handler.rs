@@ -842,11 +842,24 @@ impl TableHandler {
                 }
             }
             TableEvent::Delete {
-                row, lsn, xact_id, ..
+                row,
+                lsn,
+                xact_id,
+                delete_if_exists,
+                ..
             } => {
                 match xact_id {
-                    Some(xact_id) => table.delete_in_stream_batch(row, xact_id).await,
-                    None => table.delete(row, lsn).await,
+                    Some(xact_id) => {
+                        assert!(!delete_if_exists);
+                        table.delete_in_stream_batch(row, xact_id).await;
+                    }
+                    None => {
+                        if delete_if_exists {
+                            table.delete_if_exists(row, lsn).await;
+                        } else {
+                            table.delete(row, lsn).await;
+                        }
+                    }
                 };
             }
             TableEvent::Commit { lsn, xact_id, .. } => {

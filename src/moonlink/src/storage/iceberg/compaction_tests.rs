@@ -202,6 +202,7 @@ async fn check_loaded_file_index(file_index: FileIndex, row_indices: Vec<usize>)
             lsn: 0, // Doesn't affect.
             pos: None,
             row_identity: row_identity.extract_identity_columns(cur_row),
+            delete_if_exists: false,
         };
         let record_locations = mooncake_index.find_record(&raw_deletion_record).await;
         assert_eq!(

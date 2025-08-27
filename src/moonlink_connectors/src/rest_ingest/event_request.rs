@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowEventOperation {
     Insert,
-    Update,
+    Upsert,
     Delete,
 }
 

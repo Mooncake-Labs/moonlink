@@ -466,6 +466,7 @@ mod tests {
                     row_identity: None,
                     pos: Some((0, 1)),
                     lsn: 1,
+                    delete_if_exists: false,
                 },
                 &IdentityProp::SinglePrimitiveKey(0),
             )
@@ -477,6 +478,7 @@ mod tests {
                     row_identity: None,
                     pos: Some((0, 3)),
                     lsn: 1,
+                    delete_if_exists: false,
                 },
                 &IdentityProp::SinglePrimitiveKey(0),
             )

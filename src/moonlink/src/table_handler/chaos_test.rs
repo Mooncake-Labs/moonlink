@@ -635,6 +635,7 @@ impl ChaosState {
                 row: self.get_random_row_to_delete(),
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
+                delete_if_exists: false,
                 is_recovery: false,
             }]),
             EventKind::Update => {
@@ -644,6 +645,7 @@ impl ChaosState {
                         row: row.clone(),
                         xact_id: self.get_cur_xact_id(),
                         lsn: self.get_and_update_cur_lsn(),
+                        delete_if_exists: false,
                         is_recovery: false,
                     },
                     TableEvent::Append {

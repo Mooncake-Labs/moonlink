@@ -130,6 +130,7 @@ pub struct RawDeletionRecord {
     pub(crate) row_identity: Option<MoonlinkRow>,
     pub(crate) pos: Option<(u64, usize)>,
     pub(crate) lsn: u64,
+    pub(crate) delete_if_exists: bool,
 }
 
 #[derive(Clone, Debug)]

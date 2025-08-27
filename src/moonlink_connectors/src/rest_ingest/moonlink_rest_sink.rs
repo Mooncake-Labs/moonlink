@@ -196,13 +196,15 @@ impl RestSink {
                 self.send_table_event(src_table_id, table_event).await?;
                 debug!(src_table_id, lsn, "processed REST insert event");
             }
-            RowEventOperation::Update => {
-                // For updates, we send both delete and append events
-                // First send delete for the old row (using the same row for simplicity)
+            RowEventOperation::Upsert => {
+                // Upsert =>
+                // Append the row
+                // And Delete the row with same key if it exists
                 let delete_event = TableEvent::Delete {
                     row: row.clone(),
                     lsn,
                     xact_id: None,
+                    delete_if_exists: true,
                     is_recovery: false,
                 };
 
@@ -226,6 +228,7 @@ impl RestSink {
                     row,
                     lsn,
                     xact_id: None,
+                    delete_if_exists: true,
                     is_recovery: false,
                 };
 
@@ -426,15 +429,15 @@ mod tests {
         }
 
         // Test Update event (should produce both Delete and Append)
-        let update_event = RestEvent::RowEvent {
+        let upsert_event = RestEvent::RowEvent {
             src_table_id,
-            operation: RowEventOperation::Update,
+            operation: RowEventOperation::Upsert,
             row: test_row.clone(),
             lsn: 20,
             timestamp: SystemTime::now(),
         };
 
-        sink.process_rest_event(update_event).await.unwrap();
+        sink.process_rest_event(upsert_event).await.unwrap();
 
         // Verify delete was processed
         let delete_received = event_rx.recv().await.unwrap();
@@ -513,6 +516,7 @@ mod tests {
             row: test_row.clone(),
             lsn: 11,
             xact_id: None,
+            delete_if_exists: true,
             is_recovery: false,
         };
         sink.send_table_event(2, delete_event).await.unwrap();

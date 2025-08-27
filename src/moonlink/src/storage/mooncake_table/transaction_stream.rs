@@ -213,6 +213,7 @@ impl MooncakeTable {
             lsn: get_lsn_for_pending_xact(xact_id), // at commit time we will update this with the actual lsn
             pos: None,
             row_identity: row_identity.extract_identity_columns(row),
+            delete_if_exists: false,
         };
 
         let stream_state = self.get_or_create_stream_state(xact_id);

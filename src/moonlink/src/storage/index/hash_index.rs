@@ -110,6 +110,7 @@ mod tests {
             row_identity: None,
             pos: None,
             lsn: 1,
+            delete_if_exists: false,
         };
 
         // Test the Index trait implementation

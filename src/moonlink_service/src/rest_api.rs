@@ -505,7 +505,7 @@ async fn ingest_data(
     // Parse operation
     let operation = match payload.operation.as_str() {
         "insert" => RowEventOperation::Insert,
-        "update" => RowEventOperation::Update,
+        "upsert" => RowEventOperation::Upsert,
         "delete" => RowEventOperation::Delete,
         _ => {
             return Err((
@@ -513,7 +513,7 @@ async fn ingest_data(
                 Json(ErrorResponse {
                     error: "invalid_operation".to_string(),
                     message: format!(
-                        "Invalid operation '{}'. Must be 'insert', 'update', or 'delete'",
+                        "Invalid operation '{}'. Must be 'insert', 'upsert', or 'delete'",
                         payload.operation
                     ),
                 }),

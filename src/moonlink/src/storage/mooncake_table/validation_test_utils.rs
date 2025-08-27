@@ -141,6 +141,7 @@ pub(crate) async fn check_row_index_nonexistent(snapshot: &Snapshot, row: &Moonl
                 .extract_identity_for_key(row),
             pos: None,
             lsn: 0, // LSN has nothing to do with deletion record search
+            delete_if_exists: false,
         })
         .await;
     assert!(
@@ -167,6 +168,7 @@ pub(crate) async fn check_row_index_on_disk(
                 .extract_identity_for_key(row),
             pos: None,
             lsn: 0, // LSN has nothing to do with deletion record search
+            delete_if_exists: false,
         })
         .await;
     assert_eq!(locs.len(), 1, "Actual location for row {row:?} is {locs:?}");

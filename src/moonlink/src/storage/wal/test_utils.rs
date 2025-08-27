@@ -366,6 +366,7 @@ pub fn add_new_example_delete_event(
         row: test_row(1, "Alice", 30),
         lsn,
         xact_id,
+        delete_if_exists: false,
         is_recovery: false,
     };
     wal.push(&event);

@@ -86,6 +86,7 @@ pub enum WalEvent {
         row: MoonlinkRow,
         lsn: u64,
         xact_id: Option<u32>,
+        delete_if_exists: bool,
     },
     Commit {
         lsn: u64,
@@ -141,11 +142,16 @@ impl WalEvent {
                 is_copied: *is_copied,
             },
             TableEvent::Delete {
-                row, lsn, xact_id, ..
+                row,
+                lsn,
+                xact_id,
+                delete_if_exists,
+                ..
             } => WalEvent::Delete {
                 row: row.clone(),
                 lsn: *lsn,
                 xact_id: *xact_id,
+                delete_if_exists: *delete_if_exists,
             },
             TableEvent::Commit { lsn, xact_id, .. } => WalEvent::Commit {
                 lsn: *lsn,
@@ -178,10 +184,16 @@ impl WalEvent {
                 is_copied,
                 is_recovery: false,
             },
-            WalEvent::Delete { row, lsn, xact_id } => TableEvent::Delete {
+            WalEvent::Delete {
                 row,
                 lsn,
                 xact_id,
+                delete_if_exists,
+            } => TableEvent::Delete {
+                row,
+                lsn,
+                xact_id,
+                delete_if_exists,
                 is_recovery: false,
             },
             WalEvent::Commit { lsn, xact_id } => TableEvent::Commit {

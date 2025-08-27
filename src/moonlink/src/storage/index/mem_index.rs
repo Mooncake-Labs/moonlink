@@ -191,6 +191,7 @@ mod tests {
             row_identity: None,
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_loc.is_none());
 
@@ -200,6 +201,7 @@ mod tests {
             row_identity: None,
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         };
         let record_loc = mem_index.fast_delete(&deletion_record);
         assert!(matches!(
@@ -238,6 +240,7 @@ mod tests {
             row_identity: Some(non_existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_loc.is_none());
 
@@ -247,6 +250,7 @@ mod tests {
             row_identity: Some(non_existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_loc.is_none());
 
@@ -256,6 +260,7 @@ mod tests {
             row_identity: Some(existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         };
         let record_loc = mem_index.fast_delete(&deletion_record);
         assert!(matches!(
@@ -283,6 +288,7 @@ mod tests {
             row_identity: None,
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_locs.is_empty());
 
@@ -292,6 +298,7 @@ mod tests {
             row_identity: None,
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         };
         let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);
@@ -324,6 +331,7 @@ mod tests {
             row_identity: Some(non_existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_loc.is_empty());
 
@@ -333,6 +341,7 @@ mod tests {
             row_identity: Some(non_existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_loc.is_empty());
 
@@ -342,6 +351,7 @@ mod tests {
             row_identity: Some(existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         };
         let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);
@@ -374,6 +384,7 @@ mod tests {
             row_identity: Some(non_existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         });
         assert!(record_loc.is_empty());
 
@@ -383,6 +394,7 @@ mod tests {
             row_identity: Some(existent_row.clone()),
             pos: None,
             lsn: 0,
+            delete_if_exists: false,
         };
         let record_loc = mem_index.find_record(&deletion_record);
         assert_eq!(record_loc.len(), 1);

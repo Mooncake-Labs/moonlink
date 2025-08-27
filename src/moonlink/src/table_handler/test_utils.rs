@@ -256,6 +256,7 @@ impl TestEnvironment {
             row,
             lsn,
             xact_id,
+            delete_if_exists: false,
             is_recovery: false,
         };
         self.send_event(event.clone()).await;

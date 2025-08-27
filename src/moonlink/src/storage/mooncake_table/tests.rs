@@ -3129,3 +3129,66 @@ async fn test_out_of_order_flush_for_iceberg_snapshot() {
     let flush_lsn = iceberg_snapshot_fetcher.get_flush_lsn().await.unwrap();
     assert!(flush_lsn.is_none());
 }
+
+#[tokio::test]
+async fn test_delete_if_exists() -> Result<()> {
+    let context = TestContext::new("test_delete_if_exists");
+    let mut table = test_table(
+        &context,
+        "test_delete_if_exists",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let row1 = test_row(1, "A", 20);
+    table.append(row1.clone()).unwrap();
+    table.commit(100);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 100)
+        .await
+        .unwrap();
+
+    // delete a row that doesn't exist
+    let row2 = test_row(2, "B", 21);
+    table.delete_if_exists(row2.clone(), 101).await;
+    table.commit(102);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 102)
+        .await
+        .unwrap();
+
+    // create a snapshot and verify the row is not deleted
+    {
+        create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths,
+            puffin_cache_handles,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = snapshot.request_read().await.unwrap();
+
+        verify_files_and_deletions(
+            get_data_files_for_read(&data_file_paths).as_slice(),
+            get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+        drop(snapshot);
+    }
+
+    // upsert a row
+    let row3 = test_row(1, "C", 22);
+    table.delete_if_exists(row3.clone(), 103).await;
+    table.append(row3.clone()).unwrap();
+    table.commit(104);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 104)
+        .await
+        .unwrap();
+
+    Ok(())
+}

@@ -777,6 +777,7 @@ impl SnapshotTableState {
         index_lookup_result: Vec<RecordLocation>,
         file_id_to_lsn: &HashMap<FileId, u64>,
         batch_id_to_lsn: &HashMap<u64, u64>,
+        delete_if_exists: bool,
     ) -> Vec<ProcessedDeletionRecord> {
         let mut candidates: Vec<RecordLocation> = index_lookup_result
             .into_iter()
@@ -790,6 +791,30 @@ impl SnapshotTableState {
                     )
             })
             .collect();
+
+        if delete_if_exists {
+            let mut processed_deletions = Vec::new();
+            assert!(deletions.len() == 1);
+            let deletion = deletions.first().unwrap();
+            if deletion.row_identity.is_none() {
+                let candidate = candidates.pop();
+                if let Some(candidate) = candidate {
+                    processed_deletions.push(Self::build_processed_deletion(deletion, candidate));
+                }
+            } else {
+                for loc in &candidates {
+                    if self
+                        .matches_identity(loc, deletion.row_identity.as_ref().unwrap())
+                        .await
+                    {
+                        processed_deletions
+                            .push(Self::build_processed_deletion(deletion, loc.clone()));
+                        break;
+                    }
+                }
+            }
+            return processed_deletions;
+        }
         // This optimization is important when working with table without primary key.
         // Postgres never distinguish row with same value, so they will almost always be processed together.
         // Thus we can avoid full row identity comparison if we also process them together.
@@ -988,6 +1013,17 @@ impl SnapshotTableState {
         if new_deletions.is_empty() {
             return;
         }
+        // moonlink don't support mix delete_if_exists and not delete_if_exists for now.
+        //
+        let delete_if_exists = new_deletions
+            .iter()
+            .any(|deletion| deletion.delete_if_exists);
+        assert_eq!(
+            delete_if_exists,
+            new_deletions
+                .iter()
+                .all(|deletion| deletion.delete_if_exists)
+        );
         let mut index_lookup_result = self
             .current_snapshot
             .indices
@@ -1006,7 +1042,9 @@ impl SnapshotTableState {
             }
             let deletions = &new_deletions[start_i..i];
             let mut lookup_result = Vec::new();
-            while index_lookup_result[j].0 != new_deletions[start_i].lookup_key {
+            while j < index_lookup_result.len()
+                && index_lookup_result[j].0 != new_deletions[start_i].lookup_key
+            {
                 j += 1;
             }
             let mut j_end = j;
@@ -1022,6 +1060,7 @@ impl SnapshotTableState {
                     lookup_result,
                     &task.new_disk_file_lsn_map,
                     &task.flushing_batch_lsn_map,
+                    delete_if_exists,
                 )
                 .await;
             self.add_processed_deletion(processed_deletions, task.commit_lsn_baseline);

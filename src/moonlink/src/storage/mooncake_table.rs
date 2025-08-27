@@ -1165,7 +1165,7 @@ impl MooncakeTable {
         Ok(())
     }
 
-    pub async fn delete(&mut self, row: MoonlinkRow, lsn: u64) {
+    async fn delete_impl(&mut self, row: MoonlinkRow, lsn: u64, delete_if_exists: bool) {
         // Check if this is an append-only table
         if matches!(self.metadata.config.row_identity, IdentityProp::None) {
             tracing::error!("Delete operation not supported for append-only tables");
@@ -1195,6 +1195,7 @@ impl MooncakeTable {
                 .config
                 .row_identity
                 .extract_identity_columns(row),
+            delete_if_exists,
         };
         let pos = self
             .mem_slice
@@ -1202,6 +1203,14 @@ impl MooncakeTable {
             .await;
         record.pos = pos;
         self.next_snapshot_task.new_deletions.push(record);
+    }
+
+    pub async fn delete(&mut self, row: MoonlinkRow, lsn: u64) {
+        self.delete_impl(row, lsn, false).await;
+    }
+
+    pub async fn delete_if_exists(&mut self, row: MoonlinkRow, lsn: u64) {
+        self.delete_impl(row, lsn, true).await;
     }
 
     pub fn commit(&mut self, lsn: u64) {
