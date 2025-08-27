@@ -151,9 +151,8 @@ pub async fn build_table_components(
             table_components
                 .moonlink_table_config
                 .iceberg_table_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap(),
+                .data_accessor_config
+                .clone(),
         )),
     )
     .await?;
@@ -168,7 +167,10 @@ pub async fn build_table_components(
         table_components.read_state_filepath_remap,
     );
     let table_status_reader = TableStatusReader::new(
-        &table_components.moonlink_table_config.iceberg_table_config,
+        &table_components
+            .moonlink_table_config
+            .iceberg_table_config
+            .clone(),
         &table,
     );
     let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();

@@ -120,10 +120,9 @@ pub(crate) fn parse_moonlink_table_config(
     let persisted = MoonlinkTableConfigForPersistence {
         iceberg_table_config: IcebergTableConfigForPersistence {
             warehouse_uri: iceberg_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap()
-                .get_root_path(),
+                .metadata_accessor_config
+                .get_warehouse_uri()
+                .unwrap(),
             namespace: iceberg_config.namespace[0].to_string(),
             table_name: iceberg_config.table_name,
         },
@@ -145,7 +144,7 @@ pub(crate) fn parse_moonlink_table_config(
 
     // Extract table secret entry.
     let iceberg_secret_entry = iceberg_config
-        .catalog
+        .metadata_accessor_config
         .get_file_catalog_accessor_config()
         .unwrap()
         .extract_security_metadata_entry();
@@ -229,8 +228,9 @@ pub(crate) fn deserialize_moonlink_table_config(
         iceberg_table_config: IcebergTableConfig {
             namespace: vec![parsed.iceberg_table_config.namespace],
             table_name: parsed.iceberg_table_config.table_name,
-            catalog: moonlink::IcebergCatalogConfig::File {
-                accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+            data_accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
+            metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
+                accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
             },
         },
         mooncake_table_config,

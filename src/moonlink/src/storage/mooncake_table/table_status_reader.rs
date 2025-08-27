@@ -22,10 +22,9 @@ impl TableStatusReader {
         let (table_snapshot, _) = table.get_state_for_reader();
         Self {
             iceberg_warehouse_location: iceberg_table_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap()
-                .get_root_path(),
+                .metadata_accessor_config
+                .get_warehouse_uri()
+                .unwrap(),
             table_snapshot,
         }
     }

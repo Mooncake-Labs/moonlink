@@ -31,6 +31,18 @@ pub enum IcebergCatalogConfig {
 }
 
 impl IcebergCatalogConfig {
+    pub fn get_warehouse_uri(&self) -> Option<String> {
+        match self {
+            IcebergCatalogConfig::File { accessor_config } => Some(accessor_config.get_root_path()),
+            IcebergCatalogConfig::Rest {
+                rest_catalog_config,
+            } => rest_catalog_config.warehouse.clone(),
+            IcebergCatalogConfig::Glue {
+                glue_catalog_config,
+            } => Some(glue_catalog_config.warehouse.clone()),
+        }
+    }
+
     pub fn get_file_catalog_accessor_config(&self) -> Option<AccessorConfig> {
         match self {
             IcebergCatalogConfig::File { accessor_config } => Some(accessor_config.clone()),
@@ -61,8 +73,10 @@ pub struct IcebergTableConfig {
     pub namespace: Vec<String>,
     /// Iceberg table name.
     pub table_name: String,
+    /// Accessor config for writing data files.
+    pub data_accessor_config: AccessorConfig,
     /// Catalog configuration (defaults to File).
-    pub catalog: IcebergCatalogConfig,
+    pub metadata_accessor_config: IcebergCatalogConfig,
 }
 
 impl IcebergTableConfig {
@@ -81,7 +95,8 @@ impl Default for IcebergTableConfig {
         Self {
             namespace: vec![Self::DEFAULT_NAMESPACE.to_string()],
             table_name: Self::DEFAULT_TABLE.to_string(),
-            catalog: IcebergCatalogConfig::File {
+            data_accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
+            metadata_accessor_config: IcebergCatalogConfig::File {
                 accessor_config: AccessorConfig::new_with_storage_config(storage_config),
             },
         }
