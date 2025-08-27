@@ -10,8 +10,6 @@ managed ingestion engine for Apache Iceberg
 
 </div>
 
-<div align="left">
-
 ## Overview
 
 Moonlink is an Iceberg-native ingestion engine bringing streaming inserts and upserts to your lakehouse.
@@ -50,7 +48,7 @@ which leads to:
 
 Moonlink minimizes write amplification and metadata churn by buffering incoming data, building indexes and caches on NVMe, and committing read-optimized files and deletion vectors to Iceberg.
 
-**Inserts**: buffered and flushed as size-tuned Parquet
+**Inserts** are buffered and flushed as size-tuned Parquet
 
 ```
           ┌───moonlink───┐  ┌────iceberg───┐
@@ -62,7 +60,7 @@ raw insert│              │  │              │
           └──────────────┘  └──────────────┘
 ```
 
-**Deletes**: row positions indexed and mapped to deletion vectors
+**Deletes** are mapped to deletion vectors using an index  built on row positions
 
 ```
            ┌───moonlink───┐   ┌────iceberg───┐
@@ -104,6 +102,7 @@ For workloads requiring sub-second visibility into new data, Moonlink supports r
 
 1. **DuckDB** — with the [`duckb_mooncake`](https://github.com/Mooncake-Labs/duckdb_mooncake)  extension.
 2. **Postgres** — with the [`pg_mooncake`](https://github.com/Mooncake-Labs/pg_mooncake) extension.
+3. **DataFusion** – with [`Moonlink Datafusion`](https://github.com/Mooncake-Labs/moonlink/tree/main/src/moonlink_datafusion)
 
  
 ## Quick Start
@@ -118,23 +117,15 @@ cd moonlink
 cargo build --release --bin moonlink_service
 ```
 
-### 2. Create Data Directory
+## 2. Start the Moonlink Service
 
-Create a directory where Moonlink will store data:
-
-```bash
-mkdir -p ./data
-```
-
-### 3. Start the Service
-
-Launch Moonlink and point it to your data directory:
+Start the Moonlink service, which will store data in the `./data` directory:
 
 ```bash
 ./target/release/moonlink_service ./data
 ```
 
-### 4. Verify Service Health
+### 3. Verify Service Health
 
 Check that the service is running properly:
 
@@ -142,7 +133,7 @@ Check that the service is running properly:
 curl http://localhost:3030/health
 ```
 
-### 5. Create a Table
+### 4. Create a Table
 
 Create a table with a defined schema. Here's an example creating a `users` table:
 
@@ -163,7 +154,7 @@ curl -X POST http://localhost:3030/tables/users \
   }'
 ```
 
-### 6. Insert Data
+### 5. Insert Data
 
 Insert data into the created table:
 
