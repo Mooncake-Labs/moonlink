@@ -6,8 +6,8 @@ mod tests {
 
     use super::common::{
         assert_scan_ids_eq, crash_and_recover_backend_with_guard, create_backend_from_base_path,
-        current_wal_lsn, get_database_uri, get_serialized_table_config, smoke_create_and_insert,
-        TestGuard, TestGuardMode, DATABASE, TABLE,
+        current_wal_lsn, get_serialized_table_config, smoke_create_and_insert, TestGuard,
+        TestGuardMode, DATABASE, TABLE,
     };
     use moonlink_backend::RowEventOperation;
     use moonlink_backend::{table_status::TableStatus, REST_API_URI};
@@ -597,7 +597,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_and_incomplete_pg_replay(#[case] use_iceberg: bool) {
-        use crate::common::{connect_to_postgres, create_backend_from_tempdir};
+        use crate::common::{connect_to_postgres, create_backend_from_tempdir, get_database_uri};
 
         let (mut guard, client1) = TestGuard::new(Some("recovery"), false).await;
         let uri = get_database_uri();
