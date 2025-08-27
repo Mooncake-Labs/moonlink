@@ -518,6 +518,13 @@ jobs:
           cargo test --package moonlink_connectors --lib --features connector-pg
           # want to test storing and retrieving different types of storage configs
           cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3 storage-gcs"
+      
+      - name: Run Backend integration tests
+        timeout-minutes: 10
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          cargo test --package moonlink_backend --test test_backend
 
   # ───────────── 12 · Moonlink Service Integration Tests ─────────────
   moonlink_service_tests:
