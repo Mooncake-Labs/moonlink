@@ -6,8 +6,8 @@ mod tests {
 
     use super::common::{
         assert_scan_ids_eq, crash_and_recover_backend_with_guard, create_backend_from_base_path,
-        current_wal_lsn, get_serialized_table_config, smoke_create_and_insert, TestGuard,
-        TestGuardMode, DATABASE, TABLE,
+        current_wal_lsn, get_database_uri, get_serialized_table_config, smoke_create_and_insert,
+        TestGuard, TestGuardMode, DATABASE, TABLE,
     };
     use moonlink_backend::RowEventOperation;
     use moonlink_backend::{table_status::TableStatus, REST_API_URI};
@@ -600,7 +600,8 @@ mod tests {
         use crate::common::{connect_to_postgres, create_backend_from_tempdir};
 
         let (mut guard, client1) = TestGuard::new(Some("recovery"), false).await;
-        let (mut client2, _) = connect_to_postgres().await;
+        let uri = get_database_uri();
+        let (mut client2, _) = connect_to_postgres(&uri).await;
 
         guard.set_test_mode(TestGuardMode::Crash);
 
@@ -626,7 +627,7 @@ mod tests {
                 DATABASE.to_string(),
                 TABLE.to_string(),
                 "public.recovery".to_string(),
-                SRC_URI.to_string(),
+                uri,
                 guard.get_serialized_table_config(),
                 None, /* input_schema */
             )

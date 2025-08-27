@@ -4,6 +4,7 @@ use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_postgres::{connect, types::PgLsn, Client};
@@ -482,7 +483,8 @@ pub async fn setup_backend(
     .unwrap();
 
     // Connect to Postgres.
-    let (client, _) = connect_to_postgres().await;
+    let uri = get_database_uri();
+    let (client, _) = connect_to_postgres(&uri).await;
 
     // Clear any leftover replication slot from previous runs.
     let _ = client
@@ -514,7 +516,7 @@ pub async fn setup_backend(
                 DATABASE.to_string(),
                 TABLE.to_string(),
                 format!("public.{table_name}"),
-                SRC_URI.to_string(),
+                uri,
                 get_serialized_table_config(&temp_dir),
                 None, /* input_schema */
             )
@@ -592,29 +594,31 @@ pub async fn smoke_create_and_insert(
     recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
 }
 
-#[cfg(feature = "test-tls")]
-pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
-    let root_cert_pem = std::fs::read("../../.devcontainer/certs/ca.crt").unwrap();
-
+pub async fn connect_to_postgres(uri: &str) -> (Client, tokio::task::JoinHandle<()>) {
+    #[cfg(feature = "test-tls")]
     let connector = TlsConnector::builder()
-        .add_root_certificate(native_tls::Certificate::from_pem(root_cert_pem.as_slice()).unwrap())
+        .add_root_certificate(
+            native_tls::Certificate::from_pem(
+                std::fs::read("../../.devcontainer/certs/ca.crt")
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap(),
+        )
         .build()
         .unwrap();
+
+    #[cfg(not(feature = "test-tls"))]
+    let connector = TlsConnector::new().unwrap();
     let tls = MakeTlsConnector::new(connector);
-    let (client, connection) = connect(SRC_URI, tls).await.unwrap();
+    let (client, connection) = connect(uri, tls).await.unwrap();
     let connection_handle = tokio::spawn(async move {
         let _ = connection.await;
     });
     (client, connection_handle)
 }
 
-#[cfg(not(feature = "test-tls"))]
-pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
-    let connector = TlsConnector::new().unwrap();
-    let tls = MakeTlsConnector::new(connector);
-    let (client, connection) = connect(SRC_URI, tls).await.unwrap();
-    let connection_handle = tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    (client, connection_handle)
+/// Util function to get database URI.
+pub fn get_database_uri() -> String {
+    env::var("DATABASE_URL").unwrap_or_else(|_| SRC_URI.to_string())
 }

@@ -2,7 +2,7 @@ mod common;
 
 #[cfg(test)]
 mod tests {
-    use crate::common::connect_to_postgres;
+    use crate::common::{connect_to_postgres, get_database_uri};
 
     use super::common::{
         current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, DATABASE, SRC_URI,
@@ -17,7 +17,7 @@ mod tests {
     #[serial]
     async fn test_initial_copy_handles_existing_rows() {
         // First, create our own PostgreSQL client to pre-populate data
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_test";
 
@@ -96,7 +96,7 @@ mod tests {
     #[serial]
     async fn test_initial_copy_handles_large_existing_rows() {
         // First, create our own PostgreSQL client to pre-populate data
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_test";
 
@@ -168,7 +168,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_handles_inserts_during_copy() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_insert_during";
 
@@ -245,7 +245,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_handles_updates_during_copy() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_update_during";
 
@@ -347,7 +347,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_handles_deletes_during_copy() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_delete_during";
 
@@ -433,7 +433,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_insert_then_delete_during_copy() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_insert_delete";
         let row_count = 10_000i64;
@@ -508,7 +508,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_handles_empty_table_simple() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_empty";
 
@@ -565,7 +565,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn stress_test_initial_copy_heavy_mutations() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_stress";
         let row_count: i64 = 500_000;
@@ -706,7 +706,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_fails_to_get_stream() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_fail_stream";
 
@@ -762,7 +762,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_initial_copy_copy_stream_send_error_logged() {
-        let (initial_client, _) = connect_to_postgres().await;
+        let (initial_client, _) = connect_to_postgres(get_database_uri().as_str()).await;
 
         let table_name = "copy_send_error";
 
