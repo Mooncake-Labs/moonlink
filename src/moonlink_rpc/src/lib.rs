@@ -25,16 +25,16 @@ macro_rules! rpcs {
 }
 
 rpcs! {
-    create_snapshot(database: String, table: String, lsn: u64) -> ();
-    create_table(database: String, table: String, src: String, src_uri: String, table_config: String) -> ();
-    drop_table(database: String, table: String) -> ();
-    get_parquet_metadata(data_file: String) -> Vec<u8>;
-    get_table_schema(database: String, table: String) -> Vec<u8>;
-    list_tables() -> Vec<Table>;
-    load_files(database: String, table: String, files: Vec<String>) -> ();
-    optimize_table(database: String, table: String, mode: String) -> ();
-    scan_table_begin(database: String, table: String, lsn: u64) -> Vec<u8>;
-    scan_table_end(database: String, table: String) -> ();
+    create_snapshot(database: String, table: String, lsn: u64) -> Result<()>;
+    create_table(database: String, table: String, src: String, src_uri: String, table_config: String) -> Result<()>;
+    drop_table(database: String, table: String) -> Result<()>;
+    get_parquet_metadata(data_file: String) -> Result<Vec<u8>>;
+    get_table_schema(database: String, table: String) -> Result<Vec<u8>>;
+    list_tables() -> Result<Vec<Table>>;
+    load_files(database: String, table: String, files: Vec<String>) -> Result<()>;
+    optimize_table(database: String, table: String, mode: String) -> Result<()>;
+    scan_table_begin(database: String, table: String, lsn: u64) -> Result<Vec<u8>>;
+    scan_table_end(database: String, table: String) -> Result<()>;
 }
 
 pub async fn write<W: AsyncWrite + Unpin, S: Serialize>(writer: &mut W, data: &S) -> Result<()> {

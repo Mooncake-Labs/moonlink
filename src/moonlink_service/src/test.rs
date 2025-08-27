@@ -393,7 +393,7 @@ async fn test_moonlink_standalone_data_ingestion() {
     .await
     .unwrap();
     let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
+        decode_serialized_read_state_for_testing(bytes.expect("Decode error"));
     assert_eq!(data_file_paths.len(), 1);
     let record_batches = read_all_batches(&data_file_paths[0]).await;
     let expected_arrow_batch = RecordBatch::try_new(
@@ -412,7 +412,7 @@ async fn test_moonlink_standalone_data_ingestion() {
     assert!(puffin_deletion.is_empty());
     assert!(positional_deletion.is_empty());
 
-    scan_table_end(
+    let _ = scan_table_end(
         &mut moonlink_stream,
         DATABASE.to_string(),
         TABLE.to_string(),
@@ -479,7 +479,7 @@ async fn test_moonlink_standalone_file_upload() {
     .await
     .unwrap();
     let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
+        decode_serialized_read_state_for_testing(bytes.expect("Decode error"));
     assert_eq!(data_file_paths.len(), 1);
     let record_batches = read_all_batches(&data_file_paths[0]).await;
     let expected_arrow_batch = RecordBatch::try_new(
@@ -502,7 +502,7 @@ async fn test_moonlink_standalone_file_upload() {
     assert!(puffin_deletion.is_empty());
     assert!(positional_deletion.is_empty());
 
-    scan_table_end(
+    let _ = scan_table_end(
         &mut moonlink_stream,
         DATABASE.to_string(),
         TABLE.to_string(),
@@ -568,7 +568,7 @@ async fn test_moonlink_standalone_file_insert() {
     .await
     .unwrap();
     let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
+        decode_serialized_read_state_for_testing(bytes.expect("Decode error"));
     assert_eq!(data_file_paths.len(), 1);
     let record_batches = read_all_batches(&data_file_paths[0]).await;
     let expected_arrow_batch = RecordBatch::try_new(
@@ -591,7 +591,7 @@ async fn test_moonlink_standalone_file_insert() {
     assert!(puffin_deletion.is_empty());
     assert!(positional_deletion.is_empty());
 
-    scan_table_end(
+    let _ = scan_table_end(
         &mut moonlink_stream,
         DATABASE.to_string(),
         TABLE.to_string(),
@@ -726,7 +726,7 @@ async fn test_bulk_ingest_files() {
 
     // A dummy stub-level interface testing.
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    load_files(
+    let _ = load_files(
         &mut moonlink_stream,
         DATABASE.to_string(),
         TABLE.to_string(),

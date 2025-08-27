@@ -40,7 +40,7 @@ pub struct MooncakeTableProvider {
 impl MooncakeTableProvider {
     pub async fn try_new(uri: &str, schema: String, table: String, lsn: u64) -> Result<Self> {
         let mut stream = UnixStream::connect(uri).await?;
-        let table_schema = get_table_schema(&mut stream, schema.clone(), table.clone()).await?;
+        let table_schema = get_table_schema(&mut stream, schema.clone(), table.clone()).await??;
         let table_schema = StreamReader::try_new(table_schema.as_slice(), None)?.schema();
         let scan = Arc::new(MooncakeTableScan::try_new(stream, schema, table, lsn).await?);
         Ok(Self {
@@ -218,7 +218,7 @@ impl MooncakeTableScan {
     ) -> Result<Self> {
         let metadata = scan_table_begin(&mut stream, schema.clone(), table.clone(), lsn).await?;
         let metadata: MooncakeTableMetadata =
-            bincode::decode_from_slice(&metadata, config::standard())?.0;
+            bincode::decode_from_slice(&metadata?, config::standard())?.0;
         Ok(Self {
             stream: Some(stream),
             schema,
