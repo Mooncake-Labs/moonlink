@@ -109,23 +109,24 @@ jobs:
             sleep 2
           done
 
-      # ─────────────────────── Start Iceberg-rest ──────────────────────────
-      - name: Start iceberg-rest
+      # ─────────────────────── Start Iceberg-rest-fixture ──────────────────────────
+      - name: Start iceberg-rest-fixture
         run: |
           docker run -d \
-            --name apache/iceberg-rest-fixture \
-            -p 8181:8181
+            --name iceberg-rest-fixture \
+            -p 8181:8181 \
+            apache/iceberg-rest-fixture
 
-      # ───────────────────── Wait for Iceberg-rest to be ready ───────────────────
-      - name: Wait for Iceberg-rest ready
+      # ───────────────────── Wait for Iceberg-rest-fixture to be ready ───────────────────
+      - name: Wait for Iceberg-rest-fixture ready
         timeout-minutes: 2
         run: |
           for i in {1..10}; do
             if curl -sS http://localhost:8181/v1/config; then
-              echo "Iceberg-rest is ready!"
+              echo "Iceberg-rest-fixture is ready!"
               break
             fi
-            echo "Waiting for Iceberg-rust..."
+            echo "Waiting for Iceberg-rust-fixture..."
             sleep 2
           done
 
