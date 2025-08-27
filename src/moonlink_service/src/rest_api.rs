@@ -171,7 +171,7 @@ pub struct FileUploadResponse {
 /// ====================
 ///
 /// Health check response
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub service: String,
     pub status: String,
@@ -602,11 +602,7 @@ mod tests {
         listener.local_addr().unwrap().port()
     }
 
-    #[tokio::test]
-    async fn test_health_check_endpoint() {
-        let port = get_available_port().await;
-
-        // Initialize moonlink backend
+    async fn setup_test_backend() -> Arc<MoonlinkBackend> {
         let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(TEST_BASE_PATH)
             .await
             .unwrap();
@@ -617,7 +613,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let backend = Arc::new(backend);
+        Arc::new(backend)
+    }
+
+    #[tokio::test]
+    async fn test_health_check_endpoint() {
+        let port = get_available_port().await;
+
+        let backend = setup_test_backend().await;
 
         let api_state = ApiState::new(backend);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -639,10 +642,10 @@ mod tests {
             .expect("Failed to send request");
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let health_data: HealthResponse = resp.json::<HealthResponse>().await.unwrap();
-        assert_eq!(health_data.service, "moonlink-rest-api");
-        assert_eq!(health_data.status, "healthy");
-        assert!(health_data.timestamp > 0);
+        let health_data: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(health_data.get("service").unwrap(), "moonlink-rest-api");
+        assert_eq!(health_data.get("status").unwrap(), "healthy");
+        assert!(health_data.get("timestamp").unwrap().as_i64().unwrap() > 0);
 
         // Clean up
         shutdown_tx.send(()).unwrap();
