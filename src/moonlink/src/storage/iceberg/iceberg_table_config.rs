@@ -4,28 +4,54 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RestCatalogConfig {
+    #[serde(rename = "uri")]
+    #[serde(default)]
     uri: String,
-    warehouse: Option<String>,
+
+    #[serde(rename = "warehouse")]
+    #[serde(default)]
+    warehouse: String,
+
+    #[serde(rename = "props")]
+    #[serde(default)]
     props: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GlueCatalogConfig {
+    #[serde(rename = "name")]
+    #[serde(default)]
     name: Option<String>,
+
+    #[serde(rename = "uri")]
+    #[serde(default)]
     uri: Option<String>,
+    #[serde(rename = "catalog_id")]
+    #[serde(default)]
     catalog_id: Option<String>,
+
+    #[serde(rename = "warehouse")]
+    #[serde(default)]
     warehouse: String,
+
+    #[serde(rename = "props")]
+    #[serde(default)]
     props: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IcebergCatalogConfig {
-    File {
-        accessor_config: AccessorConfig,
-    },
+    #[serde(rename = "file")]
+    File { accessor_config: AccessorConfig },
+
+    #[cfg(feature = "catalog-rest")]
+    #[serde(rename = "rest")]
     Rest {
         rest_catalog_config: RestCatalogConfig,
     },
+
+    #[cfg(feature = "catalog-glue")]
+    #[serde(rename = "glue")]
     Glue {
         glue_catalog_config: GlueCatalogConfig,
     },
@@ -35,9 +61,11 @@ impl IcebergCatalogConfig {
     pub fn get_warehouse_uri(&self) -> String {
         match self {
             IcebergCatalogConfig::File { accessor_config } => accessor_config.get_root_path(),
+            #[cfg(feature = "catalog-rest")]
             IcebergCatalogConfig::Rest {
                 rest_catalog_config,
-            } => rest_catalog_config.warehouse.clone().unwrap_or_default(),
+            } => rest_catalog_config.warehouse.clone(),
+            #[cfg(feature = "catalog-glue")]
             IcebergCatalogConfig::Glue {
                 glue_catalog_config,
             } => glue_catalog_config.warehouse.clone(),
@@ -50,21 +78,27 @@ impl IcebergCatalogConfig {
             _ => None,
         }
     }
+
+    #[cfg(feature = "catalog-rest")]
     pub fn get_rest_catalog_config(&self) -> Option<RestCatalogConfig> {
-        match self {
-            IcebergCatalogConfig::Rest {
-                rest_catalog_config,
-            } => Some(rest_catalog_config.clone()),
-            _ => None,
+        if let IcebergCatalogConfig::Rest {
+            rest_catalog_config,
+        } = self
+        {
+            return Some(rest_catalog_config.clone());
         }
+        None
     }
+
+    #[cfg(feature = "catalog-glue")]
     pub fn get_glue_catalog_config(&self) -> Option<GlueCatalogConfig> {
-        match self {
-            IcebergCatalogConfig::Glue {
-                glue_catalog_config,
-            } => Some(glue_catalog_config.clone()),
-            _ => None,
+        if let IcebergCatalogConfig::Glue {
+            glue_catalog_config,
+        } = self
+        {
+            return Some(glue_catalog_config.clone());
         }
+        None
     }
 }
 

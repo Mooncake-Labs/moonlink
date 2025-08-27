@@ -31,6 +31,9 @@ storage-gcs = [
     "reqwest",
 ]
 
+catalog-rest = []
+catalog-glue = []
+
 bench = []
 
 chaos-test = ["function_name"]
