@@ -127,7 +127,7 @@ where
                 write(&mut stream, &()).await?;
             }
             Request::DropTable { database, table } => {
-                backend.drop_table(database, table).await;
+                backend.drop_table(database, table).await?;
                 write(&mut stream, &()).await?;
             }
             Request::GetParquetMetadata { data_file } => {

@@ -215,21 +215,21 @@ impl MoonlinkBackend {
         Ok(())
     }
 
-    pub async fn drop_table(&self, database: String, table: String) {
+    pub async fn drop_table(&self, database: String, table: String) -> Result<()> {
         let mooncake_table_id = MooncakeTableId { database, table };
 
         let table_exists = {
             let mut manager = self.replication_manager.write().await;
-            manager.drop_table(&mooncake_table_id).await.unwrap()
+            manager.drop_table(&mooncake_table_id).await?
         };
         if !table_exists {
-            return;
+            return Ok(());
         }
 
         self.metadata_store_accessor
             .delete_table_metadata(&mooncake_table_id.database, &mooncake_table_id.table)
-            .await
-            .unwrap()
+            .await?;
+        Ok(())
     }
 
     /// Get the base directory for all mooncake tables.

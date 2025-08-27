@@ -347,11 +347,20 @@ async fn drop_table(
 ) -> Result<Json<DropTableResponse>, (StatusCode, Json<ErrorResponse>)> {
     debug!("Received table drop request for '{}': {:?}", table, payload);
 
-    // Create table in backend
+    // Drop table in backend
     state
         .backend
         .drop_table(payload.database.clone(), payload.table.clone())
-        .await;
+        .await
+        .map_err(|e| {
+            (
+                get_backend_error_status_code(&e),
+                Json(ErrorResponse {
+                    error: "table_drop_failed".to_string(),
+                    message: format!("Failed to drop table: {e}"),
+                }),
+            )
+        })?;
     Ok(Json(DropTableResponse {}))
 }
 

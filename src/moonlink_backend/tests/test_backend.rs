@@ -35,13 +35,15 @@ mod tests {
         // First round of table operations.
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, SRC_URI).await;
 
         // Second round of table operations.
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, SRC_URI).await;
     }
 
@@ -58,7 +60,8 @@ mod tests {
                 "non_existent_database".to_string(),
                 "non_existent_table".to_string(),
             )
-            .await;
+            .await
+            .unwrap();
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
@@ -227,7 +230,8 @@ mod tests {
             .unwrap();
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
 
         // Second cycle: add table again, insert different data, verify it works
         client
@@ -335,7 +339,8 @@ mod tests {
         // Drop table and check metadata storage.
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         let metadata_entries = metadata_store
             .get_all_table_metadata_entries()
             .await
@@ -354,7 +359,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
 
         // First cycle: add table, insert data, verify it works
         backend
@@ -509,7 +515,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         backend
             .create_table(
                 DATABASE.to_string(),
@@ -612,7 +619,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         backend
             .create_table(
                 DATABASE.to_string(),
@@ -720,7 +728,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
 
         backend
             .create_table(
@@ -805,7 +814,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         backend
             .create_table(
                 DATABASE.to_string(),
