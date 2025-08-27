@@ -603,16 +603,22 @@ mod tests {
     }
 
     async fn setup_test_backend() -> Arc<MoonlinkBackend> {
+        if tokio::fs::metadata(TEST_BASE_PATH).await.is_ok() {
+            tokio::fs::remove_dir_all(TEST_BASE_PATH).await;
+        }
+        tokio::fs::create_dir_all(TEST_BASE_PATH).await;
+
         let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(TEST_BASE_PATH)
             .await
             .unwrap();
-        let backend = MoonlinkBackend::new(
+        let mut backend = MoonlinkBackend::new(
             TEST_BASE_PATH.to_string(),
             Some(LOCAL_HOST.to_string()),
             Box::new(sqlite_metadata_accessor),
         )
         .await
         .unwrap();
+        backend.initialize_event_api().await;
         Arc::new(backend)
     }
 
@@ -631,12 +637,12 @@ mod tests {
         });
 
         // Wait for server to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         // Make request to health endpoint
         let client = Client::new();
         let resp = client
-            .get(format!("http://127.0.0.1:{port}/health"))
+            .get(format!("http://localhost:{port}/health"))
             .send()
             .await
             .expect("Failed to send request");
@@ -646,6 +652,57 @@ mod tests {
         assert_eq!(health_data.get("service").unwrap(), "moonlink-rest-api");
         assert_eq!(health_data.get("status").unwrap(), "healthy");
         assert!(health_data.get("timestamp").unwrap().as_i64().unwrap() > 0);
+
+        // Clean up
+        shutdown_tx.send(()).unwrap();
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_table_endpoint() {
+        let port = get_available_port().await;
+
+        let backend = setup_test_backend().await;
+
+        let api_state = ApiState::new(backend);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // Start server in background
+        let server_handle = tokio::spawn(async move {
+            start_server(api_state, port, shutdown_rx).await.unwrap();
+        });
+
+        // Wait for server to start
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Make request to create table endpoint
+        let client = Client::new();
+        let create_table_payload = serde_json::json!({
+            "mooncake_database": "test_db",
+            "mooncake_table": "test_table",
+            "schema": [
+                {"name": "id", "data_type": "int32", "nullable": false},
+                {"name": "name", "data_type": "string", "nullable": false},
+                {"name": "email", "data_type": "string", "nullable": true},
+                {"name": "age", "data_type": "int32", "nullable": true}
+            ]
+        });
+
+        let resp = client
+            .post(format!("http://localhost:{port}/tables/my_table"))
+            .header("content-type", "application/json")
+            .json(&create_table_payload)
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let create_response: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(create_response.get("status").unwrap(), "success");
+        assert_eq!(create_response.get("table_name").unwrap(), "my_table");
+        assert_eq!(create_response.get("schema").unwrap(), "test_db");
+
+        // TODO: Verify table exists in backend
 
         // Clean up
         shutdown_tx.send(()).unwrap();
