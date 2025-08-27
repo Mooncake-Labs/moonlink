@@ -19,12 +19,16 @@ pub fn create_catalog(
         IcebergCatalogConfig::File { accessor_config } => {
             Ok(Box::new(FileCatalog::new(accessor_config, iceberg_schema)?))
         }
-        IcebergCatalogConfig::Rest { .. } | IcebergCatalogConfig::Glue { .. } => {
-            Err(iceberg::Error::new(
-                iceberg::ErrorKind::FeatureUnsupported,
-                "Only File catalog is supported currently",
-            ))
-        }
+        #[cfg(feature = "catalog-rest")]
+        IcebergCatalogConfig::Rest { .. } => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
+            "Only File catalog is supported currently",
+        )),
+        #[cfg(feature = "catalog-glue")]
+        IcebergCatalogConfig::Glue { .. } => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
+            "Only File catalog is supported currently",
+        )),
     }
 }
 
@@ -36,12 +40,16 @@ pub fn create_catalog_without_schema(
         IcebergCatalogConfig::File { accessor_config } => {
             Ok(Box::new(FileCatalog::new_without_schema(accessor_config)?))
         }
-        IcebergCatalogConfig::Rest { .. } | IcebergCatalogConfig::Glue { .. } => {
-            Err(iceberg::Error::new(
-                iceberg::ErrorKind::FeatureUnsupported,
-                "Only File catalog is supported currently",
-            ))
-        }
+        #[cfg(feature = "catalog-rest")]
+        IcebergCatalogConfig::Rest { .. } => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
+            "Only File catalog is supported currently",
+        )),
+        #[cfg(feature = "catalog-glue")]
+        IcebergCatalogConfig::Glue { .. } => Err(iceberg::Error::new(
+            iceberg::ErrorKind::FeatureUnsupported,
+            "Only File catalog is supported currently",
+        )),
     }
 }
 

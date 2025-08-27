@@ -75,6 +75,7 @@ impl IcebergCatalogConfig {
     pub fn get_file_catalog_accessor_config(&self) -> Option<AccessorConfig> {
         match self {
             IcebergCatalogConfig::File { accessor_config } => Some(accessor_config.clone()),
+            #[cfg(any(feature = "catalog-rest", feature = "catalog-glue"))]
             _ => None,
         }
     }
