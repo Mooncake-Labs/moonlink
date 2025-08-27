@@ -109,6 +109,26 @@ jobs:
             sleep 2
           done
 
+      # ─────────────────────── Start Iceberg-rest ──────────────────────────
+      - name: Start iceberg-rest
+        run: |
+          docker run -d \
+            --name apache/iceberg-rest-fixture \
+            -p 8181:8181
+
+      # ───────────────────── Wait for Iceberg-rest to be ready ───────────────────
+      - name: Wait for Iceberg-rest ready
+        timeout-minutes: 2
+        run: |
+          for i in {1..10}; do
+            if curl -sS http://localhost:8181/v1/config; then
+              echo "Iceberg-rest is ready!"
+              break
+            fi
+            echo "Waiting for Iceberg-rust..."
+            sleep 2
+          done
+
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
       - name: Run ${{ matrix.name }}
         timeout-minutes: ${{ matrix.timeout-minutes }}
