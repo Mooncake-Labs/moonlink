@@ -302,8 +302,7 @@ async fn validate_no_snapshot(
         &iceberg_table_manager
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -328,8 +327,7 @@ async fn validate_only_initial_snapshot(
         &iceberg_table_manager
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -354,8 +352,7 @@ async fn validate_only_new_data_files_in_snapshot(
         &iceberg_table_manager
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -380,8 +377,7 @@ async fn validate_only_new_deletion_vectors_in_snapshot(
         &iceberg_table_manager
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -414,8 +410,7 @@ async fn validate_new_data_files_and_deletion_vectors_in_snapshot(
         &iceberg_table_manager
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;

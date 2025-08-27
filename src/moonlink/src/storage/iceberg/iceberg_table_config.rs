@@ -31,15 +31,15 @@ pub enum IcebergCatalogConfig {
 }
 
 impl IcebergCatalogConfig {
-    pub fn get_warehouse_uri(&self) -> Option<String> {
+    pub fn get_warehouse_uri(&self) -> String {
         match self {
-            IcebergCatalogConfig::File { accessor_config } => Some(accessor_config.get_root_path()),
+            IcebergCatalogConfig::File { accessor_config } => accessor_config.get_root_path(),
             IcebergCatalogConfig::Rest {
                 rest_catalog_config,
-            } => rest_catalog_config.warehouse.clone(),
+            } => rest_catalog_config.warehouse.clone().unwrap_or_default(),
             IcebergCatalogConfig::Glue {
                 glue_catalog_config,
-            } => Some(glue_catalog_config.warehouse.clone()),
+            } => glue_catalog_config.warehouse.clone(),
         }
     }
 

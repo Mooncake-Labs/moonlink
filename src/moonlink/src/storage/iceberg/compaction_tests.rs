@@ -351,8 +351,7 @@ async fn test_compaction_1_1_1() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -418,8 +417,7 @@ async fn test_compaction_1_1_2() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -508,8 +506,7 @@ async fn test_compaction_1_2_1() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -598,8 +595,7 @@ async fn test_compaction_1_2_2() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -702,8 +698,7 @@ async fn test_compaction_2_2_1() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -795,8 +790,7 @@ async fn test_compaction_2_2_2() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -903,8 +897,7 @@ async fn test_compaction_2_3_1() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -983,8 +976,7 @@ async fn test_compaction_2_3_2() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1091,8 +1083,7 @@ async fn test_compaction_3_2_1() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1190,8 +1181,7 @@ async fn test_compaction_3_3_1() {
         &iceberg_table_manager_to_load
             .config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;

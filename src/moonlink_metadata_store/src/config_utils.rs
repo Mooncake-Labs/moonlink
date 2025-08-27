@@ -119,10 +119,7 @@ pub(crate) fn parse_moonlink_table_config(
     let mooncake_config = moonlink_table_config.mooncake_table_config;
     let persisted = MoonlinkTableConfigForPersistence {
         iceberg_table_config: IcebergTableConfigForPersistence {
-            warehouse_uri: iceberg_config
-                .metadata_accessor_config
-                .get_warehouse_uri()
-                .unwrap(),
+            warehouse_uri: iceberg_config.metadata_accessor_config.get_warehouse_uri(),
             namespace: iceberg_config.namespace[0].to_string(),
             table_name: iceberg_config.table_name,
         },

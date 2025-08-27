@@ -544,8 +544,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -641,8 +640,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -701,8 +699,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -863,8 +860,7 @@ async fn test_empty_snapshot_load_impl(iceberg_table_config: IcebergTableConfig)
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -968,8 +964,7 @@ async fn test_recover_from_failed_snapshot_impl(iceberg_table_config: IcebergTab
         "{}/{}/{}/metadata/{}",
         iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         ICEBERG_TEST_NAMESPACE,
         ICEBERG_TEST_TABLE,
         VERSION_HINT_FILENAME
@@ -1088,8 +1083,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1126,8 +1120,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1254,8 +1247,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1298,8 +1290,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1421,8 +1412,7 @@ async fn test_data_compaction_append_only_and_create_snapshot_impl(
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1559,8 +1549,7 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_impl(
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -2128,8 +2117,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -2171,8 +2159,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -2341,8 +2328,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -2418,8 +2404,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -2483,8 +2468,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         &snapshot,
         &iceberg_table_config
             .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap(),
+            .get_warehouse_uri(),
         filesystem_accessor.as_ref(),
     )
     .await;

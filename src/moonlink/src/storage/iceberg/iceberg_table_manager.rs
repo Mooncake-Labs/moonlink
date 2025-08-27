@@ -160,11 +160,7 @@ impl IcebergTableManager {
         if self.iceberg_table.is_none() {
             let table = utils::get_or_create_iceberg_table(
                 &*self.catalog,
-                &self
-                    .config
-                    .metadata_accessor_config
-                    .get_warehouse_uri()
-                    .unwrap(),
+                &self.config.metadata_accessor_config.get_warehouse_uri(),
                 &self.config.namespace,
                 &self.config.table_name,
                 self.mooncake_table_metadata.schema.as_ref(),
@@ -192,10 +188,7 @@ impl IcebergTableManager {
 #[async_trait]
 impl TableManager for IcebergTableManager {
     fn get_warehouse_location(&self) -> String {
-        self.config
-            .metadata_accessor_config
-            .get_warehouse_uri()
-            .unwrap()
+        self.config.metadata_accessor_config.get_warehouse_uri()
     }
 
     async fn sync_snapshot(
