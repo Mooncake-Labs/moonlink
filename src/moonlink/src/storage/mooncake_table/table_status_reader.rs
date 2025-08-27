@@ -88,10 +88,9 @@ mod tests {
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
             iceberg_warehouse_location: iceberg_table_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap()
-                .get_root_path(),
+                .metadata_accessor_config
+                .get_warehouse_uri()
+                .unwrap(),
             commit_lsn: 0,
             cardinality: 0,
             flush_lsn: None,
@@ -115,10 +114,9 @@ mod tests {
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
             iceberg_warehouse_location: iceberg_table_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap()
-                .get_root_path(),
+                .metadata_accessor_config
+                .get_warehouse_uri()
+                .unwrap(),
             commit_lsn: 0,
             cardinality: 0,
             flush_lsn: None,
@@ -146,10 +144,9 @@ mod tests {
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
             iceberg_warehouse_location: iceberg_table_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap()
-                .get_root_path(),
+                .metadata_accessor_config
+                .get_warehouse_uri()
+                .unwrap(),
             commit_lsn: 10,
             cardinality: 1,
             flush_lsn: None,
@@ -178,10 +175,9 @@ mod tests {
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
             iceberg_warehouse_location: iceberg_table_config
-                .catalog
-                .get_file_catalog_accessor_config()
-                .unwrap()
-                .get_root_path(),
+                .metadata_accessor_config
+                .get_warehouse_uri()
+                .unwrap(),
             commit_lsn: 10,
             flush_lsn: Some(10),
             cardinality: 1,

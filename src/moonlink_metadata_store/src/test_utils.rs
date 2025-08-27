@@ -25,8 +25,9 @@ pub fn get_s3_moonlink_table_config(database: &str, table: &str) -> MoonlinkTabl
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
             table_name: "table".to_string(),
-            catalog: IcebergCatalogConfig::File {
-                accessor_config: AccessorConfig::new_with_storage_config(iceberg_storage),
+            data_accessor_config: AccessorConfig::new_with_storage_config(iceberg_storage.clone()),
+            metadata_accessor_config: IcebergCatalogConfig::File {
+                accessor_config: AccessorConfig::new_with_storage_config(iceberg_storage.clone()),
             },
         },
         wal_table_config: WalConfig::new(wal_accessor, &format!("{database}.{table}")),
@@ -61,8 +62,9 @@ pub fn get_gcs_moonlink_table_config(database: &str, table: &str) -> MoonlinkTab
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
             table_name: "table".to_string(),
-            catalog: IcebergCatalogConfig::File {
-                accessor_config: AccessorConfig::new_with_storage_config(iceberg_storage),
+            data_accessor_config: AccessorConfig::new_with_storage_config(iceberg_storage.clone()),
+            metadata_accessor_config: IcebergCatalogConfig::File {
+                accessor_config: AccessorConfig::new_with_storage_config(iceberg_storage.clone()),
             },
         },
         wal_table_config: WalConfig::new(wal_accessor, &format!("{database}.{table}")),

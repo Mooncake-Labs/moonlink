@@ -193,8 +193,9 @@ pub(super) async fn create_mooncake_table_and_notify_for_index_merge(
         atomic_write_dir: None,
     };
     let iceberg_table_config = IcebergTableConfig {
-        catalog: crate::IcebergCatalogConfig::File {
-            accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        data_accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
+        metadata_accessor_config: crate::IcebergCatalogConfig::File {
+            accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
         },
         ..Default::default()
     };

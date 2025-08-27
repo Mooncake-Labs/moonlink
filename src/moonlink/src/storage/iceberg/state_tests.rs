@@ -301,10 +301,9 @@ async fn validate_no_snapshot(
         &snapshot,
         &iceberg_table_manager
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor,
     )
     .await;
@@ -328,10 +327,9 @@ async fn validate_only_initial_snapshot(
         &snapshot,
         &iceberg_table_manager
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor,
     )
     .await;
@@ -355,10 +353,9 @@ async fn validate_only_new_data_files_in_snapshot(
         &snapshot,
         &iceberg_table_manager
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor,
     )
     .await;
@@ -382,10 +379,9 @@ async fn validate_only_new_deletion_vectors_in_snapshot(
         &snapshot,
         &iceberg_table_manager
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor,
     )
     .await;
@@ -417,10 +413,9 @@ async fn validate_new_data_files_and_deletion_vectors_in_snapshot(
         &snapshot,
         &iceberg_table_manager
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor,
     )
     .await;

@@ -18,7 +18,8 @@ pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
             table_name: "table".to_string(),
-            catalog: moonlink::IcebergCatalogConfig::File {
+            data_accessor_config: iceberg_accessor_config.clone(),
+            metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
                 accessor_config: iceberg_accessor_config,
             },
         },

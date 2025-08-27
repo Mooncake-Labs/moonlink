@@ -350,10 +350,9 @@ async fn test_compaction_1_1_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -418,10 +417,9 @@ async fn test_compaction_1_1_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -509,10 +507,9 @@ async fn test_compaction_1_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -600,10 +597,9 @@ async fn test_compaction_1_2_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -705,10 +701,9 @@ async fn test_compaction_2_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -799,10 +794,9 @@ async fn test_compaction_2_2_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -908,10 +902,9 @@ async fn test_compaction_2_3_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -989,10 +982,9 @@ async fn test_compaction_2_3_2() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1098,10 +1090,9 @@ async fn test_compaction_3_2_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;
@@ -1198,10 +1189,9 @@ async fn test_compaction_3_3_1() {
         &snapshot,
         &iceberg_table_manager_to_load
             .config
-            .catalog
-            .get_file_catalog_accessor_config()
-            .unwrap()
-            .get_root_path(),
+            .metadata_accessor_config
+            .get_warehouse_uri()
+            .unwrap(),
         filesystem_accessor.as_ref(),
     )
     .await;

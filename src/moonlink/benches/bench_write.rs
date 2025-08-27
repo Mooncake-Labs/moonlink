@@ -55,7 +55,13 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    catalog: moonlink::IcebergCatalogConfig::File {
+                    data_accessor_config: AccessorConfig::new_with_storage_config(
+                        StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
+                        },
+                    ),
+                    metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
                         accessor_config: AccessorConfig::new_with_storage_config(
                             StorageConfig::FileSystem {
                                 root_directory: temp_warehouse_uri.clone(),
@@ -106,7 +112,13 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    catalog: moonlink::IcebergCatalogConfig::File {
+                    data_accessor_config: AccessorConfig::new_with_storage_config(
+                        StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
+                        },
+                    ),
+                    metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
                         accessor_config: AccessorConfig::new_with_storage_config(
                             StorageConfig::FileSystem {
                                 root_directory: temp_warehouse_uri.clone(),
@@ -160,7 +172,13 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    catalog: moonlink::IcebergCatalogConfig::File {
+                    data_accessor_config: AccessorConfig::new_with_storage_config(
+                        StorageConfig::FileSystem {
+                            root_directory: temp_warehouse_uri.clone(),
+                            atomic_write_dir: None,
+                        },
+                    ),
+                    metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
                         accessor_config: AccessorConfig::new_with_storage_config(
                             StorageConfig::FileSystem {
                                 root_directory: temp_warehouse_uri.clone(),

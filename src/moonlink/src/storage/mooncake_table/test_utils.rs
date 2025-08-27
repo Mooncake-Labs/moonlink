@@ -56,7 +56,8 @@ pub fn test_iceberg_table_config(context: &TestContext, table_name: &str) -> Ice
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name: table_name.to_string(),
-        catalog: crate::IcebergCatalogConfig::File {
+        data_accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
+        metadata_accessor_config: crate::IcebergCatalogConfig::File {
             accessor_config: AccessorConfig::new_with_storage_config(storage_config),
         },
     }
