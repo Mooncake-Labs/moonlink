@@ -594,6 +594,9 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
+    const LOCAL_HOST: &str = "http://localhost";
+    const TEST_BASE_PATH: &str = "/tmp/rest_api_test";
+
     async fn get_available_port() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         listener.local_addr().unwrap().port()
@@ -601,17 +604,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_endpoint() {
-        let local_host = "http://localhost";
-        let test_path = "/tmp/rest_api_test";
         let port = get_available_port().await;
 
         // Initialize moonlink backend
-        let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(test_path)
+        let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(TEST_BASE_PATH)
             .await
             .unwrap();
         let backend = MoonlinkBackend::new(
-            test_path.to_string(),
-            Some(local_host.to_string()),
+            TEST_BASE_PATH.to_string(),
+            Some(LOCAL_HOST.to_string()),
             Box::new(sqlite_metadata_accessor),
         )
         .await
