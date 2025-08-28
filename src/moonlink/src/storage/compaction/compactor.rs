@@ -332,7 +332,7 @@ impl CompactionBuilder {
         &mut self,
         old_file_indices: Vec<FileIndex>,
         old_to_new_remap: &HashMap<RecordLocation, RemappedRecordLocation>,
-    ) -> FileIndex {
+    ) -> Result<FileIndex> {
         let get_remapped_record_location =
             |old_record_location: RecordLocation| -> Option<RecordLocation> {
                 if let Some(remapped_record_location) = old_to_new_remap.get(&old_record_location) {
@@ -392,7 +392,6 @@ impl CompactionBuilder {
         // All rows have been deleted.
         if old_record_loc_to_new_mapping.is_empty() {
             return Ok(DataCompactionResult {
-                id: self.compaction_payload.id,
                 uuid: self.compaction_payload.uuid,
                 remapped_data_files: old_record_loc_to_new_mapping,
                 old_data_files,
@@ -408,22 +407,25 @@ impl CompactionBuilder {
             self.flush_arrow_writer().await?;
         }
 
-        // Perform compaction on file indices.
-        let new_file_indices = self
-            .compact_file_indices(
-                self.compaction_payload.file_indices.clone(),
-                &old_record_loc_to_new_mapping,
-            )
-            .await;
+        // Perform compaction on file indices
+        let mut new_file_indices = vec![];
+        if !old_file_indices.is_empty() {
+            let cur_new_file_indices = self
+                .compact_file_indices(
+                    self.compaction_payload.file_indices.clone(),
+                    &old_record_loc_to_new_mapping,
+                )
+                .await?;
+            new_file_indices.push(cur_new_file_indices);
+        }
 
         Ok(DataCompactionResult {
-            id: self.compaction_payload.id,
             uuid: self.compaction_payload.uuid,
             remapped_data_files: old_record_loc_to_new_mapping,
             old_data_files,
             old_file_indices,
             new_data_files: self.new_data_files,
-            new_file_indices: vec![new_file_indices],
+            new_file_indices,
             evicted_files_to_delete,
         })
     }

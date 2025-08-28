@@ -1,24 +1,34 @@
 use arrow_array::Int64Array;
+use moonlink::row::IdentityProp;
 use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
+use tokio_postgres::{connect, types::PgLsn, Client};
 
 use std::{collections::HashSet, fs::File};
 
 use moonlink::{decode_read_state_for_testing, AccessorConfig, StorageConfig};
 use moonlink_backend::file_utils::{recreate_directory, DEFAULT_MOONLINK_TEMP_FILE_PATH};
 use moonlink_backend::{MoonlinkBackend, ReadState};
+use moonlink_table_metadata::PositionDelete;
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
 
 /// Mooncake table database.
 pub const DATABASE: &str = "mooncake-database";
 /// Mooncake table name.
 pub const TABLE: &str = "mooncake-schema.mooncake-table";
 
-pub const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+// Devcontainer postgres instance is configured to use self-signed certs, which will fail if we don't disable TLS.
+#[cfg(not(feature = "test-tls"))]
+pub const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable";
+
+#[cfg(feature = "test-tls")]
+pub const SRC_URI: &str =
+    "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestGuardMode {
@@ -63,8 +73,15 @@ impl TestGuard {
                 skip_index_merge: true,
                 skip_data_compaction: true,
                 append_only: false,
+                row_identity: IdentityProp::FullRow,
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
+                StorageConfig::FileSystem {
+                    root_directory: root_directory.clone(),
+                    atomic_write_dir: None,
+                },
+            )),
+            wal_config: Some(AccessorConfig::new_with_storage_config(
                 StorageConfig::FileSystem {
                     root_directory,
                     atomic_write_dir: None,
@@ -322,7 +339,7 @@ pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64>
     let file_io = FileIOBuilder::new_fs_io().build().unwrap();
     for cur_blob in deletion_vectors.iter() {
         let puffin_file_path = puffin_files
-            .get(cur_blob.puffin_file_index as usize)
+            .get(cur_blob.puffin_file_number as usize)
             .unwrap();
 
         // Load puffin file and read blob
@@ -338,11 +355,10 @@ pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64>
         let deleted_row_indices = parse_deletion_vector_blob(blob.data());
 
         if !deleted_row_indices.is_empty() {
-            position_deletes.extend(
-                deleted_row_indices
-                    .iter()
-                    .map(|row_idx| (cur_blob.data_file_index, *row_idx as u32)),
-            );
+            position_deletes.extend(deleted_row_indices.iter().map(|row_idx| PositionDelete {
+                data_file_number: cur_blob.data_file_number,
+                data_file_row_number: *row_idx as u32,
+            }));
         }
     }
 
@@ -373,12 +389,26 @@ fn parse_deletion_vector_blob(blob_data: &[u8]) -> Vec<u64> {
 /// Helper function to apply position deletes to data files and return the remaining IDs
 fn apply_position_deletes_to_files(
     data_files: &[String],
-    position_deletes: &[(u32, u32)], // (file_index, row_index)
+    position_deletes: &[PositionDelete],
 ) -> HashSet<i64> {
     // Group deletes by file index
     let mut deletes_by_file: std::collections::HashMap<u32, HashSet<u32>> =
         std::collections::HashMap::new();
-    for (file_index, row_index) in position_deletes {
+    for PositionDelete {
+        data_file_number: file_index,
+        data_file_row_number: row_index,
+    } in position_deletes.iter()
+    {
+        deletes_by_file
+            .entry(*file_index)
+            .or_default()
+            .insert(*row_index);
+    }
+    for PositionDelete {
+        data_file_number: file_index,
+        data_file_row_number: row_index,
+    } in position_deletes.iter()
+    {
         deletes_by_file
             .entry(*file_index)
             .or_default()
@@ -403,15 +433,22 @@ fn apply_position_deletes_to_files(
 }
 
 /// Util function to create a table creation config by directory.
-fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
+pub fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
     let root_directory = tmp_dir.path().to_str().unwrap().to_string();
     let table_config = TableConfig {
         mooncake_config: MooncakeConfig {
             skip_index_merge: true,
             skip_data_compaction: true,
             append_only: false,
+            row_identity: IdentityProp::FullRow,
         },
         iceberg_config: Some(AccessorConfig::new_with_storage_config(
+            StorageConfig::FileSystem {
+                root_directory: root_directory.clone(),
+                atomic_write_dir: None,
+            },
+        )),
+        wal_config: Some(AccessorConfig::new_with_storage_config(
             StorageConfig::FileSystem {
                 root_directory,
                 atomic_write_dir: None,
@@ -424,7 +461,7 @@ fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
 /// Spin up a backend + scratch TempDir + psql client, and guarantee
 /// a **fresh table** named `table_name` exists and is registered with
 /// Moonlink.
-async fn setup_backend(
+pub async fn setup_backend(
     table_name: Option<&'static str>,
     has_primary_key: bool,
 ) -> (TempDir, MoonlinkBackend, Client) {
@@ -442,10 +479,7 @@ async fn setup_backend(
     .unwrap();
 
     // Connect to Postgres.
-    let (client, connection) = connect(SRC_URI, NoTls).await.unwrap();
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+    let (client, _) = connect_to_postgres().await;
 
     // Clear any leftover replication slot from previous runs.
     let _ = client
@@ -458,7 +492,6 @@ async fn setup_backend(
     let _ = client
         .simple_query("SELECT pg_drop_replication_slot('moonlink_slot_postgres')")
         .await;
-
     // Re-create the working table.
     if let Some(table_name) = table_name {
         let create_table_query = if has_primary_key {
@@ -554,4 +587,31 @@ pub async fn smoke_create_and_insert(
     assert_ne!(old.data, new.data);
 
     recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+}
+
+#[cfg(feature = "test-tls")]
+pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
+    let root_cert_pem = std::fs::read("../../.devcontainer/certs/ca.crt").unwrap();
+
+    let connector = TlsConnector::builder()
+        .add_root_certificate(native_tls::Certificate::from_pem(root_cert_pem.as_slice()).unwrap())
+        .build()
+        .unwrap();
+    let tls = MakeTlsConnector::new(connector);
+    let (client, connection) = connect(SRC_URI, tls).await.unwrap();
+    let connection_handle = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, connection_handle)
+}
+
+#[cfg(not(feature = "test-tls"))]
+pub async fn connect_to_postgres() -> (Client, tokio::task::JoinHandle<()>) {
+    let connector = TlsConnector::new().unwrap();
+    let tls = MakeTlsConnector::new(connector);
+    let (client, connection) = connect(SRC_URI, tls).await.unwrap();
+    let connection_handle = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, connection_handle)
 }

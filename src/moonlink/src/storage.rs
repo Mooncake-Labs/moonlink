@@ -26,7 +26,9 @@ pub use filesystem::accessor_config::{
     TimeoutConfig as FsTimeoutConfig,
 };
 pub use filesystem::storage_config::StorageConfig;
-pub use iceberg::iceberg_table_config::IcebergTableConfig;
+pub use iceberg::base_iceberg_snapshot_fetcher::BaseIcebergSnapshotFetcher;
+pub use iceberg::iceberg_snapshot_fetcher::IcebergSnapshotFetcher;
+pub use iceberg::iceberg_table_config::{IcebergCatalogConfig, IcebergTableConfig};
 pub use iceberg::iceberg_table_manager::IcebergTableManager;
 pub use iceberg::table_event_manager::TableEventManager;
 pub use iceberg::table_manager::TableManager;
@@ -39,7 +41,7 @@ pub use mooncake_table::table_status::TableSnapshotStatus;
 pub use mooncake_table::table_status_reader::TableStatusReader;
 pub use mooncake_table::MooncakeTable;
 pub use mooncake_table::SnapshotReadOutput;
-pub(crate) use mooncake_table::{PuffinDeletionBlobAtRead, SnapshotTableState};
+pub(crate) use mooncake_table::SnapshotTableState;
 pub use mooncake_table_config::DiskSliceWriterConfig;
 pub use mooncake_table_config::IcebergPersistenceConfig;
 pub use mooncake_table_config::MooncakeTableConfig;

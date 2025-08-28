@@ -1,5 +1,6 @@
 pub mod error;
 pub mod event_sync;
+pub mod mooncake_table_id;
 pub mod row;
 mod storage;
 pub(crate) mod table_handler;
@@ -9,12 +10,14 @@ mod union_read;
 
 pub use error::*;
 pub use event_sync::EventSyncSender;
+pub use mooncake_table_id::MooncakeTableId;
 pub use storage::storage_utils::create_data_file;
 pub(crate) use storage::NonEvictableHandle;
 pub use storage::{
-    AccessorConfig, BaseFileSystemAccess, CacheTrait, DataCompactionConfig, DiskSliceWriterConfig,
-    EventSyncReceiver, FileIndexMergeConfig, FileSystemAccessor, FsChaosConfig, FsRetryConfig,
-    FsTimeoutConfig, IcebergPersistenceConfig, IcebergTableConfig, IcebergTableManager,
+    AccessorConfig, BaseFileSystemAccess, BaseIcebergSnapshotFetcher, CacheTrait,
+    DataCompactionConfig, DiskSliceWriterConfig, EventSyncReceiver, FileIndexMergeConfig,
+    FileSystemAccessor, FsChaosConfig, FsRetryConfig, FsTimeoutConfig, IcebergCatalogConfig,
+    IcebergPersistenceConfig, IcebergSnapshotFetcher, IcebergTableConfig, IcebergTableManager,
     MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
     MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig, PersistentWalMetadata,
     SnapshotReadOutput, StorageConfig, TableEventManager, TableManager, TableSnapshotStatus,

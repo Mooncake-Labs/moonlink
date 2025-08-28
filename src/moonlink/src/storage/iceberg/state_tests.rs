@@ -45,6 +45,7 @@ use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::mooncake_table::validation_test_utils::*;
 use crate::storage::mooncake_table::Snapshot;
+use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::MooncakeTable;
@@ -298,7 +299,10 @@ async fn validate_no_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager.config.accessor_config.get_root_path(),
+        &iceberg_table_manager
+            .config
+            .metadata_accessor_config
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -320,7 +324,10 @@ async fn validate_only_initial_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager.config.accessor_config.get_root_path(),
+        &iceberg_table_manager
+            .config
+            .metadata_accessor_config
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -342,7 +349,10 @@ async fn validate_only_new_data_files_in_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager.config.accessor_config.get_root_path(),
+        &iceberg_table_manager
+            .config
+            .metadata_accessor_config
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -364,7 +374,10 @@ async fn validate_only_new_deletion_vectors_in_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager.config.accessor_config.get_root_path(),
+        &iceberg_table_manager
+            .config
+            .metadata_accessor_config
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -394,7 +407,10 @@ async fn validate_new_data_files_and_deletion_vectors_in_snapshot(
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
     validate_recovered_snapshot(
         &snapshot,
-        &iceberg_table_manager.config.accessor_config.get_root_path(),
+        &iceberg_table_manager
+            .config
+            .metadata_accessor_config
+            .get_warehouse_uri(),
         filesystem_accessor,
     )
     .await;
@@ -418,13 +434,12 @@ async fn test_state_1_1() {
 
     // Request to persist.
     assert!(!table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         dump_snapshot: false,
         force_create: false,
-        skip_iceberg_snapshot: false,
-        index_merge_option: MaintenanceOption::BestEffort,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     }));
 
     // Validate end state.
@@ -447,13 +462,12 @@ async fn test_state_1_2() {
 
     // Request to persist.
     assert!(!table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         dump_snapshot: false,
         force_create: false,
-        skip_iceberg_snapshot: false,
-        index_merge_option: MaintenanceOption::BestEffort,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     }));
 
     // Validate end state.

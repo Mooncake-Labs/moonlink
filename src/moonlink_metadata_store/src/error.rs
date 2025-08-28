@@ -1,12 +1,13 @@
 use moonlink_error::io_error_utils::get_io_error_status;
 use moonlink_error::{ErrorStatus, ErrorStruct};
+use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeJsonError;
 use thiserror::Error;
 
 #[cfg(feature = "metadata-postgres")]
 use tokio_postgres::Error as TokioPostgresError;
 
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, Error, Deserialize, Serialize)]
 pub enum Error {
     #[cfg(feature = "metadata-postgres")]
     #[error("{0}")]
@@ -74,5 +75,22 @@ impl From<std::io::Error> for Error {
     fn from(source: std::io::Error) -> Self {
         let status = get_io_error_status(&source);
         Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
+    }
+}
+
+impl Error {
+    pub fn get_status(&self) -> ErrorStatus {
+        match self {
+            #[cfg(feature = "metadata-postgres")]
+            Error::TokioPostgres(err) => err.status,
+            Error::PostgresRowCountError(err)
+            | Error::Sqlx(err)
+            | Error::SqliteRowCountError(err)
+            | Error::MetadataStoreFailedPrecondition(err)
+            | Error::SerdeJson(err)
+            | Error::TableIdNotFound(err)
+            | Error::ConfigFieldNotExist(err)
+            | Error::Io(err) => err.status,
+        }
     }
 }

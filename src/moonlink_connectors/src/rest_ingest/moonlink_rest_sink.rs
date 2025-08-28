@@ -1,6 +1,7 @@
 use crate::replication_state::ReplicationState;
+use crate::rest_ingest::event_request::RowEventOperation;
+use crate::rest_ingest::rest_event::RestEvent;
 use crate::rest_ingest::rest_source::SrcTableId;
-use crate::rest_ingest::rest_source::{RestEvent, RowEventOperation};
 use crate::{Error, Result};
 use moonlink::TableEvent;
 use std::collections::HashMap;
@@ -34,21 +35,41 @@ impl RestSink {
     }
 
     /// Add a table to the REST sink
-    pub fn add_table(&mut self, src_table_id: SrcTableId, table_status: TableStatus) -> Result<()> {
+    ///
+    /// # Arguments
+    ///
+    /// * persist_lsn: only assigned at recovery, used to indicate and update commit LSN and replication LSN.
+    pub fn add_table(
+        &mut self,
+        src_table_id: SrcTableId,
+        table_status: TableStatus,
+        persist_lsn: Option<u64>,
+    ) -> Result<()> {
+        // Update per-table commit LSN.
+        if let Some(persist_lsn) = persist_lsn {
+            table_status.commit_lsn_tx.send(persist_lsn).unwrap();
+        }
+
         if self
             .table_status
             .insert(src_table_id, table_status)
             .is_some()
         {
-            return Err(Error::RestDuplicateTable(src_table_id));
+            return Err(Error::rest_duplicate_table(src_table_id));
         }
+
+        // Update per-database replication LSN.
+        if let Some(persist_lsn) = persist_lsn {
+            self.replication_state.mark(persist_lsn);
+        }
+
         Ok(())
     }
 
     /// Remove a table from the REST sink
     pub fn drop_table(&mut self, src_table_id: SrcTableId) -> Result<()> {
         if self.table_status.remove(&src_table_id).is_none() {
-            return Err(Error::RestNonExistentTable(src_table_id));
+            return Err(Error::rest_non_existent_table(src_table_id));
         }
         Ok(())
     }
@@ -62,9 +83,10 @@ impl RestSink {
         if let Some(table_status) = self.table_status.get(&src_table_id) {
             table_status.commit_lsn_tx.send(lsn).unwrap();
         } else {
-            return Err(crate::Error::RestApi(format!(
-                "No table status found for src_table_id: {src_table_id}"
-            )));
+            return Err(crate::Error::rest_api(
+                format!("No table status found for src_table_id: {src_table_id}"),
+                None,
+            ));
         }
         self.replication_state.mark(lsn);
         Ok(())
@@ -238,13 +260,17 @@ impl RestSink {
     async fn send_table_event(&self, src_table_id: SrcTableId, event: TableEvent) -> Result<()> {
         if let Some(table_status) = self.table_status.get(&src_table_id) {
             table_status.event_sender.send(event).await.map_err(|e| {
-                crate::Error::RestApi(format!("Failed to send event to table {src_table_id}: {e}"))
+                crate::Error::rest_api(
+                    format!("Failed to send event to table {src_table_id}: {e}"),
+                    None,
+                )
             })?;
             Ok(())
         } else {
-            Err(crate::Error::RestApi(format!(
-                "No event sender found for src_table_id: {src_table_id}"
-            )))
+            Err(crate::Error::rest_api(
+                format!("No event sender found for src_table_id: {src_table_id}"),
+                None,
+            ))
         }
     }
 }
@@ -252,7 +278,6 @@ impl RestSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rest_ingest::rest_source::{RestEvent, RowEventOperation};
     use moonlink::row::{MoonlinkRow, RowValue};
     use std::time::SystemTime;
     use tokio::sync::mpsc;
@@ -277,7 +302,8 @@ mod tests {
 
         // Add table to sink
         let src_table_id = 1;
-        sink.add_table(src_table_id, table_status).unwrap();
+        sink.add_table(src_table_id, table_status, /*persist_lsn=*/ None)
+            .unwrap();
 
         // Create a test event
         let test_row = MoonlinkRow::new(vec![
@@ -376,7 +402,8 @@ mod tests {
         };
 
         let src_table_id = 1;
-        sink.add_table(src_table_id, table_status).unwrap();
+        sink.add_table(src_table_id, table_status, /*persist_lsn=*/ None)
+            .unwrap();
 
         let test_row = MoonlinkRow::new(vec![RowValue::Int32(42)]);
 
@@ -463,8 +490,10 @@ mod tests {
         };
 
         // Add two tables
-        sink.add_table(1, table_status_1).unwrap();
-        sink.add_table(2, table_status_2).unwrap();
+        sink.add_table(1, table_status_1, /*persist_lsn=*/ None)
+            .unwrap();
+        sink.add_table(2, table_status_2, /*persist_lsn=*/ None)
+            .unwrap();
 
         // Test different operation types
         let test_row = MoonlinkRow::new(vec![RowValue::Int32(1)]);

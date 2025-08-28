@@ -2,6 +2,8 @@ pub mod base_metadata_store;
 mod config_utils;
 pub mod error;
 pub mod metadata_store_utils;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 #[cfg(feature = "metadata-postgres")]
 mod postgres;

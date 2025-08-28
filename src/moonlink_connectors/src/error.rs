@@ -5,13 +5,14 @@ use crate::rest_ingest::rest_source::RestSourceError;
 use crate::rest_ingest::{json_converter, SrcTableId};
 use moonlink::Error as MoonlinkError;
 use moonlink_error::{io_error_utils, ErrorStatus, ErrorStruct};
+use serde::{Deserialize, Serialize};
 use std::panic::Location;
 use std::result;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio_postgres::Error as TokioPostgresError;
 
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, Error, Deserialize, Serialize)]
 pub enum Error {
     #[error("{0}")]
     PostgresSourceError(ErrorStruct),
@@ -35,28 +36,28 @@ pub enum Error {
     MpscChannelSendError(ErrorStruct),
 
     // Requested database table not found.
-    #[error("Table {0} not found")]
-    TableNotFound(String),
+    #[error("{0}")]
+    TableNotFound(ErrorStruct),
 
-    // Invalid source type for operation.
-    #[error("Invalid source type: {0}")]
-    InvalidSourceType(String),
+    // Table replication error: duplicate table.
+    #[error("{0}")]
+    ReplDuplicateTable(ErrorStruct),
 
     // REST API error.
-    #[error("REST API error: {0}")]
-    RestApi(String),
+    #[error("{0}")]
+    RestApi(ErrorStruct),
 
     // REST source error.
     #[error("{0}")]
     RestSource(ErrorStruct),
 
     // REST source error: duplicate source table to add.
-    #[error("REST source error: duplicate source table to add with table id {0}")]
-    RestDuplicateTable(SrcTableId),
+    #[error("{0}")]
+    RestDuplicateTable(ErrorStruct),
 
     // REST source error: non-existent source table to remove.
-    #[error("REST source error: non-existent source table to remove with table id {0}")]
-    RestNonExistentTable(SrcTableId),
+    #[error("{0}")]
+    RestNonExistentTable(ErrorStruct),
 
     // REST source error: conversion from payload to moonlink row fails.
     #[error("{0}")]
@@ -69,22 +70,66 @@ pub enum Error {
 
 pub type Result<T> = result::Result<T, Error>;
 
+impl Error {
+    #[track_caller]
+    pub fn rest_duplicate_table(id: SrcTableId) -> Self {
+        Error::RestDuplicateTable(ErrorStruct {
+            message: format!("REST source error: duplicate source table to add with table id {id}"),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
+    #[track_caller]
+    pub fn table_not_found(table_name: String) -> Self {
+        Error::TableNotFound(ErrorStruct {
+            message: format!("Table {table_name} not found"),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
+    #[track_caller]
+    pub fn repl_duplicate_table(table_name: String) -> Self {
+        Error::ReplDuplicateTable(ErrorStruct {
+            message: format!("Duplicate table added to replication: {table_name}"),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
+    #[track_caller]
+    pub fn rest_api(err_msg: String, err: Option<Arc<anyhow::Error>>) -> Self {
+        Error::RestApi(ErrorStruct {
+            message: format!("REST API error: {err_msg}"),
+            status: ErrorStatus::Permanent,
+            source: err,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
+    #[track_caller]
+    pub fn rest_non_existent_table(id: SrcTableId) -> Self {
+        Error::RestNonExistentTable(ErrorStruct {
+            message: format!(
+                "REST source error: non-existent source table to remove with table id {id}"
+            ),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+}
+
 impl From<MoonlinkError> for Error {
     #[track_caller]
     fn from(source: MoonlinkError) -> Self {
-        let status = match &source {
-            MoonlinkError::Arrow(es)
-            | MoonlinkError::Io(es)
-            | MoonlinkError::Parquet(es)
-            | MoonlinkError::WatchChannelRecvError(es)
-            | MoonlinkError::IcebergError(es)
-            | MoonlinkError::OpenDal(es)
-            | MoonlinkError::JoinError(es)
-            | MoonlinkError::Json(es) => es.status,
-        };
         Error::MoonlinkError(ErrorStruct {
             message: "Moonlink source error".to_string(),
-            status,
+            status: source.get_status(),
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })

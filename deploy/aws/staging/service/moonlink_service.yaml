@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: moonlink-service-staging
+  annotations:
+    # aws specific annotations
+    # Use an L4 NLB instead of an ALB which is needed for the moonlink TCP rpc server
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "HTTP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "5050"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/ready"
+spec:
+  type: LoadBalancer
+  # IP assigned by kubernetes automatically.
+  selector:
+    app: moonlink-deployment-staging
+  ports:
+  # Exposed port for data server.
+  - name: data
+    protocol: TCP
+    port: 8080
+    targetPort: 80
+  # Exposed port for REST API server.
+  - name: rest
+    protocol: TCP
+    port: 3030
+    targetPort: 3030
+  # Exposed port for TCP rpc server.
+  - name: tcp
+    protocol: TCP
+    port: 3031
+    targetPort: 3031
+  # Exposed port for readiness check.
+  - name: readiness
+    protocol: TCP
+    port: 5050
+    targetPort: 5050

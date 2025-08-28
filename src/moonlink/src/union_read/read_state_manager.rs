@@ -3,6 +3,7 @@ use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
 use crate::ReadState;
 use crate::ReadStateFilepathRemap;
+use more_asserts as ma;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -139,6 +140,13 @@ impl ReadStateManager {
         replication_lsn: u64,
         commit_lsn: u64,
     ) -> bool {
+        // Sanity check on read side: iceberg snapshot LSN <= mooncake snapshot LSN <= commit LSN <= replication LSN
+        if snapshot_lsn != NO_SNAPSHOT_LSN && commit_lsn != NO_COMMIT_LSN {
+            ma::assert_le!(snapshot_lsn, commit_lsn);
+        }
+        ma::assert_le!(commit_lsn, replication_lsn);
+
+        // Check snapshot readability.
         let is_snapshot_clean = Self::snapshot_is_clean(snapshot_lsn, commit_lsn);
         let is_snapshot_initialized = snapshot_lsn != NO_SNAPSHOT_LSN;
         match requested_lsn {

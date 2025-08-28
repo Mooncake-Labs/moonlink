@@ -6,9 +6,9 @@ use crate::storage::mooncake_table::snapshot_read_output::{
 };
 use crate::storage::mooncake_table::table_status::TableSnapshotStatus;
 use crate::storage::storage_utils::RecordLocation;
-use crate::storage::PuffinDeletionBlobAtRead;
 use crate::NonEvictableHandle;
 use arrow_schema::Schema;
+use moonlink_table_metadata::{DeletionVector, PositionDelete};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
@@ -27,10 +27,35 @@ impl SnapshotTableState {
     /// Read snapshot states
     /// =======================
     ///
+    /// Get the number of rows in record batches before filtering.
+    fn get_in_memory_row_num(&self) -> u64 {
+        // Minic union read functionality to get all committed in-memory row.
+        let mut num_rows = 0;
+        let (batch_id, row_id) = self.last_commit.clone().into();
+        if batch_id > 0 || row_id > 0 {
+            for (id, batch) in self.batches.iter() {
+                if *id < batch_id {
+                    num_rows += batch.get_raw_record_number();
+                } else if *id == batch_id && row_id > 0 {
+                    if batch.data.is_some() {
+                        num_rows += batch.get_raw_record_number();
+                    } else {
+                        let rows = self.rows.as_ref().unwrap().get_buffer(row_id);
+                        num_rows += rows.len() as u64;
+                    }
+                }
+            }
+        }
+        num_rows
+    }
+
     pub(crate) fn get_table_snapshot_states(&self) -> Result<TableSnapshotStatus> {
+        let persisted_row_num = self.current_snapshot.get_cardinality();
+        let in_memory_row_num = self.get_in_memory_row_num();
         Ok(TableSnapshotStatus {
             commit_lsn: self.current_snapshot.snapshot_version,
             flush_lsn: self.current_snapshot.flush_lsn,
+            cardinality: persisted_row_num + in_memory_row_num,
             iceberg_warehouse_location: self.iceberg_warehouse_location.clone(),
         })
     }
@@ -58,12 +83,9 @@ impl SnapshotTableState {
     async fn get_deletion_records(
         &mut self,
     ) -> (
-        Vec<NonEvictableHandle>,       /*puffin file cache handles*/
-        Vec<PuffinDeletionBlobAtRead>, /*deletion vector puffin*/
-        Vec<(
-            u32, /*index of disk file in snapshot*/
-            u32, /*row id*/
-        )>,
+        Vec<NonEvictableHandle>, /*puffin file cache handles*/
+        Vec<DeletionVector>,     /*deletion vector puffin*/
+        Vec<PositionDelete>,
     ) {
         // Get puffin blobs for deletion vector.
         let mut puffin_cache_handles = vec![];
@@ -90,11 +112,11 @@ impl SnapshotTableState {
             puffin_cache_handles.push(new_puffin_cache_handle.unwrap());
 
             let puffin_file_index = puffin_cache_handles.len() - 1;
-            deletion_vector_blob_at_read.push(PuffinDeletionBlobAtRead {
-                data_file_index: idx as u32,
-                puffin_file_index: puffin_file_index as u32,
-                start_offset: puffin_deletion_blob.start_offset,
-                blob_size: puffin_deletion_blob.blob_size,
+            deletion_vector_blob_at_read.push(DeletionVector {
+                data_file_number: idx as u32,
+                puffin_file_number: puffin_file_index as u32,
+                offset: puffin_deletion_blob.start_offset,
+                size: puffin_deletion_blob.blob_size,
             });
         }
 
@@ -104,7 +126,10 @@ impl SnapshotTableState {
             if let RecordLocation::DiskFile(file_id, row_id) = &deletion.pos {
                 for (id, (file, _)) in self.current_snapshot.disk_files.iter().enumerate() {
                     if file.file_id() == *file_id {
-                        ret.push((id as u32, *row_id as u32));
+                        ret.push(PositionDelete {
+                            data_file_number: id as u32,
+                            data_file_row_number: *row_id as u32,
+                        });
                         break;
                     }
                 }

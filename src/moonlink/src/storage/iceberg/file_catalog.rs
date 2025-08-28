@@ -72,7 +72,7 @@ pub struct FileCatalog {
     /// Table location.
     warehouse_location: String,
     /// Used to overwrite iceberg metadata at table creation.
-    iceberg_schema: IcebergSchema,
+    iceberg_schema: Option<IcebergSchema>,
     /// Used for atomic write to commit transaction.
     etag: Mutex<RefCell<Option<String>>>,
     /// Used to record puffin blob metadata in one transaction, and cleaned up after transaction commits.
@@ -98,7 +98,24 @@ impl FileCatalog {
             filesystem_accessor: create_filesystem_accessor(accessor_config),
             file_io,
             warehouse_location,
-            iceberg_schema,
+            iceberg_schema: Some(iceberg_schema),
+            etag: Mutex::new(RefCell::new(None)),
+            deletion_vector_blobs_to_add: HashMap::new(),
+            file_index_blobs_to_add: HashMap::new(),
+            puffin_blobs_to_remove: HashSet::new(),
+            data_files_to_remove: HashSet::new(),
+        })
+    }
+
+    /// Create a file catalog, which get initialized lazily with no schema populated.
+    pub fn new_without_schema(accessor_config: AccessorConfig) -> IcebergResult<Self> {
+        let file_io = iceberg_io_utils::create_file_io(&accessor_config)?;
+        let warehouse_location = accessor_config.get_root_path();
+        Ok(Self {
+            filesystem_accessor: create_filesystem_accessor(accessor_config),
+            file_io,
+            warehouse_location,
+            iceberg_schema: None,
             etag: Mutex::new(RefCell::new(None)),
             deletion_vector_blobs_to_add: HashMap::new(),
             file_index_blobs_to_add: HashMap::new(),
@@ -118,7 +135,7 @@ impl FileCatalog {
         Ok(Self {
             filesystem_accessor,
             file_io,
-            iceberg_schema,
+            iceberg_schema: Some(iceberg_schema),
             etag: Mutex::new(RefCell::new(None)),
             warehouse_location: String::new(),
             deletion_vector_blobs_to_add: HashMap::new(),
@@ -211,7 +228,7 @@ impl FileCatalog {
                     builder = builder.remove_properties(removals)?;
                 }
                 TableUpdate::AddSchema { schema } => {
-                    builder = builder.add_schema(schema.clone());
+                    builder = builder.add_schema(schema.clone())?;
                 }
                 TableUpdate::SetCurrentSchema { schema_id } => {
                     builder = builder.set_current_schema(*schema_id)?;
@@ -233,7 +250,8 @@ impl FileCatalog {
     ) -> IcebergResult<TableMetadata> {
         let metadata = table_metadata.metadata;
         let mut metadata_builder = metadata.into_builder(/*current_file_location=*/ None);
-        metadata_builder = metadata_builder.add_current_schema(self.iceberg_schema.clone())?;
+        metadata_builder =
+            metadata_builder.add_current_schema(self.iceberg_schema.as_ref().unwrap().clone())?;
         let new_table_metadata = metadata_builder.build()?;
         Ok(new_table_metadata.metadata)
     }

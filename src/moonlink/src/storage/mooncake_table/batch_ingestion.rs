@@ -4,8 +4,9 @@ use crate::{
 
 use super::*;
 
-use bytes::Bytes;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use futures::{stream, StreamExt};
+use parquet::arrow::ParquetRecordBatchStreamBuilder;
+use tokio::fs::File;
 
 impl MooncakeTable {
     /// Batch ingestion the given [`parquet_files`] into mooncake table.
@@ -14,32 +15,44 @@ impl MooncakeTable {
     /// 1. Record table events.
     /// 2. It involves IO operations, should be placed at background thread.s
     pub(crate) async fn batch_ingest(&mut self, parquet_files: Vec<String>, lsn: u64) {
-        let mut disk_files = hashbrown::HashMap::with_capacity(parquet_files.len());
+        const MAX_IN_FLIGHT: usize = 64;
+        let start_id = self.next_file_id;
+        self.next_file_id += parquet_files.len() as u32;
 
-        // TODO(hjiang): Parallel IO and error handling.
-        // Construct disk file from the given disk files.
-        for cur_file in parquet_files.into_iter() {
-            let content = tokio::fs::read(&cur_file).await.unwrap();
-            let content = Bytes::from(content);
-            let file_size = content.len();
-            let builder = ParquetRecordBatchReaderBuilder::try_new(content).unwrap();
-            let num_rows: usize = builder.metadata().file_metadata().num_rows() as usize;
+        let disk_files = stream::iter(parquet_files.into_iter().enumerate().map(
+            |(idx, cur_file)| {
+                let cur_file_id = (start_id as u64) + idx as u64;
+                async move {
+                    // TODO(hjiang): Handle remote data file ingestion as well.
+                    let file = File::open(&cur_file)
+                        .await
+                        .unwrap_or_else(|_| panic!("Failed to open {cur_file}"));
+                    let file_size = file
+                        .metadata()
+                        .await
+                        .unwrap_or_else(|_| panic!("Failed to stat {cur_file}"))
+                        .len() as usize;
+                    let stream_builder = ParquetRecordBatchStreamBuilder::new(file)
+                        .await
+                        .unwrap_or_else(|_| panic!("Failed to read parquet footer for {cur_file}"));
+                    let num_rows = stream_builder.metadata().file_metadata().num_rows() as usize;
 
-            let cur_file_id = self.next_file_id;
-            self.next_file_id += 1;
-            let mooncake_data_file = create_data_file(cur_file_id as u64, cur_file);
-            let disk_file_entry = DiskFileEntry {
-                cache_handle: None,
-                num_rows,
-                file_size,
-                batch_deletion_vector: BatchDeletionVector::new(num_rows),
-                puffin_deletion_blob: None,
-            };
+                    let mooncake_data_file = create_data_file(cur_file_id, cur_file.clone());
+                    let disk_file_entry = DiskFileEntry {
+                        cache_handle: None,
+                        num_rows,
+                        file_size,
+                        batch_deletion_vector: BatchDeletionVector::new(num_rows),
+                        puffin_deletion_blob: None,
+                    };
 
-            assert!(disk_files
-                .insert(mooncake_data_file, disk_file_entry)
-                .is_none());
-        }
+                    (mooncake_data_file, disk_file_entry)
+                }
+            },
+        ))
+        .buffer_unordered(MAX_IN_FLIGHT) // run up to N at once
+        .collect::<hashbrown::HashMap<_, _>>()
+        .await;
 
         // Commit the current crafted streaming transaction.
         let commit = TransactionStreamCommit::from_disk_files(disk_files, lsn);

@@ -1,4 +1,8 @@
+use crate::rest_ingest::event_request::{
+    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
+};
 use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonlinkRowError};
+use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
 use arrow_schema::Schema;
 use bytes::Bytes;
@@ -11,7 +15,6 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -29,92 +32,6 @@ pub enum RestSourceError {
     DuplicateTable(String),
     #[error("non-existent table to remove: {0}")]
     NonExistentTable(String),
-}
-
-/// ======================
-/// Row event request
-/// ======================
-///
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RowEventOperation {
-    Insert,
-    Update,
-    Delete,
-}
-
-#[derive(Debug, Clone)]
-pub struct RowEventRequest {
-    pub src_table_name: String,
-    pub operation: RowEventOperation,
-    pub payload: serde_json::Value,
-    pub timestamp: SystemTime,
-}
-
-/// ======================
-/// File event request
-/// ======================
-///
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileEventOperation {
-    /// Insert by rows.
-    Insert,
-    /// Upload by files.
-    Upload,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileEventRequest {
-    /// Src table name.
-    pub src_table_name: String,
-    /// File event operation.
-    pub operation: FileEventOperation,
-    /// Storage config, which provides access to storage backend.
-    pub storage_config: StorageConfig,
-    /// Parquet files to upload, which will be processed in order.
-    pub files: Vec<String>,
-}
-
-/// ======================
-/// Event request
-/// ======================
-///
-#[derive(Debug, Clone)]
-pub enum EventRequest {
-    RowRequest(RowEventRequest),
-    FileRequest(FileEventRequest),
-}
-
-/// ======================
-/// Rest event
-/// ======================
-///
-#[derive(Debug, Clone)]
-pub enum RestEvent {
-    RowEvent {
-        src_table_id: SrcTableId,
-        operation: RowEventOperation,
-        row: MoonlinkRow,
-        lsn: u64,
-        timestamp: SystemTime,
-    },
-    Commit {
-        lsn: u64,
-        timestamp: SystemTime,
-    },
-    FileInsertEvent {
-        /// Source table id.
-        src_table_id: SrcTableId,
-        /// Used for file row insertion operation.
-        table_events: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<RestEvent>>>>,
-    },
-    FileUploadEvent {
-        /// Source table id.
-        src_table_id: SrcTableId,
-        /// Used to directly ingest into mooncake table.
-        files: Vec<String>,
-        /// LSN for the ingestion event.
-        lsn: u64,
-    },
 }
 
 pub struct RestSource {
@@ -138,12 +55,25 @@ impl RestSource {
         }
     }
 
+    /// # Arguments
+    ///
+    /// * persist_lsn: only assigned at recovery, used to indicate and update replication LSN.
     pub fn add_table(
         &mut self,
         src_table_name: String,
         src_table_id: SrcTableId,
         schema: Arc<Schema>,
+        persist_lsn: Option<u64>,
     ) -> Result<()> {
+        // Update LSN at recovery.
+        if let Some(persist_lsn) = persist_lsn {
+            let old_lsn = self.lsn_generator.load(Ordering::SeqCst);
+            if persist_lsn > old_lsn {
+                self.lsn_generator.store(persist_lsn, Ordering::SeqCst);
+            }
+        }
+
+        // Update rest source states.
         if self
             .table_schemas
             .insert(src_table_name.clone(), schema)
@@ -328,14 +258,14 @@ impl RestSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Error;
+    use crate::{rest_ingest::event_request::FileEventRequest, Error};
     use arrow::record_batch::RecordBatch;
     use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use moonlink::row::RowValue;
     use parquet::arrow::AsyncArrowWriter;
     use serde_json::json;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::SystemTime};
     use tempfile::TempDir;
 
     fn make_test_schema() -> Arc<Schema> {
@@ -400,7 +330,12 @@ mod tests {
         // Test adding table
         let schema = make_test_schema();
         source
-            .add_table("test_table".to_string(), 1, schema.clone())
+            .add_table(
+                "test_table".to_string(),
+                1,
+                schema.clone(),
+                /*persist_lsn=*/ Some(0),
+            )
             .unwrap();
         assert_eq!(source.table_schemas.len(), 1);
         assert_eq!(source.src_table_name_to_src_id.len(), 1);
@@ -418,7 +353,12 @@ mod tests {
         let mut source = RestSource::new();
         let schema = make_test_schema();
         source
-            .add_table("test_table".to_string(), 1, schema)
+            .add_table(
+                "test_table".to_string(),
+                1,
+                schema,
+                /*persist_lsn=*/ Some(0),
+            )
             .unwrap();
 
         let request = RowEventRequest {
@@ -429,6 +369,7 @@ mod tests {
                 "name": "test"
             }),
             timestamp: SystemTime::now(),
+            tx: None,
         };
 
         let events = source.process_row_request(&request).unwrap();
@@ -474,6 +415,7 @@ mod tests {
                 /*src_table_name=*/ "test_table".to_string(),
                 /*src_table_id=*/ 1,
                 schema,
+                /*persist_lsn=*/ Some(0),
             )
             .unwrap();
 
@@ -485,6 +427,7 @@ mod tests {
                 atomic_write_dir: None,
             },
             files: vec![filepath],
+            tx: None,
         };
         let events = source.process_file_request(&request).unwrap();
         assert_eq!(events.len(), 1);
@@ -538,6 +481,7 @@ mod tests {
                 /*src_table_name=*/ "test_table".to_string(),
                 /*src_table_id=*/ 1,
                 schema,
+                /*persist_lsn=*/ Some(0),
             )
             .unwrap();
 
@@ -549,6 +493,7 @@ mod tests {
                 atomic_write_dir: None,
             },
             files: vec![filepath.clone()],
+            tx: None,
         };
         let events = source.process_file_request(&request).unwrap();
         assert_eq!(events.len(), 1);
@@ -577,6 +522,7 @@ mod tests {
                 /*src_table_name=*/ "test_table".to_string(),
                 /*src_table_id=*/ 1,
                 schema,
+                /*persist_lsn=*/ Some(0),
             )
             .unwrap();
 
@@ -588,6 +534,7 @@ mod tests {
                 atomic_write_dir: None,
             },
             files: vec!["non_existent_file".to_string()],
+            tx: None,
         };
         let events = source.process_file_request(&request).unwrap();
         assert_eq!(events.len(), 1);
@@ -611,10 +558,16 @@ mod tests {
                 "test_table".to_string(),
                 /*src_table_id=*/ 1,
                 schema.clone(),
+                /*persist_lsn=*/ Some(0),
             )
             .unwrap();
 
-        let res = source.add_table("test_table".to_string(), /*src_table_id=*/ 1, schema);
+        let res = source.add_table(
+            "test_table".to_string(),
+            /*src_table_id=*/ 1,
+            schema,
+            /*persist_lsn=*/ Some(0),
+        );
         assert!(res.is_err());
     }
 
@@ -635,6 +588,7 @@ mod tests {
             operation: RowEventOperation::Insert,
             payload: json!({"id": 1}),
             timestamp: SystemTime::now(),
+            tx: None,
         };
 
         let err = source.process_row_request(&request).unwrap_err();
@@ -662,7 +616,12 @@ mod tests {
         let mut source = RestSource::new();
         let schema = make_test_schema();
         source
-            .add_table("test_table".to_string(), 1, schema)
+            .add_table(
+                "test_table".to_string(),
+                1,
+                schema,
+                /*persist_lsn=*/ Some(0),
+            )
             .unwrap();
 
         let request1 = RowEventRequest {
@@ -670,6 +629,7 @@ mod tests {
             operation: RowEventOperation::Insert,
             payload: json!({"id": 1, "name": "first"}),
             timestamp: SystemTime::now(),
+            tx: None,
         };
 
         let request2 = RowEventRequest {
@@ -677,6 +637,7 @@ mod tests {
             operation: RowEventOperation::Insert,
             payload: json!({"id": 2, "name": "second"}),
             timestamp: SystemTime::now(),
+            tx: None,
         };
 
         let events1 = source.process_row_request(&request1).unwrap();

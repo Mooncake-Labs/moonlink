@@ -24,7 +24,7 @@ allow = [
 unknown-git = "deny"
 allow-git = [
     "https://github.com/apache/iceberg-rust.git",
-    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=4fda9c1bece3b93359ca1eb2779458fc1c080eae",
+    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35",
 ]
 
 # TODO(hjiang): Cleanup these unmaintained crates.
@@ -43,18 +43,19 @@ skip = [
     { name = "indexmap" },
     { name = "itertools" },
     { name = "ordered-float" },
+    { name = "phf_shared" },
     { name = "rand" },
     { name = "rand_chacha" },
     { name = "rand_core" },
     { name = "regex-automata" },
     { name = "regex-syntax" },
+    { name = "security-framework" },
     { name = "socket2" },
     { name = "strum" },
     { name = "strum_macros" },
     { name = "thiserror" },
     { name = "thiserror-impl" },
     { name = "tower" },
-    { name = "tower-http" },
     { name = "typed-builder" },
     { name = "typed-builder-macro" },
     { name = "wasi" },

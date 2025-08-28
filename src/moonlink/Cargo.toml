@@ -31,6 +31,9 @@ storage-gcs = [
     "reqwest",
 ]
 
+catalog-rest = []
+catalog-glue = []
+
 bench = []
 
 chaos-test = ["function_name"]
@@ -61,6 +64,7 @@ lru = { workspace = true }
 memmap2 = "0.9"
 moka = { workspace = true }
 moonlink_error = { path = "../moonlink_error" }
+moonlink_table_metadata = { path = "../moonlink_table_metadata" }
 more-asserts = { workspace = true }
 multimap = { workspace = true }
 num-bigint = { workspace = true }

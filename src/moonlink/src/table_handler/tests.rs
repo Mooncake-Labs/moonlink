@@ -5,6 +5,8 @@ use tokio::sync::watch;
 
 use super::test_utils::*;
 use super::TableEvent;
+use crate::row::IdentityProp;
+use crate::row::{MoonlinkRow, RowValue};
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
@@ -68,6 +70,7 @@ async fn test_append_with_small_disk_slice() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: false,
+        row_identity: IdentityProp::FullRow,
         batch_size: 1, // One mem slice only contains one row.
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -628,6 +631,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: false,
+        row_identity: IdentityProp::Keys(vec![0]),
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -831,6 +835,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: false,
+        row_identity: IdentityProp::Keys(vec![0]),
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -1065,6 +1070,7 @@ async fn test_multiple_snapshot_requests() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: false,
+        row_identity: IdentityProp::Keys(vec![0]),
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -1529,6 +1535,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
     // Setup mooncake config, which won't trigger any data compaction or index merge, if not full table maintenance.
     let mooncake_table_config = MooncakeTableConfig {
         append_only: false,
+        row_identity: IdentityProp::Keys(vec![0]),
         data_compaction_config: DataCompactionConfig {
             min_data_file_to_compact: 2,
             max_data_file_to_compact: u32::MAX,
@@ -1627,7 +1634,6 @@ async fn test_discard_duplicate_writes() {
         schema: create_test_arrow_schema(),
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
-        identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
     let mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
@@ -2126,6 +2132,7 @@ async fn test_append_only_table_full_pipeline() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: true, // Enable append-only mode
+        row_identity: IdentityProp::None,
         batch_size: 2,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -2237,6 +2244,7 @@ async fn test_append_only_table_high_volume() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: true,
+        row_identity: IdentityProp::None,
         batch_size: 10,
         mem_slice_size: 100,
         snapshot_deletion_record_count: 1000,
@@ -2290,6 +2298,7 @@ async fn test_append_only_table_basic() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: true, // Enable append-only mode
+        row_identity: IdentityProp::None,
         batch_size: 2,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -2352,6 +2361,7 @@ async fn test_batch_ingestion() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: true, // Enable append-only mode
+        row_identity: IdentityProp::None,
         batch_size: 2,
         mem_slice_size: 1000,
         snapshot_deletion_record_count: 1000,
@@ -2363,10 +2373,41 @@ async fn test_batch_ingestion() {
     };
     let env = TestEnvironment::new(temp_dir, mooncake_table_config).await;
 
-    let disk_file = generate_parquet_file(&env.temp_dir).await;
-    env.bulk_upload_files(vec![disk_file], /*lsn=*/ 10).await;
+    let disk_file_1 = generate_parquet_file(&env.temp_dir, "1.parquet").await;
+    let disk_file_2 = generate_parquet_file(&env.temp_dir, "1.parquet").await;
+    env.bulk_upload_files(vec![disk_file_1, disk_file_2], /*lsn=*/ 10)
+        .await;
 
     // Validate bulk ingestion result.
     env.set_readable_lsn(10);
-    env.verify_snapshot(10, &[1, 2, 3]).await;
+    env.verify_snapshot(10, &[1, 1, 2, 2, 3, 3]).await;
+}
+
+#[tokio::test]
+async fn test_alter_table() {
+    let mut env = TestEnvironment::default().await;
+
+    env.append_row(1, "Alice", 25, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.commit(1).await;
+
+    env.send_event(TableEvent::AlterTable {
+        columns_to_drop: vec!["name".to_string()],
+    })
+    .await;
+
+    env.send_event(TableEvent::Append {
+        is_copied: false,
+        row: MoonlinkRow::new(vec![RowValue::Int32(2), RowValue::Int32(30)]),
+        lsn: 1,
+        xact_id: None,
+        is_recovery: false,
+    })
+    .await;
+    env.commit(2).await;
+
+    env.set_readable_lsn(2);
+    env.verify_snapshot(2, &[1, 2]).await;
+
+    env.shutdown().await;
 }

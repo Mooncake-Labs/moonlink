@@ -9,8 +9,8 @@ pub mod table;
 pub mod table_init;
 pub mod util;
 
-use crate::pg_replicate::clients::postgres::ReplicationClient;
-use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
+use crate::pg_replicate::clients::postgres::{build_tls_connector, ReplicationClient};
+use crate::pg_replicate::conversions::cdc_event::{CdcEvent, CdcEventConversionError};
 use crate::pg_replicate::initial_copy::copy_table_stream_impl;
 use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
@@ -24,7 +24,10 @@ use futures::StreamExt;
 use moonlink::{
     MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent, WalManager,
 };
-use std::collections::HashMap;
+use native_tls::{Certificate, TlsConnector};
+use postgres_native_tls::{MakeTlsConnector, TlsStream};
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{Error, ErrorKind};
 use std::mem::take;
 use std::sync::Arc;
@@ -34,9 +37,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_postgres::error::SqlState;
-use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::PgLsn;
-use tokio_postgres::{connect, Client, Config, NoTls};
+use tokio_postgres::{connect, Client, Config};
 use tokio_postgres::{Connection, Socket};
 use tracing::{debug, error, info_span, warn, Instrument};
 
@@ -70,9 +72,13 @@ impl PostgresConnection {
     pub async fn new(uri: String) -> Result<Self> {
         debug!(%uri, "initializing postgres connection");
 
-        let (postgres_client, connection) = connect(&uri, NoTls)
+        let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+
+        let (postgres_client, connection) = connect(&uri, tls)
             .await
             .map_err(PostgresSourceError::from)?;
+
+        debug!(%uri, "connected to postgres");
         tokio::spawn(
             async move {
                 if let Err(e) = connection.await {
@@ -189,9 +195,11 @@ impl PostgresConnection {
             }
 
             // Notify read state manager with the commit LSN for the initial copy boundary.
+            self.replication_state.mark(start_lsn.into());
             if let Err(e) = commit_lsn_tx.send(start_lsn.into()) {
                 warn!(error = ?e, table_id = src_table_id, "failed to send initial copy commit lsn");
             }
+            self.replication_state.mark(start_lsn.into());
 
             Ok(true)
         } else {
@@ -209,7 +217,8 @@ impl PostgresConnection {
         tokio::spawn(async move {
             let mut retry_count = 0;
             loop {
-                match connect(&uri, NoTls).await {
+                let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+                match connect(&uri, tls).await {
                     Ok((client, connection)) => {
                         tokio::spawn(async move {
                             if let Err(e) = connection.await {
@@ -350,7 +359,7 @@ impl PostgresConnection {
         &self,
         table_name: &str,
         mooncake_table_id: &T,
-        moonlink_table_config: MoonlinkTableConfig,
+        moonlink_table_config: &mut MoonlinkTableConfig,
         is_recovery: bool,
         table_base_path: &str,
         read_state_filepath_remap: ReadStateFilepathRemap,
@@ -366,16 +375,16 @@ impl PostgresConnection {
 
         let (arrow_schema, identity) =
             crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema);
+        moonlink_table_config.mooncake_table_config.row_identity = identity;
         let table_components = TableComponents {
             read_state_filepath_remap,
             object_storage_cache,
-            moonlink_table_config,
+            moonlink_table_config: moonlink_table_config.clone(),
         };
 
         let mut table_resources = build_table_components(
             mooncake_table_id.to_string(),
             arrow_schema,
-            identity,
             table_name.to_string(),
             table_schema.src_table_id,
             &table_base_path.to_string(),
@@ -499,11 +508,9 @@ impl PostgresConnection {
 
         tokio::spawn(async move {
             let (client, connection) =
-                crate::pg_replicate::clients::postgres::ReplicationClient::connect_no_tls(
-                    &uri, true,
-                )
-                .await
-                .map_err(PostgresSourceError::from)?;
+                crate::pg_replicate::clients::postgres::ReplicationClient::connect(&uri, true)
+                    .await
+                    .map_err(PostgresSourceError::from)?;
 
             run_event_loop(client, cfg, connection, sink, receiver, source).await
         })
@@ -514,7 +521,7 @@ impl PostgresConnection {
 pub async fn run_event_loop(
     client: ReplicationClient,
     cfg: CdcStreamConfig,
-    connection: Connection<Socket, NoTlsStream>,
+    connection: Connection<Socket, TlsStream<Socket>>,
     mut sink: Sink,
     mut cmd_rx: mpsc::Receiver<PostgresReplicationCommand>,
     postgres_source: Arc<PostgresSource>,
@@ -532,9 +539,17 @@ pub async fn run_event_loop(
     // Now run the main event loop
     pin!(stream);
 
+    const MAX_EVENTS_PER_WAKE: usize = 512;
+    let mut batch: Vec<std::result::Result<CdcEvent, CdcStreamError>> =
+        Vec::with_capacity(MAX_EVENTS_PER_WAKE);
+
     debug!("replication event loop started");
 
-    let mut status_interval = tokio::time::interval(Duration::from_secs(10));
+    /// We use the same status interval as Postgres wal_receiver default.
+    /// https://github.com/postgres/postgres/blob/c13070a27b63d9ce4850d88a63bf889a6fde26f0/src/backend/utils/misc/guc_tables.c#L2306
+    const DEFAULT_STATUS_INTERVAL: Duration = Duration::from_secs(10);
+
+    let mut status_interval = tokio::time::interval(DEFAULT_STATUS_INTERVAL);
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
     let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
 
@@ -576,35 +591,46 @@ pub async fn run_event_loop(
                     break;
                 }
             },
-            event = StreamExt::next(&mut stream) => {
-                let Some(event_result) = event else {
+            n = stream.as_mut().next_batch_msgs(&mut batch, MAX_EVENTS_PER_WAKE) => {
+                if n == 0 {
                     error!("replication stream ended unexpectedly");
                     break;
-                };
+                }
 
-                match event_result {
-                    Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
-                        continue;
-                    }
-                    Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
-                        // TODO: Add support for Truncate and Origin messages and remove this.
-                        warn!("message not supported");
-                        continue;
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "cdc stream error");
-                        break;
-                    }
-                    Ok(event) => {
-                        let res = sink.process_cdc_event(event).await.unwrap();
-                        if let Some(SchemaChangeRequest(src_table_id)) = res {
-                            let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
-                            sink.alter_table(src_table_id, &table_schema).await;
-                            stream.as_mut().update_table_schema(table_schema);
+                let mut ok_events: Vec<CdcEvent> = Vec::new();
+                for event in batch.drain(..n) {
+                    match event {
+                        Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
+                            continue;
+                        }
+                        Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
+                            // TODO: Add support for Truncate and Origin messages and remove this.
+                            warn!("message not supported");
+                            continue;
+                        }
+                        Err(e) => {
+                            error!(error = ?e, "cdc stream error");
+                            break;
+                        }
+                        Ok(event) => {
+                            ok_events.push(event);
                         }
                     }
                 }
-            }
+
+                let mut schema_reqs: Vec<SchemaChangeRequest> = Vec::new();
+                for event in ok_events {
+                    if let Some(req) = sink.process_cdc_event(event).await.unwrap() {
+                        schema_reqs.push(req);
+                    }
+                }
+                // Apply schema changes once per table (deduped)
+                for src_table_id in schema_reqs.into_iter().map(|SchemaChangeRequest(id)| id).collect::<HashSet<_>>() {
+                    let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
+                    sink.alter_table(src_table_id, &table_schema).await;
+                    stream.as_mut().update_table_schema(table_schema);
+                }
+            },
             _ = &mut connection => {
                 error!("replication connection closed");
                 break;

@@ -19,6 +19,8 @@ pub struct PuffinBlobRef {
     pub(crate) start_offset: u32,
     /// Blob size.
     pub(crate) blob_size: u32,
+    /// Number of rows deleted in the puffin blob.
+    pub(crate) num_rows: usize,
 }
 
 /// Get puffin writer with the given file io.

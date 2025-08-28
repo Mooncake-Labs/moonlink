@@ -1,6 +1,7 @@
 /// Table handler state manages table event process states.
 use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::DataCompactionResult;
+use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::table_notify::TableEvent;
@@ -213,11 +214,10 @@ impl TableHandlerState {
             force_create = true;
         }
         SnapshotOption {
-            id: None,
             uuid,
             force_create,
             dump_snapshot: false,
-            skip_iceberg_snapshot: self.iceberg_snapshot_ongoing,
+            iceberg_snapshot_option: self.get_iceberg_snapshot_option(),
             index_merge_option: self.get_index_merge_maintenance_option(),
             data_compaction_option: self.get_data_compaction_maintenance_option(),
         }
@@ -479,9 +479,22 @@ impl TableHandlerState {
             return MaintenanceOption::Skip;
         }
         match request_status {
-            MaintenanceRequestStatus::Unrequested => MaintenanceOption::BestEffort,
-            MaintenanceRequestStatus::ForceRegular => MaintenanceOption::ForceRegular,
-            MaintenanceRequestStatus::ForceFull => MaintenanceOption::ForceFull,
+            MaintenanceRequestStatus::Unrequested => {
+                MaintenanceOption::BestEffort(uuid::Uuid::new_v4())
+            }
+            MaintenanceRequestStatus::ForceRegular => {
+                MaintenanceOption::ForceRegular(uuid::Uuid::new_v4())
+            }
+            MaintenanceRequestStatus::ForceFull => {
+                MaintenanceOption::ForceFull(uuid::Uuid::new_v4())
+            }
+        }
+    }
+    fn get_iceberg_snapshot_option(&self) -> IcebergSnapshotOption {
+        if self.iceberg_snapshot_ongoing {
+            IcebergSnapshotOption::Skip
+        } else {
+            IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4())
         }
     }
     fn get_index_merge_maintenance_option(&self) -> MaintenanceOption {

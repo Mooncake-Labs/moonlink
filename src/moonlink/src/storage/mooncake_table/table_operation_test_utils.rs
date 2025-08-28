@@ -1,19 +1,18 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::Receiver;
 
-#[cfg(test)]
 use crate::row::MoonlinkRow;
 use crate::storage::io_utils;
 use crate::storage::mooncake_table::disk_slice::DiskSliceWriter;
-use crate::storage::mooncake_table::test_utils_commons::DUMMY_EVENT_ID;
 use crate::storage::mooncake_table::{
     AlterTableRequest, DataCompactionPayload, DataCompactionResult, FileIndiceMergePayload,
     FileIndiceMergeResult, IcebergSnapshotPayload, IcebergSnapshotResult,
     TableMetadata as MooncakeTableMetadata,
 };
-use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
+use crate::storage::snapshot_options::{IcebergSnapshotOption, MaintenanceOption};
 use crate::table_notify::{
     DataCompactionMaintenanceStatus, IndexMergeMaintenanceStatus, TableEvent,
 };
@@ -25,6 +24,38 @@ use tracing::{debug, error};
 /// Flush
 /// ===============================
 ///
+/// Synchronize on ongoing flushes and return a map of <event id, disk slice>.
+pub(crate) async fn get_flush_results(
+    receiver: &mut Receiver<TableEvent>,
+    expected_flushes: usize,
+) -> HashMap<uuid::Uuid, DiskSliceWriter> {
+    let mut flush_results = HashMap::new();
+    for _ in 0..expected_flushes {
+        let cur_flush_result = receiver.recv().await.unwrap();
+        match cur_flush_result {
+            TableEvent::FlushResult {
+                event_id,
+                xact_id: _,
+                flush_result,
+            } => match flush_result {
+                Some(Ok(disk_slice)) => {
+                    flush_results.insert(event_id, disk_slice);
+                }
+                Some(Err(e)) => {
+                    error!(error = ?e, "failed to flush disk slice");
+                }
+                None => {
+                    debug!("Flush result is none, disk slice was empty");
+                }
+            },
+            _ => {
+                panic!("Expected FlushResult as first event, but got others.");
+            }
+        }
+    }
+    flush_results
+}
+
 /// Flush mooncake, block wait its completion and reflect result to mooncake table.
 #[cfg(test)]
 pub(crate) async fn flush_table_and_sync(
@@ -32,16 +63,17 @@ pub(crate) async fn flush_table_and_sync(
     receiver: &mut Receiver<TableEvent>,
     lsn: u64,
 ) -> Result<()> {
-    table.flush(lsn).unwrap();
+    let event_id = uuid::Uuid::new_v4();
+    table.flush(lsn, event_id).unwrap();
     let flush_result = receiver.recv().await.unwrap();
     match flush_result {
         TableEvent::FlushResult {
-            id: _,
+            event_id,
             xact_id: _,
             flush_result,
         } => match flush_result {
             Some(Ok(disk_slice)) => {
-                table.apply_flush_result(disk_slice, DUMMY_EVENT_ID);
+                table.apply_flush_result(disk_slice, event_id);
             }
             Some(Err(e)) => {
                 error!(error = ?e, "failed to flush disk slice");
@@ -65,11 +97,12 @@ pub(crate) async fn flush_table_and_sync_no_apply(
     receiver: &mut Receiver<TableEvent>,
     lsn: u64,
 ) -> Option<DiskSliceWriter> {
-    table.flush(lsn).unwrap();
+    let event_id = uuid::Uuid::new_v4();
+    table.flush(lsn, event_id).unwrap();
     let flush_result = receiver.recv().await.unwrap();
     match flush_result {
         TableEvent::FlushResult {
-            id: _,
+            event_id: _,
             xact_id: _,
             flush_result,
         } => match flush_result {
@@ -89,7 +122,7 @@ pub(crate) async fn flush_table_and_sync_no_apply(
     }
 }
 
-/// Flush mooncake, block wait its completion.
+/// Flush the given streaming transaction, block wait its completion.
 #[cfg(test)]
 pub(crate) async fn flush_stream_and_sync_no_apply(
     table: &mut MooncakeTable,
@@ -97,11 +130,12 @@ pub(crate) async fn flush_stream_and_sync_no_apply(
     xact_id: u32,
     lsn: Option<u64>,
 ) -> Option<DiskSliceWriter> {
-    table.flush_stream(xact_id, lsn).unwrap();
+    let event_id = uuid::Uuid::new_v4();
+    table.flush_stream(xact_id, lsn, event_id).unwrap();
     let flush_result = receiver.recv().await.unwrap();
     match flush_result {
         TableEvent::FlushResult {
-            id: _,
+            event_id: _,
             xact_id: _,
             flush_result,
         } => match flush_result {
@@ -122,23 +156,25 @@ pub(crate) async fn flush_stream_and_sync_no_apply(
 }
 
 /// Commit transaction stream, block wait its completion and reflect result to mooncake table.
-#[cfg(test)]
 pub(crate) async fn commit_transaction_stream_and_sync(
     table: &mut MooncakeTable,
     receiver: &mut Receiver<TableEvent>,
     xact_id: u32,
     lsn: u64,
 ) {
-    table.commit_transaction_stream(xact_id, lsn).unwrap();
+    let event_id = uuid::Uuid::new_v4();
+    table
+        .commit_transaction_stream(xact_id, lsn, event_id)
+        .unwrap();
     let flush_result = receiver.recv().await.unwrap();
     match flush_result {
         TableEvent::FlushResult {
-            id: _,
+            event_id,
             xact_id: Some(xact_id),
             flush_result,
         } => match flush_result {
             Some(Ok(disk_slice)) => {
-                table.apply_stream_flush_result(xact_id, disk_slice, DUMMY_EVENT_ID);
+                table.apply_stream_flush_result(xact_id, disk_slice, event_id);
             }
             Some(Err(e)) => {
                 error!(error = ?e, "failed to flush disk slice");
@@ -158,7 +194,6 @@ pub(crate) async fn commit_transaction_stream_and_sync(
 /// ===============================
 ///
 /// Test util function to block wait delete request, and check whether matches expected data files.
-#[cfg(test)]
 pub(crate) async fn sync_delete_evicted_files(
     receiver: &mut Receiver<TableEvent>,
     mut expected_files_to_delete: Vec<String>,
@@ -191,12 +226,11 @@ pub(crate) async fn perform_index_merge_for_test(
 
     table.set_file_indices_merge_res(index_merge_result);
     assert!(table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
-        index_merge_option: MaintenanceOption::BestEffort,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
         data_compaction_option: MaintenanceOption::Skip,
     }));
     let (_, _, _, _, evicted_files_to_delete) = sync_mooncake_snapshot(table, receiver).await;
@@ -225,13 +259,12 @@ pub(crate) async fn perform_data_compaction_for_test(
 
     table.set_data_compaction_res(data_compaction_result);
     assert!(table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
         index_merge_option: MaintenanceOption::Skip,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     }));
     let (_, _, _, _, evicted_files_to_delete) = sync_mooncake_snapshot(table, receiver).await;
     // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
@@ -290,7 +323,7 @@ pub(crate) async fn sync_iceberg_snapshot(
 async fn sync_index_merge(receiver: &mut Receiver<TableEvent>) -> FileIndiceMergeResult {
     let notification = receiver.recv().await.unwrap();
     if let TableEvent::IndexMergeResult { index_merge_result } = notification {
-        index_merge_result
+        index_merge_result.unwrap()
     } else {
         panic!("Expected index merge completion notification, but get another one.");
     }
@@ -323,13 +356,12 @@ pub(crate) async fn create_mooncake_snapshot_for_test(
     Vec<String>,
 ) {
     let mooncake_snapshot_created = table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
-        data_compaction_option: MaintenanceOption::BestEffort,
-        index_merge_option: MaintenanceOption::BestEffort,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     });
     assert!(mooncake_snapshot_created);
     sync_mooncake_snapshot(table, receiver).await
@@ -376,11 +408,10 @@ async fn sync_mooncake_snapshot_and_create_new_by_iceberg_payload(
 
     // Create mooncake snapshot after buffering iceberg snapshot result, to make sure mooncake snapshot is at a consistent state.
     assert!(table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: true,
+        iceberg_snapshot_option: IcebergSnapshotOption::Skip,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::Skip,
     }));
@@ -423,13 +454,12 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
 ) {
     // Create mooncake snapshot.
     let force_snapshot_option = SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
         index_merge_option: MaintenanceOption::Skip,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     };
     assert!(table.create_snapshot(force_snapshot_option.clone()));
 
@@ -475,13 +505,12 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
     // Set data compaction result and trigger another iceberg snapshot.
     table.set_data_compaction_res(data_compaction_result);
     assert!(table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
         index_merge_option: MaintenanceOption::Skip,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     }));
     sync_mooncake_snapshot_and_create_new_by_iceberg_payload(table, receiver).await;
 }
@@ -494,13 +523,12 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
 ) {
     // Create mooncake snapshot.
     let force_snapshot_option = SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
-        index_merge_option: MaintenanceOption::BestEffort,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     };
     assert!(table.create_snapshot(force_snapshot_option.clone()));
 
@@ -534,13 +562,12 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
     let index_merge_result = sync_index_merge(receiver).await;
     table.set_file_indices_merge_res(index_merge_result);
     assert!(table.create_snapshot(SnapshotOption {
-        id: None,
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
-        skip_iceberg_snapshot: false,
-        index_merge_option: MaintenanceOption::BestEffort,
-        data_compaction_option: MaintenanceOption::BestEffort,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     }));
     sync_mooncake_snapshot_and_create_new_by_iceberg_payload(table, receiver).await;
 }

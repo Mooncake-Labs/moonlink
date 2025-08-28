@@ -12,6 +12,7 @@ use crate::event_sync::EventSyncSender;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
+use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::{io_utils, MooncakeTable};
@@ -199,534 +200,563 @@ impl TableHandler {
             });
         };
 
-        // Process events until the receiver is closed or a Shutdown event is received
-        while let Some(event) = event_receiver.recv().await {
-            // Record event if requested.
-            if let Some(replay_tx) = &event_replay_tx {
-                replay_tx.send(event.clone()).unwrap();
+        const MAX_EVENTS_PER_BATCH: usize = 128;
+        let mut buf = Vec::<TableEvent>::with_capacity(MAX_EVENTS_PER_BATCH);
+        loop {
+            buf.clear();
+            let n = event_receiver
+                .recv_many(&mut buf, MAX_EVENTS_PER_BATCH)
+                .await;
+            if n == 0 {
+                break;
             }
 
-            table_handler_state.update_table_lsns(&event);
-
-            match event {
-                event if event.is_ingest_event() => {
-                    Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
-                        .await;
+            // Process events until the receiver is closed or a Shutdown event is received
+            for event in buf.drain(..) {
+                // Record event if requested.
+                if let Some(replay_tx) = &event_replay_tx {
+                    replay_tx.send(event.clone()).unwrap();
                 }
-                // ==============================
-                // Bulk ingestion events
-                // ==============================
-                TableEvent::LoadFiles { files, lsn } => {
-                    table.batch_ingest(files, lsn).await;
-                }
-
-                // ==============================
-                // Interactive blocking events
-                // ==============================
-                //
-                TableEvent::ForceSnapshot { lsn } => {
-                    let requested_lsn = if lsn.is_some() {
-                        lsn
-                    } else if table_handler_state.latest_commit_lsn.is_some() {
-                        table_handler_state.latest_commit_lsn
-                    } else {
-                        None
-                    };
-
-                    // Fast-path: nothing to snapshot.
-                    if requested_lsn.is_none() {
-                        table_handler_state
-                            .force_snapshot_completion_tx
-                            .send(Some(Ok(/*lsn=*/ 0)))
-                            .unwrap();
-                        continue;
+                match event {
+                    event if event.is_ingest_event() => {
+                        Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
+                            .await;
+                    }
+                    // ==============================
+                    // Bulk ingestion events
+                    // ==============================
+                    TableEvent::LoadFiles { files, lsn } => {
+                        table.batch_ingest(files, lsn).await;
                     }
 
-                    // Fast-path: if iceberg snapshot requirement is already satisfied, notify directly.
-                    let requested_lsn = requested_lsn.unwrap();
-                    let last_iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
-                    let replication_lsn = *replication_lsn_rx.borrow();
-                    let persisted_table_lsn = table_handler_state
-                        .get_persisted_table_lsn(last_iceberg_snapshot_lsn, replication_lsn);
-                    if persisted_table_lsn >= requested_lsn {
-                        table_handler_state.notify_persisted_table_lsn(persisted_table_lsn);
-                        continue;
-                    }
-                    // Iceberg snapshot LSN requirement is not met, record the required LSN, so later commit will pick up.
-                    else {
-                        table_handler_state.largest_force_snapshot_lsn =
-                            Some(match table_handler_state.largest_force_snapshot_lsn {
-                                None => requested_lsn,
-                                Some(old_largest) => std::cmp::max(old_largest, requested_lsn),
-                            });
-                    }
-                }
-                // Branch to trigger a force regular index merge request.
-                TableEvent::ForceRegularIndexMerge => {
-                    // TODO(hjiang): If there's already table maintenance ongoing, skip.
-                    if !table_handler_state.can_start_new_maintenance() {
-                        let _ = table_handler_state
-                            .table_maintenance_completion_tx
-                            .send(Ok(()));
-                        continue;
-                    }
-                    // Otherwise queue a request.
-                    assert_eq!(
-                        table_handler_state.index_merge_request_status,
-                        MaintenanceRequestStatus::Unrequested
-                    );
-                    table_handler_state.index_merge_request_status =
-                        MaintenanceRequestStatus::ForceRegular;
-                }
-                // Branch to trigger a force regular data compaction request.
-                TableEvent::ForceRegularDataCompaction => {
-                    if !table_handler_state.can_start_new_maintenance() {
-                        let _ = table_handler_state
-                            .table_maintenance_completion_tx
-                            .send(Ok(()));
-                        continue;
-                    }
-                    // Otherwise queue a request.
-                    assert_eq!(
-                        table_handler_state.data_compaction_request_status,
-                        MaintenanceRequestStatus::Unrequested
-                    );
-                    table_handler_state.data_compaction_request_status =
-                        MaintenanceRequestStatus::ForceRegular;
-                }
-                // Branch to trigger a force full index merge request.
-                TableEvent::ForceFullMaintenance => {
-                    if !table_handler_state.can_start_new_maintenance() {
-                        let _ = table_handler_state
-                            .table_maintenance_completion_tx
-                            .send(Ok(()));
-                        continue;
-                    }
-                    // Otherwise queue a request.
-                    assert_eq!(
-                        table_handler_state.index_merge_request_status,
-                        MaintenanceRequestStatus::Unrequested
-                    );
-                    assert_eq!(
-                        table_handler_state.data_compaction_request_status,
-                        MaintenanceRequestStatus::Unrequested
-                    );
-                    table_handler_state.data_compaction_request_status =
-                        MaintenanceRequestStatus::ForceFull;
-                }
-                // Branch to drop the iceberg table and clear pinned data files from the global object storage cache, only used when the whole table requested to drop.
-                // So we block wait for asynchronous request completion.
-                TableEvent::DropTable => {
-                    // Fast-path: no other concurrent events, directly clean up states and ack back.
-                    if table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
-                        drop_table(&mut table, event_sync_sender).await;
-                        return;
-                    }
+                    // ==============================
+                    // Interactive blocking events
+                    // ==============================
+                    //
+                    TableEvent::ForceSnapshot { lsn } => {
+                        let requested_lsn = if lsn.is_some() {
+                            lsn
+                        } else if table_handler_state.latest_commit_lsn.is_some() {
+                            table_handler_state.latest_commit_lsn
+                        } else {
+                            None
+                        };
 
-                    // Otherwise, leave a drop marker to clean up states later.
-                    table_handler_state.mark_drop_table();
-                }
-                TableEvent::AlterTable { columns_to_drop } => {
-                    debug!("altering table, dropping columns: {:?}", columns_to_drop);
-                    let alter_table_request = AlterTableRequest {
-                        new_columns: vec![],
-                        dropped_columns: columns_to_drop,
-                    };
-                    table_handler_state.start_alter_table(alter_table_request);
-                }
-                TableEvent::StartInitialCopy => {
-                    debug!("starting initial copy");
-                    table_handler_state.start_initial_copy();
-                }
-                TableEvent::FinishInitialCopy { start_lsn } => {
-                    debug!("finishing initial copy");
-                    if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, start_lsn)
-                    {
-                        error!(error = %e, "failed to finish initial copy");
-                    }
-                    // Force create the snapshot with LSN `start_lsn`
-                    assert!(table.create_snapshot(SnapshotOption {
-                        id: None,
-                        uuid: uuid::Uuid::new_v4(),
-                        force_create: true,
-                        dump_snapshot: false,
-                        skip_iceberg_snapshot: true,
-                        index_merge_option: MaintenanceOption::Skip,
-                        data_compaction_option: MaintenanceOption::Skip,
-                    }));
-                    table_handler_state.mooncake_snapshot_ongoing = true;
-                    table_handler_state.finish_initial_copy(start_lsn);
-
-                    // Drop any events that have LSN less than the start LSN during apply.
-                    table_handler_state.initial_persistence_lsn = Some(start_lsn);
-                    // Apply the buffered events.
-                    Self::process_blocked_events(&mut table, &mut table_handler_state).await;
-                }
-                // ==============================
-                // Table internal events
-                // ==============================
-                //
-                TableEvent::PeriodicalMooncakeTableSnapshot(uuid) => {
-                    // Only create a periodic snapshot if there isn't already one in progress
-                    if table_handler_state.mooncake_snapshot_ongoing {
-                        continue;
-                    }
-
-                    // Check whether a flush and force snapshot is needed.
-                    if table_handler_state.has_pending_force_snapshot_request()
-                        && !table_handler_state.iceberg_snapshot_ongoing
-                    {
-                        if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
-                            table.flush(commit_lsn).unwrap();
-                            table_handler_state.last_unflushed_commit_lsn = None;
-                            table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
-                            if let SpecialTableState::AlterTable { .. } =
-                                table_handler_state.special_table_state
-                            {
-                                table.force_empty_iceberg_payload();
-                            }
-                            assert!(table.create_snapshot(
-                                table_handler_state
-                                    .get_mooncake_snapshot_option(/*request_force=*/ true, uuid)
-                            ));
-                            table_handler_state.mooncake_snapshot_ongoing = true;
+                        // Fast-path: nothing to snapshot.
+                        if requested_lsn.is_none() {
+                            table_handler_state
+                                .force_snapshot_completion_tx
+                                .send(Some(Ok(/*lsn=*/ 0)))
+                                .unwrap();
                             continue;
                         }
-                    }
 
-                    // Fallback to normal periodic snapshot.
-                    table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
-                    table_handler_state.mooncake_snapshot_ongoing = table.create_snapshot(
-                        table_handler_state
-                            .get_mooncake_snapshot_option(/*request_force=*/ false, uuid),
-                    );
-                }
-                TableEvent::RegularIcebergSnapshot {
-                    mut iceberg_snapshot_payload,
-                } => {
-                    // Update table maintenance status.
-                    if iceberg_snapshot_payload.contains_table_maintenance_payload()
-                        && table_handler_state.table_maintenance_process_status
-                            == MaintenanceProcessStatus::ReadyToPersist
-                    {
-                        table_handler_state.table_maintenance_process_status =
-                            MaintenanceProcessStatus::InPersist;
-                    }
-                    table_handler_state.iceberg_snapshot_ongoing = true;
-                    if table_handler_state
-                        .should_complete_alter_table(iceberg_snapshot_payload.flush_lsn)
-                    {
-                        if let SpecialTableState::AlterTable {
-                            ref mut alter_table_request,
-                            ..
-                        } = table_handler_state.special_table_state
-                        {
-                            let new_table_metadata =
-                                table.alter_table(alter_table_request.take().unwrap());
-                            iceberg_snapshot_payload.new_table_schema = Some(new_table_metadata);
-                        } else {
-                            unreachable!("alter table request is not set");
+                        // Fast-path: if iceberg snapshot requirement is already satisfied, notify directly.
+                        let requested_lsn = requested_lsn.unwrap();
+                        let last_iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
+                        let replication_lsn = *replication_lsn_rx.borrow();
+                        let persisted_table_lsn = table_handler_state
+                            .get_persisted_table_lsn(last_iceberg_snapshot_lsn, replication_lsn);
+                        if persisted_table_lsn >= requested_lsn {
+                            table_handler_state.notify_persisted_table_lsn(persisted_table_lsn);
+                            continue;
                         }
-                        table_handler_state.finish_alter_table();
+                        // Iceberg snapshot LSN requirement is not met, record the required LSN, so later commit will pick up.
+                        else {
+                            table_handler_state.largest_force_snapshot_lsn =
+                                Some(match table_handler_state.largest_force_snapshot_lsn {
+                                    None => requested_lsn,
+                                    Some(old_largest) => std::cmp::max(old_largest, requested_lsn),
+                                });
+                        }
+                    }
+                    // Branch to trigger a force regular index merge request.
+                    TableEvent::ForceRegularIndexMerge => {
+                        // TODO(hjiang): If there's already table maintenance ongoing, skip.
+                        if !table_handler_state.can_start_new_maintenance() {
+                            let _ = table_handler_state
+                                .table_maintenance_completion_tx
+                                .send(Ok(()));
+                            continue;
+                        }
+                        // Otherwise queue a request.
+                        assert_eq!(
+                            table_handler_state.index_merge_request_status,
+                            MaintenanceRequestStatus::Unrequested
+                        );
+                        table_handler_state.index_merge_request_status =
+                            MaintenanceRequestStatus::ForceRegular;
+                    }
+                    // Branch to trigger a force regular data compaction request.
+                    TableEvent::ForceRegularDataCompaction => {
+                        if !table_handler_state.can_start_new_maintenance() {
+                            let _ = table_handler_state
+                                .table_maintenance_completion_tx
+                                .send(Ok(()));
+                            continue;
+                        }
+                        // Otherwise queue a request.
+                        assert_eq!(
+                            table_handler_state.data_compaction_request_status,
+                            MaintenanceRequestStatus::Unrequested
+                        );
+                        table_handler_state.data_compaction_request_status =
+                            MaintenanceRequestStatus::ForceRegular;
+                    }
+                    // Branch to trigger a force full index merge request.
+                    TableEvent::ForceFullMaintenance => {
+                        if !table_handler_state.can_start_new_maintenance() {
+                            let _ = table_handler_state
+                                .table_maintenance_completion_tx
+                                .send(Ok(()));
+                            continue;
+                        }
+                        // Otherwise queue a request.
+                        assert_eq!(
+                            table_handler_state.index_merge_request_status,
+                            MaintenanceRequestStatus::Unrequested
+                        );
+                        assert_eq!(
+                            table_handler_state.data_compaction_request_status,
+                            MaintenanceRequestStatus::Unrequested
+                        );
+                        table_handler_state.data_compaction_request_status =
+                            MaintenanceRequestStatus::ForceFull;
+                    }
+                    // Branch to drop the iceberg table and clear pinned data files from the global object storage cache, only used when the whole table requested to drop.
+                    // So we block wait for asynchronous request completion.
+                    TableEvent::DropTable => {
+                        // Fast-path: no other concurrent events, directly clean up states and ack back.
+                        if table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
+                            drop_table(&mut table, event_sync_sender).await;
+                            return;
+                        }
+
+                        // Otherwise, leave a drop marker to clean up states later.
+                        table_handler_state.mark_drop_table();
+                    }
+                    TableEvent::AlterTable { columns_to_drop } => {
+                        debug!("altering table, dropping columns: {:?}", columns_to_drop);
+                        let alter_table_request = AlterTableRequest {
+                            new_columns: vec![],
+                            dropped_columns: columns_to_drop,
+                        };
+                        table_handler_state.start_alter_table(alter_table_request);
+                    }
+                    TableEvent::StartInitialCopy => {
+                        debug!("starting initial copy");
+                        table_handler_state.start_initial_copy();
+                    }
+                    TableEvent::FinishInitialCopy { start_lsn } => {
+                        debug!("finishing initial copy");
+                        let event_id = uuid::Uuid::new_v4();
+                        if let Err(e) = table.commit_transaction_stream(
+                            INITIAL_COPY_XACT_ID,
+                            start_lsn,
+                            event_id,
+                        ) {
+                            error!(error = %e, "failed to finish initial copy");
+                        }
+                        // Force create the snapshot with LSN `start_lsn`
+                        assert!(table.create_snapshot(SnapshotOption {
+                            uuid: uuid::Uuid::new_v4(),
+                            force_create: true,
+                            dump_snapshot: false,
+                            iceberg_snapshot_option: IcebergSnapshotOption::Skip,
+                            index_merge_option: MaintenanceOption::Skip,
+                            data_compaction_option: MaintenanceOption::Skip,
+                        }));
+                        table_handler_state.mooncake_snapshot_ongoing = true;
+                        table_handler_state.finish_initial_copy(start_lsn);
+
+                        // Drop any events that have LSN less than the start LSN during apply.
+                        table_handler_state.initial_persistence_lsn = Some(start_lsn);
+                        // Apply the buffered events.
                         Self::process_blocked_events(&mut table, &mut table_handler_state).await;
                     }
-                    table.persist_iceberg_snapshot(iceberg_snapshot_payload);
-                }
-                TableEvent::MooncakeTableSnapshotResult {
-                    mooncake_snapshot_result,
-                } => {
-                    // Record mooncake snapshot completion.
-                    table.record_mooncake_snapshot_completion(&mooncake_snapshot_result);
-
-                    // Spawn a detached best-effort task to delete evicted object storage cache.
-                    start_task_to_delete_evicted(
-                        mooncake_snapshot_result.evicted_data_files_to_delete,
-                    );
-
-                    // Mark mooncake snapshot as completed.
-                    table.mark_mooncake_snapshot_completed();
-                    table_handler_state.mooncake_snapshot_ongoing = false;
-
-                    // Drop table if requested, and table at a clean state.
-                    if table_handler_state.special_table_state == SpecialTableState::DropTable
-                        && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
-                    {
-                        drop_table(&mut table, event_sync_sender).await;
-                        return;
-                    }
-
-                    // Notify read the mooncake table commit of LSN.
-                    table.notify_snapshot_reader(mooncake_snapshot_result.commit_lsn);
-
-                    // Process iceberg snapshot and trigger iceberg snapshot if necessary.
-                    let min_pending_flush_lsn = table.get_min_ongoing_flush_lsn();
-                    if TableHandlerState::can_initiate_iceberg_snapshot(
-                        mooncake_snapshot_result.commit_lsn,
-                        min_pending_flush_lsn,
-                        table_handler_state.iceberg_snapshot_result_consumed,
-                        table_handler_state.iceberg_snapshot_ongoing,
-                    ) {
-                        if let Some(iceberg_snapshot_payload) =
-                            mooncake_snapshot_result.iceberg_snapshot_payload
-                        {
-                            table_handler_event_sender
-                                .send(TableEvent::RegularIcebergSnapshot {
-                                    iceberg_snapshot_payload,
-                                })
-                                .await
-                                .unwrap();
-                        }
-                    }
-
-                    // Only attempt new maintenance when there's no ongoing one.
-                    if table_handler_state.table_maintenance_process_status
-                        == MaintenanceProcessStatus::Unrequested
-                    {
-                        // ==========================
-                        // Data compaction
-                        // ==========================
-                        //
-                        // Unlike snapshot, we can actually have multiple data compaction operations ongoing concurrently,
-                        // to simplify workflow we limit at most one ongoing.
-                        //
-                        // If there's force compact request, and there's nothing to compact, directly ack back.
-                        if table_handler_state
-                            .data_compaction_request_status
-                            .is_force_request()
-                            && mooncake_snapshot_result
-                                .data_compaction_payload
-                                .is_nothing()
-                        {
-                            let _ = table_handler_state
-                                .table_maintenance_completion_tx
-                                .send(Ok(()));
-                            table_handler_state.data_compaction_request_status =
-                                MaintenanceRequestStatus::Unrequested;
+                    // ==============================
+                    // Table internal events
+                    // ==============================
+                    //
+                    TableEvent::PeriodicalMooncakeTableSnapshot(uuid) => {
+                        // Only create a periodic snapshot if there isn't already one in progress
+                        if table_handler_state.mooncake_snapshot_ongoing {
+                            continue;
                         }
 
-                        // Get payload and try perform maintenance operations.
-                        if let Some(data_compaction_payload) = mooncake_snapshot_result
-                            .data_compaction_payload
-                            .take_payload()
+                        // Check whether a flush and force snapshot is needed.
+                        if table_handler_state.has_pending_force_snapshot_request()
+                            && !table_handler_state.iceberg_snapshot_ongoing
                         {
-                            table_handler_state.table_maintenance_process_status =
-                                MaintenanceProcessStatus::InProcess;
-                            table.perform_data_compaction(data_compaction_payload);
-                        }
-
-                        // ==========================
-                        // Index merge
-                        // ==========================
-                        //
-                        // Unlike snapshot, we can actually have multiple file index merge operations ongoing concurrently,
-                        // to simplify workflow we limit at most one ongoing.
-                        //
-                        // If there's force merge request, and there's nothing to merge, directly ack back.
-                        if table_handler_state
-                            .index_merge_request_status
-                            .is_force_request()
-                            && mooncake_snapshot_result
-                                .file_indices_merge_payload
-                                .is_nothing()
-                        {
-                            let _ = table_handler_state
-                                .table_maintenance_completion_tx
-                                .send(Ok(()));
-                            table_handler_state.index_merge_request_status =
-                                MaintenanceRequestStatus::Unrequested;
-                        }
-
-                        if let Some(file_indices_merge_payload) = mooncake_snapshot_result
-                            .file_indices_merge_payload
-                            .take_payload()
-                        {
-                            assert_eq!(
-                                table_handler_state.table_maintenance_process_status,
-                                MaintenanceProcessStatus::Unrequested
-                            );
-                            table_handler_state.table_maintenance_process_status =
-                                MaintenanceProcessStatus::InProcess;
-                            table.perform_index_merge(file_indices_merge_payload);
-                        }
-                    }
-                }
-                TableEvent::IcebergSnapshotResult {
-                    iceberg_snapshot_result,
-                } => {
-                    table_handler_state.iceberg_snapshot_ongoing = false;
-                    match iceberg_snapshot_result {
-                        Ok(snapshot_res) => {
-                            // Record iceberg snapshot completion.
-                            table.record_iceberg_snapshot_completion(&snapshot_res);
-
-                            // Update table maintenance operation status.
-                            if table_handler_state.table_maintenance_process_status
-                                == MaintenanceProcessStatus::InPersist
-                                && snapshot_res.contains_maintenance_result()
+                            if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn
                             {
-                                table_handler_state.table_maintenance_process_status =
-                                    MaintenanceProcessStatus::Unrequested;
-                                // Table maintenance could come from table internal events, which doesn't have notification receiver.
+                                let event_id = uuid::Uuid::new_v4();
+                                table.flush(commit_lsn, event_id).unwrap();
+                                table_handler_state.last_unflushed_commit_lsn = None;
+                                table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
+                                if let SpecialTableState::AlterTable { .. } =
+                                    table_handler_state.special_table_state
+                                {
+                                    table.force_empty_iceberg_payload();
+                                }
+                                assert!(table.create_snapshot(
+                                    table_handler_state.get_mooncake_snapshot_option(
+                                        /*request_force=*/ true, uuid
+                                    )
+                                ));
+                                table_handler_state.mooncake_snapshot_ongoing = true;
+                                continue;
+                            }
+                        }
+
+                        // Fallback to normal periodic snapshot.
+                        table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
+                        table_handler_state.mooncake_snapshot_ongoing = table.create_snapshot(
+                            table_handler_state
+                                .get_mooncake_snapshot_option(/*request_force=*/ false, uuid),
+                        );
+                    }
+                    TableEvent::RegularIcebergSnapshot {
+                        mut iceberg_snapshot_payload,
+                    } => {
+                        // Update table maintenance status.
+                        if iceberg_snapshot_payload.contains_table_maintenance_payload()
+                            && table_handler_state.table_maintenance_process_status
+                                == MaintenanceProcessStatus::ReadyToPersist
+                        {
+                            table_handler_state.table_maintenance_process_status =
+                                MaintenanceProcessStatus::InPersist;
+                        }
+                        table_handler_state.iceberg_snapshot_ongoing = true;
+                        if table_handler_state
+                            .should_complete_alter_table(iceberg_snapshot_payload.flush_lsn)
+                        {
+                            if let SpecialTableState::AlterTable {
+                                ref mut alter_table_request,
+                                ..
+                            } = table_handler_state.special_table_state
+                            {
+                                let new_table_metadata =
+                                    table.alter_table(alter_table_request.take().unwrap());
+                                iceberg_snapshot_payload.new_table_schema =
+                                    Some(new_table_metadata);
+                            } else {
+                                unreachable!("alter table request is not set");
+                            }
+                            table_handler_state.finish_alter_table();
+                            Self::process_blocked_events(&mut table, &mut table_handler_state)
+                                .await;
+                        }
+                        table.persist_iceberg_snapshot(iceberg_snapshot_payload);
+                    }
+                    TableEvent::MooncakeTableSnapshotResult {
+                        mooncake_snapshot_result,
+                    } => {
+                        // Record mooncake snapshot completion.
+                        table.record_mooncake_snapshot_completion(&mooncake_snapshot_result);
+
+                        // Spawn a detached best-effort task to delete evicted object storage cache.
+                        start_task_to_delete_evicted(
+                            mooncake_snapshot_result.evicted_data_files_to_delete,
+                        );
+
+                        // Mark mooncake snapshot as completed.
+                        table.mark_mooncake_snapshot_completed();
+                        table_handler_state.mooncake_snapshot_ongoing = false;
+
+                        // Drop table if requested, and table at a clean state.
+                        if table_handler_state.special_table_state == SpecialTableState::DropTable
+                            && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
+                        {
+                            drop_table(&mut table, event_sync_sender).await;
+                            return;
+                        }
+
+                        // Notify read the mooncake table commit of LSN.
+                        table.notify_snapshot_reader(mooncake_snapshot_result.commit_lsn);
+
+                        // Process iceberg snapshot and trigger iceberg snapshot if necessary.
+                        let min_pending_flush_lsn = table.get_min_ongoing_flush_lsn();
+                        if TableHandlerState::can_initiate_iceberg_snapshot(
+                            mooncake_snapshot_result.commit_lsn,
+                            min_pending_flush_lsn,
+                            table_handler_state.iceberg_snapshot_result_consumed,
+                            table_handler_state.iceberg_snapshot_ongoing,
+                        ) {
+                            if let Some(iceberg_snapshot_payload) =
+                                mooncake_snapshot_result.iceberg_snapshot_payload
+                            {
+                                table_handler_event_sender
+                                    .send(TableEvent::RegularIcebergSnapshot {
+                                        iceberg_snapshot_payload,
+                                    })
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+
+                        // Only attempt new maintenance when there's no ongoing one.
+                        if table_handler_state.table_maintenance_process_status
+                            == MaintenanceProcessStatus::Unrequested
+                        {
+                            // ==========================
+                            // Data compaction
+                            // ==========================
+                            //
+                            // Unlike snapshot, we can actually have multiple data compaction operations ongoing concurrently,
+                            // to simplify workflow we limit at most one ongoing.
+                            //
+                            // If there's force compact request, and there's nothing to compact, directly ack back.
+                            if table_handler_state
+                                .data_compaction_request_status
+                                .is_force_request()
+                                && mooncake_snapshot_result
+                                    .data_compaction_payload
+                                    .is_nothing()
+                            {
                                 let _ = table_handler_state
                                     .table_maintenance_completion_tx
                                     .send(Ok(()));
+                                table_handler_state.data_compaction_request_status =
+                                    MaintenanceRequestStatus::Unrequested;
                             }
 
-                            // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
-                            let iceberg_flush_lsn = snapshot_res.flush_lsn;
-                            event_sync_sender
-                                .flush_lsn_tx
-                                .send(iceberg_flush_lsn)
-                                .unwrap();
-                            table.set_iceberg_snapshot_res(snapshot_res);
-                            table_handler_state.iceberg_snapshot_result_consumed = false;
-
-                            // Notify all waiters with LSN satisfied.
-                            let replication_lsn = *replication_lsn_rx.borrow();
-                            table_handler_state
-                                .update_iceberg_persisted_lsn(iceberg_flush_lsn, replication_lsn);
-                        }
-                        Err(e) => {
-                            if table_handler_state.has_pending_force_snapshot_request() {
-                                if let Err(send_err) = table_handler_state
-                                    .force_snapshot_completion_tx
-                                    .send(Some(Err(e.clone())))
-                                {
-                                    error!(error = ?send_err, "failed to notify force snapshot, because receive end has closed channel");
-                                }
-                            }
-
-                            // Update table maintenance operation status.
-                            if table_handler_state.table_maintenance_process_status
-                                == MaintenanceProcessStatus::InPersist
+                            // Get payload and try perform maintenance operations.
+                            if let Some(data_compaction_payload) = mooncake_snapshot_result
+                                .data_compaction_payload
+                                .take_payload()
                             {
                                 table_handler_state.table_maintenance_process_status =
-                                    MaintenanceProcessStatus::Unrequested;
-                                // Table maintenance could come from table internal events, which doesn't have notification receiver.
+                                    MaintenanceProcessStatus::InProcess;
+                                table.perform_data_compaction(data_compaction_payload);
+                            }
+
+                            // ==========================
+                            // Index merge
+                            // ==========================
+                            //
+                            // Unlike snapshot, we can actually have multiple file index merge operations ongoing concurrently,
+                            // to simplify workflow we limit at most one ongoing.
+                            //
+                            // If there's force merge request, and there's nothing to merge, directly ack back.
+                            if table_handler_state
+                                .index_merge_request_status
+                                .is_force_request()
+                                && mooncake_snapshot_result
+                                    .file_indices_merge_payload
+                                    .is_nothing()
+                            {
                                 let _ = table_handler_state
                                     .table_maintenance_completion_tx
-                                    .send(Err(e));
+                                    .send(Ok(()));
+                                table_handler_state.index_merge_request_status =
+                                    MaintenanceRequestStatus::Unrequested;
                             }
 
-                            // If iceberg snapshot fails, send error back to all broadcast subscribers and unset force snapshot requests.
-                            table_handler_state.largest_force_snapshot_lsn = None;
-                        }
-                    }
-
-                    // Drop table if requested, and table at a clean state.
-                    if table_handler_state.special_table_state == SpecialTableState::DropTable
-                        && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
-                    {
-                        drop_table(&mut table, event_sync_sender).await;
-                        return;
-                    }
-                }
-                TableEvent::IndexMergeResult { index_merge_result } => {
-                    table.record_index_merge_completion(&index_merge_result);
-                    table.set_file_indices_merge_res(index_merge_result);
-                    table_handler_state.mark_index_merge_completed().await;
-                    // Check whether need to drop table.
-                    if table_handler_state.special_table_state == SpecialTableState::DropTable
-                        && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
-                    {
-                        drop_table(&mut table, event_sync_sender).await;
-                        return;
-                    }
-                }
-                TableEvent::DataCompactionResult {
-                    data_compaction_result,
-                } => {
-                    table_handler_state
-                        .mark_data_compaction_completed(&data_compaction_result)
-                        .await;
-                    match data_compaction_result {
-                        Ok(data_compaction_res) => {
-                            table.record_data_compaction_completion(&data_compaction_res);
-                            table.set_data_compaction_res(data_compaction_res)
-                        }
-                        Err(err) => {
-                            error!(error = ?err, "failed to perform compaction");
-                        }
-                    }
-                    // Check whether need to drop table.
-                    if table_handler_state.special_table_state == SpecialTableState::DropTable
-                        && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
-                    {
-                        drop_table(&mut table, event_sync_sender).await;
-                        return;
-                    }
-                }
-                TableEvent::EvictedFilesToDelete { evicted_files } => {
-                    start_task_to_delete_evicted(evicted_files.files);
-                }
-                TableEvent::PeriodicalPersistenceUpdateWal(uuid) => {
-                    if !table_handler_state.wal_persist_ongoing {
-                        table_handler_state.wal_persist_ongoing = true;
-                        let ongoing_persist_truncate = table.do_wal_persistence_update(uuid);
-                        table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
-                    }
-                }
-                TableEvent::PeriodicalWalPersistenceUpdateResult { result } => {
-                    match result {
-                        Ok(result) => {
-                            if let Some(highest_lsn) =
-                                table.handle_completed_wal_persistence_update(&result)
+                            if let Some(file_indices_merge_payload) = mooncake_snapshot_result
+                                .file_indices_merge_payload
+                                .take_payload()
                             {
+                                assert_eq!(
+                                    table_handler_state.table_maintenance_process_status,
+                                    MaintenanceProcessStatus::Unrequested
+                                );
+                                table_handler_state.table_maintenance_process_status =
+                                    MaintenanceProcessStatus::InProcess;
+                                table.perform_index_merge(file_indices_merge_payload);
+                            }
+                        }
+                    }
+                    TableEvent::IcebergSnapshotResult {
+                        iceberg_snapshot_result,
+                    } => {
+                        table_handler_state.iceberg_snapshot_ongoing = false;
+                        match iceberg_snapshot_result {
+                            Ok(snapshot_res) => {
+                                // Record iceberg snapshot completion.
+                                table.record_iceberg_snapshot_completion(&snapshot_res);
+
+                                // Update table maintenance operation status.
+                                if table_handler_state.table_maintenance_process_status
+                                    == MaintenanceProcessStatus::InPersist
+                                    && snapshot_res.contains_maintenance_result()
+                                {
+                                    table_handler_state.table_maintenance_process_status =
+                                        MaintenanceProcessStatus::Unrequested;
+                                    // Table maintenance could come from table internal events, which doesn't have notification receiver.
+                                    let _ = table_handler_state
+                                        .table_maintenance_completion_tx
+                                        .send(Ok(()));
+                                }
+
+                                // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
+                                let iceberg_flush_lsn = snapshot_res.flush_lsn;
                                 event_sync_sender
-                                    .wal_flush_lsn_tx
-                                    .send(highest_lsn)
+                                    .flush_lsn_tx
+                                    .send(iceberg_flush_lsn)
                                     .unwrap();
-                            }
-                            table_handler_state.wal_persist_ongoing = false;
+                                table.set_iceberg_snapshot_res(snapshot_res);
+                                table_handler_state.iceberg_snapshot_result_consumed = false;
 
-                            // Check whether need to drop table.
-                            if table_handler_state.special_table_state
-                                == SpecialTableState::DropTable
-                                && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
-                            {
-                                drop_table(&mut table, event_sync_sender).await;
-                                return;
+                                // Notify all waiters with LSN satisfied.
+                                let replication_lsn = *replication_lsn_rx.borrow();
+                                table_handler_state.update_iceberg_persisted_lsn(
+                                    iceberg_flush_lsn,
+                                    replication_lsn,
+                                );
+                            }
+                            Err(e) => {
+                                if table_handler_state.has_pending_force_snapshot_request() {
+                                    if let Err(send_err) = table_handler_state
+                                        .force_snapshot_completion_tx
+                                        .send(Some(Err(e.clone())))
+                                    {
+                                        error!(error = ?send_err, "failed to notify force snapshot, because receive end has closed channel");
+                                    }
+                                }
+
+                                // Update table maintenance operation status.
+                                if table_handler_state.table_maintenance_process_status
+                                    == MaintenanceProcessStatus::InPersist
+                                {
+                                    table_handler_state.table_maintenance_process_status =
+                                        MaintenanceProcessStatus::Unrequested;
+                                    // Table maintenance could come from table internal events, which doesn't have notification receiver.
+                                    let _ = table_handler_state
+                                        .table_maintenance_completion_tx
+                                        .send(Err(e));
+                                }
+
+                                // If iceberg snapshot fails, send error back to all broadcast subscribers and unset force snapshot requests.
+                                table_handler_state.largest_force_snapshot_lsn = None;
                             }
                         }
-                        Err(e) => {
-                            error!(error = %e, "failed to persist wal");
+
+                        // Drop table if requested, and table at a clean state.
+                        if table_handler_state.special_table_state == SpecialTableState::DropTable
+                            && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
+                        {
+                            drop_table(&mut table, event_sync_sender).await;
+                            return;
                         }
                     }
-                }
-                TableEvent::FinishRecovery {
-                    highest_completion_lsn,
-                } => {
-                    event_sync_sender
-                        .wal_flush_lsn_tx
-                        .send(highest_completion_lsn)
-                        .unwrap();
-                }
-                TableEvent::FlushResult {
-                    id,
-                    xact_id,
-                    flush_result,
-                } => match flush_result {
-                    Some(Ok(disk_slice)) => {
-                        if let Some(xact_id) = xact_id {
-                            table.apply_stream_flush_result(xact_id, disk_slice, id);
-                        } else {
-                            table.apply_flush_result(disk_slice, id);
+                    TableEvent::IndexMergeResult { index_merge_result } => {
+                        table_handler_state.mark_index_merge_completed().await;
+                        match index_merge_result {
+                            Ok(index_merge_result) => {
+                                table.record_index_merge_completion(&index_merge_result);
+                                table.set_file_indices_merge_res(index_merge_result);
+                                // Check whether need to drop table.
+                                if table_handler_state.special_table_state
+                                    == SpecialTableState::DropTable
+                                    && table_handler_state
+                                        .can_drop_table_now(table.has_ongoing_flush())
+                                {
+                                    drop_table(&mut table, event_sync_sender).await;
+                                    return;
+                                }
+                            }
+                            Err(err) => {
+                                error!(error = ?err, "failed to perform index merge");
+                            }
                         }
                     }
-                    Some(Err(e)) => {
-                        error!(error = ?e, "failed to flush disk slice");
-                        panic!("Fatal flush error: {e:?}");
+                    TableEvent::DataCompactionResult {
+                        data_compaction_result,
+                    } => {
+                        table_handler_state
+                            .mark_data_compaction_completed(&data_compaction_result)
+                            .await;
+                        match data_compaction_result {
+                            Ok(data_compaction_res) => {
+                                table.record_data_compaction_completion(&data_compaction_res);
+                                table.set_data_compaction_res(data_compaction_res)
+                            }
+                            Err(err) => {
+                                error!(error = ?err, "failed to perform compaction");
+                            }
+                        }
+                        // Check whether need to drop table.
+                        if table_handler_state.special_table_state == SpecialTableState::DropTable
+                            && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
+                        {
+                            drop_table(&mut table, event_sync_sender).await;
+                            return;
+                        }
                     }
-                    None => {
-                        debug!("flush result is none");
+                    TableEvent::EvictedFilesToDelete { evicted_files } => {
+                        start_task_to_delete_evicted(evicted_files.files);
                     }
-                },
-                // ==============================
-                // Replication events
-                // ==============================
-                //
-                _ => {
-                    unreachable!("unexpected event: {:?}", event);
+                    TableEvent::PeriodicalPersistenceUpdateWal(uuid) => {
+                        if !table_handler_state.wal_persist_ongoing {
+                            table_handler_state.wal_persist_ongoing = true;
+                            let ongoing_persist_truncate = table.do_wal_persistence_update(uuid);
+                            table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
+                        }
+                    }
+                    TableEvent::PeriodicalWalPersistenceUpdateResult { result } => {
+                        match result {
+                            Ok(result) => {
+                                if let Some(highest_lsn) =
+                                    table.handle_completed_wal_persistence_update(&result)
+                                {
+                                    event_sync_sender
+                                        .wal_flush_lsn_tx
+                                        .send(highest_lsn)
+                                        .unwrap();
+                                }
+                                table_handler_state.wal_persist_ongoing = false;
+
+                                // Check whether need to drop table.
+                                if table_handler_state.special_table_state
+                                    == SpecialTableState::DropTable
+                                    && table_handler_state
+                                        .can_drop_table_now(table.has_ongoing_flush())
+                                {
+                                    drop_table(&mut table, event_sync_sender).await;
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "failed to persist wal");
+                            }
+                        }
+                    }
+                    TableEvent::FinishRecovery {
+                        highest_completion_lsn,
+                    } => {
+                        event_sync_sender
+                            .wal_flush_lsn_tx
+                            .send(highest_completion_lsn)
+                            .unwrap();
+                    }
+                    TableEvent::FlushResult {
+                        event_id,
+                        xact_id,
+                        flush_result,
+                    } => match flush_result {
+                        Some(Ok(disk_slice)) => {
+                            if let Some(xact_id) = xact_id {
+                                table.apply_stream_flush_result(xact_id, disk_slice, event_id);
+                            } else {
+                                table.apply_flush_result(disk_slice, event_id);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            error!(error = ?e, "failed to flush disk slice");
+                            panic!("Fatal flush error: {e:?}");
+                        }
+                        None => {
+                            debug!("flush result is none");
+                        }
+                    },
+                    // ==============================
+                    // Replication events
+                    // ==============================
+                    //
+                    _ => {
+                        unreachable!("unexpected event: {:?}", event);
+                    }
                 }
             }
         }
@@ -758,6 +788,8 @@ impl TableHandler {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
+        // Don't update the lsn if the event is not processed yet.
+        table_handler_state.update_table_lsns(&event);
 
         // In the case that this is an initial copy event we actually expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
         if table_handler_state.should_discard_event(&event)
@@ -793,7 +825,10 @@ impl TableHandler {
                     Some(xact_id) => {
                         let res = table.append_in_stream_batch(row, xact_id);
                         if table.should_transaction_flush(xact_id) {
-                            if let Err(e) = table.flush_stream(xact_id, None) {
+                            let event_id = uuid::Uuid::new_v4();
+                            if let Err(e) =
+                                table.flush_stream(xact_id, /*lsn=*/ None, event_id)
+                            {
                                 error!(error = %e, "failed to flush stream");
                             }
                         }
@@ -845,7 +880,8 @@ impl TableHandler {
                 .await;
             }
             TableEvent::StreamFlush { xact_id, .. } => {
-                if let Err(e) = table.flush_stream(xact_id, None) {
+                let event_id = uuid::Uuid::new_v4();
+                if let Err(e) = table.flush_stream(xact_id, /*lsn=*/ None, event_id) {
                     error!(error = %e, "failed to flush stream");
                 }
             }
@@ -896,7 +932,8 @@ impl TableHandler {
                 if let Some(last_unflushed_commit_lsn) =
                     table_handler_state.last_unflushed_commit_lsn
                 {
-                    if let Err(e) = table.flush(last_unflushed_commit_lsn) {
+                    let event_id = uuid::Uuid::new_v4();
+                    if let Err(e) = table.flush(last_unflushed_commit_lsn, event_id) {
                         error!(error = %e, "flush non-streaming writes failed in LSN {lsn}");
                     }
                     table_handler_state.last_unflushed_commit_lsn = None;
@@ -910,7 +947,8 @@ impl TableHandler {
                         return;
                     }
                 }
-                if let Err(e) = table.commit_transaction_stream(xact_id, lsn) {
+                let event_id = uuid::Uuid::new_v4();
+                if let Err(e) = table.commit_transaction_stream(xact_id, lsn, event_id) {
                     error!(error = %e, "stream commit flush failed");
                 }
             }
@@ -918,7 +956,8 @@ impl TableHandler {
                 table.commit(lsn);
                 if table.should_flush() || should_force_snapshot || force_flush_requested {
                     table_handler_state.last_unflushed_commit_lsn = None;
-                    if let Err(e) = table.flush(lsn) {
+                    let event_id = uuid::Uuid::new_v4();
+                    if let Err(e) = table.flush(lsn, event_id) {
                         error!(error = %e, "flush failed in commit");
                     }
                 }

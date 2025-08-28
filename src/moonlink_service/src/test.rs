@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::rest_api::{FileUploadResponse, ListTablesResponse};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use bytes::Bytes;
 use moonlink::decode_serialized_read_state_for_testing;
+use moonlink_backend::table_status::TableStatus;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use serial_test::serial;
@@ -70,7 +72,7 @@ async fn test_readiness_probe() {
 }
 
 /// Util function to get table creation payload.
-fn get_create_table_payload(database: &str, table: &str, append_only: bool) -> serde_json::Value {
+fn get_create_table_payload(database: &str, table: &str) -> serde_json::Value {
     let create_table_payload = json!({
         "database": database,
         "table": table,
@@ -82,19 +84,39 @@ fn get_create_table_payload(database: &str, table: &str, append_only: bool) -> s
         ],
         "table_config": {
             "mooncake": {
-                "append_only": append_only
+                "append_only": true,
+                "row_identity": "None"
             }
         }
     });
     create_table_payload
 }
 
+/// Util function to get table drop payload.
+fn get_drop_table_payload(database: &str, table: &str) -> serde_json::Value {
+    let drop_table_payload = json!({
+        "database": database,
+        "table": table
+    });
+    drop_table_payload
+}
+
+/// Util function to get table optimize payload.
+fn get_optimize_table_payload(database: &str, table: &str, mode: &str) -> serde_json::Value {
+    let optimize_table_payload = json!({
+        "database": database,
+        "table": table,
+        "mode": mode
+    });
+    optimize_table_payload
+}
+
 /// Util function to create table via REST API.
-async fn create_table(client: &reqwest::Client, database: &str, table: &str, append_only: bool) {
+async fn create_table(client: &reqwest::Client, database: &str, table: &str) {
     // REST API doesn't allow duplicate source table name.
     let crafted_src_table_name = format!("{database}.{table}");
 
-    let payload = get_create_table_payload(database, table, append_only);
+    let payload = get_create_table_payload(database, table);
     let response = client
         .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
         .header("content-type", "application/json")
@@ -106,6 +128,38 @@ async fn create_table(client: &reqwest::Client, database: &str, table: &str, app
         response.status().is_success(),
         "Response status is {response:?}"
     );
+}
+
+/// Util function to drop table via REST API.
+async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
+    let payload = get_drop_table_payload(database, table);
+    let crafted_src_table_name = format!("{database}.{table}");
+    let response = client
+        .delete(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+}
+
+async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
+    let response = client
+        .get(format!("{REST_ADDR}/tables"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: ListTablesResponse = response.json().await.unwrap();
+    response.tables
 }
 
 /// Util function to load all record batches inside of the given [`path`].
@@ -121,6 +175,175 @@ async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
     reader.into_iter().map(|b| b.unwrap()).collect()
 }
 
+#[tokio::test]
+#[serial]
+async fn test_schema() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
+    let payload = json!({
+        "database": DATABASE,
+        "table": TABLE,
+        "schema": [
+            {"name": "int32", "data_type": "int32", "nullable": false},
+            {"name": "int64", "data_type": "int64", "nullable": false},
+            {"name": "string", "data_type": "string", "nullable": false},
+            {"name": "text", "data_type": "text", "nullable": false},
+            {"name": "bool", "data_type": "bool", "nullable": false},
+            {"name": "boolean", "data_type": "boolean", "nullable": false},
+            {"name": "float32", "data_type": "float32", "nullable": false},
+            {"name": "float64", "data_type": "float64", "nullable": false},
+            {"name": "date32", "data_type": "date32", "nullable": false},
+            // TODO(hjiang): add test cases for negative scale, which is not supported for now.
+            {"name": "decimal(10)", "data_type": "decimal(10,2)", "nullable": false}, // only precision value
+            {"name": "decimal(10,2)", "data_type": "decimal(10,2)", "nullable": false}, // lowercase
+            {"name": "Decimal(10,2)", "data_type": "decimal(10,2)", "nullable": false} // uppercase
+        ],
+        "table_config": {
+            "mooncake": {
+                "append_only": true
+            }
+        }
+    });
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+}
+
+/// Util function to optimize table via REST API.
+async fn optimize_table(client: &reqwest::Client, database: &str, table: &str, mode: &str) {
+    let payload = get_optimize_table_payload(database, table, mode);
+    let crafted_src_table_name = format!("{database}.{table}");
+    let response = client
+        .post(format!(
+            "{REST_ADDR}/tables/{crafted_src_table_name}/optimize"
+        ))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+}
+
+/// Util function to test optimize table
+async fn run_optimize_table_test(mode: &str) {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE).await;
+
+    // Ingest some data.
+    let insert_payload = json!({
+        "operation": "insert",
+        "request_mode": "async",
+        "data": {
+            "id": 1,
+            "name": "Alice Johnson",
+            "email": "alice@example.com",
+            "age": 30
+        }
+    });
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
+    let response = client
+        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&insert_payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+
+    // test for optimize table on mode 'full'
+    optimize_table(&client, DATABASE, TABLE, mode).await;
+
+    // Scan table and get data file and puffin files back.
+    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
+    let bytes = scan_table_begin(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+        /*lsn=*/ 1,
+    )
+    .await
+    .unwrap();
+    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
+        decode_serialized_read_state_for_testing(bytes);
+    assert_eq!(data_file_paths.len(), 1);
+    let record_batches = read_all_batches(&data_file_paths[0]).await;
+    let expected_arrow_batch = RecordBatch::try_new(
+        create_test_arrow_schema(),
+        vec![
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(StringArray::from(vec!["Alice Johnson".to_string()])),
+            Arc::new(StringArray::from(vec!["alice@example.com".to_string()])),
+            Arc::new(Int32Array::from(vec![30])),
+        ],
+    )
+    .unwrap();
+    assert_eq!(record_batches, vec![expected_arrow_batch]);
+
+    assert!(puffin_file_paths.is_empty());
+    assert!(puffin_deletion.is_empty());
+    assert!(positional_deletion.is_empty());
+
+    scan_table_end(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+    )
+    .await
+    .unwrap();
+
+    // Cleanup shared directory.
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_optimize_table_on_full_mode() {
+    run_optimize_table_test("full").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_optimize_table_on_index_mode() {
+    run_optimize_table_test("index").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_optimize_table_on_data_mode() {
+    run_optimize_table_test("data").await;
+}
+
 /// Test basic table creation, insertion and query.
 #[tokio::test]
 #[serial]
@@ -134,11 +357,12 @@ async fn test_moonlink_standalone_data_ingestion() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // Ingest some data.
     let insert_payload = json!({
         "operation": "insert",
+        "request_mode": "async",
         "data": {
             "id": 1,
             "name": "Alice Johnson",
@@ -214,12 +438,13 @@ async fn test_moonlink_standalone_file_upload() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ true).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // Upload a file.
     let parquet_file = generate_parquet_file(&get_moonlink_backend_dir()).await;
     let file_upload_payload = json!({
         "operation": "upload",
+        "request_mode": "sync",
         "files": [parquet_file],
         "storage_config": {
             "fs": {
@@ -240,6 +465,8 @@ async fn test_moonlink_standalone_file_upload() {
         response.status().is_success(),
         "Response status is {response:?}"
     );
+    let response: FileUploadResponse = response.json().await.unwrap();
+    assert_eq!(response.lsn, Some(1));
 
     // Scan table and get data file and puffin files back.
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
@@ -301,13 +528,14 @@ async fn test_moonlink_standalone_file_insert() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // Upload a file.
     let parquet_file = generate_parquet_file(&get_moonlink_backend_dir()).await;
     let file_upload_payload = json!({
         "operation": "insert",
         "files": [parquet_file],
+        "request_mode": "async",
         "storage_config": {
             "fs": {
                 "root_directory": get_moonlink_backend_dir(),
@@ -389,16 +617,80 @@ async fn test_multiple_tables_creation() {
 
     // Create the first test table.
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // Create the second test table.
-    create_table(
-        &client,
-        "second-database",
-        TABLE,
-        /*append_only=*/ false,
-    )
-    .await;
+    create_table(&client, "second-database", TABLE).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_table() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE).await;
+
+    // List table before drop.
+    let list_results = list_tables(&client).await;
+    assert_eq!(list_results.len(), 1);
+
+    // Drop test table.
+    drop_table(&client, DATABASE, TABLE).await;
+
+    // List table before drop.
+    let list_results = list_tables(&client).await;
+    assert_eq!(list_results.len(), 0);
+}
+
+/// Testing scenario: create multiple tables, and check list table result.
+#[tokio::test]
+#[serial]
+async fn test_list_tables() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create two test tables.
+    let client: reqwest::Client = reqwest::Client::new();
+    create_table(&client, "database-1", "table-1").await;
+    create_table(&client, "database-2", "table-2").await;
+
+    // List test tables.
+    let mut list_results = list_tables(&client).await;
+    assert_eq!(list_results.len(), 2);
+    list_results.sort_by(|a, b| {
+        (
+            &a.database,
+            &a.table,
+            a.commit_lsn,
+            a.flush_lsn,
+            &a.iceberg_warehouse_location,
+        )
+            .cmp(&(
+                &b.database,
+                &b.table,
+                b.commit_lsn,
+                b.flush_lsn,
+                &b.iceberg_warehouse_location,
+            ))
+    });
+
+    // Validate list results.
+    assert_eq!(list_results[0].database, "database-1");
+    assert_eq!(list_results[0].table, "table-1");
+
+    assert_eq!(list_results[1].database, "database-2");
+    assert_eq!(list_results[1].table, "table-2");
 }
 
 /// Dummy testing for bulk ingest files into mooncake table.
@@ -413,7 +705,7 @@ async fn test_bulk_ingest_files() {
     test_readiness_probe().await;
 
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // A dummy stub-level interface testing.
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
@@ -444,7 +736,7 @@ async fn test_invalid_operation() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // Test invalid operation to upload a file.
     let file_upload_payload = json!({
@@ -501,11 +793,12 @@ async fn test_non_existent_table() {
 
     // Create the test table.
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*append_only=*/ false).await;
+    create_table(&client, DATABASE, TABLE).await;
 
     // Test invalid operation to upload a file.
     let file_upload_payload = json!({
         "operation": "upload",
+        "request_mode": "async",
         "files": ["parquet_file"],
         "storage_config": {
             "fs": {
@@ -541,4 +834,73 @@ async fn test_non_existent_table() {
         .await
         .unwrap();
     // Make sure service doesn't crash.
+}
+
+/// Error case: create a mooncake table with an invalid table config.
+#[tokio::test]
+#[serial]
+async fn test_create_table_with_invalid_config() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    let client: reqwest::Client = reqwest::Client::new();
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
+
+    // ==================
+    // Invalid config 1
+    // ==================
+    //
+    // Create an invalid config payload.
+    let payload = json!({
+        "database": DATABASE,
+        "table": TABLE,
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false}
+        ],
+        "table_config": {
+            "mooncake": {
+                "append_only": false,
+                "row_identity": "None"
+            }
+        }
+    });
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+
+    // ==================
+    // Invalid config 2
+    // ==================
+    //
+    // Create an invalid config payload.
+    let payload = json!({
+        "database": DATABASE,
+        "table": TABLE,
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false}
+        ],
+        "table_config": {
+            "mooncake": {
+                "append_only": true,
+                "row_identity": "FullRow"
+            }
+        }
+    });
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
 }

@@ -25,6 +25,14 @@ impl InMemoryBatch {
         }
     }
 
+    /// Get the number of records without filter.
+    pub fn get_raw_record_number(&self) -> u64 {
+        if let Some(record_batch) = &self.data {
+            return record_batch.num_rows() as u64;
+        }
+        0
+    }
+
     pub fn get_filtered_batch(&self) -> Result<Option<RecordBatch>> {
         if self.data.is_none() {
             return Ok(None);
@@ -84,7 +92,9 @@ impl ColumnStoreBuffer {
             .collect();
 
         // Get the initial batch ID from the counter
-        let initial_id = batch_id_counter.load();
+        // To avoid initial id conflict we need to acquire a unique id.
+        // Notice, `next` returns the value before change
+        let initial_id = batch_id_counter.get_and_next() + 1;
 
         Self {
             schema,
@@ -152,7 +162,7 @@ impl ColumnStoreBuffer {
         let batch = Arc::new(RecordBatch::try_new(Arc::clone(&self.schema), columns)?);
         let last_batch = self.in_memory_batches.last_mut();
         last_batch.unwrap().batch.data = Some(batch.clone());
-        let next_batch_id = self.batch_id_counter.next() + 1;
+        let next_batch_id = self.batch_id_counter.get_and_next() + 1;
         self.in_memory_batches.push(BatchEntry {
             id: next_batch_id,
             batch: InMemoryBatch::new(self.max_rows_per_buffer),
@@ -323,7 +333,7 @@ mod tests {
     use super::*;
     use crate::row::RowValue;
     use arrow::datatypes::{DataType, Field};
-    use arrow_array::{Int32Array, StringArray, TimestampMicrosecondArray};
+    use arrow_array::{Int16Array, Int32Array, StringArray, TimestampMicrosecondArray};
     use std::collections::HashMap;
 
     // TODO(hjiang): Add unit test for ColumnStoreBuffer with deletion, and check record batch content.
@@ -338,7 +348,7 @@ mod tests {
                 "PARQUET:field_id".to_string(),
                 "2".to_string(),
             )])),
-            Field::new("age", DataType::Int32, false).with_metadata(HashMap::from([(
+            Field::new("age", DataType::Int16, false).with_metadata(HashMap::from([(
                 "PARQUET:field_id".to_string(),
                 "3".to_string(),
             )])),
@@ -354,7 +364,7 @@ mod tests {
         ]);
 
         let counter = BatchIdCounter::new(false);
-        let start = counter.load();
+        let start = counter.load() + 1;
         let mut buffer = ColumnStoreBuffer::new(Arc::new(schema.clone()), 2, Arc::new(counter));
 
         let row1 = MoonlinkRow::new(vec![
@@ -405,7 +415,7 @@ mod tests {
                         "John".to_string(),
                         "Jane".to_string(),
                     ])),
-                    Arc::new(Int32Array::from(vec![30, 25])),
+                    Arc::new(Int16Array::from(vec![30, 25])),
                     Arc::new(TimestampMicrosecondArray::from(vec![
                         1618876800000000,
                         1618876800000000,
@@ -431,7 +441,7 @@ mod tests {
                 vec![
                     Arc::new(Int32Array::from(vec![1])),
                     Arc::new(StringArray::from(vec!["John".to_string()])),
-                    Arc::new(Int32Array::from(vec![30])),
+                    Arc::new(Int16Array::from(vec![30])),
                     Arc::new(TimestampMicrosecondArray::from(vec![1618876800000000])),
                 ],
             )
@@ -453,7 +463,7 @@ mod tests {
                 vec![
                     Arc::new(Int32Array::from(vec![3])),
                     Arc::new(StringArray::from(vec!["Bob"])),
-                    Arc::new(Int32Array::from(vec![40])),
+                    Arc::new(Int16Array::from(vec![40])),
                     Arc::new(TimestampMicrosecondArray::from(vec![1618876800000000])),
                 ],
             )

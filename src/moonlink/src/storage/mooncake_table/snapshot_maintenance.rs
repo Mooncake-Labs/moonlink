@@ -49,20 +49,25 @@ impl SnapshotTableState {
 
         let config = &self.mooncake_table_metadata.config.data_compaction_config;
         let (
+            event_id,
             min_data_compaction_file_num_threshold,
             max_data_compaction_file_num_threshold,
             data_file_deletion_percentage_threshold,
             data_compaction_file_size_threshold,
         ) = match data_compaction_option {
-            MaintenanceOption::Skip => (usize::MAX, usize::MAX, 100, 0),
-            MaintenanceOption::ForceRegular => (
+            MaintenanceOption::Skip => (None, usize::MAX, usize::MAX, 100, 0),
+            MaintenanceOption::ForceRegular(event_id) => (
+                Some(event_id),
                 2,
                 config.max_data_file_to_compact as usize,
                 config.data_file_deletion_percentage as usize,
                 config.data_file_final_size as usize,
             ),
-            MaintenanceOption::ForceFull => (2, usize::MAX, 1, usize::MAX),
-            MaintenanceOption::BestEffort => (
+            MaintenanceOption::ForceFull(event_id) => {
+                (Some(event_id), 2, usize::MAX, 1, usize::MAX)
+            }
+            MaintenanceOption::BestEffort(event_id) => (
+                Some(event_id),
                 config.min_data_file_to_compact as usize,
                 config.max_data_file_to_compact as usize,
                 config.data_file_deletion_percentage as usize,
@@ -174,8 +179,7 @@ impl SnapshotTableState {
         }
 
         let payload = DataCompactionPayload {
-            id: self.event_id_assigner.get_next_event_id(),
-            uuid: uuid::Uuid::new_v4(),
+            uuid: *event_id.unwrap(),
             object_storage_cache: self.object_storage_cache.clone(),
             filesystem_accessor: self.filesystem_accessor.clone(),
             disk_files: tentative_data_files_to_compact
@@ -186,14 +190,18 @@ impl SnapshotTableState {
 
         #[cfg(any(test, debug_assertions))]
         {
-            Self::validate_compaction_payload(&payload);
+            self.validate_compaction_payload(&payload);
         }
         DataCompactionMaintenanceStatus::Payload(payload)
     }
 
-    /// Util function to validate the consistency of data compaction payload.
+    /// Util function to validate the consistency of data files and file indices for data compaction payload.
     #[cfg(any(test, debug_assertions))]
-    fn validate_compaction_payload(payload: &DataCompactionPayload) {
+    fn validate_compaction_payload(&self, payload: &DataCompactionPayload) {
+        if self.mooncake_table_metadata.config.append_only {
+            return;
+        }
+
         // Data files to compact.
         let data_files = payload
             .disk_files
@@ -225,28 +233,27 @@ impl SnapshotTableState {
             .config
             .file_index_config
             .max_file_indices_to_merge as usize;
-        let min_index_merge_file_num_threshold = match index_merge_option {
-            MaintenanceOption::Skip => usize::MAX,
-            MaintenanceOption::ForceRegular => 2,
-            MaintenanceOption::ForceFull => 2,
-            MaintenanceOption::BestEffort => {
-                self.mooncake_table_metadata
-                    .config
-                    .file_index_config
-                    .min_file_indices_to_merge as usize
-            }
-        };
         let default_final_file_size = self
             .mooncake_table_metadata
             .config
             .file_index_config
             .index_block_final_size;
-        let index_merge_file_size_threshold = match index_merge_option {
-            MaintenanceOption::Skip => u64::MAX,
-            MaintenanceOption::ForceRegular => default_final_file_size,
-            MaintenanceOption::ForceFull => 0,
-            MaintenanceOption::BestEffort => default_final_file_size,
-        };
+        let (event_id, min_index_merge_file_num_threshold, index_merge_file_size_threshold) =
+            match index_merge_option {
+                MaintenanceOption::Skip => (None, usize::MAX, u64::MAX),
+                MaintenanceOption::ForceRegular(event_id) => {
+                    (Some(event_id), 2, default_final_file_size)
+                }
+                MaintenanceOption::ForceFull(event_id) => (Some(event_id), 2, 0),
+                MaintenanceOption::BestEffort(event_id) => (
+                    Some(event_id),
+                    self.mooncake_table_metadata
+                        .config
+                        .file_index_config
+                        .min_file_indices_to_merge as usize,
+                    default_final_file_size,
+                ),
+            };
 
         // Fast-path: not enough file indices to trigger index merge.
         let mut file_indices_to_merge = HashSet::new();
@@ -277,8 +284,7 @@ impl SnapshotTableState {
         // To avoid too many small IO operations, only attempt an index merge when accumulated small indices exceeds the threshold.
         if file_indices_to_merge.len() >= min_index_merge_file_num_threshold {
             let payload = FileIndiceMergePayload {
-                id: self.event_id_assigner.get_next_event_id(),
-                uuid: uuid::Uuid::new_v4(),
+                uuid: *event_id.unwrap(),
                 file_indices: file_indices_to_merge
                     .into_iter()
                     .take(max_index_merge_file_num_threshold)

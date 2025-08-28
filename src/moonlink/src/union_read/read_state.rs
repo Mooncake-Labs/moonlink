@@ -3,9 +3,9 @@
 // Meant to be sent using either shared memory or network connection.
 //
 
-use super::table_metadata::TableMetadata;
-use crate::storage::{io_utils, PuffinDeletionBlobAtRead};
+use crate::storage::io_utils;
 use crate::NonEvictableHandle;
+use moonlink_table_metadata::{DeletionVector, MooncakeTableMetadata, PositionDelete};
 
 use bincode::config;
 use tracing::Instrument;
@@ -72,19 +72,19 @@ impl ReadState {
         // Data file and positional deletes for query.
         data_files: Vec<String>,
         puffin_cache_handles: Vec<NonEvictableHandle>,
-        mut deletion_vectors_at_read: Vec<PuffinDeletionBlobAtRead>,
-        mut position_deletes: Vec<(u32 /*file_index*/, u32 /*row_index*/)>,
+        mut deletion_vectors_at_read: Vec<DeletionVector>,
+        mut position_deletes: Vec<PositionDelete>,
         // Fields used for read state cleanup after query completion.
         associated_files: Vec<String>,
         mut cache_handles: Vec<NonEvictableHandle>, // Cache handles for data files.
         read_state_filepath_remap: ReadStateFilepathRemap, // Used to remap local filepath to
     ) -> Self {
         deletion_vectors_at_read.sort_by(|dv_1, dv_2| {
-            dv_1.data_file_index
-                .cmp(&dv_2.data_file_index)
-                .then_with(|| dv_1.puffin_file_index.cmp(&dv_2.puffin_file_index))
-                .then_with(|| dv_1.start_offset.cmp(&dv_2.start_offset))
-                .then_with(|| dv_1.blob_size.cmp(&dv_2.blob_size))
+            dv_1.data_file_number
+                .cmp(&dv_2.data_file_number)
+                .then_with(|| dv_1.puffin_file_number.cmp(&dv_2.puffin_file_number))
+                .then_with(|| dv_1.offset.cmp(&dv_2.offset))
+                .then_with(|| dv_1.size.cmp(&dv_2.size))
         });
         position_deletes.sort();
 
@@ -103,7 +103,7 @@ impl ReadState {
             .map(|path| read_state_filepath_remap(path))
             .collect::<Vec<_>>();
 
-        let metadata = TableMetadata {
+        let metadata = MooncakeTableMetadata {
             data_files: remapped_data_files,
             puffin_files: remapped_puffin_files,
             deletion_vectors: deletion_vectors_at_read,
@@ -127,10 +127,11 @@ pub fn decode_read_state_for_testing(
 ) -> (
     Vec<String>, /*data_file_paths*/
     Vec<String>, /*puffin_file_paths*/
-    Vec<PuffinDeletionBlobAtRead>,
-    Vec<(u32, u32)>,
+    Vec<DeletionVector>,
+    Vec<PositionDelete>,
 ) {
-    let metadata = TableMetadata::decode(&read_state.data);
+    let (metadata, _): (MooncakeTableMetadata, usize) =
+        bincode::decode_from_slice(&read_state.data, config::standard()).unwrap();
     (
         metadata.data_files,
         metadata.puffin_files,
@@ -146,8 +147,8 @@ pub fn decode_serialized_read_state_for_testing(
 ) -> (
     Vec<String>, /*data_file_paths*/
     Vec<String>, /*puffin_file_paths*/
-    Vec<PuffinDeletionBlobAtRead>,
-    Vec<(u32, u32)>,
+    Vec<DeletionVector>,
+    Vec<PositionDelete>,
 ) {
     let read_state = ReadState {
         data,

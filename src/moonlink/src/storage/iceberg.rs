@@ -1,3 +1,4 @@
+pub mod base_iceberg_snapshot_fetcher;
 pub(super) mod catalog_utils;
 mod data_file_manifest_manager;
 pub(super) mod deletion_vector;
@@ -5,6 +6,7 @@ mod deletion_vector_manifest_manager;
 pub(super) mod file_catalog;
 mod file_index_manifest_manager;
 mod iceberg_schema_manager;
+pub mod iceberg_snapshot_fetcher;
 pub(super) mod iceberg_table_config;
 mod iceberg_table_loader;
 pub(super) mod iceberg_table_manager;
@@ -58,3 +60,6 @@ mod file_catalog_test;
 
 #[cfg(test)]
 mod mock_filesystem_test;
+
+#[cfg(test)]
+mod snapshot_fetcher_test;

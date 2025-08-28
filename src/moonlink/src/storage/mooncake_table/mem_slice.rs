@@ -167,7 +167,7 @@ mod tests {
             )])),
         ]);
         let counter = BatchIdCounter::new(false);
-        let start = counter.load();
+        let start = counter.load() + 1;
         let mut mem_table = MemSlice::new(Arc::new(schema), 4, identity, Arc::new(counter));
 
         // Create arrays properly

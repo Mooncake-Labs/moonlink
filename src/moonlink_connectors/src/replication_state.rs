@@ -32,8 +32,8 @@ impl ReplicationState {
     /// Mark the replication position as `lsn` if it is newer than the current
     /// value.
     pub fn mark(&self, lsn: u64) {
-        if lsn > self.current.load(Ordering::Relaxed) {
-            self.current.store(lsn, Ordering::Release);
+        if lsn > self.current.load(Ordering::SeqCst) {
+            self.current.store(lsn, Ordering::SeqCst);
             self.tx.send(lsn).unwrap();
         }
     }
@@ -45,6 +45,6 @@ impl ReplicationState {
 
     /// Get the current replicated LSN value.
     pub fn now(&self) -> u64 {
-        self.current.load(Ordering::Acquire)
+        self.current.load(Ordering::SeqCst)
     }
 }

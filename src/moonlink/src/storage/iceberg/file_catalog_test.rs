@@ -484,14 +484,12 @@ async fn test_update_table_filesystem() {
 #[cfg(feature = "storage-s3")]
 async fn test_update_table_s3() -> IcebergResult<()> {
     let (catalog, _test_guard) = create_s3_catalog().await;
-    create_test_table(&catalog).await?;
     test_update_table_impl(catalog).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "storage-gcs")]
 async fn test_update_table_gcs() -> IcebergResult<()> {
     let (catalog, _test_guard) = create_gcs_catalog().await;
-    create_test_table(&catalog).await?;
     test_update_table_impl(catalog).await
 }
 
@@ -506,13 +504,11 @@ async fn test_update_schema() {
 #[cfg(feature = "storage-s3")]
 async fn test_update_schema_s3() {
     let (catalog, _test_guard) = create_s3_catalog().await;
-    create_test_table(&catalog).await.unwrap();
     test_update_schema_impl(catalog).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "storage-gcs")]
 async fn test_update_schema_gcs() {
     let (catalog, _test_guard) = create_gcs_catalog().await;
-    create_test_table(&catalog).await.unwrap();
     test_update_schema_impl(catalog).await;
 }

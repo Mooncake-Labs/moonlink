@@ -1,5 +1,6 @@
 use crate::event_sync::create_table_event_syncer;
-use crate::row::{IdentityProp, MoonlinkRow, RowValue};
+use crate::row::IdentityProp;
+use crate::row::{MoonlinkRow, RowValue};
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
@@ -16,6 +17,7 @@ use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
+use crate::IcebergCatalogConfig;
 use crate::Result;
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
@@ -52,7 +54,10 @@ pub fn get_iceberg_manager_config(table_name: String, warehouse_uri: String) -> 
     IcebergTableConfig {
         namespace: vec!["default".to_string()],
         table_name,
-        accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        data_accessor_config: AccessorConfig::new_with_storage_config(storage_config.clone()),
+        metadata_accessor_config: IcebergCatalogConfig::File {
+            accessor_config: AccessorConfig::new_with_storage_config(storage_config),
+        },
     }
 }
 
@@ -85,8 +90,9 @@ impl TestEnvironment {
     /// Creates a default test environment with default settings.
     pub async fn default() -> Self {
         let temp_dir = tempdir().unwrap();
-        let mooncake_table_config =
+        let mut mooncake_table_config =
             MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+        mooncake_table_config.row_identity = IdentityProp::Keys(vec![0]);
         Self::new(temp_dir, mooncake_table_config).await
     }
 
@@ -152,19 +158,11 @@ impl TestEnvironment {
         let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
         let wal_manager = WalManager::new(&wal_config);
 
-        // Use appropriate identity based on append_only configuration
-        let identity = if mooncake_table_config.append_only {
-            IdentityProp::None
-        } else {
-            IdentityProp::Keys(vec![0])
-        };
-
         let mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),
             1,
             path,
-            identity,
             iceberg_table_config.clone(),
             mooncake_table_config,
             wal_manager,
@@ -184,20 +182,12 @@ impl TestEnvironment {
     ) -> IcebergTableManager {
         let table_name = "table_name";
 
-        // Use appropriate identity based on append_only configuration
-        let identity = if mooncake_table_config.append_only {
-            IdentityProp::None
-        } else {
-            IdentityProp::Keys(vec![0])
-        };
-
         let mooncake_table_metadata = Arc::new(MooncakeTableMetadata {
             name: table_name.to_string(),
             table_id: 0,
             schema: create_test_arrow_schema(),
             config: mooncake_table_config.clone(),
             path: self.temp_dir.path().to_path_buf(),
-            identity,
         });
         let iceberg_table_config = get_iceberg_manager_config(
             table_name.to_string(),
@@ -213,7 +203,7 @@ impl TestEnvironment {
         .unwrap()
     }
 
-    async fn send_event(&self, event: TableEvent) {
+    pub async fn send_event(&self, event: TableEvent) {
         self.event_sender
             .send(event)
             .await
@@ -636,7 +626,7 @@ pub(crate) async fn load_one_arrow_batch(filepath: &str) -> RecordBatch {
 }
 
 /// Test util function to generate a parquet under the given [`tempdir`].
-pub(crate) async fn generate_parquet_file(tempdir: &TempDir) -> String {
+pub(crate) async fn generate_parquet_file(tempdir: &TempDir, filename: &str) -> String {
     let schema = create_test_arrow_schema();
     let ids = Int32Array::from(vec![1, 2, 3]);
     let names = StringArray::from(vec!["Alice", "Bob", "Charlie"]);
@@ -646,7 +636,7 @@ pub(crate) async fn generate_parquet_file(tempdir: &TempDir) -> String {
         vec![Arc::new(ids), Arc::new(names), Arc::new(ages)],
     )
     .unwrap();
-    let file_path = tempdir.path().join("test.parquet");
+    let file_path = tempdir.path().join(filename);
     let file_path_str = file_path.to_str().unwrap().to_string();
     let file = tokio::fs::File::create(file_path).await.unwrap();
     let mut writer: AsyncArrowWriter<tokio::fs::File> =

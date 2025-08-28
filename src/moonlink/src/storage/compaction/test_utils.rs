@@ -25,6 +25,7 @@ use crate::storage::storage_utils::{MooncakeDataFileRef, RecordLocation};
 use crate::storage::PuffinBlobRef;
 use crate::ObjectStorageCache;
 
+use crate::error::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -95,7 +96,7 @@ pub(crate) async fn create_file_index_1(
     directory: std::path::PathBuf,
     data_file: MooncakeDataFileRef,
     start_file_id: u64,
-) -> FileIndex {
+) -> Result<FileIndex> {
     let entries = vec![
         (
             get_hash_for_row(ID_VALUES[0], NAME_VALUES[0], AGE_VALUES[0]),
@@ -123,7 +124,7 @@ pub(crate) async fn create_file_index_2(
     directory: std::path::PathBuf,
     data_file: MooncakeDataFileRef,
     start_file_id: u64,
-) -> FileIndex {
+) -> Result<FileIndex> {
     let entries = vec![
         (
             get_hash_for_row(ID_VALUES[3], NAME_VALUES[3], AGE_VALUES[3]),
@@ -151,7 +152,7 @@ pub(crate) async fn create_file_index_for_both_batches(
     directory: std::path::PathBuf,
     data_file: MooncakeDataFileRef,
     start_file_id: u64,
-) -> FileIndex {
+) -> Result<FileIndex> {
     let mut entries = vec![];
     for idx in 0..NUM_ROWS {
         entries.push((
@@ -219,6 +220,7 @@ pub(crate) async fn dump_deletion_vector_puffin(
         puffin_file_cache_handle: cache_handle.unwrap(),
         start_offset: 4_u32, // Puffin file starts with 4 magic bytes.
         blob_size: blob_size as u32,
+        num_rows: deleted_rows_num,
     }
 }
 

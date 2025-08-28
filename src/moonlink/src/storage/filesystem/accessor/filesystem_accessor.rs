@@ -103,7 +103,9 @@ impl FileSystemAccessor {
         dst: &str,
         file_size: u64,
     ) -> Result<ObjectMetadata> {
-        let content = tokio::fs::read(src).await?;
+        let content = tokio::fs::read(src).await.map_err(|e| {
+            std::io::Error::new(e.kind(), format!("failed to read file {src}: {e}"))
+        })?;
         self.write_object(dst, content).await?;
         Ok(ObjectMetadata { size: file_size })
     }

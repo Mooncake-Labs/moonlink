@@ -1,16 +1,20 @@
 pub mod datetime_utils;
 pub mod decimal_utils;
+pub mod event_request;
 pub mod json_converter;
 pub mod moonlink_rest_sink;
+pub mod rest_event;
 pub mod rest_source;
 
 use crate::replication_state::ReplicationState;
+use crate::rest_ingest::event_request::EventRequest;
 use crate::rest_ingest::moonlink_rest_sink::RestSink;
 use crate::rest_ingest::moonlink_rest_sink::TableStatus;
-use crate::rest_ingest::rest_source::{EventRequest, RestSource};
+use crate::rest_ingest::rest_source::RestSource;
 use crate::Result;
 use arrow_schema::Schema;
 use moonlink::TableEvent;
+use more_asserts as ma;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -29,6 +33,8 @@ pub enum RestCommand {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
+        /// Persist LSN, only assigned for tables to recovery; used to indicate and update replication LSN.
+        persist_lsn: Option<u64>,
     },
     DropTable {
         src_table_name: String,
@@ -76,6 +82,10 @@ impl RestApiConnection {
     }
 
     /// Add a table to the REST source and sink (sends command to event loop)
+    ///
+    /// # Arguments
+    ///
+    /// * persist_lsn: only assigned at recovery, used to indicate and update replication LSN.
     #[allow(clippy::too_many_arguments)]
     pub async fn add_table(
         &self,
@@ -86,6 +96,7 @@ impl RestApiConnection {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
+        persist_lsn: Option<u64>,
     ) -> Result<()> {
         let command = RestCommand::AddTable {
             src_table_name,
@@ -95,12 +106,15 @@ impl RestApiConnection {
             commit_lsn_tx,
             flush_lsn_rx,
             wal_flush_lsn_rx,
+            persist_lsn,
         };
 
-        self.cmd_tx
-            .send(command)
-            .await
-            .map_err(|e| crate::Error::RestApi(format!("Failed to send add table command: {e}")))?;
+        self.cmd_tx.send(command).await.map_err(|e| {
+            crate::Error::rest_api(
+                format!("Failed to send add table command: {e}"),
+                Some(Arc::new(e.into())),
+            )
+        })?;
 
         Ok(())
     }
@@ -113,7 +127,10 @@ impl RestApiConnection {
         };
 
         self.cmd_tx.send(command).await.map_err(|e| {
-            crate::Error::RestApi(format!("Failed to send drop table command: {e}"))
+            crate::Error::rest_api(
+                format!("Failed to send drop table command: {e}"),
+                Some(Arc::new(e.into())),
+            )
         })?;
 
         Ok(())
@@ -130,10 +147,12 @@ impl RestApiConnection {
     }
 
     pub async fn shutdown_replication(&mut self) -> Result<()> {
-        self.cmd_tx
-            .send(RestCommand::Shutdown)
-            .await
-            .map_err(|e| crate::Error::RestApi(format!("Failed to send shutdown command: {e}")))?;
+        self.cmd_tx.send(RestCommand::Shutdown).await.map_err(|e| {
+            crate::Error::rest_api(
+                format!("Failed to send shutdown command: {e}"),
+                Some(Arc::new(e.into())),
+            )
+        })?;
         Ok(())
     }
 
@@ -161,7 +180,7 @@ pub async fn run_rest_event_loop(
     loop {
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => match cmd {
-                RestCommand::AddTable { src_table_name, src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
+                RestCommand::AddTable { src_table_name, src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx, persist_lsn } => {
                     debug!("Adding REST table '{}' with src_table_id {}", src_table_name, src_table_id);
 
                     // Add to sink (handles table events)
@@ -171,10 +190,10 @@ pub async fn run_rest_event_loop(
                         event_sender,
                         commit_lsn_tx,
                     };
-                    sink.add_table(src_table_id, table_status)?;
+                    sink.add_table(src_table_id, table_status, persist_lsn)?;
 
                     // Add to source (handles schema and request processing)
-                    rest_source.add_table(src_table_name.clone(), src_table_id, schema)?;
+                    rest_source.add_table(src_table_name.clone(), src_table_id, schema, persist_lsn)?;
                 }
                 RestCommand::DropTable { src_table_name, src_table_id } => {
                     debug!("Dropping REST table '{}' with src_table_id {}", src_table_name, src_table_id);
@@ -192,16 +211,31 @@ pub async fn run_rest_event_loop(
             },
             // Process REST requests directly (similar to how PostgreSQL processes CDC events)
             Some(request) = rest_request_rx.recv() => {
+                // TODO(hjiang): Handle recursive request like file insertion.
+                let mut lsn = 0;
+
                 // Process the request and generate events
                 match rest_source.process_request(&request) {
                     Ok(rest_events) => {
                         // Send all events to be processed by the sink
                         for rest_event in rest_events {
+                            if let Some(rest_lsn) = rest_event.lsn() {
+                                ma::assert_gt!(rest_lsn, lsn);
+                                lsn = rest_lsn;
+                            }
+
+                            // Process rest events.
                             let rest_event_proc_result = sink.process_rest_event(rest_event).await;
                             if let Err(e) = &rest_event_proc_result {
                                 warn!(error = ?e, "failed to process REST event");
                                 break; // Stop processing further events on error
                             }
+                        }
+
+                        // Send back event response if applicable.
+                        if let Some(rx) = request.get_request_tx() {
+                            // Client connection could be cut down during request handling, so no guarantee send success.
+                            let _ = rx.send(lsn).await;
                         }
                     }
                     Err(e) => {
@@ -209,6 +243,8 @@ pub async fn run_rest_event_loop(
                     }
                 }
             }
+            // All channels are closed.
+            else => break,
         }
     }
 

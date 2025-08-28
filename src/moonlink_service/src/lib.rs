@@ -1,5 +1,5 @@
 mod error;
-mod rest_api;
+pub(crate) mod rest_api;
 mod rpc_server;
 
 pub use error::Result;

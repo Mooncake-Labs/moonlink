@@ -277,7 +277,7 @@ impl DiskSliceWriter {
         let mut index_builder = GlobalIndexBuilder::new();
         index_builder.set_files(self.files.iter().map(|(file, _)| file.clone()).collect());
         index_builder.set_directory(self.dir_path.clone());
-        self.new_index = Some(index_builder.build_from_flush(list, file_id).await);
+        self.new_index = Some(index_builder.build_from_flush(list, file_id).await?);
         Ok(())
     }
 

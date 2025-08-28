@@ -1,11 +1,12 @@
 use arrow_schema::ArrowError;
 use moonlink_error::io_error_utils::get_io_error_status;
 use moonlink_error::{ErrorStatus, ErrorStruct};
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::result;
 use thiserror::Error;
 
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, Error, Deserialize, Serialize)]
 pub enum Error {
     #[error("{0}")]
     Arrow(ErrorStruct),
@@ -61,16 +62,7 @@ impl From<moonlink_rpc::Error> for Error {
     #[track_caller]
     fn from(source: moonlink_rpc::Error) -> Self {
         Error::Rpc(
-            ErrorStruct::new(
-                "RPC error".to_string(),
-                match &source {
-                    moonlink_rpc::Error::Io(err) => err.status,
-                    moonlink_rpc::Error::Decode(err) => err.status,
-                    moonlink_rpc::Error::Encode(err) => err.status,
-                    moonlink_rpc::Error::PacketTooLong(err) => err.status,
-                },
-            )
-            .with_source(source),
+            ErrorStruct::new("RPC error".to_string(), source.get_status()).with_source(source),
         )
     }
 }

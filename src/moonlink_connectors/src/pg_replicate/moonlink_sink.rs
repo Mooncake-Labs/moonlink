@@ -7,10 +7,11 @@ use crate::replication_state::ReplicationState;
 use moonlink::TableEvent;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, warn};
 
@@ -47,13 +48,18 @@ pub struct Sink {
 }
 
 impl Sink {
+    #[inline(always)]
     async fn send_table_event(
         event_sender: &Sender<TableEvent>,
         event: TableEvent,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<TableEvent>> {
         match event_sender.try_send(event) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(event)) => event_sender.send(event).await,
+            Err(TrySendError::Full(event)) => {
+                let permit = event_sender.reserve().await.expect("event receiver closed");
+                permit.send(event);
+                Ok(())
+            }
             Err(TrySendError::Closed(event)) => Err(tokio::sync::mpsc::error::SendError(event)),
         }
     }
@@ -195,6 +201,8 @@ impl Sink {
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
+                let pg_lsn = PgLsn::from(commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id);
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
@@ -220,8 +228,6 @@ impl Sink {
                 self.transaction_state.touched_tables.clear();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
-                let pg_lsn = PgLsn::from(commit_body.end_lsn());
-                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
@@ -230,6 +236,8 @@ impl Sink {
                     end_lsn = stream_commit_body.end_lsn(),
                     "stream commit"
                 );
+                let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id);
@@ -256,8 +264,6 @@ impl Sink {
                     self.streaming_transactions_state.remove(&xact_id);
                 }
                 self.streaming_last_key = None;
-                let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
-                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
@@ -715,5 +721,43 @@ mod tests {
         for _ in 0..2 {
             matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
         }
+    }
+
+    #[tokio::test]
+    async fn test_send_table_event_ok() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let res = Sink::send_table_event(&tx, TableEvent::DropTable).await;
+        assert!(res.is_ok());
+        let msg = rx.recv().await;
+        assert!(matches!(msg, Some(TableEvent::DropTable)));
+    }
+
+    #[tokio::test]
+    async fn test_send_table_event_full_reserve_path() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(TableEvent::DropTable).unwrap();
+
+        let send_future = Sink::send_table_event(&tx, TableEvent::DropTable);
+        let drain_future = async {
+            // Give the sender a moment to hit the reserve path
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            // Free one slot so reserve() can complete
+            let first = rx.recv().await;
+            assert!(matches!(first, Some(TableEvent::DropTable)));
+            // Receive the second event that was sent via the permit
+            let second = rx.recv().await;
+            assert!(matches!(second, Some(TableEvent::DropTable)));
+        };
+
+        let (send_res, _) = tokio::join!(send_future, drain_future);
+        assert!(send_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_table_event_closed() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let res = Sink::send_table_event(&tx, TableEvent::DropTable).await;
+        assert!(res.is_err());
     }
 }

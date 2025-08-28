@@ -266,10 +266,12 @@ impl MoonlinkRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// Identity for a single row.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum IdentityProp {
     SinglePrimitiveKey(usize),
     Keys(Vec<usize>),
+    #[default]
     FullRow,
     None,
 }

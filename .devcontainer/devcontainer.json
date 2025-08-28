@@ -1,8 +1,9 @@
 {
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
-    "runServices": ["nginx", "postgres", "minio", "fake-gcs"],
+    "runServices": ["nginx", "postgres", "minio", "fake-gcs", "iceberg-rest"],
     "workspaceFolder": "/workspaces/moonlink",
+    "initializeCommand": "bash ./.devcontainer/prebuild.sh",
     "features": {
         "ghcr.io/devcontainers/features/docker-in-docker:2": {},
         "ghcr.io/robbert229/devcontainer-features/postgresql-client": {

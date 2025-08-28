@@ -29,14 +29,18 @@ impl WalConfig {
     /// is not guaranteed to be unique, so we need to use the mooncake table ID which is unique
     /// within moonlink.
     pub fn default_wal_config_local(mooncake_table_id: &str, base_path: &Path) -> WalConfig {
-        let wal_storage_config = StorageConfig::FileSystem {
-            root_directory: base_path.to_str().unwrap().to_string(),
-            // TODO(paul): evaluate atomic write option.
-            atomic_write_dir: None,
-        };
+        let wal_storage_config = Self::default_storage_config_local(base_path);
         Self {
             accessor_config: AccessorConfig::new_with_storage_config(wal_storage_config),
             mooncake_table_id: mooncake_table_id.to_string(),
+        }
+    }
+
+    pub fn default_storage_config_local(base_path: &Path) -> StorageConfig {
+        StorageConfig::FileSystem {
+            root_directory: base_path.to_str().unwrap().to_string(),
+            // TODO(paul): evaluate atomic write option.
+            atomic_write_dir: None,
         }
     }
 
@@ -55,6 +59,18 @@ impl WalConfig {
 
     pub fn get_mooncake_table_id(&self) -> &str {
         &self.mooncake_table_id
+    }
+
+    const DEFAULT_MOONCAKE_TABLE_ID: &str = "default_mooncake_table_id";
+    const DEFAULT_BASE_PATH: &str = "/tmp/moonlink_wal";
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self::default_wal_config_local(
+            Self::DEFAULT_MOONCAKE_TABLE_ID,
+            Self::DEFAULT_BASE_PATH.as_ref(),
+        )
     }
 }
 

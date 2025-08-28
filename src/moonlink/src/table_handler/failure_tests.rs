@@ -31,7 +31,6 @@ async fn test_iceberg_snapshot_failure_mock_test() {
         schema: create_test_arrow_schema(),
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
-        identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
@@ -103,7 +102,6 @@ async fn test_iceberg_drop_table_failure_mock_test() {
         schema: create_test_arrow_schema(),
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
-        identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
@@ -167,7 +165,6 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
         schema: create_test_arrow_schema(),
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
-        identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
@@ -275,7 +272,6 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
         schema: create_test_arrow_schema(),
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
-        identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();
@@ -384,7 +380,6 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
         schema: create_test_arrow_schema(),
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
-        identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
     let mooncake_table_metadata_copy = mooncake_table_metadata.clone();

@@ -351,7 +351,7 @@ impl ColumnArrayBuilder {
             Self::Int32(mut b) => {
                 let arr: ArrayRef = Arc::new(b.finish());
                 match logical_type {
-                    DataType::Date32 => cast(&arr, logical_type).unwrap(),
+                    DataType::Date32 | DataType::Int16 => cast(&arr, logical_type).unwrap(),
                     _ => arr,
                 }
             }

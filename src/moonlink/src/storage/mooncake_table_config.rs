@@ -1,3 +1,4 @@
+use crate::row::IdentityProp;
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor_config::ChaosConfig;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
@@ -136,6 +137,8 @@ pub struct MooncakeTableConfig {
     pub temp_files_directory: String,
     /// Whether this is an append-only table (no indexes, no deletes).
     pub append_only: bool,
+    /// Identity for table rows.
+    pub row_identity: IdentityProp,
 }
 
 impl Default for MooncakeTableConfig {
@@ -171,8 +174,9 @@ impl MooncakeTableConfig {
             persistence_config: IcebergPersistenceConfig::default(),
             data_compaction_config: DataCompactionConfig::default(),
             file_index_config: FileIndexMergeConfig::default(),
-            temp_files_directory,
             append_only: false,
+            row_identity: IdentityProp::default(),
+            temp_files_directory,
         }
     }
 

@@ -1,8 +1,8 @@
 use crate::error::Result;
-use crate::table_metadata::{DeletionVector, MooncakeTableMetadata, PositionDelete};
 use arrow::datatypes::SchemaRef;
 use arrow_ipc::reader::StreamReader;
 use async_trait::async_trait;
+use bincode::config;
 use datafusion::catalog::memory::DataSourceExec;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{DFSchema, DataFusionError};
@@ -19,6 +19,7 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use moonlink_rpc::{get_table_schema, scan_table_begin, scan_table_end};
+use moonlink_table_metadata::{DeletionVector, MooncakeTableMetadata, PositionDelete};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
 use parquet::arrow::async_reader::AsyncFileReader;
@@ -121,12 +122,12 @@ impl TableProvider for MooncakeTableProvider {
                 let PositionDelete {
                     data_file_number: _data_file_number,
                     data_file_row_number,
-                } = position_deletes[position_delete_number];
-                if data_file_number < _data_file_number as usize {
+                } = &position_deletes[position_delete_number];
+                if data_file_number < *_data_file_number as usize {
                     break;
                 }
                 position_delete_number += 1;
-                deleted_rows.insert(data_file_row_number as u64);
+                deleted_rows.insert(*data_file_row_number as u64);
             }
 
             let file = File::open(data_file).await?;
@@ -216,7 +217,8 @@ impl MooncakeTableScan {
         lsn: u64,
     ) -> Result<Self> {
         let metadata = scan_table_begin(&mut stream, schema.clone(), table.clone(), lsn).await?;
-        let metadata = bincode::decode_from_slice(&metadata, bincode::config::standard())?.0;
+        let metadata: MooncakeTableMetadata =
+            bincode::decode_from_slice(&metadata, config::standard())?.0;
         Ok(Self {
             stream: Some(stream),
             schema,

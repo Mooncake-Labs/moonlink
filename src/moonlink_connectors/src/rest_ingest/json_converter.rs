@@ -229,6 +229,22 @@ mod tests {
         )]))
     }
 
+    fn make_schema_with_negative_scale() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "decimal_field",
+            DataType::Decimal128(2, -3),
+            false,
+        )]))
+    }
+
+    fn make_schema_with_fractional_only() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "decimal_field",
+            DataType::Decimal128(3, 5),
+            false,
+        )]))
+    }
+
     fn make_datetime_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("date", DataType::Date32, /*nullable=*/ false),
@@ -576,6 +592,72 @@ mod tests {
                     _ => panic!(
                         "Expected InvalidValue, but got another DecimalConversionError: {decimal_conversion_err:?}"
                     ),
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_conversion_negative_scale_precision_out_of_range_error() {
+        // Test IntegerPartOutOfRange error propagation for fractional only
+        let schema = make_schema_with_negative_scale();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "decimal_field": "-990010" // Has integer part but scale > precision
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal_field");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Expected DecimalConversionError, got different error type");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::PrecisionOutOfRange {
+                        expected_precision,
+                        actual_precision,
+                        ..
+                    } => {
+                        assert_eq!(*expected_precision, 2);
+                        assert_eq!(*actual_precision, 6);
+                    }
+                    _ => {
+                        panic!("Expected PrecisionOutOfRange error, got {decimal_conversion_err:?}")
+                    }
+                }
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decimal_conversion_fractional_only_integer_precision_out_of_range_error() {
+        // Test InvalidValue error propagation
+        let schema = make_schema_with_fractional_only();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "decimal_field": "0.12345"
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(f, e) => {
+                assert_eq!(f, "decimal_field");
+                let decimal_conversion_err = e
+                    .downcast_ref::<DecimalConversionError>()
+                    .expect("Expected DecimalConversionError, got different error type");
+
+                match decimal_conversion_err {
+                    DecimalConversionError::PrecisionOutOfRange {
+                        expected_precision,
+                        actual_precision,
+                        ..
+                    } => {
+                        assert_eq!(*expected_precision, 3);
+                        assert_eq!(*actual_precision, 5);
+                    }
+                    _ => panic!("Expected InvalidValue, got {decimal_conversion_err:?}"),
                 }
             }
             _ => panic!("unexpected error: {err:?}"),

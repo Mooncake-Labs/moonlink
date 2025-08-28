@@ -28,6 +28,7 @@ rpcs! {
     create_snapshot(database: String, table: String, lsn: u64) -> ();
     create_table(database: String, table: String, src: String, src_uri: String, table_config: String) -> ();
     drop_table(database: String, table: String) -> ();
+    get_parquet_metadatas(data_files: Vec<String>) -> Vec<Vec<u8>>;
     get_table_schema(database: String, table: String) -> Vec<u8>;
     list_tables() -> Vec<Table>;
     load_files(database: String, table: String, files: Vec<String>) -> ();
@@ -59,6 +60,7 @@ const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard
 pub struct Table {
     pub database: String,
     pub table: String,
+    pub cardinality: u64,
     pub commit_lsn: u64,
     pub flush_lsn: Option<u64>,
     pub iceberg_warehouse_location: String,

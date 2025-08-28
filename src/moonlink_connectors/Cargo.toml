@@ -9,8 +9,10 @@ storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
 storage-fs = ["moonlink/storage-fs"]
 connector-pg = []
+test-tls = []
 
 [dependencies]
+anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
@@ -23,11 +25,15 @@ chrono-tz = "0.10"
 futures = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_error = { path = "../moonlink_error" }
+more-asserts = { workspace = true }
+native-tls = "0.2.14"
 num-traits = { workspace = true }
 parquet = { workspace = true }
 pg_escape = "0.1"
 pin-project-lite = "0.2"
+postgres-native-tls = { workspace = true }
 postgres-replication = { workspace = true }
+serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

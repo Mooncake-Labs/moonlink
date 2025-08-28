@@ -21,7 +21,9 @@ impl TableStatusReader {
     pub fn new(iceberg_table_config: &IcebergTableConfig, table: &MooncakeTable) -> Self {
         let (table_snapshot, _) = table.get_state_for_reader();
         Self {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .metadata_accessor_config
+                .get_warehouse_uri(),
             table_snapshot,
         }
     }
@@ -35,6 +37,7 @@ impl TableStatusReader {
         Ok(TableSnapshotStatus {
             commit_lsn: table_snapshot_state.commit_lsn,
             flush_lsn: table_snapshot_state.flush_lsn,
+            cardinality: table_snapshot_state.cardinality,
             iceberg_warehouse_location: self.iceberg_warehouse_location.clone(),
         })
     }
@@ -83,8 +86,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .metadata_accessor_config
+                .get_warehouse_uri(),
             commit_lsn: 0,
+            cardinality: 0,
             flush_lsn: None,
         };
         assert_eq!(actual_table_state, expected_table_state);
@@ -105,8 +111,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .metadata_accessor_config
+                .get_warehouse_uri(),
             commit_lsn: 0,
+            cardinality: 0,
             flush_lsn: None,
         };
         assert_eq!(actual_table_state, expected_table_state);
@@ -131,8 +140,11 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .metadata_accessor_config
+                .get_warehouse_uri(),
             commit_lsn: 10,
+            cardinality: 1,
             flush_lsn: None,
         };
         assert_eq!(actual_table_state, expected_table_state);
@@ -158,9 +170,12 @@ mod tests {
         // Get table state and check.
         let actual_table_state = table_state_reader.get_current_table_state().await.unwrap();
         let expected_table_state = TableSnapshotStatus {
-            iceberg_warehouse_location: iceberg_table_config.accessor_config.get_root_path(),
+            iceberg_warehouse_location: iceberg_table_config
+                .metadata_accessor_config
+                .get_warehouse_uri(),
             commit_lsn: 10,
             flush_lsn: Some(10),
+            cardinality: 1,
         };
         assert_eq!(actual_table_state, expected_table_state);
     }

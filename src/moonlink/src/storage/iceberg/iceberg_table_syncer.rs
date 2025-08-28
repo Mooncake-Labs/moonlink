@@ -28,6 +28,7 @@ use crate::storage::storage_utils::{
 use crate::storage::{io_utils, storage_utils};
 use crate::Result;
 
+use futures::{stream, StreamExt, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::vec;
 
@@ -35,6 +36,9 @@ use iceberg::puffin::CompressionCodec;
 use iceberg::spec::DataFile;
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::{Error as IcebergError, Result as IcebergResult};
+
+/// Default concurrency of iceberg data file upload.
+const DEFAULT_DATA_FILE_UPLOAD_CONCURRENCY: usize = 128;
 
 /// Results for importing data files into iceberg table.
 pub struct DataFileImportResult {
@@ -159,6 +163,7 @@ impl IcebergTableManager {
             puffin_file_cache_handle: cache_handle.unwrap(),
             start_offset: 4_u32, // Puffin file starts with 4 magic bytes.
             blob_size: blob_size as u32,
+            num_rows: deleted_row_count,
         };
         Ok(puffin_blob_ref)
     }
@@ -175,15 +180,32 @@ impl IcebergTableManager {
         let mut new_remote_data_files = Vec::with_capacity(new_data_files.len());
         let mut new_iceberg_data_files = Vec::with_capacity(new_data_files.len());
 
-        // Handle imported new data files.
-        for local_data_file in new_data_files.into_iter() {
-            let iceberg_data_file = iceberg_io_utils::write_record_batch_to_iceberg(
-                self.iceberg_table.as_ref().unwrap(),
-                local_data_file.file_path(),
-                self.iceberg_table.as_ref().unwrap().metadata(),
-                self.filesystem_accessor.as_ref(),
-            )
+        let iceberg_table = self.iceberg_table.clone();
+        let filesystem_accessor = self.filesystem_accessor.clone();
+
+        // Import disk slice writer to iceberg table.
+        let new_data_files_clone = new_data_files.clone();
+        let iceberg_data_files: Vec<DataFile> = stream::iter(new_data_files_clone.into_iter())
+            .map(move |local_data_file| {
+                let iceberg_table = iceberg_table.clone();
+                let filesystem_accessor = filesystem_accessor.clone();
+                async move {
+                    iceberg_io_utils::write_record_batch_to_iceberg(
+                        iceberg_table.as_ref().as_ref().unwrap(),
+                        local_data_file.file_path(),
+                        iceberg_table.as_ref().unwrap().metadata(),
+                        filesystem_accessor.as_ref(),
+                    )
+                    .await
+                }
+            })
+            .buffered(DEFAULT_DATA_FILE_UPLOAD_CONCURRENCY)
+            .try_collect()
             .await?;
+
+        // Handle imported new data files.
+        for (idx, local_data_file) in new_data_files.into_iter().enumerate() {
+            let cur_iceberg_data_file = iceberg_data_files[idx].clone();
 
             // Try get deletion vector batch size.
             let max_rows = new_deletion_vector
@@ -194,7 +216,7 @@ impl IcebergTableManager {
             let old_entry = self.persisted_data_files.insert(
                 local_data_file.file_id(),
                 DataFileEntry {
-                    data_file: iceberg_data_file.clone(),
+                    data_file: cur_iceberg_data_file.clone(),
                     // Max number of rows will be initialized when deletion take place.
                     deletion_vector: BatchDeletionVector::new(
                         max_rows.unwrap_or(UNINITIALIZED_BATCH_DELETION_VECTOR_MAX_ROW),
@@ -207,26 +229,26 @@ impl IcebergTableManager {
             assert!(local_data_files_to_remote
                 .insert(
                     local_data_file.file_path().clone(),
-                    iceberg_data_file.file_path().to_string(),
+                    cur_iceberg_data_file.file_path().to_string(),
                 )
                 .is_none());
 
             // Record all imported iceberg data files, with file id unchanged.
             new_remote_data_files.push(create_data_file(
                 local_data_file.file_id().0,
-                iceberg_data_file.file_path().to_string(),
+                cur_iceberg_data_file.file_path().to_string(),
             ));
 
             // Record file path to file id mapping.
             assert!(self
                 .remote_data_file_to_file_id
                 .insert(
-                    iceberg_data_file.file_path().to_string(),
+                    cur_iceberg_data_file.file_path().to_string(),
                     local_data_file.file_id(),
                 )
                 .is_none());
 
-            new_iceberg_data_files.push(iceberg_data_file);
+            new_iceberg_data_files.push(cur_iceberg_data_file);
         }
 
         // Handle removed data files.

@@ -2,23 +2,25 @@ mod common;
 
 #[cfg(test)]
 mod tests {
-    use crate::common::{ids_from_state, nonunique_ids_from_state};
+    use crate::common::{ids_from_state, SRC_URI};
 
     use super::common::{
-        assert_scan_ids_eq, assert_scan_nonunique_ids_eq, crash_and_recover_backend,
-        crash_and_recover_backend_with_guard, current_wal_lsn, smoke_create_and_insert, TestGuard,
+        assert_scan_ids_eq, crash_and_recover_backend_with_guard, create_backend_from_base_path,
+        current_wal_lsn, get_serialized_table_config, smoke_create_and_insert, TestGuard,
         TestGuardMode, DATABASE, TABLE,
     };
-    use moonlink_backend::table_status::TableStatus;
+    use moonlink_backend::RowEventOperation;
+    use moonlink_backend::{table_status::TableStatus, REST_API_URI};
+    use moonlink_backend::{EventRequest, MoonlinkBackend, RowEventRequest};
     use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, SqliteMetadataStore};
 
-    use rstest::*;
+    use arrow::datatypes::Schema as ArrowSchema;
+    use arrow_schema::{DataType, Field};
+    use serde_json::json;
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};
-
-    use tokio_postgres::connect;
-
-    const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+    use std::time::SystemTime;
+    use tempfile::TempDir;
 
     // ───────────────────────────── Tests ─────────────────────────────
 
@@ -28,11 +30,38 @@ mod tests {
     async fn test_moonlink_service() {
         let (guard, client) = TestGuard::new(Some("test"), true).await;
         let backend = guard.backend();
-        smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, SRC_URI).await;
+        // Till now, table already created at backend.
+
+        // First round of table operations.
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, SRC_URI).await;
+
+        // Second round of table operations.
+        backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await
+            .unwrap();
+        smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, SRC_URI).await;
+    }
+
+    /// Testing scenario: drop a non-existent table shouldn't crash.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_drop_non_existent_table() {
+        let (guard, _client) = TestGuard::new(Some("test"), true).await;
+        let backend = guard.backend();
+
+        // We're good as long as backend doesn't crash.
+        backend
+            .drop_table(
+                "non_existent_database".to_string(),
+                "non_existent_table".to_string(),
+            )
+            .await
+            .unwrap();
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
@@ -165,6 +194,7 @@ mod tests {
             table: TABLE.to_string(),
             commit_lsn: lsn,
             flush_lsn: Some(lsn),
+            cardinality: 1,
             iceberg_warehouse_location: guard.tmp().unwrap().path().to_str().unwrap().to_string(),
         };
         assert_eq!(table_statuses, vec![expected_table_status]);
@@ -200,7 +230,8 @@ mod tests {
             .unwrap();
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
 
         // Second cycle: add table again, insert different data, verify it works
         client
@@ -308,7 +339,8 @@ mod tests {
         // Drop table and check metadata storage.
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         let metadata_entries = metadata_store
             .get_all_table_metadata_entries()
             .await
@@ -327,7 +359,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
 
         // First cycle: add table, insert data, verify it works
         backend
@@ -380,6 +413,96 @@ mod tests {
         .await;
     }
 
+    /// Test recovery for rest ingested table.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_recovery_for_rest_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let metadata_store_accessor =
+            SqliteMetadataStore::new_with_directory(temp_dir.path().to_str().unwrap())
+                .await
+                .unwrap();
+        let mut backend = MoonlinkBackend::new(
+            temp_dir.path().to_str().unwrap().into(),
+            /*data_server_uri=*/ None,
+            Box::new(metadata_store_accessor),
+        )
+        .await
+        .unwrap();
+        backend.initialize_event_api().await.unwrap();
+
+        // Create a rest table.
+        let arrow_schema = ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "0".to_string(),
+            )])),
+            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("age", DataType::Int32, false).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "2".to_string(),
+            )])),
+        ]);
+        backend
+            .create_table(
+                DATABASE.to_string(),
+                TABLE.to_string(),
+                "public.recovery_for_rest_table".to_string(),
+                REST_API_URI.to_string(),
+                get_serialized_table_config(&temp_dir),
+                Some(arrow_schema),
+            )
+            .await
+            .unwrap();
+
+        // Ingest data into table.
+        let row_event_request = RowEventRequest {
+            src_table_name: "public.recovery_for_rest_table".to_string(),
+            operation: RowEventOperation::Insert,
+            payload: json!({
+                "id": 1,
+                "name": "Alice Johnson",
+                "age": 30
+            }),
+            timestamp: SystemTime::now(),
+            tx: None,
+        };
+        let rest_event_request = EventRequest::RowRequest(row_event_request);
+        backend
+            .send_event_request(rest_event_request)
+            .await
+            .unwrap();
+
+        // Force snapshot with LSN 2, LSN 1 = row insertion, LSN 2 = commit.
+        backend
+            .create_snapshot(DATABASE.to_string(), TABLE.to_string(), /*lsn=*/ 2)
+            .await
+            .unwrap();
+
+        // Crash backend recovery and recreate backend.
+        backend.shutdown_connection(REST_API_URI, false).await;
+        backend =
+            create_backend_from_base_path(temp_dir.path().to_str().unwrap().to_string()).await;
+        assert_scan_ids_eq(
+            &backend,
+            DATABASE.to_string(),
+            TABLE.to_string(),
+            /*lsn=*/ 2,
+            [1],
+        )
+        .await;
+    }
+
+    #[cfg(feature = "test-utils")]
+    use super::common::{assert_scan_nonunique_ids_eq, crash_and_recover_backend};
+    #[cfg(feature = "test-utils")]
+    use crate::common::nonunique_ids_from_state;
+    #[cfg(feature = "test-utils")]
+    use rstest::*;
+
     /// Multiple failures and recovery from just the WAL
     #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -392,7 +515,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         backend
             .create_table(
                 DATABASE.to_string(),
@@ -473,13 +597,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_and_incomplete_pg_replay(#[case] use_iceberg: bool) {
-        use crate::common::create_backend_from_tempdir;
+        use crate::common::{connect_to_postgres, create_backend_from_tempdir};
 
         let (mut guard, client1) = TestGuard::new(Some("recovery"), false).await;
-        let (mut client2, conn2) = connect(SRC_URI, tokio_postgres::NoTls).await.unwrap();
-        tokio::spawn(async move {
-            let _ = conn2.await;
-        });
+        let (mut client2, _) = connect_to_postgres().await;
 
         guard.set_test_mode(TestGuardMode::Crash);
 
@@ -498,7 +619,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         backend
             .create_table(
                 DATABASE.to_string(),
@@ -606,7 +728,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
 
         backend
             .create_table(
@@ -691,7 +814,8 @@ mod tests {
         // Drop the table that setup_backend created so we can test the full cycle
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
-            .await;
+            .await
+            .unwrap();
         backend
             .create_table(
                 DATABASE.to_string(),

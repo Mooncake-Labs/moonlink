@@ -55,16 +55,26 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    accessor_config: AccessorConfig::new_with_storage_config(
+                    data_accessor_config: AccessorConfig::new_with_storage_config(
                         StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
                             atomic_write_dir: None,
                         },
                     ),
+                    metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
+                        accessor_config: AccessorConfig::new_with_storage_config(
+                            StorageConfig::FileSystem {
+                                root_directory: temp_warehouse_uri.clone(),
+                                atomic_write_dir: None,
+                            },
+                        ),
+                    },
                     ..Default::default()
                 };
-                let table_config =
+                let mut table_config =
                     MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+                table_config.row_identity = IdentityProp::SinglePrimitiveKey(0);
+
                 // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
                 let wal_config = WalConfig::default_wal_config_local("1", temp_dir.path());
                 let wal_manager = WalManager::new(&wal_config);
@@ -73,7 +83,6 @@ fn bench_write(c: &mut Criterion) {
                     "test_table".to_string(),
                     1,
                     temp_dir.path().to_path_buf(),
-                    IdentityProp::SinglePrimitiveKey(0),
                     iceberg_table_config,
                     table_config,
                     wal_manager,
@@ -92,7 +101,7 @@ fn bench_write(c: &mut Criterion) {
                         values: row.values.clone(),
                     });
                 }
-                let _ = table.flush(100000);
+                let _ = table.flush(100000, /*event_id=*/ uuid::Uuid::new_v4());
             });
         });
     });
@@ -104,16 +113,26 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    accessor_config: AccessorConfig::new_with_storage_config(
+                    data_accessor_config: AccessorConfig::new_with_storage_config(
                         StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
                             atomic_write_dir: None,
                         },
                     ),
+                    metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
+                        accessor_config: AccessorConfig::new_with_storage_config(
+                            StorageConfig::FileSystem {
+                                root_directory: temp_warehouse_uri.clone(),
+                                atomic_write_dir: None,
+                            },
+                        ),
+                    },
                     ..Default::default()
                 };
-                let table_config =
+                let mut table_config =
                     MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+                table_config.row_identity = IdentityProp::SinglePrimitiveKey(0);
+
                 // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
                 let wal_config = WalConfig::default_wal_config_local("1", temp_dir.path());
                 let wal_manager = WalManager::new(&wal_config);
@@ -122,7 +141,6 @@ fn bench_write(c: &mut Criterion) {
                     "test_table".to_string(),
                     1,
                     temp_dir.path().to_path_buf(),
-                    IdentityProp::SinglePrimitiveKey(0),
                     iceberg_table_config,
                     table_config,
                     wal_manager,
@@ -144,7 +162,7 @@ fn bench_write(c: &mut Criterion) {
                         1,
                     );
                 }
-                let _ = table.flush(100000);
+                let _ = table.flush(100000, /*event_id=*/ uuid::Uuid::new_v4());
             });
         });
     });
@@ -156,16 +174,26 @@ fn bench_write(c: &mut Criterion) {
                 let temp_warehouse_dir = tempdir().unwrap();
                 let temp_warehouse_uri = temp_warehouse_dir.path().to_str().unwrap().to_string();
                 let iceberg_table_config = IcebergTableConfig {
-                    accessor_config: AccessorConfig::new_with_storage_config(
+                    data_accessor_config: AccessorConfig::new_with_storage_config(
                         StorageConfig::FileSystem {
                             root_directory: temp_warehouse_uri.clone(),
                             atomic_write_dir: None,
                         },
                     ),
+                    metadata_accessor_config: moonlink::IcebergCatalogConfig::File {
+                        accessor_config: AccessorConfig::new_with_storage_config(
+                            StorageConfig::FileSystem {
+                                root_directory: temp_warehouse_uri.clone(),
+                                atomic_write_dir: None,
+                            },
+                        ),
+                    },
                     ..Default::default()
                 };
-                let table_config =
+                let mut table_config =
                     MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+                table_config.row_identity = IdentityProp::SinglePrimitiveKey(0);
+
                 // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
                 let wal_config = WalConfig::default_wal_config_local("1", temp_dir.path());
                 let wal_manager = WalManager::new(&wal_config);
@@ -175,7 +203,6 @@ fn bench_write(c: &mut Criterion) {
                         "test_table".to_string(),
                         1,
                         temp_dir.path().to_path_buf(),
-                        IdentityProp::SinglePrimitiveKey(0),
                         iceberg_table_config,
                         table_config,
                         wal_manager,
@@ -197,7 +224,13 @@ fn bench_write(c: &mut Criterion) {
                             1,
                         );
                     }
-                    table.flush_stream(1, None).unwrap();
+                    table
+                        .flush_stream(
+                            /*xact_id=*/ 1,
+                            /*lsn=*/ None,
+                            /*event_id=*/ uuid::Uuid::new_v4(),
+                        )
+                        .unwrap();
                 });
                 table
             },
@@ -213,7 +246,13 @@ fn bench_write(c: &mut Criterion) {
                             )
                             .await;
                     }
-                    table.flush_stream(1, None).unwrap();
+                    table
+                        .flush_stream(
+                            /*xact_id=*/ 1,
+                            /*lsn=*/ None,
+                            /*event_id=*/ uuid::Uuid::new_v4(),
+                        )
+                        .unwrap();
                 });
             },
             BatchSize::PerIteration,

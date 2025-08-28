@@ -1,3 +1,4 @@
+#[cfg(any(test, debug_assertions))]
 use crate::row::IdentityProp;
 use crate::storage::mooncake_table::SnapshotTableState;
 use crate::storage::mooncake_table::{SnapshotOption, SnapshotTask};
@@ -73,7 +74,10 @@ impl SnapshotTableState {
     #[cfg(any(test, debug_assertions))]
     fn assert_data_files_and_file_indices_match(&self) {
         // Skip validation for append-only tables since they don't have file indices.
-        if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
+        if matches!(
+            self.mooncake_table_metadata.config.row_identity,
+            IdentityProp::None
+        ) {
             return;
         }
 
@@ -94,7 +98,10 @@ impl SnapshotTableState {
     #[cfg(any(test, debug_assertions))]
     async fn assert_index_blocks_cached(&self) {
         // Skip validation for append-only tables since they don't have file indices
-        if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
+        if matches!(
+            self.mooncake_table_metadata.config.row_identity,
+            IdentityProp::None
+        ) {
             return;
         }
 
@@ -122,7 +129,10 @@ impl SnapshotTableState {
     #[cfg(any(test, debug_assertions))]
     fn assert_file_indices_no_duplicate(&self) {
         // Skip validation for append-only tables since they don't have file indices
-        if matches!(self.mooncake_table_metadata.identity, IdentityProp::None) {
+        if matches!(
+            self.mooncake_table_metadata.config.row_identity,
+            IdentityProp::None
+        ) {
             return;
         }
 

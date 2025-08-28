@@ -1,25 +1,31 @@
 #![cfg(feature = "connector-pg")]
 
-use crate::pg_replicate::clients::postgres::ReplicationClient;
+use super::test_utils::{create_replication_client, setup_connection, TestResources};
 use crate::pg_replicate::conversions::text::TextFormatConverter;
-use crate::pg_replicate::table::{ColumnSchema, TableName};
+use crate::pg_replicate::table::TableName;
 use serial_test::serial;
 use tokio_postgres::types::{Kind, Type};
-use tokio_postgres::{connect, NoTls};
 
-async fn setup_connection() -> tokio_postgres::Client {
-    // Use DATABASE_URL env var if set (for CI), otherwise use devcontainer default
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:postgres@postgres:5432/postgres".to_string());
+// Type constants
+const TYPE_ADDRESS: &str = "test_address";
+const TYPE_POINT: &str = "test_point";
+const TYPE_LOCATION: &str = "test_location";
+const TYPE_ITEM: &str = "test_item";
+const TYPE_SKILL: &str = "test_skill";
+const TYPE_PERSON: &str = "test_person";
+const TYPE_COORDS: &str = "test_coords";
+const TYPE_VENUE: &str = "test_venue";
+const TYPE_TAG: &str = "test_tag";
+const TYPE_META: &str = "test_meta";
+const TYPE_DOC: &str = "test_doc";
 
-    let (client, connection) = connect(&database_url, NoTls).await.unwrap();
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("Postgres connection error: {e}");
-        }
-    });
-    client
-}
+// Table constants
+const TABLE_BASIC_COMPOSITE: &str = "test_basic_composite";
+const TABLE_NESTED: &str = "test_nested";
+const TABLE_ARRAY_COMPOSITE: &str = "test_array_composite";
+const TABLE_NESTED_ARRAY: &str = "test_nested_array";
+const TABLE_DEEP: &str = "test_deep";
+const TABLE_MIXED: &str = "test_mixed";
 
 async fn get_table_id(client: &tokio_postgres::Client, table_name: &str) -> u32 {
     let query = format!(
@@ -36,36 +42,49 @@ async fn get_table_id(client: &tokio_postgres::Client, table_name: &str) -> u32 
     panic!("Table not found: {}", table_name);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_basic_composite_type() {
     let client = setup_connection().await;
+    let mut resources = TestResources::new(client);
 
     // Create basic composite type
-    client
-        .simple_query(
-            "DROP TYPE IF EXISTS test_address CASCADE;
-             CREATE TYPE test_address AS (street TEXT, city TEXT, zip INTEGER);
+    resources
+        .client()
+        .simple_query(&format!(
+            "DROP TYPE IF EXISTS {} CASCADE;
+             CREATE TYPE {} AS (street TEXT, city TEXT, zip INTEGER);
              
-             DROP TABLE IF EXISTS test_basic_composite CASCADE;
-             CREATE TABLE test_basic_composite (
+             DROP TABLE IF EXISTS {} CASCADE;
+             CREATE TABLE {} (
                  id INTEGER PRIMARY KEY,
-                 addr test_address
+                 addr {}
              );
              
-             INSERT INTO test_basic_composite VALUES 
-             (1, ROW('123 Main St', 'NYC', 10001)::test_address);",
-        )
+             INSERT INTO {} VALUES 
+             (1, ROW('123 Main St', 'NYC', 10001)::{});",
+            TYPE_ADDRESS,
+            TYPE_ADDRESS,
+            TABLE_BASIC_COMPOSITE,
+            TABLE_BASIC_COMPOSITE,
+            TYPE_ADDRESS,
+            TABLE_BASIC_COMPOSITE,
+            TYPE_ADDRESS
+        ))
         .await
         .unwrap();
 
-    let table_id = get_table_id(&client, "test_basic_composite").await;
+    // Register resources for cleanup
+    resources.add_type(TYPE_ADDRESS);
+    resources.add_table(TABLE_BASIC_COMPOSITE);
+
+    let table_id = get_table_id(resources.client(), TABLE_BASIC_COMPOSITE).await;
     let table_name = TableName {
         schema: "public".to_string(),
-        name: "test_basic_composite".to_string(),
+        name: TABLE_BASIC_COMPOSITE.to_string(),
     };
 
-    let replication_client = ReplicationClient::from_client(client);
+    let replication_client = create_replication_client().await;
     let schema = replication_client
         .get_table_schema(table_id, table_name, /*publication=*/ None)
         .await
@@ -94,39 +113,57 @@ async fn test_basic_composite_type() {
     assert!(TextFormatConverter::try_from_str(&addr_col.typ, test_value).is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_nested_composite_types() {
     let client = setup_connection().await;
+    let mut resources = TestResources::new(client);
 
     // Create nested composite types
-    client
-        .simple_query(
-            "DROP TYPE IF EXISTS test_point CASCADE;
-             DROP TYPE IF EXISTS test_location CASCADE;
-             CREATE TYPE test_point AS (x FLOAT8, y FLOAT8);
-             CREATE TYPE test_location AS (name TEXT, point test_point);
+    resources
+        .client()
+        .simple_query(&format!(
+            "DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
+             CREATE TYPE {} AS (x FLOAT8, y FLOAT8);
+             CREATE TYPE {} AS (name TEXT, point {});
              
-             DROP TABLE IF EXISTS test_nested CASCADE;
-             CREATE TABLE test_nested (
+             DROP TABLE IF EXISTS {} CASCADE;
+             CREATE TABLE {} (
                  id INTEGER PRIMARY KEY,
-                 loc test_location
+                 loc {}
              );
              
-             INSERT INTO test_nested VALUES 
-             (1, ROW('Home', ROW(1.5, 2.5)::test_point)::test_location);",
-        )
+             INSERT INTO {} VALUES 
+             (1, ROW('Home', ROW(1.5, 2.5)::{})::{});",
+            TYPE_POINT,
+            TYPE_LOCATION,
+            TYPE_POINT,
+            TYPE_LOCATION,
+            TYPE_POINT,
+            TABLE_NESTED,
+            TABLE_NESTED,
+            TYPE_LOCATION,
+            TABLE_NESTED,
+            TYPE_POINT,
+            TYPE_LOCATION
+        ))
         .await
         .unwrap();
 
-    let table_id = get_table_id(&client, "test_nested").await;
-    let replication_client = ReplicationClient::from_client(client);
+    // Register resources for cleanup
+    resources.add_type(TYPE_POINT);
+    resources.add_type(TYPE_LOCATION);
+    resources.add_table(TABLE_NESTED);
+
+    let table_id = get_table_id(resources.client(), TABLE_NESTED).await;
+    let replication_client = create_replication_client().await;
     let schema = replication_client
         .get_table_schema(
             table_id,
             TableName {
                 schema: "public".to_string(),
-                name: "test_nested".to_string(),
+                name: TABLE_NESTED.to_string(),
             },
             /*publication=*/ None,
         )
@@ -157,37 +194,51 @@ async fn test_nested_composite_types() {
     assert!(TextFormatConverter::try_from_str(&loc_col.typ, test_value).is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_array_of_composite_types() {
     let client = setup_connection().await;
+    let mut resources = TestResources::new(client);
 
     // Create composite type for array testing
-    client
-        .simple_query(
-            "DROP TYPE IF EXISTS test_item CASCADE;
-             CREATE TYPE test_item AS (name TEXT, value INTEGER);
+    resources
+        .client()
+        .simple_query(&format!(
+            "DROP TYPE IF EXISTS {} CASCADE;
+             CREATE TYPE {} AS (name TEXT, value INTEGER);
              
-             DROP TABLE IF EXISTS test_array_composite CASCADE;
-             CREATE TABLE test_array_composite (
+             DROP TABLE IF EXISTS {} CASCADE;
+             CREATE TABLE {} (
                  id INTEGER PRIMARY KEY,
-                 items test_item[]
+                 items {}[]
              );
              
-             INSERT INTO test_array_composite VALUES 
-             (1, ARRAY[ROW('Item1', 100)::test_item, ROW('Item2', 200)::test_item]);",
-        )
+             INSERT INTO {} VALUES 
+             (1, ARRAY[ROW('Item1', 100)::{}, ROW('Item2', 200)::{}]);",
+            TYPE_ITEM,
+            TYPE_ITEM,
+            TABLE_ARRAY_COMPOSITE,
+            TABLE_ARRAY_COMPOSITE,
+            TYPE_ITEM,
+            TABLE_ARRAY_COMPOSITE,
+            TYPE_ITEM,
+            TYPE_ITEM
+        ))
         .await
         .unwrap();
 
-    let table_id = get_table_id(&client, "test_array_composite").await;
-    let replication_client = ReplicationClient::from_client(client);
+    // Register resources for cleanup
+    resources.add_type(TYPE_ITEM);
+    resources.add_table(TABLE_ARRAY_COMPOSITE);
+
+    let table_id = get_table_id(resources.client(), TABLE_ARRAY_COMPOSITE).await;
+    let replication_client = create_replication_client().await;
     let schema = replication_client
         .get_table_schema(
             table_id,
             TableName {
                 schema: "public".to_string(),
-                name: "test_array_composite".to_string(),
+                name: TABLE_ARRAY_COMPOSITE.to_string(),
             },
             /*publication=*/ None,
         )
@@ -224,39 +275,58 @@ async fn test_array_of_composite_types() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_composite_with_nested_array() {
     let client = setup_connection().await;
+    let mut resources = TestResources::new(client);
 
     // Create composite type with array field
-    client
-        .simple_query(
-            "DROP TYPE IF EXISTS test_skill CASCADE;
-             DROP TYPE IF EXISTS test_person CASCADE;
-             CREATE TYPE test_skill AS (name TEXT, level INTEGER);
-             CREATE TYPE test_person AS (name TEXT, skills test_skill[]);
+    resources
+        .client()
+        .simple_query(&format!(
+            "DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
+             CREATE TYPE {} AS (name TEXT, level INTEGER);
+             CREATE TYPE {} AS (name TEXT, skills {}[]);
              
-             DROP TABLE IF EXISTS test_nested_array CASCADE;
-             CREATE TABLE test_nested_array (
+             DROP TABLE IF EXISTS {} CASCADE;
+             CREATE TABLE {} (
                  id INTEGER PRIMARY KEY,
-                 person test_person
+                 person {}
              );
              
-             INSERT INTO test_nested_array VALUES 
-             (1, ROW('Alice', ARRAY[ROW('Python', 5)::test_skill, ROW('Rust', 3)::test_skill])::test_person);",
-        )
+             INSERT INTO {} VALUES 
+             (1, ROW('Alice', ARRAY[ROW('Python', 5)::{}, ROW('Rust', 3)::{}])::{});",
+            TYPE_SKILL,
+            TYPE_PERSON,
+            TYPE_SKILL,
+            TYPE_PERSON,
+            TYPE_SKILL,
+            TABLE_NESTED_ARRAY,
+            TABLE_NESTED_ARRAY,
+            TYPE_PERSON,
+            TABLE_NESTED_ARRAY,
+            TYPE_SKILL,
+            TYPE_SKILL,
+            TYPE_PERSON
+        ))
         .await
         .unwrap();
 
-    let table_id = get_table_id(&client, "test_nested_array").await;
-    let replication_client = ReplicationClient::from_client(client);
+    // Register resources for cleanup
+    resources.add_type(TYPE_SKILL);
+    resources.add_type(TYPE_PERSON);
+    resources.add_table(TABLE_NESTED_ARRAY);
+
+    let table_id = get_table_id(resources.client(), TABLE_NESTED_ARRAY).await;
+    let replication_client = create_replication_client().await;
     let schema = replication_client
         .get_table_schema(
             table_id,
             TableName {
                 schema: "public".to_string(),
-                name: "test_nested_array".to_string(),
+                name: TABLE_NESTED_ARRAY.to_string(),
             },
             /*publication=*/ None,
         )
@@ -298,44 +368,72 @@ async fn test_composite_with_nested_array() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_deeply_nested_composites() {
     let client = setup_connection().await;
+    let mut resources = TestResources::new(client);
 
     // Create deeply nested composite types (3+ levels)
-    client
-        .simple_query(
-            "DROP TYPE IF EXISTS test_coords CASCADE;
-             DROP TYPE IF EXISTS test_address CASCADE;
-             DROP TYPE IF EXISTS test_location CASCADE;
-             DROP TYPE IF EXISTS test_venue CASCADE;
+    resources
+        .client()
+        .simple_query(&format!(
+            "DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
              
-             CREATE TYPE test_coords AS (lat FLOAT8, lon FLOAT8);
-             CREATE TYPE test_address AS (street TEXT, coords test_coords);
-             CREATE TYPE test_location AS (name TEXT, addr test_address);
-             CREATE TYPE test_venue AS (id INTEGER, loc test_location);
+             CREATE TYPE {} AS (lat FLOAT8, lon FLOAT8);
+             CREATE TYPE {} AS (street TEXT, coords {});
+             CREATE TYPE {} AS (name TEXT, addr {});
+             CREATE TYPE {} AS (id INTEGER, loc {});
              
-             DROP TABLE IF EXISTS test_deep CASCADE;
-             CREATE TABLE test_deep (
+             DROP TABLE IF EXISTS {} CASCADE;
+             CREATE TABLE {} (
                  id INTEGER PRIMARY KEY,
-                 venue test_venue
+                 venue {}
              );
              
-             INSERT INTO test_deep VALUES 
-             (1, ROW(100, ROW('Stadium', ROW('123 Main', ROW(40.7, -74.0)::test_coords)::test_address)::test_location)::test_venue);",
-        )
+             INSERT INTO {} VALUES 
+             (1, ROW(100, ROW('Stadium', ROW('123 Main', ROW(40.7, -74.0)::{})::{})::{})::{});",
+            TYPE_COORDS,
+            TYPE_ADDRESS,
+            TYPE_LOCATION,
+            TYPE_VENUE,
+            TYPE_COORDS,
+            TYPE_ADDRESS,
+            TYPE_COORDS,
+            TYPE_LOCATION,
+            TYPE_ADDRESS,
+            TYPE_VENUE,
+            TYPE_LOCATION,
+            TABLE_DEEP,
+            TABLE_DEEP,
+            TYPE_VENUE,
+            TABLE_DEEP,
+            TYPE_COORDS,
+            TYPE_ADDRESS,
+            TYPE_LOCATION,
+            TYPE_VENUE
+        ))
         .await
         .unwrap();
 
-    let table_id = get_table_id(&client, "test_deep").await;
-    let replication_client = ReplicationClient::from_client(client);
+    // Register resources for cleanup
+    resources.add_type(TYPE_COORDS);
+    resources.add_type(TYPE_ADDRESS);
+    resources.add_type(TYPE_LOCATION);
+    resources.add_type(TYPE_VENUE);
+    resources.add_table(TABLE_DEEP);
+
+    let table_id = get_table_id(resources.client(), TABLE_DEEP).await;
+    let replication_client = create_replication_client().await;
     let schema = replication_client
         .get_table_schema(
             table_id,
             TableName {
                 schema: "public".to_string(),
-                name: "test_deep".to_string(),
+                name: TABLE_DEEP.to_string(),
             },
             /*publication=*/ None,
         )
@@ -385,44 +483,67 @@ async fn test_deeply_nested_composites() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_complex_mixed_nesting() {
     let client = setup_connection().await;
+    let mut resources = TestResources::new(client);
 
     // Test array of composites with nested arrays
-    client
-        .simple_query(
-            "DROP TYPE IF EXISTS test_tag CASCADE;
-             DROP TYPE IF EXISTS test_meta CASCADE;
-             DROP TYPE IF EXISTS test_doc CASCADE;
+    resources
+        .client()
+        .simple_query(&format!(
+            "DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
+             DROP TYPE IF EXISTS {} CASCADE;
              
-             CREATE TYPE test_tag AS (name TEXT, score INTEGER);
-             CREATE TYPE test_meta AS (tags test_tag[], author TEXT);
-             CREATE TYPE test_doc AS (title TEXT, meta test_meta, refs INTEGER[]);
+             CREATE TYPE {} AS (name TEXT, score INTEGER);
+             CREATE TYPE {} AS (tags {}[], author TEXT);
+             CREATE TYPE {} AS (title TEXT, meta {}, refs INTEGER[]);
              
-             DROP TABLE IF EXISTS test_mixed CASCADE;
-             CREATE TABLE test_mixed (
+             DROP TABLE IF EXISTS {} CASCADE;
+             CREATE TABLE {} (
                  id INTEGER PRIMARY KEY,
-                 docs test_doc[]
+                 docs {}[]
              );
              
-             INSERT INTO test_mixed VALUES 
+             INSERT INTO {} VALUES 
              (1, ARRAY[
-                 ROW('Doc1', ROW(ARRAY[ROW('tag1', 5)::test_tag], 'Alice')::test_meta, ARRAY[1,2])::test_doc
+                 ROW('Doc1', ROW(ARRAY[ROW('tag1', 5)::{}], 'Alice')::{}, ARRAY[1,2])::{}
              ]);",
-        )
+            TYPE_TAG,
+            TYPE_META,
+            TYPE_DOC,
+            TYPE_TAG,
+            TYPE_META,
+            TYPE_TAG,
+            TYPE_DOC,
+            TYPE_META,
+            TABLE_MIXED,
+            TABLE_MIXED,
+            TYPE_DOC,
+            TABLE_MIXED,
+            TYPE_TAG,
+            TYPE_META,
+            TYPE_DOC
+        ))
         .await
         .unwrap();
 
-    let table_id = get_table_id(&client, "test_mixed").await;
-    let replication_client = ReplicationClient::from_client(client);
+    // Register resources for cleanup
+    resources.add_type(TYPE_TAG);
+    resources.add_type(TYPE_META);
+    resources.add_type(TYPE_DOC);
+    resources.add_table(TABLE_MIXED);
+
+    let table_id = get_table_id(resources.client(), TABLE_MIXED).await;
+    let replication_client = create_replication_client().await;
     let schema = replication_client
         .get_table_schema(
             table_id,
             TableName {
                 schema: "public".to_string(),
-                name: "test_mixed".to_string(),
+                name: TABLE_MIXED.to_string(),
             },
             /*publication=*/ None,
         )

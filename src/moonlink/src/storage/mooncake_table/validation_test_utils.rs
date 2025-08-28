@@ -79,6 +79,11 @@ pub(crate) async fn validate_recovered_snapshot(
         assert!(tokio::fs::try_exists(puffin_filepath).await.unwrap());
     }
 
+    // For append-only table, there's no file indices.
+    if snapshot.indices.file_indices.is_empty() {
+        return;
+    }
+
     // Check file indices.
     let mut index_referenced_data_filepaths: HashSet<String> = HashSet::new();
     for cur_file_index in snapshot.indices.file_indices.iter() {
@@ -124,12 +129,16 @@ pub(crate) async fn check_file_pinned(object_storage_cache: &ObjectStorageCache,
 
 /// Test util function to check the given row doesn't exist in the snapshot indices.
 pub(crate) async fn check_row_index_nonexistent(snapshot: &Snapshot, row: &MoonlinkRow) {
-    let key = snapshot.metadata.identity.get_lookup_key(row);
+    let key = snapshot.metadata.config.row_identity.get_lookup_key(row);
     let locs = snapshot
         .indices
         .find_record(&RawDeletionRecord {
             lookup_key: key,
-            row_identity: snapshot.metadata.identity.extract_identity_for_key(row),
+            row_identity: snapshot
+                .metadata
+                .config
+                .row_identity
+                .extract_identity_for_key(row),
             pos: None,
             lsn: 0, // LSN has nothing to do with deletion record search
         })
@@ -146,12 +155,16 @@ pub(crate) async fn check_row_index_on_disk(
     row: &MoonlinkRow,
     filesystem_accessor: &dyn BaseFileSystemAccess,
 ) {
-    let key = snapshot.metadata.identity.get_lookup_key(row);
+    let key = snapshot.metadata.config.row_identity.get_lookup_key(row);
     let locs = snapshot
         .indices
         .find_record(&RawDeletionRecord {
             lookup_key: key,
-            row_identity: snapshot.metadata.identity.extract_identity_for_key(row),
+            row_identity: snapshot
+                .metadata
+                .config
+                .row_identity
+                .extract_identity_for_key(row),
             pos: None,
             lsn: 0, // LSN has nothing to do with deletion record search
         })

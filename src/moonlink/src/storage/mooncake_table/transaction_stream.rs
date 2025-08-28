@@ -33,7 +33,7 @@ pub(crate) struct TransactionStreamState {
 
 /// Determines the state of a transaction stream.
 /// Transaction can be safely removed when it is no longer `Pending` and has no pending flushes.
-#[derive(PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TransactionStreamStatus {
     Pending,
     Committed,
@@ -149,7 +149,7 @@ impl MooncakeTable {
                 TransactionStreamState::new(
                     metadata.schema.clone(),
                     metadata.config.batch_size,
-                    metadata.identity.clone(),
+                    metadata.config.row_identity.clone(),
                     Arc::clone(&self.streaming_batch_id_counter),
                 )
             })
@@ -174,8 +174,12 @@ impl MooncakeTable {
         }
 
         // Perform append operation.
-        let lookup_key = self.metadata.identity.get_lookup_key(&row);
-        let identity_for_key = self.metadata.identity.extract_identity_for_key(&row);
+        let lookup_key = self.metadata.config.row_identity.get_lookup_key(&row);
+        let identity_for_key = self
+            .metadata
+            .config
+            .row_identity
+            .extract_identity_for_key(&row);
 
         let stream_state = self.get_or_create_stream_state(xact_id);
         stream_state
@@ -187,7 +191,7 @@ impl MooncakeTable {
 
     pub async fn delete_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) {
         // Check if this is an append-only table
-        if matches!(self.metadata.identity, IdentityProp::None) {
+        if matches!(self.metadata.config.row_identity, IdentityProp::None) {
             tracing::error!("Delete operation not supported for append-only tables");
             return;
         }
@@ -202,13 +206,13 @@ impl MooncakeTable {
         }
 
         // Perform delete operation.
-        let lookup_key = self.metadata.identity.get_lookup_key(&row);
-        let metadata_identity = self.metadata.identity.clone();
+        let lookup_key = self.metadata.config.row_identity.get_lookup_key(&row);
+        let row_identity = self.metadata.config.row_identity.clone();
         let mut record = RawDeletionRecord {
             lookup_key,
             lsn: get_lsn_for_pending_xact(xact_id), // at commit time we will update this with the actual lsn
             pos: None,
-            row_identity: metadata_identity.extract_identity_columns(row),
+            row_identity: row_identity.extract_identity_columns(row),
         };
 
         let stream_state = self.get_or_create_stream_state(xact_id);
@@ -222,7 +226,7 @@ impl MooncakeTable {
             // Delete from stream mem slice
             if stream_state
                 .mem_slice
-                .delete(&record, &metadata_identity)
+                .delete(&record, &row_identity)
                 .await
                 .is_some()
             {
@@ -243,7 +247,7 @@ impl MooncakeTable {
                                 continue;
                             }
                             if record.row_identity.is_some()
-                                && metadata_identity.requires_identity_check_in_mem_slice()
+                                && row_identity.requires_identity_check_in_mem_slice()
                                 && !record
                                     .row_identity
                                     .as_ref()
@@ -251,7 +255,7 @@ impl MooncakeTable {
                                     .equals_record_batch_at_offset(
                                         batch.data.as_ref().unwrap(),
                                         row_id,
-                                        &metadata_identity,
+                                        &row_identity,
                                     )
                             {
                                 continue;
@@ -286,7 +290,7 @@ impl MooncakeTable {
                                     .equals_parquet_at_offset(
                                         file.file_path(),
                                         row_id,
-                                        &metadata_identity,
+                                        &row_identity,
                                     )
                                     .await
                             {
@@ -306,7 +310,7 @@ impl MooncakeTable {
         // Scope the main table deletion lookup
         record.pos = {
             self.mem_slice
-                .find_non_deleted_position(&record, &metadata_identity)
+                .find_non_deleted_position(&record, &row_identity)
                 .await
         };
 
@@ -400,7 +404,7 @@ impl MooncakeTable {
         &mut self,
         xact_id: u32,
         mut disk_slice: DiskSliceWriter,
-        flush_event_id: BackgroundEventId,
+        flush_event_id: uuid::Uuid,
     ) {
         // Record events for flush completion.
         if let Some(event_replay_tx) = &self.event_replay_tx {
@@ -417,16 +421,10 @@ impl MooncakeTable {
                 .unwrap();
         }
 
-        // Perform table flush completion notification.
-        if let Some(lsn) = disk_slice.lsn() {
-            self.remove_ongoing_flush_lsn(lsn);
-            self.try_set_next_flush_lsn(lsn);
-        }
-
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
-            .expect("Stream state not found for xact_id: {xact_id}");
+            .unwrap_or_else(|| panic!("Stream state not found for xact_id: {xact_id}"));
 
         stream_state.ongoing_flush_count -= 1;
 
@@ -446,6 +444,7 @@ impl MooncakeTable {
             let should_remove = stream_state.ongoing_flush_count == 0;
             let _ = stream_state;
 
+            self.remove_ongoing_flush_lsn(commit_lsn);
             self.try_set_next_flush_lsn(commit_lsn);
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
             if should_remove {
@@ -507,18 +506,27 @@ impl MooncakeTable {
         }
     }
 
-    pub fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
+    /// # Arguments
+    ///
+    /// * lsn: commit LSN for the current streaming transaction if assigned.
+    pub fn flush_stream(
+        &mut self,
+        xact_id: u32,
+        lsn: Option<u64>,
+        event_id: uuid::Uuid,
+    ) -> Result<()> {
         // Temporarily remove to drop reference to self
         let mut stream_state = self
             .transaction_stream_states
             .remove(&xact_id)
-            .expect("Stream state not found for xact_id, lsn: {xact_id, lsn}");
+            .unwrap_or_else(|| {
+                panic!("Stream state not found for xact_id {xact_id}, lsn: {lsn:?}")
+            });
 
         // Record events for flush initiation.
-        let flush_event_id = self.event_id_assigner.get_next_event_id();
         if let Some(event_replay_tx) = &self.event_replay_tx {
             let table_event = replay_events::create_flush_event_initiation(
-                flush_event_id,
+                event_id,
                 /*xact_id=*/ Some(xact_id),
                 lsn,
                 stream_state.mem_slice.get_commit_check_point(),
@@ -534,11 +542,20 @@ impl MooncakeTable {
 
         stream_state.ongoing_flush_count += 1;
 
+        // For streaming transactions, only record ongoing flush operations when commit;
+        // otherwise it's completely invisible to the outside world.
+        let ongoing_flush_count = if lsn.is_some() {
+            stream_state.ongoing_flush_count
+        } else {
+            0
+        };
+
         self.flush_disk_slice(
             &mut disk_slice,
             table_notify_tx,
             Some(xact_id),
-            flush_event_id,
+            ongoing_flush_count,
+            event_id,
         );
 
         // Add back stream state
@@ -560,7 +577,7 @@ impl MooncakeTable {
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
-            .expect("Stream state not found for xact_id: {xact_id}");
+            .unwrap_or_else(|| panic!("Stream state not found for xact_id: {xact_id}"));
 
         // Add state from current mem slice to stream first
         let (_, mut batches, index) = stream_state.mem_slice.drain()?;
@@ -644,12 +661,17 @@ impl MooncakeTable {
     }
 
     /// Commit a transaction stream.
-    /// Flushes any remaining rows from stream mem slice
-    /// Adds all in mem batches and indices to next snapshot task
-    /// Updates deletion records
-    /// Enqueues `TransactionStreamOutput::Commit` for snapshot task
-    pub fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        self.flush_stream(xact_id, Some(lsn))?;
+    /// - Flushes any remaining rows from stream mem slice
+    /// - Adds all in mem batches and indices to next snapshot task
+    /// - Updates deletion records
+    /// - Enqueues `TransactionStreamOutput::Commit` for snapshot task
+    pub fn commit_transaction_stream(
+        &mut self,
+        xact_id: u32,
+        lsn: u64,
+        event_id: uuid::Uuid,
+    ) -> Result<()> {
+        self.flush_stream(xact_id, Some(lsn), event_id)?;
         self.commit_transaction_stream_impl(xact_id, lsn)
     }
 }

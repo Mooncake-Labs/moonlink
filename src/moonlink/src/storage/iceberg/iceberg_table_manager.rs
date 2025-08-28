@@ -85,7 +85,7 @@ impl IcebergTableManager {
         let iceberg_schema =
             iceberg::arrow::arrow_schema_to_schema(mooncake_table_metadata.schema.as_ref())?;
         let catalog =
-            catalog_utils::create_catalog(config.accessor_config.clone(), iceberg_schema)?;
+            catalog_utils::create_catalog(config.metadata_accessor_config.clone(), iceberg_schema)?;
         Ok(Self {
             snapshot_loaded: false,
             config,
@@ -160,7 +160,7 @@ impl IcebergTableManager {
         if self.iceberg_table.is_none() {
             let table = utils::get_or_create_iceberg_table(
                 &*self.catalog,
-                &self.config.accessor_config.get_root_path(),
+                &self.config.metadata_accessor_config.get_warehouse_uri(),
                 &self.config.namespace,
                 &self.config.table_name,
                 self.mooncake_table_metadata.schema.as_ref(),
@@ -188,7 +188,7 @@ impl IcebergTableManager {
 #[async_trait]
 impl TableManager for IcebergTableManager {
     fn get_warehouse_location(&self) -> String {
-        self.config.accessor_config.get_root_path()
+        self.config.metadata_accessor_config.get_warehouse_uri()
     }
 
     async fn sync_snapshot(

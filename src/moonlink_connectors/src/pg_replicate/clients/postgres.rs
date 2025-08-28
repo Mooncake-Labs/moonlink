@@ -3,15 +3,18 @@ use std::collections::{HashMap, HashSet};
 use crate::pg_replicate::conversions::text::TextFormatConverter;
 use crate::pg_replicate::table::{ColumnSchema, LookupKey, SrcTableId, TableName, TableSchema};
 use futures::future::err;
+use native_tls::TlsConnector;
 use pg_escape::{quote_identifier, quote_literal};
+use postgres_native_tls::{MakeTlsConnector, TlsStream};
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
+use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
     config::ReplicationMode,
     types::{Kind, PgLsn, Type},
-    Client as PostgresClient, Config, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow,
+    Client as PostgresClient, Config, CopyOutStream, SimpleQueryMessage, SimpleQueryRow,
 };
-use tokio_postgres::{tls::NoTlsStream, Connection, Socket};
+use tokio_postgres::{Connection, Socket};
 use tracing::Instrument;
 use tracing::{debug, info_span, warn};
 
@@ -27,6 +30,9 @@ pub struct ReplicationClient {
 
 #[derive(Debug, Error)]
 pub enum ReplicationClientError {
+    #[error("native_tls error: {0}")]
+    NativeTlsError(#[from] native_tls::Error),
+
     #[error("tokio_postgres error: {0}")]
     TokioPostgresError(#[from] tokio_postgres::Error),
 
@@ -63,17 +69,19 @@ pub enum ReplicationClientError {
 
 impl ReplicationClient {
     /// Connect to a postgres database in logical replication mode without TLS
-    pub async fn connect_no_tls(
+    pub async fn connect(
         uri: &str,
         replication_mode: bool,
-    ) -> Result<(ReplicationClient, Connection<Socket, NoTlsStream>), ReplicationClientError> {
+    ) -> Result<(ReplicationClient, Connection<Socket, TlsStream<Socket>>), ReplicationClientError>
+    {
+        let tls = build_tls_connector()?;
         debug!("connecting to postgres");
 
         let mut config = uri.parse::<Config>()?;
         if replication_mode {
             config.replication_mode(ReplicationMode::Logical);
         }
-        let (postgres_client, connection) = config.connect(NoTls).await?;
+        let (postgres_client, connection) = config.connect(tls).await?;
 
         debug!("successfully connected to postgres");
 
@@ -854,4 +862,30 @@ impl ReplicationClient {
 
         Ok(stream)
     }
+}
+
+#[cfg(not(feature = "test-tls"))]
+pub fn build_tls_connector() -> Result<MakeTlsConnector, ReplicationClientError> {
+    let connector = TlsConnector::new().expect("failed to create tls connector");
+    let tls = MakeTlsConnector::new(connector);
+    Ok(tls)
+}
+
+#[cfg(feature = "test-tls")]
+pub fn build_tls_connector() -> Result<MakeTlsConnector, ReplicationClientError> {
+    let file_path = "../../.devcontainer/certs/ca.crt";
+
+    // check that file exists
+    if !std::path::Path::new(file_path).exists() {
+        warn!("file {} does not exist", file_path);
+    }
+    let pem_bytes = std::fs::read(file_path).unwrap();
+
+    let connector = TlsConnector::builder()
+        .add_root_certificate(native_tls::Certificate::from_pem(pem_bytes.as_slice()).unwrap())
+        .build()
+        .unwrap();
+
+    let tls = MakeTlsConnector::new(connector);
+    Ok(tls)
 }

@@ -12,12 +12,11 @@ use crate::storage::compaction::table_compaction::{CompactedDataEntry, RemappedR
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::index::{cache_utils as index_cache_utils, FileIndex};
 use crate::storage::mooncake_table::persistence_buffer::UnpersistedRecords;
-use crate::storage::mooncake_table::replay::event_id_assigner::EventIdAssigner;
-use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 use crate::storage::mooncake_table::BatchIdCounter;
 use crate::storage::mooncake_table::MoonlinkRow;
 use crate::storage::mooncake_table::SnapshotOption;
+use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::storage_utils::{FileId, TableId, TableUniqueFileId};
 use crate::storage::storage_utils::{
     MooncakeDataFileRef, ProcessedDeletionRecord, RawDeletionRecord, RecordLocation,
@@ -82,26 +81,11 @@ pub(crate) struct SnapshotTableState {
 
     /// Batch ID counter for non-streaming operations
     pub(super) non_streaming_batch_id_counter: Arc<BatchIdCounter>,
-
-    /// Used to generated monotonically increasing id to differentiate each replay events.
-    pub(super) event_id_assigner: EventIdAssigner,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PuffinDeletionBlobAtRead {
-    /// Index of local data files.
-    pub data_file_index: u32,
-    /// Index of puffin filepaths.
-    pub puffin_file_index: u32,
-    pub start_offset: u32,
-    pub blob_size: u32,
 }
 
 #[derive(Clone)]
 pub struct MooncakeSnapshotOutput {
     /// Table event id.
-    pub(crate) id: BackgroundEventId,
-    /// UUID for the current mooncake snapshot result.
     pub(crate) uuid: uuid::Uuid,
     /// Committed LSN for mooncake snapshot.
     pub(crate) commit_lsn: u64,
@@ -120,7 +104,6 @@ pub struct MooncakeSnapshotOutput {
 impl std::fmt::Debug for MooncakeSnapshotOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MooncakeSnapshotOutput")
-            .field("id", &self.id)
             .field("uuid", &self.uuid)
             .field("commit", &self.commit_lsn)
             .field("iceberg_snapshot_payload", &self.iceberg_snapshot_payload)
@@ -163,11 +146,10 @@ impl SnapshotTableState {
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         current_snapshot: Snapshot,
         non_streaming_batch_id_counter: Arc<BatchIdCounter>,
-        event_id_assigner: EventIdAssigner,
     ) -> Result<Self> {
         let mut batches = BTreeMap::new();
         // Properly load a batch ID from the counter to ensure correspondence with MemSlice.
-        let initial_batch_id = non_streaming_batch_id_counter.next();
+        let initial_batch_id = non_streaming_batch_id_counter.load();
         batches.insert(
             initial_batch_id,
             InMemoryBatch::new(metadata.config.batch_size),
@@ -188,7 +170,6 @@ impl SnapshotTableState {
             uncommitted_deletion_log: Vec::new(),
             unpersisted_records: UnpersistedRecords::new(table_config),
             non_streaming_batch_id_counter,
-            event_id_assigner,
         })
     }
 
@@ -484,8 +465,6 @@ impl SnapshotTableState {
         mut task: SnapshotTask,
         opt: SnapshotOption,
     ) -> MooncakeSnapshotOutput {
-        // Validate event id is assigned.
-        assert!(opt.id.is_some());
         // Validate mooncake table operation invariants.
         self.validate_mooncake_table_invariants(&task, &opt);
         // Validate persistence results.
@@ -599,7 +578,7 @@ impl SnapshotTableState {
 
         // TODO(hjiang): When there's only schema evolution, we should also flush even no flush.
         let flush_lsn = self.current_snapshot.flush_lsn.unwrap_or(0);
-        if !opt.skip_iceberg_snapshot
+        if opt.iceberg_snapshot_option != IcebergSnapshotOption::Skip
             && (force_empty_iceberg_payload || flush_by_table_write)
             && flush_lsn < task.min_ongoing_flush_lsn
         {
@@ -613,8 +592,11 @@ impl SnapshotTableState {
                 || flush_by_new_files_or_maintenance
                 || force_empty_iceberg_payload
             {
-                iceberg_snapshot_payload =
-                    Some(self.get_iceberg_snapshot_payload(flush_lsn, committed_deletion_logs));
+                iceberg_snapshot_payload = Some(self.get_iceberg_snapshot_payload(
+                    &opt.iceberg_snapshot_option,
+                    flush_lsn,
+                    committed_deletion_logs,
+                ));
             }
         }
 
@@ -632,7 +614,6 @@ impl SnapshotTableState {
         }
 
         MooncakeSnapshotOutput {
-            id: opt.id.unwrap(),
             uuid: opt.uuid,
             commit_lsn: self.current_snapshot.snapshot_version,
             iceberg_snapshot_payload,
@@ -905,7 +886,7 @@ impl SnapshotTableState {
                 identity.equals_record_batch_at_offset(
                     batch.data.as_ref().expect("batch missing data"),
                     *row_id,
-                    &self.current_snapshot.metadata.identity,
+                    &self.current_snapshot.metadata.config.row_identity,
                 )
             }
             RecordLocation::DiskFile(file_id, row_id) => {
@@ -918,7 +899,7 @@ impl SnapshotTableState {
                     .equals_parquet_at_offset(
                         file.file_path(),
                         *row_id,
-                        &self.current_snapshot.metadata.identity,
+                        &self.current_snapshot.metadata.config.row_identity,
                     )
                     .await
             }

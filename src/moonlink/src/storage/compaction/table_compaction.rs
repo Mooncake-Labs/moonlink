@@ -1,7 +1,6 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::puffin_utils::PuffinBlobRef;
 use crate::storage::index::FileIndex;
-use crate::storage::mooncake_table::replay::replay_events::BackgroundEventId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
 use crate::storage::storage_utils::RecordLocation;
 use crate::storage::storage_utils::TableUniqueFileId;
@@ -47,8 +46,6 @@ impl Eq for SingleFileToCompact {}
 #[derive(Clone)]
 pub struct DataCompactionPayload {
     /// Background event id.
-    pub(crate) id: BackgroundEventId,
-    /// UUID for current compaction operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// Object storage cache.
     pub(crate) object_storage_cache: Arc<dyn CacheTrait>,
@@ -63,7 +60,6 @@ pub struct DataCompactionPayload {
 impl std::fmt::Debug for DataCompactionPayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataCompactionPayload")
-            .field("id", &self.id)
             .field("uuid", &self.uuid)
             .field("object_storage_cache", &self.object_storage_cache)
             .field("filesystem_accessor", &self.filesystem_accessor)
@@ -101,8 +97,6 @@ pub(crate) struct RemappedRecordLocation {
 #[derive(Clone, Default, PartialEq)]
 pub struct DataCompactionResult {
     /// Background event id.
-    pub(crate) id: BackgroundEventId,
-    /// UUID for current compaction operation, used for observability purpose.
     pub(crate) uuid: uuid::Uuid,
     /// Data files which get compacted, maps from old record location to new one.
     pub(crate) remapped_data_files: HashMap<RecordLocation, RemappedRecordLocation>,
@@ -123,6 +117,7 @@ pub struct DataCompactionResult {
 impl DataCompactionResult {
     /// Return whether data compaction result is empty.
     pub fn is_empty(&self) -> bool {
+        // If all rows have been deleted after compaction, there'll be no new data files, file indices and remaps.
         if self.old_data_files.is_empty() {
             assert!(self.remapped_data_files.is_empty());
             assert!(self.old_data_files.is_empty());
@@ -132,8 +127,6 @@ impl DataCompactionResult {
             return true;
         }
 
-        // If all rows have been deleted after compaction, there'll be no new data files, file indices and remaps.
-        assert!(!self.old_file_indices.is_empty());
         false
     }
 }
@@ -141,7 +134,6 @@ impl DataCompactionResult {
 impl std::fmt::Debug for DataCompactionResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataCompactionResult")
-            .field("id", &self.id)
             .field("uuid", &self.uuid)
             .field("remapped data files count", &self.remapped_data_files.len())
             .field("old data files count", &self.old_data_files.len())
