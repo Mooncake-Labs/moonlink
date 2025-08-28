@@ -176,6 +176,8 @@ struct ChaosState {
     rng: StdRng,
     /// Whether to enable delete operations.
     append_only: bool,
+    /// Whether to test upsert/ delete if exists.
+    is_upsert_table: bool,
     /// Non table update operation invocation status.
     non_table_update_cmd_call: NonTableUpdateCmdCall,
     /// Used to generate rows to insert.
@@ -207,12 +209,18 @@ struct ChaosState {
 }
 
 impl ChaosState {
-    fn new(read_state_manager: ReadStateManager, random_seed: u64, append_only: bool) -> Self {
+    fn new(
+        read_state_manager: ReadStateManager,
+        random_seed: u64,
+        append_only: bool,
+        upsert_delete_if_exists: bool,
+    ) -> Self {
         let rng = StdRng::seed_from_u64(random_seed);
         Self {
             random_seed,
             rng,
             append_only,
+            is_upsert_table: upsert_delete_if_exists,
             non_table_update_cmd_call: NonTableUpdateCmdCall::default(),
             txn_state: TxnState::Empty,
             next_id: 0,
@@ -342,6 +350,13 @@ impl ChaosState {
             .any(|(cur_id, _)| *cur_id == id)
     }
 
+    fn can_append(&self) -> bool {
+        if self.is_upsert_table {
+            return false;
+        }
+        true
+    }
+
     /// Return whether we could delete a row in the next event.
     ///
     /// The logic corresponds to [`get_random_row_to_delete`].
@@ -417,6 +432,13 @@ impl ChaosState {
 
     /// Get a random row to delete.
     fn get_random_row_to_delete(&mut self) -> MoonlinkRow {
+        if self.is_upsert_table && self.rng.random_range(0..100) < 50 {
+            // Delete a none existing row.
+            let row = create_row(self.next_id, /*name=*/ "user", self.next_id % 5);
+            self.next_id += 1;
+            return row;
+        }
+
         let mut candidates: Vec<(i32, MoonlinkRow, bool /*committed*/)> = self
             .committed_inserted_rows
             .iter()
@@ -471,6 +493,14 @@ impl ChaosState {
 
     /// Get a random row to update.
     fn get_random_row_to_update(&mut self) -> MoonlinkRow {
+        if self.is_upsert_table && self.rng.random_range(0..100) < 50 {
+            // upsert a new row.
+            let row = create_row(self.next_id, /*name=*/ "user", self.next_id % 5);
+            self.uncommitted_inserted_rows
+                .push_back((self.next_id, row.clone()));
+            self.next_id += 1;
+            return row;
+        }
         let mut candidates: Vec<(i32, MoonlinkRow)> = self
             .committed_inserted_rows
             .iter()
@@ -570,10 +600,14 @@ impl ChaosState {
         self.try_push_read_snapshot_cmd(&mut choices);
         self.try_push_table_maintenance_cmd(&mut choices);
         if self.txn_state == TxnState::Empty {
-            choices.push(EventKind::BeginStreamingTxn);
+            if !self.is_upsert_table {
+                choices.push(EventKind::BeginStreamingTxn);
+            }
             choices.push(EventKind::BeginNonStreamingTxn);
         } else {
-            choices.push(EventKind::Append);
+            if self.can_append() {
+                choices.push(EventKind::Append);
+            }
             if self.can_delete() {
                 choices.push(EventKind::Delete);
             }
@@ -635,7 +669,7 @@ impl ChaosState {
                 row: self.get_random_row_to_delete(),
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
-                delete_if_exists: false,
+                delete_if_exists: self.is_upsert_table,
                 is_recovery: false,
             }]),
             EventKind::Update => {
@@ -645,7 +679,7 @@ impl ChaosState {
                         row: row.clone(),
                         xact_id: self.get_cur_xact_id(),
                         lsn: self.get_and_update_cur_lsn(),
-                        delete_if_exists: false,
+                        delete_if_exists: self.is_upsert_table,
                         is_recovery: false,
                     },
                     TableEvent::Append {
@@ -706,6 +740,16 @@ enum TableMaintenanceOption {
     DataCompaction,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum SpecialTableOption {
+    /// No special table option.
+    None,
+    /// Upsert/ delete if exists.
+    UpsertDeleteIfExists,
+    /// Append only.
+    AppendOnly,
+}
+
 #[derive(Clone, Debug)]
 struct TestEnvConfig {
     /// Test name.
@@ -714,8 +758,8 @@ struct TestEnvConfig {
     disk_slice_write_chaos_enabled: bool,
     /// Whether to enable local filesystem optimization for object storage cache.
     local_filesystem_optimization_enabled: bool,
-    /// Whether to disable deletion, just append operation.
-    append_only: bool,
+    /// Special table option.
+    special_table_option: SpecialTableOption,
     /// Table background maintenance option.
     maintenance_option: TableMaintenanceOption,
     /// Event count.
@@ -753,7 +797,11 @@ impl TestEnvironment {
             config.disk_slice_write_chaos_enabled,
             chaos_test_arg.seed,
         );
-        let identity = get_random_identity(chaos_test_arg.seed, config.append_only);
+        let identity = get_random_identity(
+            chaos_test_arg.seed,
+            config.special_table_option == SpecialTableOption::AppendOnly,
+            config.special_table_option == SpecialTableOption::UpsertDeleteIfExists,
+        );
         let mooncake_table_metadata = match &config.maintenance_option {
             TableMaintenanceOption::NoTableMaintenance => create_test_table_metadata_disable_flush(
                 table_temp_dir.path().to_str().unwrap().to_string(),
@@ -964,7 +1012,7 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
     let event_sender = env.event_sender.clone();
     let read_state_manager = env.read_state_manager;
     let mut table_event_manager = env.table_event_manager;
-    let last_commit_lsn_tx = env.last_commit_lsn_tx.clone();
+    let last_commit_lsn_tx = env.last_commit_lsn_tx;
     let replication_lsn_tx = env.replication_lsn_tx.clone();
 
     // Fields used to recreate a new mooncake table.
@@ -976,7 +1024,8 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
         let mut state = ChaosState::new(
             read_state_manager,
             cloned_args.seed,
-            test_env_config.append_only,
+            test_env_config.special_table_option == SpecialTableOption::AppendOnly,
+            test_env_config.special_table_option == SpecialTableOption::UpsertDeleteIfExists,
         );
         println!(
             "Test {} is with random seed {}",
@@ -1091,7 +1140,7 @@ async fn test_disk_slice_chaos_on_local_fs() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: true,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
         event_count: 2000,
@@ -1118,7 +1167,7 @@ async fn test_chaos_on_local_fs_with_no_background_maintenance() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1141,7 +1190,7 @@ async fn test_chaos_on_local_fs_with_index_merge() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1164,7 +1213,7 @@ async fn test_chaos_on_local_fs_with_data_compaction() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1191,7 +1240,7 @@ async fn test_local_system_optimization_chaos_with_no_background_maintenance() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: true,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1214,7 +1263,7 @@ async fn test_local_system_optimization_chaos_with_index_merge() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: true,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1237,7 +1286,7 @@ async fn test_local_system_optimization_chaos_with_data_compaction() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: true,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1266,7 +1315,7 @@ async fn test_s3_chaos_with_no_background_maintenance() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1288,7 +1337,7 @@ async fn test_s3_chaos_with_index_merge() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1310,7 +1359,7 @@ async fn test_s3_chaos_with_data_compaction() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1336,7 +1385,7 @@ async fn test_gcs_chaos_with_no_background_maintenance() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1358,7 +1407,7 @@ async fn test_gcs_chaos_with_index_merge() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1380,7 +1429,7 @@ async fn test_gcs_chaos_with_data_compaction() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1404,7 +1453,7 @@ async fn test_chaos_injection_with_no_background_maintenance() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: true,
         event_count: 100,
@@ -1427,7 +1476,7 @@ async fn test_chaos_injection_with_index_merge() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: true,
         event_count: 100,
@@ -1450,7 +1499,7 @@ async fn test_chaos_injection_with_data_compaction() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: false,
+        special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: true,
         event_count: 100,
@@ -1477,7 +1526,7 @@ async fn test_append_only_chaos_on_local_fs_with_no_background_maintenance() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: true,
+        special_table_option: SpecialTableOption::AppendOnly,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
         event_count: 3500,
@@ -1500,7 +1549,29 @@ async fn test_append_only_chaos_on_local_fs_with_data_compaction() {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,
         disk_slice_write_chaos_enabled: false,
-        append_only: true,
+        special_table_option: SpecialTableOption::AppendOnly,
+        maintenance_option: TableMaintenanceOption::DataCompaction,
+        error_injection_enabled: false,
+        event_count: 3500,
+        storage_config: StorageConfig::FileSystem {
+            root_directory,
+            atomic_write_dir: None,
+        },
+    };
+    let env = TestEnvironment::new(test_env_config).await;
+    chaos_test_impl(env).await;
+}
+
+#[named]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_upsert_chaos_on_local_fs_with_data_compaction() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let root_directory = iceberg_temp_dir.path().to_str().unwrap().to_string();
+    let test_env_config = TestEnvConfig {
+        test_name: function_name!(),
+        local_filesystem_optimization_enabled: false,
+        disk_slice_write_chaos_enabled: false,
+        special_table_option: SpecialTableOption::UpsertDeleteIfExists,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
         event_count: 3500,

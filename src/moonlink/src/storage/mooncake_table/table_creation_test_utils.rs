@@ -203,7 +203,11 @@ pub(crate) fn create_test_table_metadata_with_config(
 
 /// Test util function to get random row identity.
 #[cfg(feature = "chaos-test")]
-pub(crate) fn get_random_identity(random_seed: u64, append_only: bool) -> IdentityProp {
+pub(crate) fn get_random_identity(
+    random_seed: u64,
+    append_only: bool,
+    upsert_delete_if_exists: bool,
+) -> IdentityProp {
     // If append only, no random choice.
     if append_only {
         return IdentityProp::None;
@@ -212,11 +216,13 @@ pub(crate) fn get_random_identity(random_seed: u64, append_only: bool) -> Identi
     use rand::{seq::IndexedRandom, SeedableRng};
     let mut rng = rand::rngs::StdRng::seed_from_u64(random_seed);
 
-    let identities = [
+    let mut identities = vec![
         IdentityProp::SinglePrimitiveKey(0),
         IdentityProp::Keys(vec![0]),
-        IdentityProp::FullRow,
     ];
+    if !upsert_delete_if_exists {
+        identities.push(IdentityProp::FullRow);
+    }
     identities.choose(&mut rng).unwrap().clone()
 }
 

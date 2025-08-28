@@ -1043,7 +1043,7 @@ impl SnapshotTableState {
             let deletions = &new_deletions[start_i..i];
             let mut lookup_result = Vec::new();
             while j < index_lookup_result.len()
-                && index_lookup_result[j].0 != new_deletions[start_i].lookup_key
+                && index_lookup_result[j].0 < new_deletions[start_i].lookup_key
             {
                 j += 1;
             }
