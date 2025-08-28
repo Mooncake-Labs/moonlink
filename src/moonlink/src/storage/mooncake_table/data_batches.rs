@@ -348,7 +348,7 @@ mod tests {
                 "PARQUET:field_id".to_string(),
                 "2".to_string(),
             )])),
-            Field::new("age", DataType::Int32, false).with_metadata(HashMap::from([(
+            Field::new("age", DataType::Int16, false).with_metadata(HashMap::from([(
                 "PARQUET:field_id".to_string(),
                 "3".to_string(),
             )])),
@@ -415,7 +415,7 @@ mod tests {
                         "John".to_string(),
                         "Jane".to_string(),
                     ])),
-                    Arc::new(Int32Array::from(vec![30, 25])),
+                    Arc::new(Int16Array::from(vec![30, 25])),
                     Arc::new(TimestampMicrosecondArray::from(vec![
                         1618876800000000,
                         1618876800000000,
@@ -441,7 +441,7 @@ mod tests {
                 vec![
                     Arc::new(Int32Array::from(vec![1])),
                     Arc::new(StringArray::from(vec!["John".to_string()])),
-                    Arc::new(Int32Array::from(vec![30])),
+                    Arc::new(Int16Array::from(vec![30])),
                     Arc::new(TimestampMicrosecondArray::from(vec![1618876800000000])),
                 ],
             )
@@ -463,7 +463,7 @@ mod tests {
                 vec![
                     Arc::new(Int32Array::from(vec![3])),
                     Arc::new(StringArray::from(vec!["Bob"])),
-                    Arc::new(Int32Array::from(vec![40])),
+                    Arc::new(Int16Array::from(vec![40])),
                     Arc::new(TimestampMicrosecondArray::from(vec![1618876800000000])),
                 ],
             )
@@ -473,79 +473,6 @@ mod tests {
             *second_batch.batch.data.as_ref().unwrap(),
             expected_record_batch
         );
-
-        Ok(())
-    }
-
-    /// Fixed issue: https://github.com/Mooncake-Labs/moonlink/issues/1752
-    #[test]
-    fn test_create_batch_from_rows_smallint_type() -> Result<()> {
-        use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
-
-        let schema = Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("symbol", DataType::Utf8, true),
-            Field::new(
-                "time",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
-                false,
-            ),
-            Field::new("price", DataType::Float32, false),
-            Field::new("small_number", DataType::Int16, false),
-        ]);
-
-        let t1: i64 = 1_717_581_600_000_000;
-        let t2: i64 = 1_717_581_900_000_000;
-        let t3: i64 = 1_717_582_200_000_000;
-        let t4: i64 = 1_717_582_500_000_000;
-
-        let row1 = MoonlinkRow::new(vec![
-            RowValue::Int64(1),
-            RowValue::ByteArray("AMD".as_bytes().to_vec()),
-            RowValue::Int64(t1),
-            RowValue::Float32(119.0),
-            RowValue::Int32(1),
-        ]);
-
-        let row2 = MoonlinkRow::new(vec![
-            RowValue::Int64(2),
-            RowValue::ByteArray("AMZN".as_bytes().to_vec()),
-            RowValue::Int64(t2),
-            RowValue::Float32(207.0),
-            RowValue::Int32(2),
-        ]);
-
-        let row3 = MoonlinkRow::new(vec![
-            RowValue::Int64(3),
-            RowValue::ByteArray("AAPL".as_bytes().to_vec()),
-            RowValue::Int64(t3),
-            RowValue::Float32(203.0),
-            RowValue::Int32(3),
-        ]);
-
-        let row4 = MoonlinkRow::new(vec![
-            RowValue::Int64(4),
-            RowValue::ByteArray("AMZN".as_bytes().to_vec()),
-            RowValue::Int64(t4),
-            RowValue::Float32(210.0),
-            RowValue::Int32(4),
-        ]);
-
-        let rows = vec![row1, row2, row3, row4];
-        let deletions = BatchDeletionVector::new(rows.len());
-        let rb = create_batch_from_rows(&rows, Arc::new(schema.clone()), &deletions);
-
-        let f = rb.schema_ref().field(rb.schema().index_of("small_number")?);
-        assert_eq!(f.data_type(), &DataType::Int16);
-
-        // Assert smallint column is Int16Array
-        let small_idx = rb.schema().index_of("small_number").unwrap();
-        let small_arr = rb.column(small_idx);
-        let small_col = small_arr
-            .as_any()
-            .downcast_ref::<Int16Array>()
-            .expect("small_number should be Int16Array");
-        assert_eq!(small_col.value(0), 1);
 
         Ok(())
     }
