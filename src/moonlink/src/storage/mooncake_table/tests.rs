@@ -3190,5 +3190,29 @@ async fn test_delete_if_exists() -> Result<()> {
         .await
         .unwrap();
 
+    // create a snapshot and verify the row is upserted
+    {
+        create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths,
+            puffin_cache_handles,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = snapshot.request_read().await.unwrap();
+
+        verify_files_and_deletions(
+            get_data_files_for_read(&data_file_paths).as_slice(),
+            get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+        drop(snapshot);
+    }
+
     Ok(())
 }

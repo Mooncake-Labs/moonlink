@@ -794,7 +794,7 @@ impl SnapshotTableState {
 
         if delete_if_exists {
             let mut processed_deletions = Vec::new();
-            assert!(deletions.len() == 1);
+            assert_eq!(deletions.len(), 1);
             let deletion = deletions.first().unwrap();
             if deletion.row_identity.is_none() {
                 let candidate = candidates.pop();
