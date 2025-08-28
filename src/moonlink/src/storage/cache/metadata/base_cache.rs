@@ -3,6 +3,7 @@ use async_trait::async_trait;
 #[async_trait]
 #[allow(dead_code)]
 pub trait MetadataCacheTrait<K, V>: Send + Sync
+// TODO: Do we really need 'static here? Revisit later.
 where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
