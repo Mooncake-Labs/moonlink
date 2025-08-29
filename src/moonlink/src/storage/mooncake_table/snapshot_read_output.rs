@@ -5,6 +5,7 @@ use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
 use crate::ReadStateFilepathRemap;
 use crate::{NonEvictableHandle, ReadState, Result};
+use futures::{stream, StreamExt};
 use moonlink_table_metadata::{DeletionVector, PositionDelete};
 
 use std::sync::Arc;
@@ -34,6 +35,15 @@ impl DataFileForRead {
             Self::RemoteFilePath((_, file)) => file.clone(),
         }
     }
+}
+
+/// Represents a remote file with its original index, unique file identifier, and remote file path.
+/// This structure is used to maintain the order of files as they appear in the original data file path,
+/// which is crucial for operations that depend on the file's position, such as deletions or updates.
+struct RemoteFileEntry {
+    index: usize,
+    file_id: TableUniqueFileId,
+    remote_filepath: String,
 }
 
 #[derive(Clone, Default)]
@@ -74,73 +84,55 @@ impl ReadOutput {
             .unwrap();
     }
 
-    fn resolve_temporary_files(
-        temp_files_with_index: Vec<(usize, String)>,
-        resolved_data_files: &mut [String],
-    ) {
-        for (index, file) in temp_files_with_index {
-            resolved_data_files[index] = file;
-        }
-    }
-
     /// File ordering should be preserved because the index determines the position
     /// in the final [`resolved_data_files`] array, which delete or other operations rely on.
     async fn resolve_remote_files(
         &mut self,
         object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
-        remote_files_with_index: Vec<(usize, TableUniqueFileId, String)>,
+        remote_files_entries: Vec<RemoteFileEntry>,
         resolved_data_files: &mut [String],
         cache_handles: &mut Vec<NonEvictableHandle>,
     ) -> Result<()> {
-        let chunks = remote_files_with_index.chunks(MAX_PARALLEL_OPERATIONS);
-        let mut errs = Vec::new();
-        for chunk in chunks {
-            let futures = chunk
-                .iter()
-                .map(|(index, file_id, remote_filepath)| {
-                    let cache = object_storage_cache.clone();
-                    let fs_accessor = filesystem_accessor.clone();
-                    async move {
-                        let result = cache
-                            .get_cache_entry(*file_id, remote_filepath, fs_accessor.as_ref())
-                            .await;
-                        (index, remote_filepath, result)
-                    }
-                })
-                .collect::<Vec<_>>();
+        let mut results = stream::iter(remote_files_entries.into_iter())
+            .map(|remote_file_entry| {
+                let cache = object_storage_cache.clone();
+                let fs_accessor = filesystem_accessor.clone();
+                async move {
+                    let result = cache
+                        .get_cache_entry(
+                            remote_file_entry.file_id,
+                            &remote_file_entry.remote_filepath,
+                            fs_accessor.as_ref(),
+                        )
+                        .await;
+                    (
+                        remote_file_entry.index,
+                        remote_file_entry.remote_filepath,
+                        result,
+                    )
+                }
+            })
+            .buffered(MAX_PARALLEL_OPERATIONS);
 
-            let chunk_results = futures::future::join_all(futures).await;
-
-            // Process each result, maintaining the original order of files.
-            for (index, remote_filepath, result) in chunk_results {
-                match result {
-                    Ok((cache_handle, files_to_delete)) => {
-                        if let Some(cache_handle) = cache_handle {
-                            resolved_data_files[*index] =
-                                cache_handle.get_cache_filepath().to_string();
-                            cache_handles.push(cache_handle);
-                        } else {
-                            resolved_data_files[*index] = remote_filepath.clone();
-                        }
-
-                        self.notify_evicted_files(files_to_delete.into_vec()).await;
+        while let Some((index, remote_filepath, result)) = results.next().await {
+            match result {
+                Ok((cache_handle, files_to_delete)) => {
+                    if let Some(cache_handle) = cache_handle {
+                        resolved_data_files[index] = cache_handle.get_cache_filepath().to_string();
+                        cache_handles.push(cache_handle);
+                    } else {
+                        resolved_data_files[index] = remote_filepath;
                     }
-                    Err(e) => {
-                        errs.push(e);
-                    }
+
+                    self.notify_evicted_files(files_to_delete.into_vec()).await;
+                }
+                Err(e) => {
+                    self.handle_resolution_error(std::mem::take(cache_handles))
+                        .await;
+                    return Err(e);
                 }
             }
-            if !errs.is_empty() {
-                break;
-            }
-        }
-
-        // If any errors occurred, handle them and return the first error encountered.
-        if !errs.is_empty() {
-            self.handle_resolution_error(std::mem::take(cache_handles))
-                .await;
-            return Err(errs.into_iter().next().unwrap());
         }
 
         Ok(())
@@ -157,32 +149,33 @@ impl ReadOutput {
         let data_file_paths = std::mem::take(&mut self.data_file_paths);
 
         // Separate temporary files and remote files while preserving order
-        let mut temp_files_with_index = Vec::new();
-        let mut remote_files_with_index = Vec::new();
+        let mut remote_files_entries = Vec::new();
         for (index, cur_data_file) in data_file_paths.into_iter().enumerate() {
             match cur_data_file {
                 DataFileForRead::TemporaryDataFile(file) => {
-                    temp_files_with_index.push((index, file));
+                    resolved_data_files[index] = file;
                 }
                 DataFileForRead::RemoteFilePath((file_id, remote_filepath)) => {
-                    remote_files_with_index.push((index, file_id, remote_filepath));
+                    remote_files_entries.push(RemoteFileEntry {
+                        index,
+                        file_id,
+                        remote_filepath,
+                    });
                 }
             }
         }
 
-        Self::process_temporary_files(temp_files_with_index, &mut resolved_data_files);
-
         // Process remote files in parallel but maintain order
-        if !remote_files_with_index.is_empty() {
+        if !remote_files_entries.is_empty() {
             let (object_storage_cache, filesystem_accessor) = (
                 self.object_storage_cache.as_ref().unwrap(),
                 self.filesystem_accessor.as_ref().unwrap(),
             );
 
-            self.process_remote_files(
+            self.resolve_remote_files(
                 object_storage_cache.clone(),
                 filesystem_accessor.clone(),
-                remote_files_with_index,
+                remote_files_entries,
                 &mut resolved_data_files,
                 &mut cache_handles,
             )
@@ -208,7 +201,7 @@ impl ReadOutput {
         // Pre-allocate based on known sizes: cache_handles + puffin_cache_handles + associated_files
         let total_size =
             cache_handles.len() + self.puffin_cache_handles.len() + self.associated_files.len();
-        let mut evicted_files_to_delete_on_error: Vec<String> = Vec::with_capacity(total_capacity);
+        let mut evicted_files_to_delete_on_error: Vec<String> = Vec::with_capacity(total_size);
         // Unpin all previously pinned cache handles before propagating error.
         for mut handle in cache_handles.drain(..) {
             let files_to_delete = handle.unreference().await;
@@ -244,7 +237,6 @@ mod tests {
     use smallvec::SmallVec;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -427,19 +419,27 @@ mod tests {
     async fn test_file_order_preserved_with_different_delays() {
         let mut mock_cache = MockCacheTrait::new();
         let call_order = Arc::new(AtomicUsize::new(0));
+        let task_notify = Arc::new(tokio::sync::Notify::new());
+
         mock_cache.expect_get_cache_entry().times(2).returning({
             let call_order = call_order.clone();
             move |_, _, _| {
                 let order = call_order.fetch_add(1, Ordering::SeqCst);
+                let task_notify = task_notify.clone();
                 Box::pin(async move {
-                    let delay = match order {
-                        0 => 30,
-                        1 => 1000,
-                        2 => 10,
-                        _ => 0,
+                    match order {
+                        0 => {
+                            task_notify.notified().await;
+                        }
+                        1 => {
+                            task_notify.notify_one();
+                        }
+                        _ => unreachable!(),
                     };
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    Ok((/*cache_handle=*/None, /*evicted_files=*/SmallVec::new()))
+                    Ok((
+                        /*cache_handle=*/ None,
+                        /*evicted_files=*/ SmallVec::new(),
+                    ))
                 })
             }
         });
@@ -466,10 +466,10 @@ mod tests {
 
         let res = read_output
             .take_as_read_state(Arc::new(|p: String| p))
-            .await;
-        assert!(res.is_ok());
+            .await
+            .unwrap();
 
-        let read_state: Arc<ReadState> = res.unwrap();
+        let read_state: Arc<ReadState> = res;
         let (data_files, _, _, _) = decode_read_state_for_testing(&read_state);
 
         assert_eq!(data_files.len(), 4);
@@ -489,8 +489,10 @@ mod tests {
             .in_sequence(&mut seq)
             .returning(|_, _, _| {
                 Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    Ok((/*cache_handle=*/None, /*evicted_files=*/SmallVec::new()))
+                    Ok((
+                        /*cache_handle=*/ None,
+                        /*evicted_files=*/ SmallVec::new(),
+                    ))
                 })
             });
 
@@ -500,7 +502,6 @@ mod tests {
             .in_sequence(&mut seq)
             .returning(|_, _, _| {
                 Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
                     Err(crate::Error::from(std::io::Error::other("network timeout")))
                 })
             });
@@ -525,9 +526,9 @@ mod tests {
 
         let res = read_output
             .take_as_read_state(Arc::new(|p: String| p))
-            .await;
-        assert!(res.is_err());
-        let error_msg = res.err().unwrap().to_string();
+            .await
+            .unwrap_err();
+        let error_msg = res.to_string();
         assert!(error_msg.contains("network timeout"));
     }
 }
