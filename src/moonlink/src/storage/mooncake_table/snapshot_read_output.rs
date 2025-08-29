@@ -439,7 +439,7 @@ mod tests {
                         _ => 0,
                     };
                     tokio::time::sleep(Duration::from_millis(delay)).await;
-                    Ok((None, SmallVec::new()))
+                    Ok((/*cache_handle=*/None, /*evicted_files=*/SmallVec::new()))
                 })
             }
         });
