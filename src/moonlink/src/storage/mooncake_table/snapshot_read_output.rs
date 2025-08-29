@@ -74,7 +74,7 @@ impl ReadOutput {
             .unwrap();
     }
 
-    fn process_temporary_files(
+    fn resolve_temporary_files(
         temp_files_with_index: Vec<(usize, String)>,
         resolved_data_files: &mut [String],
     ) {
