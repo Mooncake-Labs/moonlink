@@ -1,5 +1,6 @@
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
@@ -94,7 +95,8 @@ impl ReadOutput {
         resolved_data_files: &mut [String],
         cache_handles: &mut Vec<NonEvictableHandle>,
     ) -> Result<()> {
-        let mut results = stream::iter(remote_files_entries.into_iter())
+        let mut results = Vec::with_capacity(remote_files_entries.len());
+        let mut stream_results = stream::iter(remote_files_entries.into_iter())
             .map(|remote_file_entry| {
                 let cache = object_storage_cache.clone();
                 let fs_accessor = filesystem_accessor.clone();
@@ -115,7 +117,12 @@ impl ReadOutput {
             })
             .buffer_unordered(MAX_PARALLEL_OPERATIONS);
 
-        while let Some((index, remote_filepath, result)) = results.next().await {
+        while let Some(result) = stream_results.next().await {
+            results.push(result);
+        }
+
+        let mut error_messages = Vec::new();
+        for (index, remote_filepath, result) in results {
             match result {
                 Ok((cache_handle, files_to_delete)) => {
                     if let Some(cache_handle) = cache_handle {
@@ -130,9 +137,17 @@ impl ReadOutput {
                 Err(e) => {
                     self.handle_resolution_error(std::mem::take(cache_handles))
                         .await;
-                    return Err(e);
+                    error_messages.push(format!("[{index}] {remote_filepath}: {e}"));
                 }
             }
+        }
+
+        if !error_messages.is_empty() {
+            return Err(crate::Error::from(std::io::Error::other(format!(
+                "Failed to resolve {} files: {}",
+                error_messages.len(),
+                error_messages.join("; ")
+            ))));
         }
 
         Ok(())
