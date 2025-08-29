@@ -85,7 +85,7 @@ impl ReadOutput {
 
     /// File ordering should be preserved because the index determines the position
     /// in the final [`resolved_data_files`] array, which delete or other operations rely on.
-    async fn process_remote_files(
+    async fn resolve_remote_files(
         &mut self,
         object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
