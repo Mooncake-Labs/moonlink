@@ -636,7 +636,7 @@ mod tests {
         });
 
         // Wait for server to start
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Make request to health endpoint
         let client = Client::new();
