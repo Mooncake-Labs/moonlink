@@ -123,6 +123,22 @@ pub struct OptimizeTableRequest {
 pub struct OptimizeTableResponse {}
 
 /// ====================
+/// Create SnapShot
+/// ====================
+///
+/// Request structure for table optimize.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateSnapShotRequest {
+    pub database: String,
+    pub table: String,
+    pub lsn: u64,
+}
+
+/// Response structure for table optimize.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateSnapShotResponse {}
+
+/// ====================
 /// Data ingestion
 /// ====================
 ///
@@ -202,6 +218,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/ingest/{table}", post(ingest_data))
         .route("/upload/{table}", post(upload_files))
         .route("/tables/{table}/optimize", post(optimize_table))
+        .route("/tables/{table}/snapshot", post(create_snapshot))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -485,6 +502,36 @@ async fn optimize_table(
                 Json(ErrorResponse {
                     error: "table_optimize_failed".to_string(),
                     message: format!("Failed to optimize table: {e}"),
+                }),
+            ))
+        }
+    }
+}
+
+/// Create snapshot endpoint
+async fn create_snapshot(
+    Path(table): Path<String>,
+    State(state): State<ApiState>,
+    Json(payload): Json<CreateSnapShotRequest>,
+) -> Result<Json<CreateSnapShotResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received create snapshot request for '{}': {:?}",
+        table, payload
+    );
+    match state
+        .backend
+        .create_snapshot(payload.database, payload.table, payload.lsn)
+        .await
+    {
+        Ok(_) => Ok(Json(CreateSnapShotResponse {})),
+        Err(e) => {
+            error!("Failed to create snapshot '{}': {}", table, e);
+            let status_code = get_backend_error_status_code(&e);
+            Err((
+                status_code,
+                Json(ErrorResponse {
+                    error: "create_snapshot_failed".to_string(),
+                    message: format!("Failed to create snapshot: {e}"),
                 }),
             ))
         }
