@@ -587,6 +587,7 @@ pub async fn start_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moonlink::decode_read_state_for_testing;
     use moonlink_backend::MoonlinkBackend;
     use moonlink_metadata_store::SqliteMetadataStore;
     use reqwest::Client;
@@ -604,9 +605,9 @@ mod tests {
 
     async fn setup_test_backend() -> Arc<MoonlinkBackend> {
         if tokio::fs::metadata(TEST_BASE_PATH).await.is_ok() {
-            tokio::fs::remove_dir_all(TEST_BASE_PATH).await;
+            let _ = tokio::fs::remove_dir_all(TEST_BASE_PATH).await;
         }
-        tokio::fs::create_dir_all(TEST_BASE_PATH).await;
+        let _ = tokio::fs::create_dir_all(TEST_BASE_PATH).await;
 
         let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(TEST_BASE_PATH)
             .await
@@ -618,16 +619,14 @@ mod tests {
         )
         .await
         .unwrap();
-        backend.initialize_event_api().await;
+        let _ = backend.initialize_event_api().await;
         Arc::new(backend)
     }
 
     #[tokio::test]
     async fn test_health_check_endpoint() {
         let port = get_available_port().await;
-
         let backend = setup_test_backend().await;
-
         let api_state = ApiState::new(backend);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -661,10 +660,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_endpoint() {
         let port = get_available_port().await;
-
         let backend = setup_test_backend().await;
-
         let api_state = ApiState::new(backend);
+        let backend = api_state.backend.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         // Start server in background
@@ -673,7 +671,7 @@ mod tests {
         });
 
         // Wait for server to start
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Make request to create table endpoint
         let client = Client::new();
@@ -702,7 +700,27 @@ mod tests {
         assert_eq!(create_response.get("table_name").unwrap(), "my_table");
         assert_eq!(create_response.get("schema").unwrap(), "test_db");
 
-        // TODO: Verify table exists in backend
+        // Wait for table to be ready
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify table exists in backend
+        let tables = backend.list_tables().await.unwrap();
+        assert!(tables.len() == 1);
+        let table = tables.first().unwrap();
+        assert_eq!(table.mooncake_database, "test_db");
+        assert_eq!(table.mooncake_table, "test_table");
+
+        // Verify the table is scannable and empty
+        let read_state = backend
+            .scan_table("test_db".to_string(), "test_table".to_string(), None)
+            .await
+            .unwrap();
+        let table_metadata = decode_read_state_for_testing(&read_state);
+        let (data_files, puffin_files, deletion_vectors, position_deletes) = table_metadata;
+        assert!(data_files.is_empty());
+        assert!(puffin_files.is_empty());
+        assert!(deletion_vectors.is_empty());
+        assert!(position_deletes.is_empty());
 
         // Clean up
         shutdown_tx.send(()).unwrap();
