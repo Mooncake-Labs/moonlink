@@ -490,7 +490,7 @@ mod tests {
             .returning(|_, _, _| {
                 Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(20)).await;
-                    Ok((None, SmallVec::new()))
+                    Ok((/*cache_handle=*/None, /*evicted_files=*/SmallVec::new()))
                 })
             });
 
