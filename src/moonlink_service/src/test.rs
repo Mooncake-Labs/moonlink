@@ -417,7 +417,9 @@ async fn test_create_snapshot() {
     );
     let lsn: u64 = 1;
 
-    // Scan table and get data file and puffin files back.
+    // After all changes reflected at mooncake snapshot, trigger an iceberg snapshot.
+    create_snapshot(&client, DATABASE, TABLE, lsn).await;
+
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
     let bytes = scan_table_begin(
         &mut moonlink_stream,
@@ -454,11 +456,6 @@ async fn test_create_snapshot() {
     )
     .await
     .unwrap();
-
-    // After all changes reflected at mooncake snapshot, trigger an iceberg snapshot.
-    create_snapshot(&client, DATABASE, TABLE, lsn).await;
-
-    // Check table status.
 
     // Cleanup shared directory.
     cleanup_directory(&get_moonlink_backend_dir()).await;
