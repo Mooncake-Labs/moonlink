@@ -206,7 +206,7 @@ impl ReadOutput {
     /// Handle cleanup and notifications when resolving remote filepaths fails.
     async fn handle_resolution_error(&mut self, mut cache_handles: Vec<NonEvictableHandle>) {
         // Pre-allocate based on known sizes: cache_handles + puffin_cache_handles + associated_files
-        let total_capacity =
+        let total_size =
             cache_handles.len() + self.puffin_cache_handles.len() + self.associated_files.len();
         let mut evicted_files_to_delete_on_error: Vec<String> = Vec::with_capacity(total_capacity);
         // Unpin all previously pinned cache handles before propagating error.
