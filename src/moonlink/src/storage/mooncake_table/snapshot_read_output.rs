@@ -113,7 +113,7 @@ impl ReadOutput {
                     )
                 }
             })
-            .buffered(MAX_PARALLEL_OPERATIONS);
+            .buffer_unordered(MAX_PARALLEL_OPERATIONS);
 
         while let Some((index, remote_filepath, result)) = results.next().await {
             match result {
