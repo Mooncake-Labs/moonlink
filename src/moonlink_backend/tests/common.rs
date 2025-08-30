@@ -119,6 +119,7 @@ impl Drop for TestGuard {
         if self.test_mode == TestGuardMode::Crash {
             return;
         }
+        let uri = get_database_uri();
 
         // move everything we need into the async block
         let backend = Arc::clone(&self.backend);
@@ -128,7 +129,7 @@ impl Drop for TestGuard {
                 let _ = backend
                     .drop_table(DATABASE.to_string(), TABLE.to_string())
                     .await;
-                let _ = backend.shutdown_connection(SRC_URI, true).await;
+                let _ = backend.shutdown_connection(&uri, true).await;
                 let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
                 drop(tmp);
             });
@@ -299,11 +300,12 @@ pub async fn create_updated_iceberg_snapshot(
 pub async fn crash_and_recover_backend_with_guard(
     mut guard: TestGuard,
 ) -> (MoonlinkBackend, TempDir) {
+    let uri = get_database_uri();
     // Ensure the guard stops cleaning up on drop to simulate crash semantics
     guard.set_test_mode(TestGuardMode::Crash);
 
     // Shutdown pg connection and table handler.
-    guard.backend().shutdown_connection(SRC_URI, false).await;
+    guard.backend().shutdown_connection(&uri, false).await;
     // Take the testing directory, for recovery from iceberg table.
     let testing_directory_before_recovery = guard.take_test_directory();
     // Drop everything for the old backend.
@@ -325,7 +327,8 @@ pub async fn crash_and_recover_backend(
     backend: MoonlinkBackend,
     tempdir: &TempDir,
 ) -> MoonlinkBackend {
-    backend.shutdown_connection(SRC_URI, false).await;
+    let uri = get_database_uri();
+    backend.shutdown_connection(&uri, false).await;
     let base_path = tempdir.path().to_str().unwrap().to_string();
     create_backend_from_base_path(base_path).await
 }
@@ -470,6 +473,7 @@ pub async fn setup_backend(
     has_primary_key: bool,
 ) -> (TempDir, MoonlinkBackend, Client) {
     let temp_dir = TempDir::new().unwrap();
+    let uri = get_database_uri();
     let metadata_store_accessor =
         SqliteMetadataStore::new_with_directory(temp_dir.path().to_str().unwrap())
             .await
@@ -483,7 +487,6 @@ pub async fn setup_backend(
     .unwrap();
 
     // Connect to Postgres.
-    let uri = get_database_uri();
     let (client, _) = connect_to_postgres(&uri).await;
 
     // Clear any leftover replication slot from previous runs.
