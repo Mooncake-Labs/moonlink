@@ -8,6 +8,7 @@ license = { workspace = true }
 default = ["storage-fs"]
 storage-all = ["storage-fs", "storage-s3", "storage-gcs"]
 test-utils = []
+rest-catalog = ["iceberg-catalog-rest"]
 
 storage-fs = ["opendal/services-fs", "iceberg/storage-fs"]
 storage-s3 = [
@@ -59,6 +60,7 @@ futures = { workspace = true }
 hashbrown = { workspace = true }
 hmac = { version = "0.12", optional = true }
 iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true, optional = true }
 itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"

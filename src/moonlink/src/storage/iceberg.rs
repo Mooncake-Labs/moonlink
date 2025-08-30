@@ -20,6 +20,19 @@ pub(super) mod parquet_stats_utils;
 pub(super) mod parquet_utils;
 pub(super) mod puffin_utils;
 pub(super) mod puffin_writer_proxy;
+
+#[cfg(feature = "rest-catalog")]
+#[cfg(test)]
+pub(super) mod rest_catalog;
+
+#[cfg(feature = "rest-catalog")]
+#[cfg(test)]
+pub(super) mod rest_catalog_test_utils;
+
+#[cfg(feature = "rest-catalog")]
+#[cfg(test)]
+pub(super) mod rest_catalog_test_guard;
+
 mod schema_utils;
 mod snapshot_utils;
 mod table_commit_proxy;
@@ -57,6 +70,10 @@ mod file_catalog_test_utils;
 
 #[cfg(test)]
 mod file_catalog_test;
+
+#[cfg(feature = "rest-catalog")]
+#[cfg(test)]
+mod rest_catalog_test;
 
 #[cfg(test)]
 mod mock_filesystem_test;

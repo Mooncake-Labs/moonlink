@@ -201,7 +201,50 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────────────────── 4 · TEST & COVERAGE ────────────────────────────
+  # ──────────────────────── 4 · Rest-Catalog test (feature) ─────────────────
+  rest_catalog_test:
+    name: Rest-Catalog tests (feature)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        type: [feature]
+        include:
+          - type: feature
+            name: Rest-Catalog feature test
+            timeout-minutes: 10
+            cmd: |
+              cargo test --lib --features=rest-catalog
+    steps:
+      - uses: actions/checkout@v5
+
+      # ─────────────────────── Start Iceberg-rest ──────────────────────────
+      - name: Start Iceberg-rest-fixture
+        run: |
+          docker run -d \
+            --name iceberg-rest-fixture \
+            -p 8181:8181 \
+            apache/iceberg-rest-fixture
+
+      # ───────────────────── Wait for Iceberg-rest to be ready ───────────────────
+      - name: Wait for Iceberg-rest-fixture ready
+        timeout-minutes: 2
+        run: |
+          for i in {1..10}; do
+            if curl -sS http://localhost:8181/v1/config; then
+              echo "Iceberg-rest-fixture is ready!"
+              break
+            fi
+            echo "Waiting for Iceberg-rest-fixture..."
+            sleep 2
+          done
+
+      # ────────────────────── Toolchain + Test Tools ─────────────────────────
+      - name: Run ${{ matrix.name }}
+        timeout-minutes: ${{ matrix.timeout-minutes }}
+        run: |
+          ${{ matrix.cmd }}
+
+  # ───────────────────────── 5 · TEST & COVERAGE ────────────────────────────
   coverage:
     name: Unit Tests + Coverage (llvm-cov + nextest)
     runs-on: ubuntu-latest
@@ -263,7 +306,7 @@ jobs:
           files: lcov.info
           fail_ci_if_error: true
 
-  # ──────────────────────── 5 · Chaos test ────────────────────────────
+  # ──────────────────────── 6 · Chaos test ────────────────────────────
   chaos_test:
     name: Chaos test
     runs-on: ubuntu-latest
@@ -295,7 +338,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 6 · Chaos test with local fs optimization ─────────────
+  # ───────────── 7 · Chaos test with local fs optimization ─────────────
   chaos_test_with_local_fs_optimization:
     name: Chaos test with local filesystem optimization
     runs-on: ubuntu-latest
@@ -318,7 +361,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 7 · Chaos test with chaos injection ─────────────
+  # ───────────── 8 · Chaos test with chaos injection ─────────────
   chaos_test_with_chaos_injection:
     name: Chaos test with chaos injection
     runs-on: ubuntu-latest
@@ -350,7 +393,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 8 · Chaos test for disk slice write ─────────────
+  # ───────────── 9 · Chaos test for disk slice write ─────────────
   disk_slice_write_with_chaos:
     name: Chaos test for disk slice write
     runs-on: ubuntu-latest
@@ -382,7 +425,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 9 · Chaos test for append only operation ─────────────
+  # ───────────── 10 · Chaos test for append only operation ─────────────
   append_only_chaos:
     name: Chaos test for append only operation
     runs-on: ubuntu-latest
@@ -414,7 +457,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 10 · Chaos test for table upsert operation ─────────────
+  # ───────────── 11 · Chaos test for table upsert operation ─────────────
   upsert_operation_chaos:
     name: Chaos test for upsert operation
     runs-on: ubuntu-latest
@@ -446,7 +489,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 11 · Regression test  ─────────────
+  # ───────────── 12 · Regression test  ─────────────
   regression_test:
     name: Regression test
     runs-on: ubuntu-latest
@@ -468,7 +511,7 @@ jobs:
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::regression --features=chaos-test -p moonlink -- --nocapture
 
-  # ───────────── 12 · PostgreSQL Integration Tests ─────────────
+  # ───────────── 13 · PostgreSQL Integration Tests ─────────────
   postgres_tests:
     name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest
@@ -548,7 +591,7 @@ jobs:
         run: |
           cargo test --package moonlink_backend --test test_backend
 
-  # ───────────── 13 · Moonlink Service Integration Tests ─────────────
+  # ───────────── 14 · Moonlink Service Integration Tests ─────────────
   moonlink_service_tests:
     name: Moonlink Service Integration Tests
     runs-on: ubuntu-latest
