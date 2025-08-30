@@ -635,10 +635,6 @@ mod tests {
                 Box::pin(async move { Ok((Some(handle_clone), files_to_delete)) })
             });
 
-        // Before invoking read, request deletion on the data cache entry so that
-        // unreference() on error will return its cache filepath to delete.
-        let _ = real_cache.try_delete_cache_entry(FAKE_FILE_ID).await;
-
         // Prepare a separate cache/handle to simulate puffin cache behavior, and
         // also mark it requested-to-delete so unreference returns files.
         let puffin_temp_dir = tempdir().unwrap();
@@ -682,10 +678,31 @@ mod tests {
         let error_msg = res.to_string();
         assert!(error_msg.contains("network timeout"));
 
-        // Check that the handle was properly unpinned on error
+        // Check that the handle was properly unpinned
         assert_eq!(
             real_cache
-                .get_non_evictable_entry_ref_count(&FAKE_FILE_ID)
+                .get_non_evictable_entry_ref_count(&file_id_1)
+                .await,
+            0
+        );
+
+        assert_eq!(
+            real_cache
+                .get_non_evictable_entry_ref_count(&file_id_2)
+                .await,
+            0
+        );
+
+        assert_eq!(
+            real_cache
+                .get_non_evictable_entry_ref_count(&file_id_3)
+                .await,
+            0
+        );
+
+        assert_eq!(
+            real_cache
+                .get_non_evictable_entry_ref_count(&file_id_4)
                 .await,
             0
         );
