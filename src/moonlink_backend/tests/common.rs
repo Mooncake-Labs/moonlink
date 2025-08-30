@@ -594,21 +594,24 @@ pub async fn smoke_create_and_insert(
     recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
 }
 
+#[cfg(feature = "test-tls")]
 pub async fn connect_to_postgres(uri: &str) -> (Client, tokio::task::JoinHandle<()>) {
-    #[cfg(feature = "test-tls")]
+    let root_cert_pem = std::fs::read("../../.devcontainer/certs/ca.crt").unwrap();
+
     let connector = TlsConnector::builder()
-        .add_root_certificate(
-            native_tls::Certificate::from_pem(
-                std::fs::read("../../.devcontainer/certs/ca.crt")
-                    .unwrap()
-                    .as_slice(),
-            )
-            .unwrap(),
-        )
+        .add_root_certificate(native_tls::Certificate::from_pem(root_cert_pem.as_slice()).unwrap())
         .build()
         .unwrap();
+    let tls = MakeTlsConnector::new(connector);
+    let (client, connection) = connect(uri, tls).await.unwrap();
+    let connection_handle = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, connection_handle)
+}
 
-    #[cfg(not(feature = "test-tls"))]
+#[cfg(not(feature = "test-tls"))]
+pub async fn connect_to_postgres(uri: &str) -> (Client, tokio::task::JoinHandle<()>) {
     let connector = TlsConnector::new().unwrap();
     let tls = MakeTlsConnector::new(connector);
     let (client, connection) = connect(uri, tls).await.unwrap();

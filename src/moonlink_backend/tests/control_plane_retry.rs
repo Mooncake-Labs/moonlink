@@ -2,7 +2,8 @@ mod common;
 
 #[cfg(test)]
 mod control_plane_retry_tests {
-    use super::common::{connect_to_postgres, SRC_URI};
+
+    use super::common::{connect_to_postgres, get_database_uri};
     use moonlink_connectors::pg_replicate::PostgresConnection;
     use serial_test::serial;
 
@@ -39,15 +40,16 @@ mod control_plane_retry_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_run_control_query_reconnects_after_terminate() {
+        let uri = get_database_uri();
         // Build a dedicated PostgresConnection (control-plane)
-        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
 
         // Baseline: SELECT 1 works
         let _ = conn.run_control_query("SELECT 1;").await.unwrap();
 
         // Terminate the backend PID for this connection
         let pid = get_control_pid(&mut conn).await;
-        let (admin, _handle) = connect_to_postgres().await;
+        let (admin, _handle) = connect_to_postgres(&uri).await;
         let _ = admin
             .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
             .await
@@ -63,8 +65,9 @@ mod control_plane_retry_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_alter_table_replica_identity_after_terminate() {
+        let uri = get_database_uri();
         // Setup: ensure a small temp table exists
-        let (client, _handle) = connect_to_postgres().await;
+        let (client, _handle) = connect_to_postgres(&uri).await;
         let _ = client
             .simple_query(
                 "DROP TABLE IF EXISTS retry_test;
@@ -74,11 +77,11 @@ mod control_plane_retry_tests {
             .unwrap();
 
         // Build a dedicated PostgresConnection
-        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
 
         // Kill control-plane backend
         let pid = get_control_pid(&mut conn).await;
-        let (admin, _h) = connect_to_postgres().await;
+        let (admin, _h) = connect_to_postgres(&uri).await;
         let _ = admin
             .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
             .await
@@ -93,11 +96,12 @@ mod control_plane_retry_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_drop_replication_slot_after_terminate() {
-        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let uri = get_database_uri();
+        let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
 
         // Kill control-plane backend to force reconnect on next call
         let pid = get_control_pid(&mut conn).await;
-        let (admin, _h) = connect_to_postgres().await;
+        let (admin, _h) = connect_to_postgres(&uri).await;
         let _ = admin
             .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
             .await
@@ -111,7 +115,8 @@ mod control_plane_retry_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_run_control_query_non_transport_error() {
-        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let uri = get_database_uri();
+        let mut conn = PostgresConnection::new(uri).await.unwrap();
         let err = conn.run_control_query("THIS IS NOT SQL").await.err();
         assert!(err.is_some());
     }
@@ -120,8 +125,9 @@ mod control_plane_retry_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_attempt_drop_transport_error_background_retry() {
+        let uri = get_database_uri();
         // Prepare table and publication membership
-        let (admin, _h) = connect_to_postgres().await;
+        let (admin, _h) = connect_to_postgres(&uri).await;
         let _ = admin
             .simple_query(
                 "DROP TABLE IF EXISTS retry_drop;
@@ -134,11 +140,11 @@ mod control_plane_retry_tests {
             .unwrap();
 
         // Create a PostgresConnection (will set lock_timeout too)
-        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
 
         // Kill control-plane backend to force a transport error on the first simple_query
         let pid = get_control_pid(&mut conn).await;
-        let (killer, _hk) = connect_to_postgres().await;
+        let (killer, _hk) = connect_to_postgres(&uri).await;
         let _ = killer
             .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
             .await
@@ -167,13 +173,14 @@ mod control_plane_retry_tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     #[serial]
     async fn test_run_control_query_backoff_virtual_time() {
+        let uri = get_database_uri();
         // Build a control-plane connection
-        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
         let _ = conn.run_control_query("SELECT 1;").await.unwrap();
 
         // Induce transport error for the first attempt
         let pid = get_control_pid(&mut conn).await;
-        let (admin, _h) = connect_to_postgres().await;
+        let (admin, _h) = connect_to_postgres(&uri).await;
         let _ = admin
             .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
             .await

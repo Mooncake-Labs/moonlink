@@ -28,9 +28,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_moonlink_service() {
+        let uri = get_database_uri();
         let (guard, client) = TestGuard::new(Some("test"), true).await;
         let backend = guard.backend();
-        let uri = get_database_uri();
         // Till now, table already created at backend.
 
         // First round of table operations.
@@ -38,14 +38,14 @@ mod tests {
             .drop_table(DATABASE.to_string(), TABLE.to_string())
             .await
             .unwrap();
-        smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, uri.as_str()).await;
+        smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, &uri).await;
 
         // Second round of table operations.
         backend
             .drop_table(DATABASE.to_string(), TABLE.to_string())
             .await
             .unwrap();
-        smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, uri.as_str()).await;
+        smoke_create_and_insert(guard.tmp().unwrap(), backend, &client, &uri).await;
     }
 
     /// Testing scenario: drop a non-existent table shouldn't crash.
@@ -207,9 +207,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_replication_connection_cleanup() {
+        let uri = get_database_uri();
         let (guard, client) = TestGuard::new(Some("repl_test"), true).await;
         let backend = guard.backend();
-        let uri = get_database_uri();
 
         client
             .simple_query("INSERT INTO repl_test VALUES (1,'first');")
@@ -354,10 +354,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery() {
+        let uri = get_database_uri();
         let (mut guard, client) = TestGuard::new(Some("recovery"), true).await;
         guard.set_test_mode(TestGuardMode::Crash);
         let backend = guard.backend();
-        let uri = get_database_uri();
 
         // Drop the table that setup_backend created so we can test the full cycle
         backend
@@ -425,10 +425,9 @@ mod tests {
             SqliteMetadataStore::new_with_directory(temp_dir.path().to_str().unwrap())
                 .await
                 .unwrap();
-        let uri = get_database_uri();
         let mut backend = MoonlinkBackend::new(
             temp_dir.path().to_str().unwrap().into(),
-            Some(uri),
+            /*data_server_uri=*/ None,
             Box::new(metadata_store_accessor),
         )
         .await
@@ -512,10 +511,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_only() {
+        let uri = get_database_uri();
         let (mut guard, client) = TestGuard::new(Some("recovery"), false).await;
         guard.set_test_mode(TestGuardMode::Crash);
         let backend = guard.backend();
-        let uri = get_database_uri();
 
         // Drop the table that setup_backend created so we can test the full cycle
         backend
@@ -604,8 +603,8 @@ mod tests {
     async fn test_recovery_with_wal_and_incomplete_pg_replay(#[case] use_iceberg: bool) {
         use crate::common::{connect_to_postgres, create_backend_from_tempdir};
 
-        let (mut guard, client1) = TestGuard::new(Some("recovery"), false).await;
         let uri = get_database_uri();
+        let (mut guard, client1) = TestGuard::new(Some("recovery"), false).await;
         let (mut client2, _) = connect_to_postgres(&uri).await;
 
         guard.set_test_mode(TestGuardMode::Crash);
@@ -727,10 +726,10 @@ mod tests {
     async fn test_recovery_with_wal_pg_runs_ahead(#[case] use_iceberg: bool) {
         use crate::common::create_backend_from_tempdir;
 
+        let uri = get_database_uri();
         let (mut guard, client) = TestGuard::new(Some("recovery"), false).await;
         guard.set_test_mode(TestGuardMode::Crash);
         let backend = guard.backend();
-        let uri = get_database_uri();
 
         // Drop the table that setup_backend created so we can test the full cycle
         backend
@@ -814,10 +813,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery_with_wal_and_iceberg_snapshot() {
+        let uri = get_database_uri();
         let (mut guard, client) = TestGuard::new(Some("recovery"), false).await;
         guard.set_test_mode(TestGuardMode::Crash);
         let backend = guard.backend();
-        let uri = get_database_uri();
 
         // Drop the table that setup_backend created so we can test the full cycle
         backend
