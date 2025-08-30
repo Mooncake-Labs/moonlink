@@ -35,6 +35,7 @@ clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 datafusion = "49"
 datafusion-cli = "49"
+datafusion-pruning = "49"
 fastbloom = "0.12"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15"
