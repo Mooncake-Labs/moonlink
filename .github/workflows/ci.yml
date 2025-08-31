@@ -631,6 +631,7 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/.shared-nginx
           chmod 777 ${{ github.workspace }}/.shared-nginx
+          echo "nginx ok" > ${{ github.workspace }}/.shared-nginx/index.html
 
       # ─────────────────────── Start nginx manually ──────────────────────────
       - name: Start nginx
@@ -651,14 +652,19 @@ jobs:
       - name: Wait for nginx
         timeout-minutes: 2
         run: |
+          set -euo pipefail
           for i in {1..10}; do
             if curl -sf http://localhost:80; then
               echo "Nginx is ready!"
-              break
+              exit 0
             fi
             echo "Waiting for nginx..."
             sleep 2
           done
+          echo "ERROR: nginx failed to start."
+          docker ps -a
+          docker logs nginx || true
+          exit 1
 
       - name: Run moonlink_service integration tests
         timeout-minutes: 10
