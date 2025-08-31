@@ -76,7 +76,7 @@ spec:
               subPath: nginx.conf
         # Local Postgres instance used by Moonlink
         - name: postgres
-          image: mooncakeLabs/pg_mooncake
+          image: mooncakelabs/pg_mooncake
           env:
             - name: POSTGRES_PASSWORD
               value: password
