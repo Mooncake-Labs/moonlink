@@ -1,7 +1,6 @@
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::datatypes::{DataType, Field};
-use arrow::record_batch::RecordBatch;
-use arrow_array::{Int32Array, StringArray};
+use arrow_array::{Int32Array, RecordBatch, StringArray};
 use parquet::arrow::AsyncArrowWriter;
 
 use std::collections::HashMap;
@@ -27,6 +26,20 @@ pub(crate) fn create_test_arrow_schema() -> Arc<ArrowSchema> {
             "3".to_string(),
         )])),
     ]))
+}
+
+/// Util function to create test arrow batch.
+pub(crate) async fn create_test_arrow_batch() -> RecordBatch {
+    RecordBatch::try_new(
+        create_test_arrow_schema(),
+        vec![
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(StringArray::from(vec!["Alice Johnson".to_string()])),
+            Arc::new(StringArray::from(vec!["alice@example.com".to_string()])),
+            Arc::new(Int32Array::from(vec![30])),
+        ],
+    )
+    .unwrap()
 }
 
 /// Test util function to generate a parquet under the given [`tempdir`].
