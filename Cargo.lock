@@ -4425,6 +4425,7 @@ dependencies = [
  "moonlink_error",
  "moonlink_metadata_store",
  "moonlink_rpc",
+ "more-asserts",
  "parquet",
  "reqwest",
  "serde",

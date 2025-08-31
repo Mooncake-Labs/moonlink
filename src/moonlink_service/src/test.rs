@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use async_recursion::async_recursion;
 use bytes::Bytes;
+use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use serial_test::serial;
@@ -203,7 +204,7 @@ async fn test_health_check_endpoint() {
     let health_data: serde_json::Value = response.json().await.unwrap();
     assert_eq!(health_data["service"], "moonlink-rest-api");
     assert_eq!(health_data["status"], "healthy");
-    assert!(health_data["timestamp"].as_u64().unwrap() > 0);
+    ma::assert_gt!(health_data["timestamp"].as_u64().unwrap(), 0);
 }
 
 #[tokio::test]
