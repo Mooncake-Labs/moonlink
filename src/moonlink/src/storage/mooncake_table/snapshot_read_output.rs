@@ -1,6 +1,5 @@
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
@@ -141,7 +140,7 @@ impl ReadOutput {
             self.handle_resolution_error(std::mem::take(cache_handles))
                 .await;
             return Err(crate::Error::from(std::io::Error::other(format!(
-                "Failed to resolve {} files: {}",
+                "Failed to resolve {} files: {}\n",
                 error_messages.len(),
                 error_messages.join("; ")
             ))));
@@ -237,14 +236,13 @@ impl ReadOutput {
 mod tests {
     use super::*;
     use crate::storage::cache::object_storage::base_cache::MockCacheTrait;
-    use crate::storage::cache::object_storage::base_cache::{CacheEntry, FileMetadata};
     use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
     use crate::storage::filesystem::accessor::base_filesystem_accessor::MockBaseFileSystemAccess;
     use crate::storage::mooncake_table::cache_test_utils::{
         create_infinite_object_storage_cache, import_fake_cache_entry,
     };
     use crate::storage::mooncake_table::test_utils_commons::{
-        get_fake_file_path, get_unique_table_file_id, FAKE_FILE_ID, FAKE_FILE_SIZE,
+        get_fake_file_path, get_unique_table_file_id, FAKE_FILE_ID,
     };
     use crate::storage::storage_utils::FileId;
     use crate::table_notify::TableEvent;
@@ -254,6 +252,10 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use tempfile::tempdir;
+
+    use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
+    use crate::storage::filesystem::accessor_config::AccessorConfig;
+    use crate::storage::filesystem::storage_config::StorageConfig;
 
     #[tokio::test]
     async fn test_take_as_read_state_notifies_files_to_delete_on_success() {
@@ -496,157 +498,45 @@ mod tests {
         assert_eq!(data_files[3], get_fake_file_path(&temp_dir));
     }
 
-    // Test that the cache is correctly unpinned when the file order is: success, failure, success,success
+    // Test that the cache is correctly pinned when all file operations succeed
+    // with a test size of 1000 (greater than our set max parallel read of 128)
     #[tokio::test]
-    async fn test_parallel_partial_fail() {
+    async fn test_parallel_success() {
+        let test_size = 1000;
         // Prepare a real cache and a pinned handle we will inject via mock.
         let temp_dir = tempdir().unwrap();
         let real_cache: ObjectStorageCache = create_infinite_object_storage_cache(
             &temp_dir, /*optimize_local_filesystem=*/ false,
         );
 
-        // Create separate handles for different file_ids to avoid double unreference
-        let file_id_1 = get_unique_table_file_id(FileId(101));
-        let file_id_2 = get_unique_table_file_id(FileId(102));
-        let file_id_3 = get_unique_table_file_id(FileId(103));
-        let file_id_4 = get_unique_table_file_id(FileId(104));
+        let mut file_ids = Vec::new();
+        let mut test_data_file_paths = Vec::new();
+        for i in 0..test_size {
+            let file_id = get_unique_table_file_id(FileId(101 + i));
+            tokio::fs::write(
+                &temp_dir.path().join(format!("file_{i}.parquet")),
+                format!("test data_{i}").as_bytes(),
+            )
+            .await
+            .unwrap();
+            file_ids.push(file_id);
+            test_data_file_paths.push(DataFileForRead::RemoteFilePath((
+                file_id,
+                temp_dir
+                    .path()
+                    .join(format!("file_{i}.parquet"))
+                    .to_string_lossy()
+                    .to_string(),
+            )));
+        }
 
-        let pinned_handle_for_file_id_1 = {
-            let cache = real_cache.clone();
-            let fake_filepath = get_fake_file_path(&temp_dir);
-            let filepath = std::path::PathBuf::from(&fake_filepath);
-            tokio::fs::File::create(&filepath).await.unwrap();
-
-            let cache_entry = CacheEntry {
-                cache_filepath: fake_filepath,
-                file_metadata: FileMetadata {
-                    file_size: FAKE_FILE_SIZE,
-                },
-            };
-            cache.import_cache_entry(file_id_1, cache_entry).await.0
+        // Filesystem use for real cache
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_string_lossy().to_string(),
+            atomic_write_dir: None,
         };
-
-        let pinned_handle_for_file_id_3 = {
-            let cache = real_cache.clone();
-            let fake_filepath = get_fake_file_path(&temp_dir);
-            let filepath = std::path::PathBuf::from(&fake_filepath);
-            tokio::fs::File::create(&filepath).await.unwrap();
-
-            let cache_entry = CacheEntry {
-                cache_filepath: fake_filepath,
-                file_metadata: FileMetadata {
-                    file_size: FAKE_FILE_SIZE,
-                },
-            };
-            cache.import_cache_entry(file_id_3, cache_entry).await.0
-        };
-
-        let pinned_handle_for_file_id_4 = {
-            let cache = real_cache.clone();
-            let fake_filepath = get_fake_file_path(&temp_dir);
-            let filepath = std::path::PathBuf::from(&fake_filepath);
-            tokio::fs::File::create(&filepath).await.unwrap();
-
-            let cache_entry = CacheEntry {
-                cache_filepath: fake_filepath,
-                file_metadata: FileMetadata {
-                    file_size: FAKE_FILE_SIZE,
-                },
-            };
-            cache.import_cache_entry(file_id_4, cache_entry).await.0
-        };
-
-        // The handle is pinned once now; sanity check.
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_1)
-                .await,
-            1
-        );
-
-        // The handle is pinned once now; sanity check.
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_2)
-                .await,
-            0
-        );
-
-        // The handle is pinned once now; sanity check.
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_3)
-                .await,
-            1
-        );
-
-        // The handle is pinned once now; sanity check.
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_4)
-                .await,
-            1
-        );
-
-        // Build a mock cache that returns different handles, then an error on fourth call.
-        let mut mock_cache = MockCacheTrait::new();
-        let mut seq = Sequence::new();
-        let handle_clone_success_task_1 = pinned_handle_for_file_id_1.clone();
-        let handle_clone_success_task_3 = pinned_handle_for_file_id_3.clone();
-        let handle_clone_success_task_4 = pinned_handle_for_file_id_4.clone();
-
-        mock_cache
-            .expect_get_cache_entry()
-            .once()
-            .in_sequence(&mut seq)
-            .returning(move |_, _, _| {
-                let handle_clone = handle_clone_success_task_1.clone();
-                let files_to_delete = SmallVec::new();
-                Box::pin(async move { Ok((Some(handle_clone), files_to_delete)) })
-            });
-
-        mock_cache
-            .expect_get_cache_entry()
-            .once()
-            .in_sequence(&mut seq)
-            .returning(|_, _, _| {
-                Box::pin(async move {
-                    Err(crate::Error::from(std::io::Error::other("network timeout")))
-                })
-            });
-
-        mock_cache
-            .expect_get_cache_entry()
-            .once()
-            .in_sequence(&mut seq)
-            .returning(move |_, _, _| {
-                let handle_clone = handle_clone_success_task_3.clone();
-                let files_to_delete = SmallVec::new();
-                Box::pin(async move { Ok((Some(handle_clone), files_to_delete)) })
-            });
-
-        mock_cache
-            .expect_get_cache_entry()
-            .once()
-            .in_sequence(&mut seq)
-            .returning(move |_, _, _| {
-                let handle_clone = handle_clone_success_task_4.clone();
-                let files_to_delete = SmallVec::new();
-                Box::pin(async move { Ok((Some(handle_clone), files_to_delete)) })
-            });
-
-        // Prepare a separate cache/handle to simulate puffin cache behavior, and
-        // also mark it requested-to-delete so unreference returns files.
-        let puffin_temp_dir = tempdir().unwrap();
-        let mut puffin_cache: ObjectStorageCache = create_infinite_object_storage_cache(
-            &puffin_temp_dir,
-            /*optimize_local_filesystem=*/ false,
-        );
-        let puffin_handle = { import_fake_cache_entry(&puffin_temp_dir, &mut puffin_cache).await };
-        let _ = puffin_cache.try_delete_cache_entry(FAKE_FILE_ID).await;
-
-        // Filesystem accessor mock (unused, but required by signature).
-        let filesystem_accessor = MockBaseFileSystemAccess::new();
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+        let filesystem_accessor = FileSystemAccessor::new(accessor_config);
 
         // Table notifier channel to capture deletion notifications.
         let (tx, mut _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
@@ -655,56 +545,104 @@ mod tests {
         // let fake_remote_path = get_fake_file_path(&temp_dir);
         let associated_temp_dir = tempdir().unwrap();
         let read_output = ReadOutput {
-            data_file_paths: vec![
-                DataFileForRead::RemoteFilePath((file_id_1, get_fake_file_path(&temp_dir))),
-                DataFileForRead::RemoteFilePath((file_id_2, get_fake_file_path(&temp_dir))),
-                DataFileForRead::RemoteFilePath((file_id_3, get_fake_file_path(&temp_dir))),
-                DataFileForRead::RemoteFilePath((file_id_4, get_fake_file_path(&temp_dir))),
-            ],
-            puffin_cache_handles: vec![puffin_handle],
+            data_file_paths: test_data_file_paths,
+            puffin_cache_handles: Vec::new(),
             deletion_vectors: Vec::new(),
             position_deletes: Vec::new(),
             // Add an associated temporary file to trigger error-path notification.
             associated_files: vec![get_fake_file_path(&associated_temp_dir)],
             table_notifier: Some(tx),
-            object_storage_cache: Some(Arc::new(mock_cache)),
+            object_storage_cache: Some(Arc::new(real_cache.clone())),
             filesystem_accessor: Some(Arc::new(filesystem_accessor)),
         };
 
-        let res = read_output
+        let _read_state = read_output
+            .take_as_read_state(Arc::new(|p: String| p))
+            .await
+            .unwrap();
+
+        // Check that the handles were properly transferred to ReadState on success
+        // While ReadState is alive, the cache handles are owned by ReadState,
+        // so the cache's reference count should be 1
+        for file_id in &file_ids {
+            assert_eq!(
+                real_cache.get_non_evictable_entry_ref_count(file_id).await,
+                1
+            );
+        }
+    }
+
+    // Test to verify that the cache is correctly unpinned when processing files with alternating success and failure:
+    // files with odd IDs fail, while files with even IDs succeed.
+    #[tokio::test]
+    async fn test_parallel_partial_fail() {
+        let test_size = 1000;
+        // Prepare a real cache and a pinned handle we will inject via mock.
+        let temp_dir = tempdir().unwrap();
+        let real_cache: ObjectStorageCache = create_infinite_object_storage_cache(
+            &temp_dir, /*optimize_local_filesystem=*/ false,
+        );
+
+        let mut file_ids = Vec::new();
+        let mut test_data_file_paths = Vec::new();
+        for i in 0..test_size {
+            let file_id = get_unique_table_file_id(FileId(101 + i));
+            if i % 2 == 0 {
+                tokio::fs::write(
+                    &temp_dir.path().join(format!("file_{i}.parquet")),
+                    format!("test data_{i}").as_bytes(),
+                )
+                .await
+                .unwrap();
+            }
+            file_ids.push(file_id);
+            test_data_file_paths.push(DataFileForRead::RemoteFilePath((
+                file_id,
+                temp_dir
+                    .path()
+                    .join(format!("file_{i}.parquet"))
+                    .to_string_lossy()
+                    .to_string(),
+            )));
+        }
+
+        // Filesystem use for real cache
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_string_lossy().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+        let filesystem_accessor = FileSystemAccessor::new(accessor_config);
+
+        // Table notifier channel to capture deletion notifications.
+        let (tx, mut _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
+
+        // Construct ReadOutput with two remote files; second call will error.
+        // let fake_remote_path = get_fake_file_path(&temp_dir);
+        let associated_temp_dir = tempdir().unwrap();
+        let read_output = ReadOutput {
+            data_file_paths: test_data_file_paths,
+            puffin_cache_handles: Vec::new(),
+            deletion_vectors: Vec::new(),
+            position_deletes: Vec::new(),
+            // Add an associated temporary file to trigger error-path notification.
+            associated_files: vec![get_fake_file_path(&associated_temp_dir)],
+            table_notifier: Some(tx),
+            object_storage_cache: Some(Arc::new(real_cache.clone())),
+            filesystem_accessor: Some(Arc::new(filesystem_accessor)),
+        };
+
+        let _read_state = read_output
             .take_as_read_state(Arc::new(|p: String| p))
             .await
             .unwrap_err();
-        let error_msg = res.to_string();
-        assert!(error_msg.contains("network timeout"));
 
-        // Check that the handle was properly unpinned
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_1)
-                .await,
-            0
-        );
-
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_2)
-                .await,
-            0
-        );
-
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_3)
-                .await,
-            0
-        );
-
-        assert_eq!(
-            real_cache
-                .get_non_evictable_entry_ref_count(&file_id_4)
-                .await,
-            0
-        );
+        // Ensure the cache is clean after read
+        for file_id in file_ids {
+            assert_eq!(
+                real_cache.get_non_evictable_entry_ref_count(&file_id).await,
+                0
+            );
+        }
     }
 }
