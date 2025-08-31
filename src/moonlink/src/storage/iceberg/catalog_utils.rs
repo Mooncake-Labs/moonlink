@@ -5,7 +5,7 @@ use crate::storage::iceberg::iceberg_table_config::IcebergCatalogConfig;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
 
 use iceberg::spec::Schema as IcebergSchema;
-use iceberg::Result as IcebergResult;
+use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableUpdate};
 
 /// Create a catelog based on the provided type.
 ///
@@ -51,6 +51,42 @@ pub fn create_catalog_without_schema(
             "Only File catalog is supported currently",
         )),
     }
+}
+
+/// Reflect table updates to table metadata builder.
+pub(crate) fn reflect_table_updates(
+    mut builder: TableMetadataBuilder,
+    table_updates: Vec<TableUpdate>,
+) -> IcebergResult<TableMetadataBuilder> {
+    for update in &table_updates {
+        match update {
+            TableUpdate::AddSnapshot { snapshot } => {
+                builder = builder.add_snapshot(snapshot.clone())?;
+            }
+            TableUpdate::SetSnapshotRef {
+                ref_name,
+                reference,
+            } => {
+                builder = builder.set_ref(ref_name, reference.clone())?;
+            }
+            TableUpdate::SetProperties { updates } => {
+                builder = builder.set_properties(updates.clone())?;
+            }
+            TableUpdate::RemoveProperties { removals } => {
+                builder = builder.remove_properties(removals)?;
+            }
+            TableUpdate::AddSchema { schema } => {
+                builder = builder.add_schema(schema.clone())?;
+            }
+            TableUpdate::SetCurrentSchema { schema_id } => {
+                builder = builder.set_current_schema(*schema_id)?;
+            }
+            _ => {
+                unreachable!("Unimplemented table update: {:?}", update);
+            }
+        }
+    }
+    Ok(builder)
 }
 
 /// Test util function to create catalog with provided filesystem accessor.

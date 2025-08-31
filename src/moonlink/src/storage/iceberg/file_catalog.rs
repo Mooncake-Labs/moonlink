@@ -2,13 +2,13 @@ use super::puffin_writer_proxy::append_puffin_metadata_and_rewrite;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::iceberg::catalog_utils::reflect_table_updates;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
 use crate::storage::iceberg::moonlink_catalog::{PuffinBlobType, PuffinWrite, SchemaUpdate};
 use crate::storage::iceberg::puffin_writer_proxy::{
     get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
 };
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
-use crate::storage::iceberg::table_metadata_utils::reflect_table_updates;
 
 use futures::future::join_all;
 use std::cell::RefCell;
