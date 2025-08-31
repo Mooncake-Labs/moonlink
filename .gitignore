@@ -1,5 +1,5 @@
 /.history
 /target/
 .vscode/
-.devcontainer/cert/
+.devcontainer/certs/
 .shared-nginx/
