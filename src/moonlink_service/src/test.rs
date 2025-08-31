@@ -62,6 +62,41 @@ async fn cleanup_directory(dir: &str) {
     }
 }
 
+struct TestGuard {
+    dir: String,
+}
+
+impl TestGuard {
+    async fn new(dir: &str) -> Self {
+        cleanup_directory(dir).await;
+        Self {
+            dir: dir.to_string(),
+        }
+    }
+}
+
+impl Drop for TestGuard {
+    fn drop(&mut self) {
+        fn cleanup_sync(dir: &str) {
+            let dir = std::path::Path::new(dir);
+            if dir.exists() {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_dir() {
+                        cleanup_sync(path.to_str().unwrap());
+                        std::fs::remove_dir_all(path).unwrap();
+                    } else {
+                        std::fs::remove_file(path).unwrap();
+                    }
+                }
+            }
+        }
+
+        cleanup_sync(&self.dir);
+    }
+}
+
 /// Send request to readiness endpoint.
 async fn test_readiness_probe() {
     let url = format!("http://127.0.0.1:{READINESS_PROBE_PORT}/ready");
@@ -182,7 +217,7 @@ async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
 #[tokio::test]
 #[serial]
 async fn test_health_check_endpoint() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -210,7 +245,7 @@ async fn test_health_check_endpoint() {
 #[tokio::test]
 #[serial]
 async fn test_schema() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -286,7 +321,7 @@ async fn optimize_table(client: &reqwest::Client, database: &str, table: &str, m
 
 /// Util function to test optimize table
 async fn run_optimize_table_test(mode: &str) {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -388,7 +423,7 @@ async fn test_optimize_table_on_data_mode() {
 #[tokio::test]
 #[serial]
 async fn test_moonlink_standalone_data_ingestion() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -469,7 +504,7 @@ async fn test_moonlink_standalone_data_ingestion() {
 #[tokio::test]
 #[serial]
 async fn test_moonlink_standalone_file_upload() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -559,7 +594,7 @@ async fn test_moonlink_standalone_file_upload() {
 #[tokio::test]
 #[serial]
 async fn test_moonlink_standalone_file_insert() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -648,7 +683,7 @@ async fn test_moonlink_standalone_file_insert() {
 #[tokio::test]
 #[serial]
 async fn test_multiple_tables_creation() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -666,7 +701,7 @@ async fn test_multiple_tables_creation() {
 #[tokio::test]
 #[serial]
 async fn test_drop_table() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -693,7 +728,7 @@ async fn test_drop_table() {
 #[tokio::test]
 #[serial]
 async fn test_list_tables() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -737,7 +772,7 @@ async fn test_list_tables() {
 #[tokio::test]
 #[serial]
 async fn test_bulk_ingest_files() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -767,7 +802,7 @@ async fn test_bulk_ingest_files() {
 #[tokio::test]
 #[serial]
 async fn test_invalid_operation() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -824,7 +859,7 @@ async fn test_invalid_operation() {
 #[tokio::test]
 #[serial]
 async fn test_non_existent_table() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -880,7 +915,7 @@ async fn test_non_existent_table() {
 #[tokio::test]
 #[serial]
 async fn test_create_table_with_invalid_config() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
