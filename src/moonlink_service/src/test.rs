@@ -180,6 +180,34 @@ async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
 
 #[tokio::test]
 #[serial]
+async fn test_health_check_endpoint() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{REST_ADDR}/health"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let health_data: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(health_data["service"], "moonlink-rest-api");
+    assert_eq!(health_data["status"], "healthy");
+    assert!(health_data["timestamp"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+#[serial]
 async fn test_schema() {
     cleanup_directory(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
@@ -227,6 +255,13 @@ async fn test_schema() {
         response.status().is_success(),
         "Response status is {response:?}"
     );
+    let create_response: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(create_response.get("database").unwrap(), DATABASE);
+    assert_eq!(
+        create_response.get("table").unwrap(),
+        &crafted_src_table_name
+    );
+    assert_eq!(create_response.get("lsn").unwrap(), 1);
 }
 
 /// Util function to optimize table via REST API.
