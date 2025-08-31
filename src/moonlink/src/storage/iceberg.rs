@@ -30,6 +30,7 @@ mod snapshot_utils;
 mod table_commit_proxy;
 pub(super) mod table_event_manager;
 pub(super) mod table_manager;
+mod table_metadata_utils;
 pub(super) mod table_property;
 pub(super) mod utils;
 pub(super) mod validation;

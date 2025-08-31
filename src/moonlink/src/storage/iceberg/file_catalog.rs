@@ -8,6 +8,7 @@ use crate::storage::iceberg::puffin_writer_proxy::{
     get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
 };
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
+use crate::storage::iceberg::table_metadata_utils::reflect_table_updates;
 
 use futures::future::join_all;
 use std::cell::RefCell;
@@ -51,9 +52,7 @@ use iceberg::spec::{
 };
 use iceberg::table::Table;
 use iceberg::Result as IcebergResult;
-use iceberg::{
-    Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent, TableUpdate,
-};
+use iceberg::{Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent};
 use iceberg::{Error as IcebergError, TableRequirement};
 
 /// Object storage usually doesn't have "folder" concept, when creating a new namespace, we create an indicator file under certain folder.
@@ -203,42 +202,6 @@ impl FileCatalog {
             cur_requirement.check(Some(table_metadata))?;
         }
         Ok(())
-    }
-
-    /// Reflect table updates to table metadata builder.
-    fn reflect_table_updates(
-        mut builder: TableMetadataBuilder,
-        table_updates: Vec<TableUpdate>,
-    ) -> IcebergResult<TableMetadataBuilder> {
-        for update in &table_updates {
-            match update {
-                TableUpdate::AddSnapshot { snapshot } => {
-                    builder = builder.add_snapshot(snapshot.clone())?;
-                }
-                TableUpdate::SetSnapshotRef {
-                    ref_name,
-                    reference,
-                } => {
-                    builder = builder.set_ref(ref_name, reference.clone())?;
-                }
-                TableUpdate::SetProperties { updates } => {
-                    builder = builder.set_properties(updates.clone())?;
-                }
-                TableUpdate::RemoveProperties { removals } => {
-                    builder = builder.remove_properties(removals)?;
-                }
-                TableUpdate::AddSchema { schema } => {
-                    builder = builder.add_schema(schema.clone())?;
-                }
-                TableUpdate::SetCurrentSchema { schema_id } => {
-                    builder = builder.set_current_schema(*schema_id)?;
-                }
-                _ => {
-                    unreachable!("Unimplemented table update: {:?}", update);
-                }
-            }
-        }
-        Ok(builder)
     }
 
     /// This is a hack function to work-around iceberg-rust.
@@ -705,7 +668,7 @@ impl Catalog for FileCatalog {
 
         // Construct new metadata with updates.
         let updates = commit.take_updates();
-        let builder = Self::reflect_table_updates(builder, updates)?;
+        let builder = reflect_table_updates(builder, updates)?;
         let metadata = builder.build()?.metadata;
 
         // Write metadata file.
