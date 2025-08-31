@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::rest_api::{FileUploadResponse, IngestResponse, ListTablesResponse};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use async_recursion::async_recursion;
 use bytes::Bytes;
@@ -395,7 +396,7 @@ async fn test_create_snapshot() {
     // Ingest some data.
     let insert_payload = json!({
         "operation": "insert",
-        "request_mode": "async",
+        "request_mode": "sync",
         "data": {
             "id": 1,
             "name": "Alice Johnson",
@@ -415,7 +416,9 @@ async fn test_create_snapshot() {
         response.status().is_success(),
         "Response status is {response:?}"
     );
-    let lsn: u64 = 1;
+    let response: IngestResponse = response.json().await.unwrap();
+    assert_eq!(response.lsn, Some(1));
+    let lsn = response.lsn.unwrap();
 
     // After all changes reflected at mooncake snapshot, trigger an iceberg snapshot.
     create_snapshot(&client, DATABASE, TABLE, lsn).await;
