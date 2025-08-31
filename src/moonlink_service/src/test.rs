@@ -5,6 +5,7 @@ use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use serial_test::serial;
+use std::env;
 use tokio::net::TcpStream;
 
 use crate::test_utils::*;
@@ -15,12 +16,18 @@ use moonlink_rpc::{load_files, scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
 fn get_moonlink_backend_dir() -> String {
-    if let Ok(backend_dir) = std::env::var("MOONLINK_BACKEND_DIR") {
+    if let Ok(backend_dir) = env::var("MOONLINK_BACKEND_DIR") {
         backend_dir
     } else {
         "/workspaces/moonlink/.shared-nginx".to_string()
     }
 }
+
+/// Util function to get nginx address
+fn get_nginx_addr() -> String {
+    env::var("NGINX_ADDR").unwrap_or_else(|_| NGINX_ADDR.to_string())
+}
+
 /// Local nginx server IP/port address.
 const NGINX_ADDR: &str = "http://nginx.local:80";
 /// Local moonlink REST API IP/port address.
@@ -34,10 +41,11 @@ const TABLE: &str = "test-table";
 
 fn get_service_config() -> ServiceConfig {
     let moonlink_backend_dir = get_moonlink_backend_dir();
+    let nginx_addr = get_nginx_addr();
 
     ServiceConfig {
         base_path: moonlink_backend_dir.clone(),
-        data_server_uri: Some(NGINX_ADDR.to_string()),
+        data_server_uri: Some(nginx_addr),
         rest_api_port: Some(3030),
         tcp_port: Some(3031),
     }

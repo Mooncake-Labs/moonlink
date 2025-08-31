@@ -664,5 +664,6 @@ jobs:
         timeout-minutes: 10
         env:
           MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
+          NGINX_ADDR: http://nginx.local:80
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features standalone-test -- --nocapture
