@@ -122,7 +122,7 @@ pub struct OptimizeTableRequest {
 pub struct OptimizeTableResponse {}
 
 /// ====================
-/// Create SnapShot
+/// Create Snapshot
 /// ====================
 ///
 /// Request structure for snapshot creation.
@@ -517,8 +517,8 @@ async fn create_snapshot(
     Json(payload): Json<CreateSnapShotRequest>,
 ) -> Result<Json<CreateSnapShotResponse>, (StatusCode, Json<ErrorResponse>)> {
     debug!(
-        "Received create snapshot request for '{}': {:?}",
-        table, payload
+        "Received create snapshot request for '{}': {}",
+        &payload.database, table
     );
     match state
         .backend

@@ -662,8 +662,6 @@ jobs:
             sleep 2
           done
           echo "ERROR: nginx failed to start."
-          docker ps -a
-          docker logs nginx || true
           exit 1
 
       - name: Run moonlink_service integration tests
