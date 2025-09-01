@@ -80,7 +80,12 @@ fn get_id_from_row(row: &MoonlinkRow) -> i32 {
 async fn create_mooncake_table_for_replay(
     replay_env: &ReplayEnvironment,
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::fs::File>>,
-) -> (Arc<TableMetadata>, IcebergTableConfig, MooncakeTable) {
+) -> (
+    Arc<TableMetadata>,
+    IcebergTableConfig,
+    MooncakeTable,
+    bool, /*is_upsert_table*/
+) {
     let line = lines.next_line().await.unwrap().unwrap();
     let replay_table_metadata: ReplayTableMetadata = serde_json::from_str(&line).unwrap();
     let local_table_directory = replay_env
@@ -132,7 +137,13 @@ async fn create_mooncake_table_for_replay(
         Arc::new(object_storage_cache),
     )
     .await;
-    (table_metadata, iceberg_table_config, mooncake_table)
+
+    (
+        table_metadata,
+        iceberg_table_config,
+        mooncake_table,
+        replay_table_metadata.is_upsert_table,
+    )
 }
 
 /// Test util function to check whether iceberg snapshot contains expected content.
@@ -233,7 +244,7 @@ pub(crate) async fn replay(replay_filepath: &str) {
     let data_files = Arc::new(Mutex::new(HashMap::new()));
     let data_files_clone = data_files.clone();
 
-    let (table_metadata, iceberg_table_config, mut table) =
+    let (table_metadata, iceberg_table_config, mut table, is_upsert_table) =
         create_mooncake_table_for_replay(&replay_env, &mut lines).await;
     let (table_event_sender, mut table_event_receiver) = mpsc::channel(100);
     let (event_replay_sender, _event_replay_receiver) = mpsc::unbounded_channel();
@@ -434,6 +445,10 @@ pub(crate) async fn replay(replay_filepath: &str) {
                 if let Some(xact_id) = delete_event.xact_id {
                     table
                         .delete_in_stream_batch(delete_event.row, xact_id)
+                        .await;
+                } else if is_upsert_table {
+                    table
+                        .delete_if_exists(delete_event.row, delete_event.lsn.unwrap())
                         .await;
                 } else {
                     table

@@ -2771,7 +2771,7 @@ async fn test_streaming_deletion_remap_sets_batch_deletion_vector() {
         let total_deleted: usize = stream_state
             .flushed_files
             .values()
-            .map(|entry| entry.batch_deletion_vector.get_num_rows_deleted())
+            .map(|entry| entry.committed_deletion_vector.get_num_rows_deleted())
             .sum();
         assert_eq!(
             total_deleted, 1,

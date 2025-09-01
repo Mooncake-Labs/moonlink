@@ -390,7 +390,7 @@ pub(crate) async fn create_mooncake_and_persist_for_test(
 }
 
 // Test util to block wait current mooncake snapshot completion, get the iceberg persistence payload, and perform a new mooncake snapshot and wait completion.
-async fn sync_mooncake_snapshot_and_create_new_by_iceberg_payload(
+pub(crate) async fn sync_mooncake_snapshot_and_create_new_by_iceberg_payload(
     table: &mut MooncakeTable,
     receiver: &mut Receiver<TableEvent>,
 ) {

@@ -310,6 +310,7 @@ impl TestEnvironment {
         rx.recv().await.unwrap()
     }
 
+    /// Commit the transaction, flush and create mooncake/iceberg snapshot.
     pub async fn flush_table_and_sync(&mut self, lsn: u64, xact_id: Option<u32>) {
         self.send_event(TableEvent::CommitFlush {
             lsn,

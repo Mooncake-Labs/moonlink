@@ -219,7 +219,9 @@ impl SnapshotTableState {
             }
             if let RecordLocation::DiskFile(file_id, row_idx) = &cur_deletion_log.pos {
                 let batch_deletion_vector = self.current_snapshot.disk_files.get(file_id).unwrap();
-                let max_rows = batch_deletion_vector.batch_deletion_vector.get_max_rows();
+                let max_rows = batch_deletion_vector
+                    .committed_deletion_vector
+                    .get_max_rows();
 
                 let cur_data_file = self
                     .current_snapshot
@@ -366,7 +368,7 @@ impl SnapshotTableState {
                     num_rows: cur_entry.num_rows,
                     file_size: cur_entry.file_size,
                     cache_handle: Some(cache_handle),
-                    batch_deletion_vector: BatchDeletionVector::new(
+                    committed_deletion_vector: BatchDeletionVector::new(
                         /*max_rows=*/ cur_entry.num_rows,
                     ),
                     puffin_deletion_blob: None,
@@ -405,7 +407,7 @@ impl SnapshotTableState {
             // ====================================
             //
             // If no deletion record for this file, directly remove it, no need to do remapping.
-            if old_entry.batch_deletion_vector.is_empty() {
+            if old_entry.committed_deletion_vector.is_empty() {
                 assert!(old_entry.puffin_deletion_blob.is_none());
                 continue;
             }
@@ -420,7 +422,7 @@ impl SnapshotTableState {
             }
 
             // If there's deletion record, try remap to the new compacted data file.
-            let deleted_rows = old_entry.batch_deletion_vector.collect_deleted_rows();
+            let deleted_rows = old_entry.committed_deletion_vector.collect_deleted_rows();
             for cur_deleted_row in deleted_rows {
                 let old_record_location =
                     RecordLocation::DiskFile(cur_old_data_file.file_id(), cur_deleted_row as usize);
@@ -434,7 +436,7 @@ impl SnapshotTableState {
                         .get_mut(&new_record_location.new_data_file)
                         .unwrap();
                     assert!(new_deletion_entry
-                        .batch_deletion_vector
+                        .committed_deletion_vector
                         .delete_row(new_record_location.record_location.get_row_idx()));
                 }
                 // Case-2: The old record has already been compacted, directly skip.
@@ -721,7 +723,7 @@ impl SnapshotTableState {
                             num_rows: file_attrs.row_num,
                             file_size: file_attrs.file_size,
                             cache_handle: Some(cache_handle),
-                            batch_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),
+                            committed_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),
                             puffin_deletion_blob: None,
                         },
                     )
@@ -738,7 +740,7 @@ impl SnapshotTableState {
                     // Precondition: all new data files have been reflected to disk file map
                     for (file_ref, disk_entry) in self.current_snapshot.disk_files.iter_mut() {
                         if file_ref.file_id() == file_id {
-                            assert!(disk_entry.batch_deletion_vector.delete_row(row_idx));
+                            assert!(disk_entry.committed_deletion_vector.delete_row(row_idx));
                             break;
                         }
                     }
@@ -880,7 +882,7 @@ impl SnapshotTableState {
                 .disk_files
                 .get(file_id)
                 .expect("missing disk file")
-                .batch_deletion_vector
+                .committed_deletion_vector
                 .is_deleted(*row_id),
         }
     }
@@ -952,7 +954,7 @@ impl SnapshotTableState {
                     .disk_files
                     .get_mut(file_name)
                     .unwrap()
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .delete_row(*row_id);
                 assert!(res);
             }

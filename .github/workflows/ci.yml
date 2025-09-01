@@ -100,14 +100,17 @@ jobs:
       - name: Wait for Fake GCS ready
         timeout-minutes: 2
         run: |
+          set -euo pipefail
           for i in {1..10}; do
             if curl -sf http://gcs.local:4443/storage/v1/b; then
               echo "Fake GCS is ready!"
-              break
+              exit 0
             fi
             echo "Waiting for Fake GCS..."
             sleep 2
           done
+          echo "ERROR: Fake GCS failed to start."
+          exit 1
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
       - name: Run ${{ matrix.name }}
@@ -176,14 +179,17 @@ jobs:
       - name: Wait for Fake S3
         timeout-minutes: 2
         run: |
+          set -euo pipefail
           for i in {1..10}; do
-            if curl -sf http://minio:9000/minio/health/ready; then
+            if curl -sf http://s3.local:9000/minio/health/ready; then
               echo "Fake S3 is ready!"
-              break
+              exit 0
             fi
-            echo "Waiting for Fake GCS..."
+            echo "Waiting for Fake S3..."
             sleep 2
           done
+          echo "ERROR: Fake S3 failed to start."
+          exit 1
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
       - name: Run ${{ matrix.name }}
@@ -201,7 +207,53 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────────────────── 4 · TEST & COVERAGE ────────────────────────────
+  # ──────────────────────── 4 · Rest catalog test (feature) ─────────────────
+  rest_catalog_test:
+    name: rest catalog tests (feature)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        type: [feature]
+        include:
+          - type: feature
+            name: rest catalog feature test
+            timeout-minutes: 10
+            cmd: |
+              cargo test --lib --features=catalog-rest
+    steps:
+      - uses: actions/checkout@v5
+
+      # ─────────────────────── Start Iceberg-rest ──────────────────────────
+      - name: Start Iceberg-rest-fixture
+        run: |
+          docker run -d \
+            --name iceberg-rest-fixture \
+            -p 8181:8181 \
+            apache/iceberg-rest-fixture
+
+      # ───────────────────── Wait for Iceberg-rest to be ready ───────────────────
+      - name: Wait for Iceberg-rest-fixture ready
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          for i in {1..10}; do
+            if curl -sS http://localhost:8181/v1/config; then
+              echo "Iceberg-rest-fixture is ready!"
+              exit 0
+            fi
+            echo "Waiting for Iceberg-rest-fixture..."
+            sleep 2
+          done
+          echo "ERROR: Iceberg-rest-fixture failed to start."
+          exit 1
+
+      # ────────────────────── Toolchain + Test Tools ─────────────────────────
+      - name: Run ${{ matrix.name }}
+        timeout-minutes: ${{ matrix.timeout-minutes }}
+        run: |
+          ${{ matrix.cmd }}
+
+  # ───────────────────────── 5 · TEST & COVERAGE ────────────────────────────
   coverage:
     name: Unit Tests + Coverage (llvm-cov + nextest)
     runs-on: ubuntu-latest
@@ -263,7 +315,7 @@ jobs:
           files: lcov.info
           fail_ci_if_error: true
 
-  # ──────────────────────── 5 · Chaos test ────────────────────────────
+  # ──────────────────────── 6 · Chaos test ────────────────────────────
   chaos_test:
     name: Chaos test
     runs-on: ubuntu-latest
@@ -295,7 +347,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 6 · Chaos test with local fs optimization ─────────────
+  # ───────────── 7 · Chaos test with local fs optimization ─────────────
   chaos_test_with_local_fs_optimization:
     name: Chaos test with local filesystem optimization
     runs-on: ubuntu-latest
@@ -318,7 +370,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 7 · Chaos test with chaos injection ─────────────
+  # ───────────── 8 · Chaos test with chaos injection ─────────────
   chaos_test_with_chaos_injection:
     name: Chaos test with chaos injection
     runs-on: ubuntu-latest
@@ -350,7 +402,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 8 · Chaos test for disk slice write ─────────────
+  # ───────────── 9 · Chaos test for disk slice write ─────────────
   disk_slice_write_with_chaos:
     name: Chaos test for disk slice write
     runs-on: ubuntu-latest
@@ -382,7 +434,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 9 · Chaos test for append only operation ─────────────
+  # ───────────── 10 · Chaos test for append only operation ─────────────
   append_only_chaos:
     name: Chaos test for append only operation
     runs-on: ubuntu-latest
@@ -414,7 +466,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 10 · Chaos test for table upsert operation ─────────────
+  # ───────────── 11 · Chaos test for table upsert operation ─────────────
   upsert_operation_chaos:
     name: Chaos test for upsert operation
     runs-on: ubuntu-latest
@@ -446,7 +498,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 11 · Regression test  ─────────────
+  # ───────────── 12 · Regression test  ─────────────
   regression_test:
     name: Regression test
     runs-on: ubuntu-latest
@@ -468,7 +520,7 @@ jobs:
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::regression --features=chaos-test -p moonlink -- --nocapture
 
-  # ───────────── 12 · PostgreSQL Integration Tests ─────────────
+  # ───────────── 13 · PostgreSQL Integration Tests ─────────────
   postgres_tests:
     name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest
@@ -506,14 +558,17 @@ jobs:
 
       - name: Wait for PostgreSQL
         run: |
+          set -euo pipefail
           for i in {1..10}; do
             if pg_isready -h localhost -p 5432 -U postgres; then
               echo "PostgreSQL is ready!"
-              break
+              exit 0
             fi
             echo "Waiting for PostgreSQL..."
             sleep 2
           done
+          echo "ERROR: PostgreSQL failed to start."
+          exit 1
 
       - name: Configure PostgreSQL for logical replication
         run: |
@@ -522,15 +577,18 @@ jobs:
 
       - name: Restart PostgreSQL to apply wal_level
         run: |
+          set -euo pipefail
           docker restart postgres
           for i in {1..10}; do
             if pg_isready -h localhost -p 5432 -U postgres; then
               echo "PostgreSQL restarted and ready!"
-              break
+              exit 0
             fi
             echo "Waiting for PostgreSQL after restart..."
             sleep 2
           done
+          echo "ERROR: PostgreSQL failed to restart."
+          exit 1
 
       - name: Run PostgreSQL integration tests
         timeout-minutes: 10
@@ -548,7 +606,7 @@ jobs:
         run: |
           cargo test --package moonlink_backend --test test_backend
 
-  # ───────────── 13 · Moonlink Service Integration Tests ─────────────
+  # ───────────── 14 · Moonlink Service Integration Tests ─────────────
   moonlink_service_tests:
     name: Moonlink Service Integration Tests
     runs-on: ubuntu-latest
@@ -573,6 +631,7 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/.shared-nginx
           chmod 777 ${{ github.workspace }}/.shared-nginx
+          echo "nginx ok" > ${{ github.workspace }}/.shared-nginx/index.html
 
       # ─────────────────────── Start nginx manually ──────────────────────────
       - name: Start nginx
@@ -593,18 +652,22 @@ jobs:
       - name: Wait for nginx
         timeout-minutes: 2
         run: |
+          set -euo pipefail
           for i in {1..10}; do
             if curl -sf http://localhost:80; then
               echo "Nginx is ready!"
-              break
+              exit 0
             fi
             echo "Waiting for nginx..."
             sleep 2
           done
+          echo "ERROR: nginx failed to start."
+          exit 1
 
       - name: Run moonlink_service integration tests
         timeout-minutes: 10
         env:
           MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
+          NGINX_ADDR: http://nginx.local:80
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features standalone-test -- --nocapture

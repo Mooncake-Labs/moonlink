@@ -102,9 +102,11 @@ impl SnapshotTableState {
                 if data_file_deletion_percentage_threshold == 0 {
                     continue;
                 }
-                let deletion_percentage =
-                    disk_file_entry.batch_deletion_vector.get_num_rows_deleted() * 100
-                        / disk_file_entry.num_rows;
+                let deletion_percentage = disk_file_entry
+                    .committed_deletion_vector
+                    .get_num_rows_deleted()
+                    * 100
+                    / disk_file_entry.num_rows;
                 if deletion_percentage < data_file_deletion_percentage_threshold {
                     continue;
                 }

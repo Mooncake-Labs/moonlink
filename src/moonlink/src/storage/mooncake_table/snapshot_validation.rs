@@ -83,7 +83,7 @@ impl SnapshotTableState {
                     .as_ref()
                     .map_or(0, |cur_puffin_blob| cur_puffin_blob.num_rows),
                 cur_disk_file_entry
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .get_num_rows_deleted()
             );
         }

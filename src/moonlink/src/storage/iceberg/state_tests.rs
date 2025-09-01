@@ -151,15 +151,15 @@ async fn check_prev_data_files(
 
     // In the test suite, we only delete the second prepared row.
     assert!(!deletion_vector
-        .batch_deletion_vector
+        .committed_deletion_vector
         .is_deleted(/*row_idx=*/ 0));
     if deleted {
         assert!(deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .is_deleted(/*row_idx=*/ 1));
     } else {
         assert!(!deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .is_deleted(/*row_idx=*/ 1));
     }
 }
@@ -197,15 +197,15 @@ async fn check_new_data_files(
 
     // In the test suite, we only delete the second prepared row.
     assert!(!deletion_vector
-        .batch_deletion_vector
+        .committed_deletion_vector
         .is_deleted(/*row_idx=*/ 0));
     if deleted {
         assert!(deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .is_deleted(/*row_idx=*/ 1));
     } else {
         assert!(!deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .is_deleted(/*row_idx=*/ 1));
     }
 }
@@ -234,7 +234,7 @@ async fn check_prev_and_new_data_files(
             .await
             .unwrap();
         loaded_record_batches.push(cur_arrow_batch);
-        batch_deletion_vectors.push(&cur_deletion_vector.batch_deletion_vector);
+        batch_deletion_vectors.push(&cur_deletion_vector.committed_deletion_vector);
     }
     // In the test suite, the first record has two rows, and the second record has one row.
     if loaded_record_batches[0].num_rows() == 1 {

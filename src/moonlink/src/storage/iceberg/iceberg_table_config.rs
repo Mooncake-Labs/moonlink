@@ -4,17 +4,31 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RestCatalogConfig {
+    #[serde(rename = "name")]
+    #[serde(default)]
+    pub name: String,
+
     #[serde(rename = "uri")]
     #[serde(default)]
-    uri: String,
+    pub uri: String,
 
     #[serde(rename = "warehouse")]
     #[serde(default)]
-    warehouse: String,
+    pub warehouse: String,
 
+    /// Optional configuration properties.
+    /// Unknown configs will be ignored.
+    ///
+    /// - prefix:          Optional URL path prefix to insert after the base URI and API version.
+    /// - oauth2-server-uri: Custom OAuth2 server URI. Defaults to: [uri, PATH_V1:"v1", "oauth", "tokens"].join("/")
+    /// - token:           Static authentication token used by the client for sending requests.
+    /// - credentials:     Client credentials used to fetch a new token.
+    ///     - None: No credentials provided.
+    ///     - Some(None, client_secret): Only client_secret is provided.
+    ///     - Some(Some(client_id), client_secret): Both client_id and client_secret are provided.
     #[serde(rename = "props")]
     #[serde(default)]
-    props: HashMap<String, String>,
+    pub props: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -432,7 +432,11 @@ impl ChaosState {
 
     /// Get a random row to delete.
     fn get_random_row_to_delete(&mut self) -> MoonlinkRow {
-        if self.is_upsert_table && self.rng.random_range(0..100) < 50 {
+        // Delete if exists is only supported for non-streaming transaction.
+        if self.is_upsert_table
+            && self.get_cur_xact_id().is_none()
+            && self.rng.random_range(0..100) < 50
+        {
             // Delete a none existing row.
             let row = create_row(self.next_id, /*name=*/ "user", self.next_id % 5);
             self.next_id += 1;
@@ -883,6 +887,8 @@ impl TestEnvironment {
             config: mooncake_table_metadata.config.clone(),
             local_filesystem_optimization_enabled: config.local_filesystem_optimization_enabled,
             storage_config: config.storage_config.clone(),
+            is_upsert_table: config.special_table_option
+                == SpecialTableOption::UpsertDeleteIfExists,
         };
         tokio::spawn(async move {
             Self::dump_table_event(

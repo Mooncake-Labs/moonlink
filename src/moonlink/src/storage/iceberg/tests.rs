@@ -629,7 +629,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
     // No deletion vector is expected.
     assert!(batch_deletion_vector.puffin_deletion_blob.is_none());
     assert!(batch_deletion_vector
-        .batch_deletion_vector
+        .committed_deletion_vector
         .collect_deleted_rows()
         .is_empty());
     // Check data file.
@@ -2000,7 +2000,9 @@ async fn test_small_batch_size_and_large_parquet_size() {
     assert_eq!(snapshot.disk_files.len(), 1);
     let deletion_vector = snapshot.disk_files.iter().next().unwrap().1.clone();
     assert_eq!(
-        deletion_vector.batch_deletion_vector.collect_deleted_rows(),
+        deletion_vector
+            .committed_deletion_vector
+            .collect_deleted_rows(),
         vec![1]
     );
     check_deletion_vector_consistency_for_snapshot(&snapshot).await;
@@ -2194,7 +2196,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
         .unwrap();
     assert_eq!(actual_arrow_batch, expected_arrow_batch_1);
     assert!(deletion_vector_1
-        .batch_deletion_vector
+        .committed_deletion_vector
         .collect_deleted_rows()
         .is_empty());
     assert!(deletion_vector_1.puffin_deletion_blob.is_none());
@@ -2271,7 +2273,9 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
     // Left arrow record 2 and 3, both don't have deletion vector.
     let deletion_entry = snapshot.disk_files.remove(&old_data_file).unwrap();
     assert_eq!(
-        deletion_entry.batch_deletion_vector.collect_deleted_rows(),
+        deletion_entry
+            .committed_deletion_vector
+            .collect_deleted_rows(),
         vec![0]
     );
     let mut arrow_batch_2_persisted = false;
@@ -2279,7 +2283,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
     for (cur_data_file, cur_deletion_vector) in snapshot.disk_files.iter() {
         assert!(cur_deletion_vector.puffin_deletion_blob.is_none());
         assert!(cur_deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .collect_deleted_rows()
             .is_empty());
 
@@ -2442,7 +2446,9 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         loaded_arrow_batch, expected_arrow_batch,
         "Expected arrow data is {expected_arrow_batch:?}, actual data is {loaded_arrow_batch:?}"
     );
-    let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = deletion_vector
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert!(
         deleted_rows.is_empty(),
         "There should be no deletion vector in iceberg table."
@@ -2509,7 +2515,9 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         "Expected arrow data is {expected_arrow_batch:?}, actual data is {loaded_arrow_batch:?}"
     );
 
-    let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = deletion_vector
+        .committed_deletion_vector
+        .collect_deleted_rows();
     let expected_deleted_rows = vec![0_u64];
     assert_eq!(deleted_rows, expected_deleted_rows);
 
@@ -2573,7 +2581,9 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         "Expected arrow data is {expected_arrow_batch:?}, actual data is {loaded_arrow_batch:?}"
     );
 
-    let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = deletion_vector
+        .committed_deletion_vector
+        .collect_deleted_rows();
     let expected_deleted_rows = vec![0_u64, 1_u64];
     assert_eq!(deleted_rows, expected_deleted_rows);
 
@@ -2643,7 +2653,9 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
     .unwrap();
     assert_eq!(loaded_arrow_batch, expected_arrow_batch);
 
-    let deleted_rows = deletion_vector.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = deletion_vector
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert!(
         deleted_rows.is_empty(),
         "The new appended data file should have no deletion vector aside, but actually it contains deletion vector {deleted_rows:?}"

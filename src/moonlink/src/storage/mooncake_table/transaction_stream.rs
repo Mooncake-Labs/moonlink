@@ -284,7 +284,7 @@ impl MooncakeTable {
                                 .flushed_files
                                 .get_key_value_mut(&file_id)
                                 .expect("missing disk file");
-                            if disk_file_entry.batch_deletion_vector.is_deleted(row_id) {
+                            if disk_file_entry.committed_deletion_vector.is_deleted(row_id) {
                                 continue;
                             }
                             if record.row_identity.is_none()
@@ -303,7 +303,9 @@ impl MooncakeTable {
                                     pos: loc,
                                     lsn: record.lsn,
                                 });
-                                assert!(disk_file_entry.batch_deletion_vector.delete_row(row_id));
+                                assert!(disk_file_entry
+                                    .committed_deletion_vector
+                                    .delete_row(row_id));
                                 return;
                             }
                         }
@@ -474,7 +476,7 @@ impl MooncakeTable {
                 num_rows: file_attrs.row_num,
                 file_size: file_attrs.file_size,
                 cache_handle: None,
-                batch_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),
+                committed_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),
                 puffin_deletion_blob: None,
             };
             // Add now flushed files to stream state
@@ -503,7 +505,9 @@ impl MooncakeTable {
             {
                 for (file, disk_file_entry) in stream_state.flushed_files.iter_mut() {
                     if file.file_id() == file_id {
-                        assert!(disk_file_entry.batch_deletion_vector.delete_row(row_idx));
+                        assert!(disk_file_entry
+                            .committed_deletion_vector
+                            .delete_row(row_idx));
                         break;
                     }
                 }

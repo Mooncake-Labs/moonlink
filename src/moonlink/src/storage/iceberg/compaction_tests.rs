@@ -233,7 +233,7 @@ async fn check_loaded_snapshot(
     // After compaction, there should be only one data file with no deletion vector.
     let (data_file, disk_file_entry) = snapshot.disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    assert!(disk_file_entry.batch_deletion_vector.is_empty());
+    assert!(disk_file_entry.committed_deletion_vector.is_empty());
     check_loaded_arrow_batches(data_file.file_path(), row_indices.clone()).await;
 
     let file_indice = snapshot.indices.file_indices.clone();
@@ -362,7 +362,7 @@ async fn test_compaction_1_1_1() {
     assert_eq!(disk_files.len(), 1);
     let (data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    assert!(disk_file_entry.batch_deletion_vector.is_empty());
+    assert!(disk_file_entry.committed_deletion_vector.is_empty());
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;
     check_snapshot_reflects_persistence_for_compaction(&snapshot, data_file, actual_file_indices)
@@ -428,7 +428,9 @@ async fn test_compaction_1_1_2() {
     assert_eq!(disk_files.len(), 1);
     let (compacted_data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = disk_file_entry
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert!(
         deleted_rows == vec![1] || deleted_rows == vec![3],
         "Deleted rows are {deleted_rows:?}"
@@ -517,7 +519,9 @@ async fn test_compaction_1_2_1() {
     assert_eq!(disk_files.len(), 1);
     let (compacted_data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = disk_file_entry
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert!(
         deleted_rows == vec![0] || deleted_rows == vec![2],
         "Deleted rows are {deleted_rows:?}"
@@ -606,7 +610,9 @@ async fn test_compaction_1_2_2() {
     assert_eq!(disk_files.len(), 1);
     let (compacted_data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = disk_file_entry
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert!(
         deleted_rows == vec![0, 1] || deleted_rows == vec![2, 3],
         "Deleted rows are {deleted_rows:?}"
@@ -709,7 +715,9 @@ async fn test_compaction_2_2_1() {
     assert_eq!(disk_files.len(), 1);
     let (compacted_data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = disk_file_entry
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert!(
         deleted_rows == vec![0] || deleted_rows == vec![1],
         "Deleted rows are {deleted_rows:?}"
@@ -801,7 +809,9 @@ async fn test_compaction_2_2_2() {
     assert_eq!(disk_files.len(), 1);
     let (compacted_data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = disk_file_entry
+        .committed_deletion_vector
+        .collect_deleted_rows();
     // Due to the non-deterministic nature of hashmap, the row indices in the compacted data file is also non-deterministic.
     assert!(
         deleted_rows == vec![0, 1] || deleted_rows == vec![0, 2],
@@ -908,7 +918,7 @@ async fn test_compaction_2_3_1() {
     assert_eq!(disk_files.len(), 1);
     let (data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    assert!(disk_file_entry.batch_deletion_vector.is_empty());
+    assert!(disk_file_entry.committed_deletion_vector.is_empty());
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.
     let actual_file_indices = get_file_indices_for_table(&table).await;
     check_snapshot_reflects_persistence_for_compaction(&snapshot, data_file, actual_file_indices)
@@ -989,7 +999,7 @@ async fn test_compaction_2_3_2() {
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
     // Deleted row index in the compacted data file.
     let committed_compacted_row_indice: Vec<usize> = disk_file_entry
-        .batch_deletion_vector
+        .committed_deletion_vector
         .collect_deleted_rows()
         .iter()
         .map(|idx| *idx as usize)
@@ -1094,7 +1104,9 @@ async fn test_compaction_3_2_1() {
     assert_eq!(disk_files.len(), 1);
     let (compacted_data_file, disk_file_entry) = disk_files.iter().next().unwrap();
     assert!(disk_file_entry.puffin_deletion_blob.is_none());
-    let deleted_rows = disk_file_entry.batch_deletion_vector.collect_deleted_rows();
+    let deleted_rows = disk_file_entry
+        .committed_deletion_vector
+        .collect_deleted_rows();
     assert_eq!(deleted_rows, vec![0, 1, 2, 3]);
 
     // Check data files and file indices in mooncake table snapshot is the same as iceberg persisted ones.

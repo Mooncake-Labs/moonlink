@@ -120,7 +120,7 @@ impl MooncakeTable {
                         cache_handle: None,
                         num_rows,
                         file_size,
-                        batch_deletion_vector: BatchDeletionVector::new(num_rows),
+                        committed_deletion_vector: BatchDeletionVector::new(num_rows),
                         puffin_deletion_blob: None,
                     };
 

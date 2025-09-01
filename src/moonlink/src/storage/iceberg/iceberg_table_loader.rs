@@ -205,7 +205,7 @@ impl IcebergTableManager {
                     file_size: data_file_entry.data_file.file_size_in_bytes() as usize,
                     cache_handle: None,
                     puffin_deletion_blob,
-                    batch_deletion_vector: data_file_entry.deletion_vector.clone(),
+                    committed_deletion_vector: data_file_entry.deletion_vector.clone(),
                 },
             );
         }

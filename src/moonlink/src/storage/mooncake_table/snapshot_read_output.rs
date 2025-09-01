@@ -5,11 +5,15 @@ use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
 use crate::ReadStateFilepathRemap;
 use crate::{NonEvictableHandle, ReadState, Result};
+use futures::{stream, StreamExt};
 use moonlink_table_metadata::{DeletionVector, PositionDelete};
 
 use std::sync::Arc;
 
 use tokio::sync::mpsc::Sender;
+
+/// Maximum number of parallel remote file operations to prevent excessive resource usage
+const MAX_PARALLEL_OPERATIONS: usize = 128;
 
 /// Mooncake snapshot for read.
 ///
@@ -31,6 +35,15 @@ impl DataFileForRead {
             Self::RemoteFilePath((_, file)) => file.clone(),
         }
     }
+}
+
+/// Represents a remote file with its original index, unique file identifier, and remote file path.
+/// This structure is used to maintain the order of files as they appear in the original data file path,
+/// which is crucial for operations that depend on the file's position, such as deletions or updates.
+struct RemoteFileEntry {
+    index: usize,
+    file_id: TableUniqueFileId,
+    remote_filepath: String,
 }
 
 #[derive(Clone, Default)]
@@ -71,48 +84,115 @@ impl ReadOutput {
             .unwrap();
     }
 
-    /// Resolve all remote filepaths and convert into [`ReadState`] for query usage.
+    /// Attempt to download remote files and cache them locally, if possible.
+    /// Resolved files will be updated to [`resolved_data_files`] in-place in the given order.
     ///
-    /// TODO(hjiang): Parallelize download and pin.
+    /// If any error happens, all involved cache handles will unreferenced, temporary files will be deleted as well.
+    async fn resolve_remote_files(
+        &mut self,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        remote_files_entries: Vec<RemoteFileEntry>,
+        resolved_data_files: &mut [String],
+        cache_handles: &mut Vec<NonEvictableHandle>,
+    ) -> Result<()> {
+        let results = stream::iter(remote_files_entries.into_iter())
+            .map(|remote_file_entry| {
+                let cache = object_storage_cache.clone();
+                let fs_accessor = filesystem_accessor.clone();
+                async move {
+                    let result = cache
+                        .get_cache_entry(
+                            remote_file_entry.file_id,
+                            &remote_file_entry.remote_filepath,
+                            fs_accessor.as_ref(),
+                        )
+                        .await;
+                    (
+                        remote_file_entry.index,
+                        remote_file_entry.remote_filepath,
+                        result,
+                    )
+                }
+            })
+            .buffer_unordered(MAX_PARALLEL_OPERATIONS)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut error_messages = Vec::new();
+        for (index, remote_filepath, result) in results {
+            match result {
+                Ok((cache_handle, files_to_delete)) => {
+                    if let Some(cache_handle) = cache_handle {
+                        resolved_data_files[index] = cache_handle.get_cache_filepath().to_string();
+                        cache_handles.push(cache_handle);
+                    } else {
+                        resolved_data_files[index] = remote_filepath;
+                    }
+
+                    self.notify_evicted_files(files_to_delete.into_vec()).await;
+                }
+                Err(e) => {
+                    error_messages.push(format!("[{index}] {remote_filepath}: {e}"));
+                }
+            }
+        }
+
+        if !error_messages.is_empty() {
+            self.handle_resolution_error(std::mem::take(cache_handles))
+                .await;
+            return Err(crate::Error::from(std::io::Error::other(format!(
+                "Failed to resolve {} files: {}",
+                error_messages.len(),
+                error_messages.join(";\n")
+            ))));
+        }
+
+        Ok(())
+    }
+
+    /// Resolve all remote filepaths and convert into [`ReadState`] for query usage.
     pub async fn take_as_read_state(
         mut self,
         read_state_filepath_remap: ReadStateFilepathRemap,
     ) -> Result<Arc<ReadState>> {
         // Resolve remote data files.
-        let mut resolved_data_files = Vec::with_capacity(self.data_file_paths.len());
+        let mut resolved_data_files = vec![String::new(); self.data_file_paths.len()];
         let mut cache_handles = vec![];
         let data_file_paths = std::mem::take(&mut self.data_file_paths);
-        for cur_data_file in data_file_paths.into_iter() {
+
+        // Separate temporary files and remote files while preserving order
+        let mut remote_files_entries = Vec::new();
+        for (index, cur_data_file) in data_file_paths.into_iter().enumerate() {
             match cur_data_file {
-                DataFileForRead::TemporaryDataFile(file) => resolved_data_files.push(file),
+                DataFileForRead::TemporaryDataFile(file) => {
+                    resolved_data_files[index] = file;
+                }
                 DataFileForRead::RemoteFilePath((file_id, remote_filepath)) => {
-                    let (object_storage_cache, filesystem_accessor) = (
-                        self.object_storage_cache.as_ref().unwrap(),
-                        self.filesystem_accessor.as_ref().unwrap(),
-                    );
-                    let res = object_storage_cache
-                        .get_cache_entry(file_id, &remote_filepath, filesystem_accessor.as_ref())
-                        .await;
-
-                    match res {
-                        Ok((cache_handle, files_to_delete)) => {
-                            if let Some(cache_handle) = cache_handle {
-                                resolved_data_files
-                                    .push(cache_handle.get_cache_filepath().to_string());
-                                cache_handles.push(cache_handle);
-                            } else {
-                                resolved_data_files.push(remote_filepath);
-                            }
-
-                            self.notify_evicted_files(files_to_delete.into_vec()).await;
-                        }
-                        Err(e) => {
-                            self.handle_resolution_error(cache_handles).await;
-                            return Err(e);
-                        }
-                    }
+                    remote_files_entries.push(RemoteFileEntry {
+                        index,
+                        file_id,
+                        remote_filepath,
+                    });
                 }
             }
+        }
+
+        // Process remote files in parallel but maintain order
+        if !remote_files_entries.is_empty() {
+            let (object_storage_cache, filesystem_accessor) = (
+                self.object_storage_cache.as_ref().unwrap(),
+                self.filesystem_accessor.as_ref().unwrap(),
+            );
+
+            self.resolve_remote_files(
+                object_storage_cache.clone(),
+                filesystem_accessor.clone(),
+                remote_files_entries,
+                &mut resolved_data_files,
+                &mut cache_handles,
+            )
+            .await?;
         }
 
         // Construct read state.
@@ -131,7 +211,9 @@ impl ReadOutput {
 
     /// Handle cleanup and notifications when resolving remote filepaths fails.
     async fn handle_resolution_error(&mut self, mut cache_handles: Vec<NonEvictableHandle>) {
-        let mut evicted_files_to_delete_on_error: Vec<String> = vec![];
+        let total_size =
+            cache_handles.len() + self.puffin_cache_handles.len() + self.associated_files.len();
+        let mut evicted_files_to_delete_on_error: Vec<String> = Vec::with_capacity(total_size);
         // Unpin all previously pinned cache handles before propagating error.
         for mut handle in cache_handles.drain(..) {
             let files_to_delete = handle.unreference().await;
@@ -160,11 +242,21 @@ mod tests {
     use crate::storage::mooncake_table::cache_test_utils::{
         create_infinite_object_storage_cache, import_fake_cache_entry,
     };
-    use crate::storage::mooncake_table::test_utils_commons::{get_fake_file_path, FAKE_FILE_ID};
+    use crate::storage::mooncake_table::test_utils_commons::{
+        get_fake_file_path, get_unique_table_file_id, FAKE_FILE_ID,
+    };
+    use crate::storage::storage_utils::FileId;
     use crate::table_notify::TableEvent;
+    use crate::union_read::decode_read_state_for_testing;
     use mockall::Sequence;
     use smallvec::SmallVec;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
+
+    use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
+    use crate::storage::filesystem::accessor_config::AccessorConfig;
+    use crate::storage::filesystem::storage_config::StorageConfig;
 
     #[tokio::test]
     async fn test_take_as_read_state_notifies_files_to_delete_on_success() {
@@ -340,5 +432,203 @@ mod tests {
         expected_files.sort();
 
         assert_eq!(notified_files_sorted, expected_files);
+    }
+
+    // Test that the file order is preserved even if the remote file resolution fails.
+    #[tokio::test]
+    async fn test_file_order_preserved_with_different_delays() {
+        let mut mock_cache = MockCacheTrait::new();
+        let call_order = Arc::new(AtomicUsize::new(0));
+        let task_notify = Arc::new(tokio::sync::Notify::new());
+
+        mock_cache.expect_get_cache_entry().times(2).returning({
+            let call_order = call_order.clone();
+            move |_, _, _| {
+                let order = call_order.fetch_add(1, Ordering::SeqCst);
+                let task_notify = task_notify.clone();
+                Box::pin(async move {
+                    match order {
+                        0 => {
+                            task_notify.notified().await;
+                        }
+                        1 => {
+                            task_notify.notify_one();
+                        }
+                        _ => unreachable!(),
+                    };
+                    Ok((
+                        /*cache_handle=*/ None,
+                        /*evicted_files=*/ SmallVec::new(),
+                    ))
+                })
+            }
+        });
+
+        let filesystem_accessor = MockBaseFileSystemAccess::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
+
+        let read_output = ReadOutput {
+            data_file_paths: vec![
+                DataFileForRead::TemporaryDataFile("/tmp/filename_1".to_string()),
+                DataFileForRead::RemoteFilePath((FAKE_FILE_ID, "/tmp/filename_2".to_string())),
+                DataFileForRead::RemoteFilePath((FAKE_FILE_ID, "/tmp/filename_3".to_string())),
+                DataFileForRead::TemporaryDataFile("/tmp/filename_4".to_string()),
+            ],
+            puffin_cache_handles: Vec::new(),
+            deletion_vectors: Vec::new(),
+            position_deletes: Vec::new(),
+            associated_files: Vec::new(),
+            table_notifier: Some(tx),
+            object_storage_cache: Some(Arc::new(mock_cache)),
+            filesystem_accessor: Some(Arc::new(filesystem_accessor)),
+        };
+
+        let res = read_output
+            .take_as_read_state(Arc::new(|p: String| p))
+            .await
+            .unwrap();
+
+        let read_state: Arc<ReadState> = res;
+        let (data_files, _, _, _) = decode_read_state_for_testing(&read_state);
+
+        assert_eq!(data_files.len(), 4);
+        assert_eq!(data_files[0], "/tmp/filename_1".to_string());
+        assert_eq!(data_files[1], "/tmp/filename_2".to_string());
+        assert_eq!(data_files[2], "/tmp/filename_3".to_string());
+        assert_eq!(data_files[3], "/tmp/filename_4".to_string());
+    }
+
+    // Test that the cache is correctly pinned when all file operations succeed
+    // with a test size of 1000 (greater than our set max parallel read of 128)
+    #[tokio::test]
+    async fn test_parallel_success() {
+        let test_size = 1000;
+        // Prepare a real cache and a pinned handle we will inject via mock.
+        let temp_dir = tempdir().unwrap();
+        let real_cache: ObjectStorageCache = create_infinite_object_storage_cache(
+            &temp_dir, /*optimize_local_filesystem=*/ false,
+        );
+
+        let mut file_ids = Vec::new();
+        let mut test_data_file_paths = Vec::new();
+        for i in 0..test_size {
+            let file_id = get_unique_table_file_id(FileId(i));
+            let filepath = temp_dir.path().join(format!("file_{i}.parquet"));
+            tokio::fs::write(&filepath, format!("test data {i}").as_bytes())
+                .await
+                .unwrap();
+            file_ids.push(file_id);
+            test_data_file_paths.push(DataFileForRead::RemoteFilePath((
+                file_id,
+                filepath.to_str().unwrap().to_string(),
+            )));
+        }
+
+        // Filesystem use for real cache
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_string_lossy().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+        let filesystem_accessor = FileSystemAccessor::new(accessor_config);
+
+        // Table notifier channel to capture deletion notifications.
+        let (tx, mut _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
+
+        // Construct ReadOutput with two remote files; second call will error.
+        let associated_temp_dir = tempdir().unwrap();
+        let read_output = ReadOutput {
+            data_file_paths: test_data_file_paths,
+            puffin_cache_handles: Vec::new(),
+            deletion_vectors: Vec::new(),
+            position_deletes: Vec::new(),
+            // Add an associated temporary file to trigger error-path notification.
+            associated_files: vec![get_fake_file_path(&associated_temp_dir)],
+            table_notifier: Some(tx),
+            object_storage_cache: Some(Arc::new(real_cache.clone())),
+            filesystem_accessor: Some(Arc::new(filesystem_accessor)),
+        };
+
+        let _read_state = read_output
+            .take_as_read_state(Arc::new(|p: String| p))
+            .await
+            .unwrap();
+
+        // Check that the handles were properly transferred to ReadState on success
+        // While ReadState is alive, the cache handles are owned by ReadState,
+        // so the cache's reference count should be 1
+        for file_id in &file_ids {
+            assert_eq!(
+                real_cache.get_non_evictable_entry_ref_count(file_id).await,
+                1
+            );
+        }
+    }
+
+    // Test to verify that the cache is correctly unpinned when processing files with alternating success and failure:
+    // files with odd IDs fail, while files with even IDs succeed.
+    #[tokio::test]
+    async fn test_parallel_partial_fail() {
+        let test_size = 1000;
+        // Prepare a real cache and a pinned handle we will inject via mock.
+        let temp_dir = tempdir().unwrap();
+        let real_cache: ObjectStorageCache = create_infinite_object_storage_cache(
+            &temp_dir, /*optimize_local_filesystem=*/ false,
+        );
+
+        let mut file_ids = Vec::new();
+        let mut test_data_file_paths = Vec::new();
+        for i in 0..test_size {
+            let file_id = get_unique_table_file_id(FileId(i));
+            let filepath = temp_dir.path().join(format!("file_{i}.parquet"));
+            if i % 2 == 0 {
+                tokio::fs::write(&filepath, format!("test data_{i}").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            file_ids.push(file_id);
+            test_data_file_paths.push(DataFileForRead::RemoteFilePath((
+                file_id,
+                filepath.to_str().unwrap().to_string(),
+            )));
+        }
+
+        // Filesystem use for real cache
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_string_lossy().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+        let filesystem_accessor = FileSystemAccessor::new(accessor_config);
+
+        // Table notifier channel to capture deletion notifications.
+        let (tx, mut _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
+
+        // Construct ReadOutput with two remote files; second call will error.
+        let associated_temp_dir = tempdir().unwrap();
+        let read_output = ReadOutput {
+            data_file_paths: test_data_file_paths,
+            puffin_cache_handles: Vec::new(),
+            deletion_vectors: Vec::new(),
+            position_deletes: Vec::new(),
+            // Add an associated temporary file to trigger error-path notification.
+            associated_files: vec![get_fake_file_path(&associated_temp_dir)],
+            table_notifier: Some(tx),
+            object_storage_cache: Some(Arc::new(real_cache.clone())),
+            filesystem_accessor: Some(Arc::new(filesystem_accessor)),
+        };
+
+        let _read_state_error = read_output
+            .take_as_read_state(Arc::new(|p: String| p))
+            .await
+            .unwrap_err();
+
+        // Ensure the cache is clean after read
+        for file_id in file_ids {
+            assert_eq!(
+                real_cache.get_non_evictable_entry_ref_count(&file_id).await,
+                0
+            );
+        }
     }
 }
