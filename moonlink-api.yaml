@@ -1,0 +1,745 @@
+openapi: 3.0.3
+info:
+  title: Moonlink API – Simplified Specification
+  description: Simplified and more RESTful version of the Moonlink API
+  version: 2.0.0
+  contact:
+    name: Moonlink API Support
+    url: "https://mooncake.dev"
+
+servers:
+  - url: "https://api.mooncake.dev"
+    description: Production API server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: storages
+    description: Object storage management
+  - name: catalogs
+    description: Catalog management
+  - name: namespaces
+    description: Namespace management
+  - name: tables
+    description: Table and data operations
+  - name: replications
+    description: Database replication
+  - name: jobs
+    description: Job management
+
+paths:
+  # ============================================================================
+  # SIMPLIFIED STORAGE MANAGEMENT
+  # ============================================================================
+  /v1/storages:
+    get:
+      summary: List storages
+      operationId: listStorages
+      tags: [storages]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  storages:
+                    type: array
+                    items: { $ref: '#/components/schemas/Storage' }
+    post:
+      summary: Create storage
+      operationId: createStorage
+      tags: [storages]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StorageRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Storage' }
+
+  /v1/storages/{storage_id}:
+    delete:
+      summary: Delete storage
+      operationId: deleteStorage
+      tags: [storages]
+      parameters:
+        - name: storage_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+
+  # ============================================================================
+  # SIMPLIFIED CATALOG MANAGEMENT
+  # ============================================================================
+  /v1/catalogs:
+    get:
+      summary: List catalogs
+      operationId: listCatalogs
+      tags: [catalogs]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  catalogs:
+                    type: array
+                    items: { $ref: '#/components/schemas/Catalog' }
+    post:
+      summary: Create catalog
+      operationId: createCatalog
+      tags: [catalogs]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CatalogRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Catalog' }
+
+  /v1/catalogs/{catalog}:
+    get:
+      summary: Get catalog details and settings
+      description: Retrieve catalog information including all configuration settings
+      operationId: getCatalog
+      tags: [catalogs]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogWithSettings' }
+
+    delete:
+      summary: Delete catalog
+      operationId: deleteCatalog
+      tags: [catalogs]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+
+  # ============================================================================
+  # NAMESPACE MANAGEMENT
+  # ============================================================================
+  /v1/catalogs/{catalog}/namespaces:
+    get:
+      summary: List namespaces
+      description: List all namespaces in the catalog
+      operationId: listNamespaces
+      tags: [namespaces]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespaces:
+                    type: array
+                    items: { $ref: '#/components/schemas/Namespace' }
+                required: [namespaces]
+    post:
+      summary: Create namespace
+      description: Create a new namespace in the catalog
+      operationId: createNamespace
+      tags: [namespaces]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NamespaceRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Namespace' }
+
+  /v1/catalogs/{catalog}/namespaces/{namespace}:
+    get:
+      summary: Get namespace details
+      description: Get details and properties of a specific namespace
+      operationId: getNamespace
+      tags: [namespaces]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Namespace' }
+
+    delete:
+      summary: Delete namespace
+      description: Delete a namespace and all its tables
+      operationId: deleteNamespace
+      tags: [namespaces]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+
+  # ============================================================================
+  # TABLE MANAGEMENT
+  # ============================================================================
+  /v1/catalogs/{catalog}/namespaces/{namespace}/tables:
+    get:
+      summary: List tables
+      operationId: listTables
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tables: { type: array, items: { type: string } }
+    post:
+      summary: Create table
+      operationId: createTable
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TableRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Table' }
+
+  /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}:
+    delete:
+      summary: Delete table
+      operationId: deleteTable
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+        - name: table
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+    patch:
+      summary: Optimize table
+      operationId: optimizeTable
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+        - name: table
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                operation: { type: string, enum: [optimize] }
+                options:
+                  type: object
+                  properties:
+                    operations: 
+                      type: array
+                      items: { type: string, enum: [compact, expire_snapshots, delete_orphans] }
+                    target_file_size_mb: { type: integer, default: 256 }
+      responses:
+        '202':
+          description: Optimization started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobResponse' }
+
+  # TABLE ROW OPERATIONS  
+  /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}/rows:
+    post:
+      summary: Insert rows
+      description: Insert new rows into the table
+      operationId: insertRows
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+        - name: table
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InsertRowsRequest' }
+      responses:
+        '201':
+          description: Rows inserted successfully
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RowOperationResult' }
+
+  /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}/rows:delete:
+    post:
+      summary: Delete rows by keys
+      description: Delete specific rows identified by their primary keys
+      operationId: deleteRows
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+        - name: table
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteRowsRequest' }
+      responses:
+        '200':
+          description: Rows deleted successfully
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RowOperationResult' }
+
+  /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}/load:
+    post:
+      summary: Load data from files
+      description: Load data into the table from files (Parquet, CSV, JSON, etc.)
+      operationId: loadTableData
+      tags: [tables]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+        - name: table
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoadRequest' }
+      responses:
+        '202':
+          description: Load job started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobResponse' }
+
+  # ============================================================================
+  # SIMPLIFIED REPLICATION
+  # ============================================================================
+  /v1/replications:
+    get:
+      summary: List replications
+      operationId: listReplications
+      tags: [replications]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  replications:
+                    type: array
+                    items: { $ref: '#/components/schemas/Replication' }
+    post:
+      summary: Create replication
+      operationId: createReplication
+      tags: [replications]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicationRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobResponse' }
+
+  /v1/replications/{replication_id}:
+    delete:
+      summary: Delete replication
+      operationId: deleteReplication
+      tags: [replications]
+      parameters:
+        - name: replication_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+
+  # ============================================================================
+  # JOBS
+  # ============================================================================
+  /v1/jobs/{job_id}:
+    get:
+      summary: Get job status
+      operationId: getJob
+      tags: [jobs]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+    delete:
+      summary: Cancel job
+      operationId: cancelJob
+      tags: [jobs]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Canceled }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    # ============================================================================
+    # SIMPLIFIED SCHEMAS
+    # ============================================================================
+    StorageRequest:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [s3, s3_compatible] }
+        bucket: { type: string }
+        region: { type: string } # required for s3, optional for s3_compatible
+        endpoint: { type: string } # required for s3_compatible
+        base_path: { type: string, default: "" }
+        credentials:
+          type: object
+          properties:
+            access_key_id: { type: string }
+            secret_access_key: { type: string }
+            session_token: { type: string }
+          required: [access_key_id, secret_access_key]
+      required: [name, type, bucket, credentials]
+
+    Storage:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string }
+        bucket: { type: string }
+        region: { type: string }
+        endpoint: { type: string }
+        base_path: { type: string }
+        status: { type: string, enum: [ready, error] }
+        created_at: { type: string, format: date-time }
+      required: [id, name, type, bucket, status, created_at]
+
+    CatalogRequest:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [internal, glue, unity] }
+        storage_id: { type: string }
+        config: { type: object } # simplified - no complex nested auth
+      required: [name, type]
+
+    Catalog:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string }
+        storage_id: { type: string }
+        status: { type: string, enum: [ready, error] }
+        created_at: { type: string, format: date-time }
+      required: [id, name, type, status, created_at]
+
+    TableRequest:
+      type: object
+      properties:
+        name: { type: string }
+        columns:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              type: { type: string }
+              nullable: { type: boolean, default: true }
+            required: [name, type]
+        primary_key: { type: array, items: { type: string } }
+        partition_by: { type: array, items: { type: string } }
+      required: [name, columns]
+
+    Table:
+      type: object
+      properties:
+        id: { type: string }
+        catalog: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        primary_key: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+      required: [id, catalog, namespace, name, created_at]
+
+    ReplicationRequest:
+      type: object
+      properties:
+        source_uri: { type: string }
+        source_table: { type: string }
+        target_catalog: { type: string, default: "default" }
+        target_namespace: { type: string }
+        target_table: { type: string }
+        mode: { type: string, enum: [snapshot, snapshot_and_cdc] }
+      required: [source_uri, source_table, target_table]
+
+    Replication:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [pending, running, completed, failed] }
+        source_table: { type: string }
+        target_table: { type: string }
+        mode: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, status, source_table, target_table, mode, created_at]
+
+    Job:
+      type: object
+      properties:
+        job_id: { type: string }
+        status: { type: string, enum: [queued, running, completed, failed, canceled] }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        error: { type: string }
+      required: [job_id, status, created_at]
+
+    JobResponse:
+      type: object
+      properties:
+        job_id: { type: string }
+      required: [job_id]
+
+    CatalogSettings:
+      type: object
+      description: Key-value configuration settings for the catalog
+      additionalProperties: { type: string }
+      example:
+        warehouse: "s3://my-bucket/warehouse/"
+        io_impl: "org.apache.iceberg.aws.s3.S3FileIO"
+        s3_region: "us-east-1"
+        format_version: "2"
+        write_format_default: "parquet"
+
+    CatalogWithSettings:
+      allOf:
+        - $ref: '#/components/schemas/Catalog'
+        - type: object
+          properties:
+            settings: { $ref: '#/components/schemas/CatalogSettings' }
+          required: [settings]
+
+
+
+    NamespaceRequest:
+      type: object
+      properties:
+        name: { type: string }
+        properties:
+          type: object
+          additionalProperties: { type: string }
+          description: Optional key-value properties for the namespace
+      required: [name]
+
+    Namespace:
+      type: object
+      properties:
+        catalog: { type: string }
+        name: { type: string }
+        properties:
+          type: object
+          additionalProperties: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [catalog, name, created_at, updated_at]
+
+    InsertRowsRequest:
+      type: object
+      properties:
+        rows:
+          type: array
+          items: { type: object }
+          description: Array of row objects to insert
+          minItems: 1
+      required: [rows]
+      example:
+        rows:
+          - id: "user_123"
+            name: "John Doe"
+            email: "john@example.com"
+          - id: "user_124"
+            name: "Jane Smith"
+            email: "jane@example.com"
+
+    DeleteRowsRequest:
+      type: object
+      properties:
+        keys:
+          type: array
+          items: { type: object }
+          description: Array of primary key objects identifying rows to delete
+          minItems: 1
+      required: [keys]
+      example:
+        keys:
+          - id: "user_123"
+          - id: "user_124"
+
+    RowOperationResult:
+      type: object
+      properties:
+        count: { type: integer, minimum: 0 }
+        operation: { type: string, enum: [inserted, deleted] }
+      required: [count, operation]
+      example:
+        count: 2
+        operation: "inserted"
+
+    LoadRequest:
+      type: object
+      properties:
+        source:
+          type: object
+          properties:
+            uris:
+              type: array
+              items: { type: string }
+              description: File URIs to load (s3://, https://, etc.)
+            format: { type: string, enum: [auto, parquet, csv, json, orc, avro], default: auto }
+        options:
+          type: object
+          properties:
+            on_conflict: { type: string, enum: [update, ignore, error], default: update }
+            header: { type: boolean, default: true, description: "For CSV files" }
+            delimiter: { type: string, default: ",", description: "For CSV files" }
+      required: [source]
