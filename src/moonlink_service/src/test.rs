@@ -396,9 +396,6 @@ async fn run_optimize_table_test(mode: &str) {
     )
     .await
     .unwrap();
-
-    // Cleanup shared directory.
-    cleanup_directory(&get_moonlink_backend_dir()).await;
 }
 
 #[tokio::test]
@@ -495,9 +492,6 @@ async fn test_moonlink_standalone_data_ingestion() {
     )
     .await
     .unwrap();
-
-    // Cleanup shared directory.
-    cleanup_directory(&get_moonlink_backend_dir()).await;
 }
 
 /// Test basic table creation, file upload and query.
@@ -585,9 +579,6 @@ async fn test_moonlink_standalone_file_upload() {
     )
     .await
     .unwrap();
-
-    // Cleanup shared directory.
-    cleanup_directory(&get_moonlink_backend_dir()).await;
 }
 
 /// Test basic table creation, file insert and query.
@@ -674,9 +665,6 @@ async fn test_moonlink_standalone_file_insert() {
     )
     .await
     .unwrap();
-
-    // Cleanup shared directory.
-    cleanup_directory(&get_moonlink_backend_dir()).await;
 }
 
 /// Testing scenario: two tables with the same name, but under different databases are created.
