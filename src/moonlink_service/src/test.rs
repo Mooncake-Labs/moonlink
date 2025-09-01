@@ -9,7 +9,9 @@ use serde_json::json;
 use serial_test::serial;
 use tokio::net::TcpStream;
 
-use crate::rest_api::{FileUploadResponse, ListTablesResponse};
+use crate::rest_api::{
+    CreateTableResponse, FileUploadResponse, HealthResponse, ListTablesResponse,
+};
 use crate::test_utils::*;
 use crate::{start_with_config, ServiceConfig, READINESS_PROBE_PORT};
 use moonlink::decode_serialized_read_state_for_testing;
@@ -236,10 +238,10 @@ async fn test_health_check_endpoint() {
         response.status().is_success(),
         "Response status is {response:?}"
     );
-    let health_data: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(health_data["service"], "moonlink-rest-api");
-    assert_eq!(health_data["status"], "healthy");
-    ma::assert_gt!(health_data["timestamp"].as_u64().unwrap(), 0);
+    let response: HealthResponse = response.json().await.unwrap();
+    assert_eq!(response.service, "moonlink-rest-api");
+    assert_eq!(response.status, "healthy");
+    ma::assert_gt!(response.timestamp, 0);
 }
 
 #[tokio::test]
@@ -291,13 +293,10 @@ async fn test_schema() {
         response.status().is_success(),
         "Response status is {response:?}"
     );
-    let create_response: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(create_response.get("database").unwrap(), DATABASE);
-    assert_eq!(
-        create_response.get("table").unwrap(),
-        &crafted_src_table_name
-    );
-    assert_eq!(create_response.get("lsn").unwrap(), 1);
+    let response: CreateTableResponse = response.json().await.unwrap();
+    assert_eq!(response.database, DATABASE);
+    assert_eq!(response.table, crafted_src_table_name);
+    assert_eq!(response.lsn, 1);
 }
 
 /// Util function to optimize table via REST API.
