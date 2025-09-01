@@ -416,6 +416,78 @@ mod tests {
         .await;
     }
 
+    /// Test for rest ingested table.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_for_rest_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let metadata_store_accessor =
+            SqliteMetadataStore::new_with_directory(temp_dir.path().to_str().unwrap())
+                .await
+                .unwrap();
+        let mut backend = MoonlinkBackend::new(
+            temp_dir.path().to_str().unwrap().into(),
+            /*data_server_uri=*/ None,
+            Box::new(metadata_store_accessor),
+        )
+        .await
+        .unwrap();
+        backend.initialize_event_api().await.unwrap();
+
+        // Create a rest table.
+        let arrow_schema = ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "0".to_string(),
+            )])),
+            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("age", DataType::Int32, false).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "2".to_string(),
+            )])),
+        ]);
+        backend
+            .create_table(
+                DATABASE.to_string(),
+                TABLE.to_string(),
+                "public.recovery_for_rest_table".to_string(),
+                REST_API_URI.to_string(),
+                get_serialized_table_config(&temp_dir),
+                Some(arrow_schema),
+            )
+            .await
+            .unwrap();
+
+        // Ingest data into table.
+        let row_event_request = RowEventRequest {
+            src_table_name: "public.recovery_for_rest_table".to_string(),
+            operation: RowEventOperation::Insert,
+            payload: json!({
+                "id": 1,
+                "name": "Alice Johnson",
+                "age": 30
+            }),
+            timestamp: SystemTime::now(),
+            tx: None,
+        };
+        let rest_event_request = EventRequest::RowRequest(row_event_request);
+        backend
+            .send_event_request(rest_event_request)
+            .await
+            .unwrap();
+
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(2))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids, HashSet::from([1]));
+    }
+
     /// Test recovery for rest ingested table.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
