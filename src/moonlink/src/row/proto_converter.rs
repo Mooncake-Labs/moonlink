@@ -59,5 +59,3 @@ fn proto_to_row_value(p: &proto::RowValue) -> RowValue {
         Kind::Null(_) => RowValue::Null,
     }
 }
-
-

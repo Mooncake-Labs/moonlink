@@ -236,16 +236,26 @@ impl RestSource {
 
         // If is_proto is set, decode from base64 protobuf; otherwise convert from JSON
         let row = if request.is_proto {
-            let b64 = request
-                .payload
-                .as_str()
-                .ok_or_else(|| RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValue("data".to_string())))?;
+            let b64 = request.payload.as_str().ok_or_else(|| {
+                RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValue(
+                    "data".to_string(),
+                ))
+            })?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64)
-                .map_err(|e| RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause("data".to_string(), Box::new(e))))?;
-            let p: moonlink_proto::moonlink::MoonlinkRow =
-                prost::Message::decode(bytes.as_slice())
-                    .map_err(|e| RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause("data".to_string(), Box::new(e))))?;
+                .map_err(|e| {
+                    RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause(
+                        "data".to_string(),
+                        Box::new(e),
+                    ))
+                })?;
+            let p: moonlink_proto::moonlink::MoonlinkRow = prost::Message::decode(bytes.as_slice())
+                .map_err(|e| {
+                    RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause(
+                        "data".to_string(),
+                        Box::new(e),
+                    ))
+                })?;
             moonlink::row::proto_to_moonlink_row(&p)
         } else {
             let converter = JsonToMoonlinkRowConverter::new(schema.clone());
@@ -296,13 +306,12 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use moonlink::row::RowValue;
     use parquet::arrow::AsyncArrowWriter;
     use serde_json::json;
     use std::{sync::Arc, time::SystemTime};
     use tempfile::TempDir;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use moonlink::row::RowValue;
-
 
     fn make_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
