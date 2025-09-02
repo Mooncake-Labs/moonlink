@@ -255,7 +255,7 @@ impl PostgresConnection {
                 .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
                 .await
                 .expect("failed to get table copy stream");
-            let res = copy_table_stream(
+            copy_table_stream(
                 schema.clone(),
                 stream,
                 &event_sender,
@@ -263,11 +263,8 @@ impl PostgresConnection {
                 table_base_path,
                 None,
             )
-            .await;
-
-            if let Err(e) = res {
-                error!(error = ?e, table_id = src_table_id, "failed to copy table");
-            }
+            .await
+            .expect("failed to copy table");
 
             // Commit the transaction
             copy_source
