@@ -171,7 +171,7 @@ impl ParquetFileWriter {
                 let path = self.next_file_path();
                 // Ensure directory exists
                 if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await.ok();
+                    tokio::fs::create_dir_all(parent).await?;
                 }
                 let file = tokio::fs::File::create(&path).await?;
                 let props = get_default_parquet_properties();
