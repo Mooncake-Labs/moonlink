@@ -507,6 +507,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_initial_copy_uses_base_path() {
+        // Test that initial copy files are created under base_path
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let table_id = 9999u32;
+
+        // Create some test data
+        let rows = vec![
+            Ok(TableRow {
+                values: vec![Cell::I32(1)],
+            }),
+            Ok(TableRow {
+                values: vec![Cell::I32(2)],
+            }),
+        ];
+        let stream = stream::iter(rows);
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
+        let mut schema = make_test_schema("base_path_test");
+        schema.src_table_id = table_id;
+
+        // Run initial copy
+        let _progress = copy_table_stream(schema, Box::pin(stream), &tx, 42, base_path, None)
+            .await
+            .expect("copy failed");
+
+        // Verify files are created under base_path/initial_copy/table_{id}/
+        let expected_dir = std::path::Path::new(base_path)
+            .join("initial_copy")
+            .join(format!("table_{}", table_id));
+        assert!(
+            expected_dir.exists(),
+            "Expected directory should exist: {:?}",
+            expected_dir
+        );
+
+        // Verify at least one .parquet file exists in the expected directory
+        let entries = std::fs::read_dir(&expected_dir).unwrap();
+        let parquet_files: Vec<_> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext == "parquet")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !parquet_files.is_empty(),
+            "Should have at least one parquet file"
+        );
+
+        // Verify LoadFiles event contains correct root_directory
+        let evt = rx.recv().await.expect("should receive LoadFiles event");
+        match evt {
+            TableEvent::LoadFiles {
+                storage_config,
+                files,
+                ..
+            } => {
+                match storage_config {
+                    StorageConfig::FileSystem { root_directory, .. } => {
+                        assert_eq!(root_directory, expected_dir.to_str().unwrap());
+                    }
+                    _ => panic!("Expected FileSystem storage config"),
+                }
+                assert!(!files.is_empty(), "Should have files in LoadFiles event");
+            }
+            _ => panic!("Expected LoadFiles event, got {:?}", evt),
+        }
+    }
+
+    #[tokio::test]
     async fn ic_backpressure_sanity() {
         // Channel capacity 1, many rows, small batch size, small rotation threshold
         let config = InitialCopyWriterConfig {
