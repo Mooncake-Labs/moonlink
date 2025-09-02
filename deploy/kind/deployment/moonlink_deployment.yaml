@@ -1,35 +1,3 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  # ConfigMap providing a custom nginx.conf with enhanced logging format
-  # This config defines a log_format named `with_range` that logs the
-  # client IP, user, timestamp, request line, status, response size,
-  # HTTP range header and user‑agent.  We then enable access_log to
-  # write to stdout using this custom format.
-  name: moonlink-nginx-config
-data:
-  nginx.conf: |
-    events {}
-    http {
-      log_format with_range '$remote_addr - $remote_user [$time_local] '
-                            '"$request" $status '
-                            'resp_size=$body_bytes_sent '
-                            'range=$http_range '
-                            'ua="$http_user_agent"';
-      # Write access logs to stdout using the custom format so logs are visible
-      # via `kubectl logs`. Without this, Nginx uses its default `combined` format.
-      access_log /dev/stdout with_range;
-      server {
-        listen 80;
-        server_name _;
-        root /usr/share/nginx/html;
-        # Default behaviour: try to serve the requested file, return 404 if missing
-        location / {
-          try_files $uri $uri/ =404;
-        }
-      }
-    }
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,57 +13,52 @@ spec:
         app: moonlink-dev
     spec:
       containers:
-        # Main Moonlink container exposing REST and gRPC endpoints
-        - name: moonlink-dev
-          image: moonlink:dev
-          env:
-            # shared-cache-directory mounts /tmp/moonlink
-            # so Moonlink can cache data plane files locally.  See volumes below
-          volumeMounts:
-            - name: shared-cache-directory
-              mountPath: /tmp/moonlink
-          ports:
-            # REST API port
-            - containerPort: 3030
-            # gRPC API port
-            - containerPort: 3031
-        # Lightweight nginx serving files from the shared cache
-        - name: nginx
-          image: nginx:latest
-          ports:
-            - containerPort: 80
-          volumeMounts:
-            # Serve cached files via nginx
-            - name: shared-cache-directory
-              mountPath: /usr/share/nginx/html
-            # Mount our custom nginx.conf supplied by the ConfigMap.  We use
-            # subPath to mount only the file itself rather than the entire
-            # ConfigMap as a directory.
-            - name: nginx-config
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
-        # Local Postgres instance used by Moonlink
-        - name: postgres
-          image: mooncakelabs/pg_mooncake
-          env:
-            - name: POSTGRES_PASSWORD
-              value: password
-          ports:
-            - containerPort: 5432
-          volumeMounts:
-            - name: pgdata
-              mountPath: /var/lib/postgresql/data
-      volumes:
-        # Persistent storage for Postgres data. An emptyDir is sufficient for
-        # development since data is thrown away when the pod is removed.
-        - name: pgdata
-          emptyDir: {}
-        # Shared directory between Moonlink and nginx.  Moonlink writes files
-        # here and nginx serves them.
+      # Moonlink, which serves REST API and TCP rpc requests.
+      - name: moonlink-dev
+        image: moonlink:dev
+        env:
+        volumeMounts:
         - name: shared-cache-directory
-          emptyDir: {}
-        # ConfigMap volume providing nginx.conf.  This must match the name
-        # declared above in the ConfigMap resource.
+          mountPath: /tmp/moonlink
+        ports:
+        # Port number for REST API server.
+        - containerPort: 3030
+        # Port number for TCP rpc server.
+        - containerPort: 3031
+
+      # Data server, which serves data plane requests.
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        # nginx serves local files under certain directory.
+        - name: shared-cache-directory
+          mountPath: /usr/share/nginx/html
+        # mount nginx.conf from ConfigMap
         - name: nginx-config
-          configMap:
-            name: moonlink-nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+
+      # Act as remote postgres instance.
+      - name: postgres
+        image: mooncakelabs/pg_mooncake
+        env:
+        - name: POSTGRES_PASSWORD
+          value: password
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+
+      volumes:
+      - name: pgdata
+        emptyDir: {}
+      # Shared cache directory between data server and moonlink.
+      - name: shared-cache-directory
+        emptyDir: {}
+      # ConfigMap providing nginx.conf
+      - name: nginx-config
+        configMap:
+          name: moonlink-nginx-config
