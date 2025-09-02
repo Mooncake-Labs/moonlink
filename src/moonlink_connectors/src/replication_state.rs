@@ -34,7 +34,8 @@ impl ReplicationState {
     pub fn mark(&self, lsn: u64) {
         if lsn > self.current.load(Ordering::SeqCst) {
             self.current.store(lsn, Ordering::SeqCst);
-            self.tx.send(lsn).unwrap();
+            // Ignore send error if there are no subscribers (e.g., during shutdown)
+            let _ = self.tx.send(lsn);
         }
     }
 
