@@ -49,3 +49,28 @@ impl ReplicationState {
         self.current.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_without_subscribers_does_not_panic_and_updates_state() {
+        let state = ReplicationState::new();
+        assert_eq!(state.now(), 0);
+        // No subscribers have been created; this will panic without the fix.
+        state.mark(42);
+        assert_eq!(state.now(), 42);
+    }
+
+    #[test]
+    fn mark_after_last_subscriber_dropped_does_not_panic() {
+        let state = ReplicationState::new();
+        // Create a subscriber and then drop it to simulate shutdown.
+        let rx = state.subscribe();
+        drop(rx);
+        // This will panic without the fix because there are no receivers.
+        state.mark(100);
+        assert_eq!(state.now(), 100);
+    }
+}
