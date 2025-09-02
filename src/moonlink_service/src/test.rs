@@ -1,236 +1,13 @@
-use arrow_array::RecordBatch;
-use async_recursion::async_recursion;
-use bytes::Bytes;
 use more_asserts as ma;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use serial_test::serial;
-use std::env;
 use tokio::net::TcpStream;
 
-use crate::rest_api::{
-    CreateTableResponse, FileUploadResponse, HealthResponse, IngestResponse, ListTablesResponse,
-};
+use crate::rest_api::{CreateTableResponse, FileUploadResponse, HealthResponse, IngestResponse};
+use crate::start_with_config;
 use crate::test_utils::*;
-use crate::{start_with_config, ServiceConfig, READINESS_PROBE_PORT};
 use moonlink::decode_serialized_read_state_for_testing;
-use moonlink_backend::table_status::TableStatus;
 use moonlink_rpc::{load_files, scan_table_begin, scan_table_end};
-
-/// Moonlink backend directory.
-fn get_moonlink_backend_dir() -> String {
-    if let Ok(backend_dir) = env::var("MOONLINK_BACKEND_DIR") {
-        backend_dir
-    } else {
-        "/workspaces/moonlink/.shared-nginx".to_string()
-    }
-}
-
-/// Util function to get nginx address
-fn get_nginx_addr() -> String {
-    env::var("NGINX_ADDR").unwrap_or_else(|_| NGINX_ADDR.to_string())
-}
-
-/// Local nginx server IP/port address.
-const NGINX_ADDR: &str = "http://nginx.local:80";
-/// Local moonlink REST API IP/port address.
-const REST_ADDR: &str = "http://127.0.0.1:3030";
-/// Local moonlink server IP/port address.
-const MOONLINK_ADDR: &str = "127.0.0.1:3031";
-/// Test database name.
-const DATABASE: &str = "test-database";
-/// Test table name.
-const TABLE: &str = "test-table";
-
-fn get_service_config() -> ServiceConfig {
-    let moonlink_backend_dir = get_moonlink_backend_dir();
-    let nginx_addr = get_nginx_addr();
-
-    ServiceConfig {
-        base_path: moonlink_backend_dir.clone(),
-        data_server_uri: Some(nginx_addr),
-        rest_api_port: Some(3030),
-        tcp_port: Some(3031),
-    }
-}
-
-/// Util function to delete and all subdirectories and files in the given directory.
-#[async_recursion]
-async fn cleanup_directory(dir: &str) {
-    let dir = std::path::Path::new(dir);
-    let mut entries = tokio::fs::read_dir(dir).await.unwrap();
-    while let Some(entry) = entries.next_entry().await.unwrap() {
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            cleanup_directory(entry_path.to_str().unwrap()).await;
-            tokio::fs::remove_dir_all(&entry_path).await.unwrap();
-        } else {
-            tokio::fs::remove_file(&entry_path).await.unwrap();
-        }
-    }
-}
-
-struct TestGuard {
-    dir: String,
-}
-
-impl TestGuard {
-    async fn new(dir: &str) -> Self {
-        cleanup_directory(dir).await;
-        Self {
-            dir: dir.to_string(),
-        }
-    }
-}
-
-impl Drop for TestGuard {
-    fn drop(&mut self) {
-        fn cleanup_sync(dir: &str) {
-            let dir = std::path::Path::new(dir);
-            if dir.exists() {
-                for entry in std::fs::read_dir(dir).unwrap() {
-                    let entry = entry.unwrap();
-                    let path = entry.path();
-                    if path.is_dir() {
-                        cleanup_sync(path.to_str().unwrap());
-                        std::fs::remove_dir_all(path).unwrap();
-                    } else {
-                        std::fs::remove_file(path).unwrap();
-                    }
-                }
-            }
-        }
-
-        cleanup_sync(&self.dir);
-    }
-}
-
-/// Send request to readiness endpoint.
-async fn test_readiness_probe() {
-    let url = format!("http://127.0.0.1:{READINESS_PROBE_PORT}/ready");
-    loop {
-        if let Ok(resp) = reqwest::get(&url).await {
-            if resp.status() == reqwest::StatusCode::OK {
-                return;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-/// Util function to get table creation payload.
-fn get_create_table_payload(database: &str, table: &str) -> serde_json::Value {
-    let create_table_payload = json!({
-        "database": database,
-        "table": table,
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
-            {"name": "name", "data_type": "string", "nullable": false},
-            {"name": "email", "data_type": "string", "nullable": true},
-            {"name": "age", "data_type": "int32", "nullable": true}
-        ],
-        "table_config": {
-            "mooncake": {
-                "append_only": true,
-                "row_identity": "None"
-            }
-        }
-    });
-    create_table_payload
-}
-
-/// Util function to get table drop payload.
-fn get_drop_table_payload(database: &str, table: &str) -> serde_json::Value {
-    let drop_table_payload = json!({
-        "database": database,
-        "table": table
-    });
-    drop_table_payload
-}
-
-/// Util function to get table optimize payload.
-fn get_optimize_table_payload(database: &str, table: &str, mode: &str) -> serde_json::Value {
-    let optimize_table_payload = json!({
-        "database": database,
-        "table": table,
-        "mode": mode
-    });
-    optimize_table_payload
-}
-
-/// Util function to get create snapshot payload.
-fn get_create_snapshot_payload(database: &str, table: &str, lsn: u64) -> serde_json::Value {
-    let snapshot_creation_payload = json!({
-        "database": database,
-        "table": table,
-        "lsn": lsn
-    });
-    snapshot_creation_payload
-}
-
-/// Util function to create table via REST API.
-async fn create_table(client: &reqwest::Client, database: &str, table: &str) {
-    // REST API doesn't allow duplicate source table name.
-    let crafted_src_table_name = format!("{database}.{table}");
-
-    let payload = get_create_table_payload(database, table);
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-}
-
-/// Util function to drop table via REST API.
-async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
-    let payload = get_drop_table_payload(database, table);
-    let crafted_src_table_name = format!("{database}.{table}");
-    let response = client
-        .delete(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-}
-
-async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
-    let response = client
-        .get(format!("{REST_ADDR}/tables"))
-        .header("content-type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-    let response: ListTablesResponse = response.json().await.unwrap();
-    response.tables
-}
-
-/// Util function to load all record batches inside of the given [`path`].
-async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
-    let resp = reqwest::get(url).await.unwrap();
-    assert!(resp.status().is_success(), "Response status is {resp:?}");
-    let data: Bytes = resp.bytes().await.unwrap();
-    let reader = ParquetRecordBatchReaderBuilder::try_new(data)
-        .unwrap()
-        .build()
-        .unwrap();
-
-    reader.into_iter().map(|b| b.unwrap()).collect()
-}
 
 #[tokio::test]
 #[serial]
@@ -445,7 +222,7 @@ async fn create_snapshot(client: &reqwest::Client, database: &str, table: &str, 
 #[tokio::test]
 #[serial]
 async fn test_create_snapshot() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
     let config = get_service_config();
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
@@ -512,9 +289,6 @@ async fn test_create_snapshot() {
     )
     .await
     .unwrap();
-
-    // Cleanup shared directory.
-    cleanup_directory(&get_moonlink_backend_dir()).await;
 }
 
 /// Test basic table creation, insertion and query.
