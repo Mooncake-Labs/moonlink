@@ -267,7 +267,7 @@ pub async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
     response.tables
 }
 
-/// Util function to load all record batches inside of the given [`path`].
+/// Util function to load all record batches for the given [`url`].
 pub async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
     let resp = reqwest::get(url).await.unwrap();
     assert!(resp.status().is_success(), "Response status is {resp:?}");
