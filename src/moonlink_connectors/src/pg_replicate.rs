@@ -264,7 +264,10 @@ impl PostgresConnection {
                 None,
             )
             .await
-            .expect("failed to copy table");
+            .expect(&format!(
+                "failed to copy table for src_table_id: {}",
+                src_table_id
+            ));
 
             // Commit the transaction
             copy_source
