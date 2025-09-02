@@ -228,6 +228,7 @@ impl PostgresConnection {
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
         commit_lsn_tx: watch::Sender<u64>,
+        table_base_path: &str,
     ) -> Result<(bool)> {
         let src_table_id = schema.src_table_id;
         // Create a dedicated source for the copy
@@ -259,6 +260,7 @@ impl PostgresConnection {
                 stream,
                 &event_sender,
                 start_lsn.into(),
+                table_base_path,
                 None,
             )
             .await;
@@ -515,6 +517,7 @@ impl PostgresConnection {
                 table_resources.event_sender.clone(),
                 is_recovery,
                 commit_lsn_tx_for_copy,
+                table_base_path,
             )
             .await?;
 

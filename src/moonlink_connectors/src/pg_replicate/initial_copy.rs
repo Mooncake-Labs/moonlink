@@ -34,6 +34,7 @@ pub async fn copy_table_stream<S>(
     mut stream: S,
     event_sender: &Sender<TableEvent>,
     start_lsn: u64,
+    base_path: &str,
     config: Option<InitialCopyWriterConfig>,
 ) -> Result<CopyProgress>
 where
@@ -48,8 +49,8 @@ where
     config.num_writer_tasks = 4;
 
     // Create output directory for initial copy files
-    let output_dir = std::env::temp_dir()
-        .join("moonlink_initial_copy")
+    let output_dir = std::path::PathBuf::from(base_path)
+        .join("initial_copy")
         .join(format!("table_{}", table_schema.src_table_id));
 
     // Create batch channel for RecordBatches
@@ -213,7 +214,9 @@ mod tests {
         let schema = make_test_schema("test");
         let start_lsn = 1000u64;
 
-        let progress = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn, None)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let progress = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn, base_path, None)
             .await
             .expect("copy failed");
 
@@ -256,7 +259,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
         let schema = make_test_schema("empty");
 
-        let progress = copy_table_stream(schema, Box::pin(stream), &tx, 0u64, None)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let progress = copy_table_stream(schema, Box::pin(stream), &tx, 0u64, base_path, None)
             .await
             .expect("copy failed");
         assert_eq!(progress.rows_copied, 0);
@@ -305,9 +310,18 @@ mod tests {
         let schema = make_test_schema("rotate");
         let start_lsn = 42u64;
 
-        let _ = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn, Some(config))
-            .await
-            .expect("copy failed");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let _ = copy_table_stream(
+            schema,
+            Box::pin(stream),
+            &tx,
+            start_lsn,
+            base_path,
+            Some(config),
+        )
+        .await
+        .expect("copy failed");
 
         // LoadFiles with multiple files
         let evt = timeout(Duration::from_millis(500), rx.recv())
@@ -345,7 +359,9 @@ mod tests {
         let (tx, _) = mpsc::channel::<TableEvent>(1);
         let schema = make_test_schema("broken");
 
-        let err = copy_table_stream(schema, Box::pin(stream), &tx, 0u64, None)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let err = copy_table_stream(schema, Box::pin(stream), &tx, 0u64, base_path, None)
             .await
             .expect_err("expected failure");
 
@@ -382,7 +398,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
         let schema = make_test_schema("mw_e2e");
 
-        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 7, Some(config))
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 7, base_path, Some(config))
             .await
             .expect("copy failed");
 
@@ -420,7 +438,9 @@ mod tests {
         let mut schema = make_test_schema("empty_n");
         schema.src_table_id = table_id;
 
-        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 0, Some(config))
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 0, base_path, Some(config))
             .await
             .expect("copy failed");
 
@@ -453,8 +473,10 @@ mod tests {
     #[tokio::test]
     async fn ic_writer_error_propagation_via_default_dir_collision() {
         let table_id = 7777u32;
-        let default_dir = std::env::temp_dir()
-            .join("moonlink_initial_copy")
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let default_dir = std::path::PathBuf::from(base_path)
+            .join("initial_copy")
             .join(format!("table_{}", table_id));
         // Ensure parent exists and create a file at the would-be directory path
         if let Some(parent) = default_dir.parent() {
@@ -477,7 +499,7 @@ mod tests {
         let mut schema = make_test_schema("err_out_dir_default");
         schema.src_table_id = table_id;
 
-        let err = copy_table_stream(schema, Box::pin(stream), &tx, 1, Some(config))
+        let err = copy_table_stream(schema, Box::pin(stream), &tx, 1, base_path, Some(config))
             .await
             .expect_err("expected failure");
         let s = err.to_string().to_lowercase();
@@ -504,7 +526,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
         let schema = make_test_schema("backpressure");
 
-        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 9, Some(config))
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 9, base_path, Some(config))
             .await
             .expect("copy failed");
 
