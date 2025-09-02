@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::watch;
+use tracing::warn;
 
 /// Tracks replication progress and notifies listeners when the replicated
 /// LSN advances.
@@ -35,7 +36,9 @@ impl ReplicationState {
         if lsn > self.current.load(Ordering::SeqCst) {
             self.current.store(lsn, Ordering::SeqCst);
             // Ignore send error if there are no subscribers (e.g., during shutdown)
-            let _ = self.tx.send(lsn);
+            if let Err(e) = self.tx.send(lsn) {
+                warn!(error = ?e, "failed to send replication state for lsn {}", lsn);
+            }
         }
     }
 
