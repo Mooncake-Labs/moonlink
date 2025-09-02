@@ -618,4 +618,48 @@ mod tests {
             _ => panic!("expected LoadFiles"),
         }
     }
+
+    #[tokio::test]
+    async fn ic_writer_error_does_not_emit_loadfiles() {
+        // Create a path collision for the output directory used by copy_table_stream so writer fails
+        let table_id = 8888u32;
+
+        // Use a temp base path and collide at base_path/initial_copy/table_{id}
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().to_str().unwrap();
+        let default_dir = std::path::Path::new(base_path)
+            .join("initial_copy")
+            .join(format!("table_{}", table_id));
+        if let Some(parent) = default_dir.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&default_dir, b"block").await.unwrap();
+
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: usize::MAX,
+            max_rows_per_batch: 1024,
+            num_writer_tasks: 2,
+            batch_channel_capacity: 4,
+        };
+
+        let rows = vec![Ok(TableRow {
+            values: vec![Cell::I32(1)],
+        })];
+        let stream = stream::iter(rows);
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
+        let mut schema = make_test_schema("err_no_loadfiles");
+        schema.src_table_id = table_id;
+
+        // Expect the copy to fail due to directory collision
+        let _ = copy_table_stream(schema, Box::pin(stream), &tx, 1, base_path, Some(config))
+            .await
+            .expect_err("expected failure");
+
+        // Ensure no LoadFiles event was emitted
+        let recv_res = timeout(Duration::from_millis(300), rx.recv()).await;
+        assert!(
+            recv_res.is_err(),
+            "no LoadFiles event should be emitted on failure"
+        );
+    }
 }
