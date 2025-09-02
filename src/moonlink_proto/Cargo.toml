@@ -1,0 +1,21 @@
+[package]
+name = "moonlink_proto"
+version = { workspace = true }
+edition = { workspace = true }
+license = "MIT"
+
+[dependencies]
+bytes = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13"
+tonic-build = { version = "0.12", optional = true }
+protoc-bin-vendored = "3"
+
+[features]
+default = []
+grpc = ["dep:tonic-build"]
+
+

@@ -17,12 +17,15 @@ storage-fs = ["moonlink/storage-fs"]
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.8"
+base64 = "0.22"
 clap = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }
 moonlink_error = { path = "../moonlink_error" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 moonlink_rpc = { path = "../moonlink_rpc" }
+moonlink_proto = { path = "../moonlink_proto" }
+prost = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

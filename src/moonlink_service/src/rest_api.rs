@@ -146,6 +146,10 @@ pub struct CreateSnapShotResponse {}
 pub struct IngestRequest {
     pub operation: String,
     pub data: serde_json::Value,
+    /// When true, `data` must be a JSON string of base64-encoded protobuf `MoonlinkRow`.
+    /// Defaults to false.
+    #[serde(default)]
+    pub is_proto: bool,
     /// Whether to enable synchronous mode.
     pub request_mode: RequestMode,
 }
@@ -601,6 +605,7 @@ async fn ingest_data(
         src_table_name: src_table_name.clone(),
         operation,
         payload: payload.data,
+        is_proto: payload.is_proto,
         timestamp: SystemTime::now(),
         tx: if payload.request_mode == RequestMode::Sync {
             Some(tx)

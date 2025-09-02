@@ -472,6 +472,7 @@ mod tests {
                 "name": "Alice Johnson",
                 "age": 30
             }),
+            is_proto: false,
             timestamp: SystemTime::now(),
             tx: Some(tx),
         };

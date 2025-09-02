@@ -19,6 +19,8 @@ pub struct RowEventRequest {
     pub src_table_name: String,
     pub operation: RowEventOperation,
     pub payload: serde_json::Value,
+    /// When true, `payload` must be a JSON string of base64-encoded protobuf `MoonlinkRow`.
+    pub is_proto: bool,
     pub timestamp: SystemTime,
     /// An optional channel for commit LSN, used to synchronize request completion.
     /// TODO(hjiang): Handle error propagation.

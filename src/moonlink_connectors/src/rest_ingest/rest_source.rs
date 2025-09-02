@@ -6,6 +6,7 @@ use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonl
 use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
 use arrow_schema::Schema;
+use base64::Engine as _;
 use bytes::Bytes;
 use moonlink::row::MoonlinkRow;
 use moonlink::{
@@ -233,8 +234,23 @@ impl RestSource {
             .get(&request.src_table_name)
             .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
 
-        let converter = JsonToMoonlinkRowConverter::new(schema.clone());
-        let row = converter.convert(&request.payload)?;
+        // If is_proto is set, decode from base64 protobuf; otherwise convert from JSON
+        let row = if request.is_proto {
+            let b64 = request
+                .payload
+                .as_str()
+                .ok_or_else(|| RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValue("data".to_string())))?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause("data".to_string(), Box::new(e))))?;
+            let p: moonlink_proto::moonlink::MoonlinkRow =
+                prost::Message::decode(bytes.as_slice())
+                    .map_err(|e| RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause("data".to_string(), Box::new(e))))?;
+            moonlink::row::proto_to_moonlink_row(&p)
+        } else {
+            let converter = JsonToMoonlinkRowConverter::new(schema.clone());
+            converter.convert(&request.payload)?
+        };
 
         let row_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
         let commit_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
@@ -280,11 +296,13 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
-    use moonlink::row::RowValue;
     use parquet::arrow::AsyncArrowWriter;
     use serde_json::json;
     use std::{sync::Arc, time::SystemTime};
     use tempfile::TempDir;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use moonlink::row::RowValue;
+
 
     fn make_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -386,6 +404,7 @@ mod tests {
                 "id": 42,
                 "name": "test"
             }),
+            is_proto: false,
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -418,6 +437,49 @@ mod tests {
                 assert_eq!(*lsn, 2);
             }
             _ => panic!("Expected Commit event"),
+        }
+    }
+
+    #[test]
+    fn test_process_row_with_proto_row() {
+        let mut source = RestSource::new();
+        let schema = make_test_schema();
+        source
+            .add_table(
+                "test_table".to_string(),
+                1,
+                schema,
+                /*persist_lsn=*/ Some(0),
+            )
+            .unwrap();
+
+        // Build a MoonlinkRow directly that would not match the JSON payload
+        let direct_row = MoonlinkRow::new(vec![
+            RowValue::Int32(123),
+            RowValue::ByteArray(b"proto".to_vec()),
+        ]);
+
+        // Build RowEventRequest with is_proto set, JSON payload contains base64 string
+        let request = RowEventRequest {
+            src_table_name: "test_table".to_string(),
+            operation: RowEventOperation::Insert,
+            payload: json!(BASE64_STANDARD.encode({
+                let p = moonlink::row::moonlink_row_to_proto(&direct_row);
+                let mut buf = Vec::new();
+                prost::Message::encode(&p, &mut buf).unwrap();
+                buf
+            })),
+            is_proto: true,
+            timestamp: SystemTime::now(),
+            tx: None,
+        };
+
+        let events = source.process_row_request(&request).unwrap();
+        match &events[0] {
+            RestEvent::RowEvent { row, .. } => {
+                assert_eq!(row, &direct_row);
+            }
+            other => panic!("expected RowEvent, got {other:?}"),
         }
     }
 
@@ -606,6 +668,7 @@ mod tests {
             src_table_name: "unknown_table".to_string(),
             operation: RowEventOperation::Insert,
             payload: json!({"id": 1}),
+            is_proto: false,
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -647,6 +710,7 @@ mod tests {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
             payload: json!({"id": 1, "name": "first"}),
+            is_proto: false,
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -655,6 +719,7 @@ mod tests {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
             payload: json!({"id": 2, "name": "second"}),
+            is_proto: false,
             timestamp: SystemTime::now(),
             tx: None,
         };

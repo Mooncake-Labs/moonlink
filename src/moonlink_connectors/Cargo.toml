@@ -17,6 +17,7 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+base64 = "0.22"
 bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
 byteorder = "1.5"
 bytes = { workspace = true }
@@ -25,11 +26,13 @@ chrono-tz = "0.10"
 futures = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_error = { path = "../moonlink_error" }
+moonlink_proto = { path = "../moonlink_proto" }
 more-asserts = { workspace = true }
 native-tls = "0.2.14"
 num-traits = { workspace = true }
 parquet = { workspace = true }
 pg_escape = "0.1"
+prost = { workspace = true }
 pin-project-lite = "0.2"
 postgres-native-tls = { workspace = true }
 postgres-replication = { workspace = true }

@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package moonlink;
+
+// RowValue mirrors the Rust enum `RowValue` with a oneof
+message RowValue {
+  oneof kind {
+    int32 int32 = 1;
+    // Microseconds since midnight for Time; microseconds since UNIX epoch (UTC) for Timestamp/TimestampTz
+    int64 int64 = 2;
+    float float32 = 3;
+    double float64 = 4;
+    // Decimal stored as 128-bit integer two's complement
+    // Represented in protobuf as bytes in big-endian 16 bytes
+    bytes decimal_128_be = 5;
+    bool bool = 6;
+    bytes bytes = 7;
+    bytes fixed_len_bytes = 8; // always 16 bytes for uuid or similar
+    Array array = 9;
+    Struct struct = 10;
+    Null null = 11;
+  }
+}
+
+message Array {
+  repeated RowValue values = 1;
+}
+
+message Struct {
+  repeated RowValue fields = 1;
+}
+
+message Null {}
+
+message MoonlinkRow {
+  repeated RowValue values = 1;
+}
+
+
+
