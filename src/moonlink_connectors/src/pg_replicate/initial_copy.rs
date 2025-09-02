@@ -34,7 +34,7 @@ pub async fn copy_table_stream<S>(
     mut stream: S,
     event_sender: &Sender<TableEvent>,
     start_lsn: u64,
-    base_path: &str,
+    table_base_path: &str,
     config: Option<InitialCopyWriterConfig>,
 ) -> Result<CopyProgress>
 where
@@ -49,7 +49,7 @@ where
     config.num_writer_tasks = 4;
 
     // Create output directory for initial copy files
-    let output_dir = std::path::PathBuf::from(base_path)
+    let output_dir = std::path::PathBuf::from(table_base_path)
         .join("initial_copy")
         .join(format!("table_{}", table_schema.src_table_id));
 
