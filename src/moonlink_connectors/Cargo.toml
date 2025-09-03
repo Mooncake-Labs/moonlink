@@ -31,10 +31,10 @@ native-tls = "0.2.14"
 num-traits = { workspace = true }
 parquet = { workspace = true }
 pg_escape = "0.1"
-prost = { workspace = true }
 pin-project-lite = "0.2"
 postgres-native-tls = { workspace = true }
 postgres-replication = { workspace = true }
+prost = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

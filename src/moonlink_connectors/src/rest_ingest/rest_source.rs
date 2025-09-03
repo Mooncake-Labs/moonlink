@@ -33,6 +33,10 @@ pub enum RestSourceError {
     DuplicateTable(String),
     #[error("non-existent table to remove: {0}")]
     NonExistentTable(String),
+    #[error("protobuf conversion error: {0}")]
+    ProtobufDecoding(#[from] prost::DecodeError),
+    #[error("moonlink row conversion error: {0}")]
+    MoonlinkRowProtobufConversion(#[from] moonlink::row::ProtoToMoonlinkRowError),
 }
 
 pub struct RestSource {
@@ -241,15 +245,9 @@ impl RestSource {
             }
             IngestRequestPayload::Protobuf(bytes) => {
                 let p: moonlink_proto::moonlink::MoonlinkRow =
-                    prost::Message::decode(bytes.as_slice()).map_err(|e| {
-                        RestSourceError::JsonConversion(
-                            JsonToMoonlinkRowError::InvalidValueWithCause(
-                                "data".to_string(),
-                                Box::new(e),
-                            ),
-                        )
-                    })?;
-                moonlink::row::proto_to_moonlink_row(p)
+                    prost::Message::decode(bytes.as_slice())
+                        .map_err(RestSourceError::ProtobufDecoding)?;
+                moonlink::row::proto_to_moonlink_row(p).map_err(RestSourceError::from)?
             }
         };
 
@@ -448,7 +446,7 @@ mod tests {
         source
             .add_table(
                 "test_table".to_string(),
-                1,
+                /*src_table_id=*/ 1,
                 schema,
                 /*persist_lsn=*/ Some(0),
             )

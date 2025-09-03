@@ -22,8 +22,8 @@ moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }
 moonlink_error = { path = "../moonlink_error" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
-moonlink_rpc = { path = "../moonlink_rpc" }
 moonlink_proto = { path = "../moonlink_proto" }
+moonlink_rpc = { path = "../moonlink_rpc" }
 prost = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 serde = { workspace = true }

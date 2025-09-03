@@ -5,10 +5,10 @@ members = [
     "src/moonlink_connectors",
     "src/moonlink_datafusion",
     "src/moonlink_metadata_store",
+    "src/moonlink_proto",
     "src/moonlink_rpc",
     "src/moonlink_service",
     "src/moonlink_table_metadata",
-    "src/moonlink_proto",
 ]
 resolver = "2"
 
