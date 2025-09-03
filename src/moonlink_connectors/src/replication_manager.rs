@@ -43,6 +43,30 @@ impl ReplicationManager {
         }
     }
 
+    pub async fn get_or_create_connection(
+        &mut self,
+        src_uri: &str,
+    ) -> Result<&mut ReplicationConnection> {
+        let replication_connection = match self.connections.entry(src_uri.to_string()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                debug!(%src_uri, "creating replication connection");
+
+                tokio::fs::create_dir_all(&self.table_base_path).await?;
+                let base_path = tokio::fs::canonicalize(&self.table_base_path).await?;
+                let replication_connection = ReplicationConnection::new(
+                    src_uri.to_string(),
+                    base_path.to_str().unwrap().to_string(),
+                    self.object_storage_cache.clone(),
+                )
+                .await?;
+                entry.insert(replication_connection)
+            }
+        };
+
+        Ok(replication_connection)
+    }
+
     /// Add a table to be replicated from the given `uri`.
     ///
     /// If replication for this `uri` is not yet running a new replication
@@ -62,23 +86,16 @@ impl ReplicationManager {
         is_recovery: bool,
     ) -> Result<()> {
         debug!(%src_uri, table_name, "adding table through manager");
-        let (replication_connection, is_new_repl_conn): (&mut ReplicationConnection, bool) =
-            match self.connections.entry(src_uri.to_string()) {
-                Entry::Occupied(entry) => (entry.into_mut(), false),
-                Entry::Vacant(entry) => {
-                    debug!(%src_uri, "creating replication connection");
 
-                    tokio::fs::create_dir_all(&self.table_base_path).await?;
-                    let base_path = tokio::fs::canonicalize(&self.table_base_path).await?;
-                    let replication_connection = ReplicationConnection::new(
-                        src_uri.to_string(),
-                        base_path.to_str().unwrap().to_string(),
-                        self.object_storage_cache.clone(),
-                    )
-                    .await?;
-                    (entry.insert(replication_connection), true)
-                }
-            };
+        // Error handling: don't allow duplicate mooncake table id be registered.
+        if self.table_info.contains_key(&mooncake_table_id) {
+            return Err(Error::repl_duplicate_table(mooncake_table_id.to_string()));
+        }
+
+        let replication_connection = self.get_or_create_connection(src_uri).await?;
+        if !replication_connection.replication_started() {
+            replication_connection.start_replication().await?;
+        }
 
         let src_table_id = replication_connection
             .add_table_replication(
@@ -90,16 +107,6 @@ impl ReplicationManager {
             )
             .await?;
 
-        // Error handling: don't allow duplicate mooncake table id be registered.
-        if self.table_info.contains_key(&mooncake_table_id) {
-            replication_connection
-                .drop_table(&mooncake_table_id, src_table_id)
-                .await?;
-            if is_new_repl_conn {
-                assert!(self.connections.remove(src_uri).is_some());
-            }
-            return Err(Error::repl_duplicate_table(mooncake_table_id.to_string()));
-        }
         assert!(self
             .table_info
             .insert(

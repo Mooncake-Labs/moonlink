@@ -213,7 +213,6 @@ impl MoonlinkBackend {
                         /*is_recovery=*/ false,
                     )
                     .await?;
-                manager.start_replication(&src_uri).await?;
                 Ok(cur_moonlink_table_config)
             }
         };
