@@ -1,6 +1,6 @@
 use crate::rest_ingest::event_request::{
-    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
-    SnapshotRequest,
+    EventRequest, FileEventOperation, FileEventRequest, IngestRequestPayload, RowEventOperation,
+    RowEventRequest, SnapshotRequest,
 };
 use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonlinkRowError};
 use crate::rest_ingest::rest_event::RestEvent;
@@ -33,6 +33,10 @@ pub enum RestSourceError {
     DuplicateTable(String),
     #[error("non-existent table to remove: {0}")]
     NonExistentTable(String),
+    #[error("protobuf conversion error: {0}")]
+    ProtobufDecoding(#[from] prost::DecodeError),
+    #[error("moonlink row conversion error: {0}")]
+    MoonlinkRowProtobufConversion(#[from] moonlink::row::ProtoToMoonlinkRowError),
 }
 
 pub struct RestSource {
@@ -233,8 +237,19 @@ impl RestSource {
             .get(&request.src_table_name)
             .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
 
-        let converter = JsonToMoonlinkRowConverter::new(schema.clone());
-        let row = converter.convert(&request.payload)?;
+        // Decode based on payload type
+        let row = match &request.payload {
+            IngestRequestPayload::Json(value) => {
+                let converter = JsonToMoonlinkRowConverter::new(schema.clone());
+                converter.convert(value)?
+            }
+            IngestRequestPayload::Protobuf(bytes) => {
+                let p: moonlink_proto::moonlink::MoonlinkRow =
+                    prost::Message::decode(bytes.as_slice())
+                        .map_err(RestSourceError::ProtobufDecoding)?;
+                moonlink::row::proto_to_moonlink_row(p)?
+            }
+        };
 
         let row_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
         let commit_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
@@ -276,7 +291,10 @@ impl RestSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{rest_ingest::event_request::FileEventRequest, Error};
+    use crate::{
+        rest_ingest::event_request::{FileEventRequest, IngestRequestPayload},
+        Error,
+    };
     use arrow::record_batch::RecordBatch;
     use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
@@ -382,10 +400,10 @@ mod tests {
         let request = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({
+            payload: IngestRequestPayload::Json(json!({
                 "id": 42,
                 "name": "test"
-            }),
+            })),
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -418,6 +436,47 @@ mod tests {
                 assert_eq!(*lsn, 2);
             }
             _ => panic!("Expected Commit event"),
+        }
+    }
+
+    #[test]
+    fn test_process_row_with_proto_row() {
+        let mut source = RestSource::new();
+        let schema = make_test_schema();
+        source
+            .add_table(
+                "test_table".to_string(),
+                /*src_table_id=*/ 1,
+                schema,
+                /*persist_lsn=*/ Some(0),
+            )
+            .unwrap();
+
+        // Build a MoonlinkRow directly that would not match the JSON payload
+        let direct_row = MoonlinkRow::new(vec![
+            RowValue::Int32(123),
+            RowValue::ByteArray(b"proto".to_vec()),
+        ]);
+
+        let request = RowEventRequest {
+            src_table_name: "test_table".to_string(),
+            operation: RowEventOperation::Insert,
+            payload: {
+                let p = moonlink::row::moonlink_row_to_proto(direct_row.clone());
+                let mut buf = Vec::new();
+                prost::Message::encode(&p, &mut buf).unwrap();
+                IngestRequestPayload::Protobuf(buf)
+            },
+            timestamp: SystemTime::now(),
+            tx: None,
+        };
+
+        let events = source.process_row_request(&request).unwrap();
+        match &events[0] {
+            RestEvent::RowEvent { row, .. } => {
+                assert_eq!(row, &direct_row);
+            }
+            other => panic!("expected RowEvent, got {other:?}"),
         }
     }
 
@@ -605,7 +664,7 @@ mod tests {
         let request = RowEventRequest {
             src_table_name: "unknown_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({"id": 1}),
+            payload: IngestRequestPayload::Json(json!({"id": 1})),
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -646,7 +705,7 @@ mod tests {
         let request1 = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({"id": 1, "name": "first"}),
+            payload: IngestRequestPayload::Json(json!({"id": 1, "name": "first"})),
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -654,7 +713,7 @@ mod tests {
         let request2 = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({"id": 2, "name": "second"}),
+            payload: IngestRequestPayload::Json(json!({"id": 2, "name": "second"})),
             timestamp: SystemTime::now(),
             tx: None,
         };

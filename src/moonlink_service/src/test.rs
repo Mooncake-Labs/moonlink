@@ -1,6 +1,7 @@
 use arrow_array::RecordBatch;
 use async_recursion::async_recursion;
 use bytes::Bytes;
+use moonlink::row::{moonlink_row_to_proto, MoonlinkRow, RowValue};
 use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
@@ -654,6 +655,81 @@ async fn test_moonlink_standalone_file_upload() {
         "Response status is {response:?}"
     );
     let response: FileUploadResponse = response.json().await.unwrap();
+    let lsn = response.lsn.unwrap();
+
+    // Scan table and get data file and puffin files back.
+    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
+    let bytes = scan_table_begin(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+        lsn,
+    )
+    .await
+    .unwrap();
+    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
+        decode_serialized_read_state_for_testing(bytes);
+    assert_eq!(data_file_paths.len(), 1);
+    let record_batches = read_all_batches(&data_file_paths[0]).await;
+    let expected_arrow_batch = create_test_arrow_batch();
+    assert_eq!(record_batches, vec![expected_arrow_batch]);
+
+    assert!(puffin_file_paths.is_empty());
+    assert!(puffin_deletion.is_empty());
+    assert!(positional_deletion.is_empty());
+
+    scan_table_end(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_moonlink_standalone_protobuf_ingestion() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
+
+    // Build protobuf payload for a single row.
+    let row = MoonlinkRow::new(vec![
+        RowValue::Int32(1),
+        RowValue::ByteArray("Alice Johnson".as_bytes().to_vec()),
+        RowValue::ByteArray("alice@example.com".as_bytes().to_vec()),
+        RowValue::Int32(30),
+    ]);
+    let proto_row = moonlink_row_to_proto(row);
+    let mut buf = Vec::new();
+    prost::Message::encode(&proto_row, &mut buf).unwrap();
+
+    let insert_payload = json!({
+        "operation": "insert",
+        "request_mode": "sync",
+        "data": buf
+    });
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
+    let response = client
+        .post(format!("{REST_ADDR}/ingestpb/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&insert_payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: IngestResponse = response.json().await.unwrap();
     let lsn = response.lsn.unwrap();
 
     // Scan table and get data file and puffin files back.

@@ -142,7 +142,7 @@ fn build_field_from_schema(
             })?;
             let children: Result<Vec<Field>, SchemaBuildError> = child_schemas
                 .iter()
-                .map(|child| build_field_from_schema(child, None, field_id))
+                .map(|child| build_field_from_schema(child, /*override_name=*/ None, field_id))
                 .collect();
             let children = children?;
             let field = Field::new_struct(&name, children, nullable);
@@ -186,7 +186,7 @@ pub fn build_arrow_schema(fields: &[FieldSchema]) -> Result<Schema, SchemaBuildE
     let mut field_id: i32 = 0;
     let built_fields: Result<Vec<Field>, SchemaBuildError> = fields
         .iter()
-        .map(|fs| build_field_from_schema(fs, None, &mut field_id))
+        .map(|fs| build_field_from_schema(fs, /*override_name=*/ None, &mut field_id))
         .collect();
     Ok(Schema::new(built_fields?))
 }

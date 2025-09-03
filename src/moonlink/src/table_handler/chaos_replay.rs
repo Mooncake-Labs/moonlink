@@ -2,6 +2,7 @@ use crate::row::MoonlinkRow;
 use crate::row::RowValue;
 use crate::storage::cache::object_storage::cache_config::ObjectStorageCacheConfig;
 use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
+use crate::storage::io_utils;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::snapshot::MooncakeSnapshotOutput;
 use crate::storage::mooncake_table::DataCompactionResult;
@@ -556,15 +557,16 @@ pub(crate) async fn replay(replay_filepath: &str) {
                         guard.remove(&snapshot_completion_event.uuid)
                     };
                     if let Some(completed_mooncake_snapshot) = completed_mooncake_snapshot {
+                        let mooncake_snapshot_result =
+                            completed_mooncake_snapshot.mooncake_snapshot_result;
+                        io_utils::delete_local_files(
+                            &mooncake_snapshot_result.evicted_data_files_to_delete,
+                        )
+                        .await
+                        .unwrap();
                         table.mark_mooncake_snapshot_completed();
-                        table.record_mooncake_snapshot_completion(
-                            &completed_mooncake_snapshot.mooncake_snapshot_result,
-                        );
-                        table.notify_snapshot_reader(
-                            completed_mooncake_snapshot
-                                .mooncake_snapshot_result
-                                .commit_lsn,
-                        );
+                        table.record_mooncake_snapshot_completion(&mooncake_snapshot_result);
+                        table.notify_snapshot_reader(mooncake_snapshot_result.commit_lsn);
                         break;
                     }
                     // Otherwise block until the corresponding flush event completes.
