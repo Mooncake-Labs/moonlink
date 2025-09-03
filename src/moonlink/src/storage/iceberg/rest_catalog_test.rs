@@ -9,7 +9,7 @@ use std::collections::HashMap;
 async fn test_create_table() {
     let namespace = get_random_string();
     let table = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+    let mut guard = RestCatalogTestGuard::new(vec![namespace.clone()], None, None)
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
     let config = default_rest_catalog_config();
@@ -30,7 +30,7 @@ async fn test_create_table() {
 async fn test_drop_table() {
     let namespace = get_random_string();
     let table = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
+    let mut guard = RestCatalogTestGuard::new(vec![namespace.clone()], Some(table.clone()), None)
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
     let config = default_rest_catalog_config();
@@ -61,7 +61,7 @@ async fn test_drop_table() {
 async fn test_table_exists() {
     let namespace = get_random_string();
     let table = get_random_string();
-    let guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
+    let guard = RestCatalogTestGuard::new(vec![namespace.clone()], Some(table.clone()), None)
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
     let config = default_rest_catalog_config();
@@ -87,7 +87,7 @@ async fn test_table_exists() {
 async fn test_load_table() {
     let namespace = get_random_string();
     let table = get_random_string();
-    let guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
+    let guard = RestCatalogTestGuard::new(vec![namespace.clone()], Some(table.clone()), None)
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
     let config = default_rest_catalog_config();

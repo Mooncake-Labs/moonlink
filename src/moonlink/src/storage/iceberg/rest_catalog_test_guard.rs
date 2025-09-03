@@ -10,13 +10,18 @@ pub(crate) struct RestCatalogTestGuard {
 }
 
 impl RestCatalogTestGuard {
-    pub(crate) async fn new(namespace: String, table: Option<String>) -> Result<Self> {
+    pub(crate) async fn new(
+        namespace: Vec<String>,
+        table: Option<String>,
+        props: Option<HashMap<String, String>>,
+    ) -> Result<Self> {
         let config = default_rest_catalog_config();
         let catalog = RestCatalog::new(config)
             .await
             .expect("Catalog creation fail");
-        let ns_ident = NamespaceIdent::new(namespace);
-        catalog.create_namespace(&ns_ident, HashMap::new()).await?;
+        let ns_ident = NamespaceIdent::from_vec(namespace).unwrap();
+        let properties = props.clone().unwrap_or_default();
+        catalog.create_namespace(&ns_ident, properties).await?;
         let table_ident = if let Some(t) = table {
             let tc = default_table_creation(t.clone());
             catalog.create_table(&ns_ident, tc).await?;
