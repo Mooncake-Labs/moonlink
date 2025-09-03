@@ -2,6 +2,7 @@ use crate::storage::iceberg::rest_catalog::RestCatalog;
 use crate::storage::iceberg::rest_catalog_test_guard::RestCatalogTestGuard;
 use crate::storage::iceberg::rest_catalog_test_utils::*;
 use iceberg::{Catalog, NamespaceIdent, TableIdent};
+use std::collections::HashMap;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_create_table() {
@@ -98,4 +99,18 @@ async fn test_load_table() {
     });
     let result_table_ident = result.identifier().clone();
     assert_eq!(table_ident, result_table_ident);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_namespace() {
+    let namespace = get_random_string();
+    let config = default_rest_catalog_config();
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    let namespace_ident = NamespaceIdent::new(namespace.clone());
+    catalog
+        .create_namespace(&namespace_ident, HashMap::new())
+        .await
+        .unwrap_or_else(|_| panic!("Namespace creation fail, namespace={namespace}"));
 }
