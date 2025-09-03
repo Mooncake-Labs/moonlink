@@ -17,7 +17,6 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
-base64 = "0.22"
 bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
 byteorder = "1.5"
 bytes = { workspace = true }

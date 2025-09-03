@@ -8,7 +8,9 @@ use axum::{
 use moonlink::StorageConfig;
 use moonlink_backend::{table_config::TableConfig, table_status::TableStatus};
 use moonlink_backend::{EventRequest, FileEventOperation, RowEventOperation};
-use moonlink_backend::{FileEventRequest, RowEventRequest, SnapshotRequest, REST_API_URI};
+use moonlink_backend::{
+    FileEventRequest, IngestRequestPayload, RowEventRequest, SnapshotRequest, REST_API_URI,
+};
 use moonlink_error::ErrorStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -146,10 +148,15 @@ pub struct CreateSnapShotResponse {}
 pub struct IngestRequest {
     pub operation: String,
     pub data: serde_json::Value,
-    /// When true, `data` must be a JSON string of base64-encoded protobuf `MoonlinkRow`.
-    /// Defaults to false.
-    #[serde(default)]
-    pub is_proto: bool,
+    /// Whether to enable synchronous mode.
+    pub request_mode: RequestMode,
+}
+
+/// Request structure for data ingestion with protobuf
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngestProtobufRequest {
+    pub operation: String,
+    pub data: Vec<u8>,
     /// Whether to enable synchronous mode.
     pub request_mode: RequestMode,
 }
@@ -218,7 +225,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/tables", get(list_tables))
         .route("/tables/{table}", post(create_table))
         .route("/tables/{table}", delete(drop_table))
-        .route("/ingest/{table}", post(ingest_data))
+        .route("/ingest/{table}", post(ingest_data_json))
+        .route("/ingestpb/{table}", post(ingest_data_protobuf))
         .route("/upload/{table}", post(upload_files))
         .route("/tables/{table}/optimize", post(optimize_table))
         .route("/tables/{table}/snapshot", post(create_snapshot))
@@ -570,11 +578,52 @@ async fn create_snapshot(
     }
 }
 
-/// Data ingestion endpoint
-async fn ingest_data(
+#[derive(Debug)]
+struct IngestRequestInternal {
+    operation: String,
+    data: IngestRequestPayload,
+    request_mode: RequestMode,
+}
+
+async fn ingest_data_protobuf(
     Path(src_table_name): Path<String>,
     State(state): State<ApiState>,
-    Json(payload): Json<IngestRequest>,
+    Json(request): Json<IngestProtobufRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    ingest_data_impl(
+        src_table_name,
+        state,
+        IngestRequestInternal {
+            operation: request.operation,
+            data: IngestRequestPayload::Protobuf(request.data),
+            request_mode: request.request_mode,
+        },
+    )
+    .await
+}
+
+async fn ingest_data_json(
+    Path(src_table_name): Path<String>,
+    State(state): State<ApiState>,
+    Json(request): Json<IngestRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    ingest_data_impl(
+        src_table_name,
+        state,
+        IngestRequestInternal {
+            operation: request.operation,
+            data: IngestRequestPayload::Json(request.data),
+            request_mode: request.request_mode,
+        },
+    )
+    .await
+}
+
+/// Data ingestion endpoint
+async fn ingest_data_impl(
+    src_table_name: String,
+    state: ApiState,
+    payload: IngestRequestInternal,
 ) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
     debug!(
         "Received ingestion request for table '{}': {:?}",
@@ -605,7 +654,6 @@ async fn ingest_data(
         src_table_name: src_table_name.clone(),
         operation,
         payload: payload.data,
-        is_proto: payload.is_proto,
         timestamp: SystemTime::now(),
         tx: if payload.request_mode == RequestMode::Sync {
             Some(tx)

@@ -1,12 +1,11 @@
 use crate::rest_ingest::event_request::{
-    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
-    SnapshotRequest,
+    EventRequest, FileEventOperation, FileEventRequest, IngestRequestPayload, RowEventOperation,
+    RowEventRequest, SnapshotRequest,
 };
 use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonlinkRowError};
 use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
 use arrow_schema::Schema;
-use base64::Engine as _;
 use bytes::Bytes;
 use moonlink::row::MoonlinkRow;
 use moonlink::{
@@ -234,32 +233,24 @@ impl RestSource {
             .get(&request.src_table_name)
             .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
 
-        // If is_proto is set, decode from base64 protobuf; otherwise convert from JSON
-        let row = if request.is_proto {
-            let b64 = request.payload.as_str().ok_or_else(|| {
-                RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValue(
-                    "data".to_string(),
-                ))
-            })?;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map_err(|e| {
-                    RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause(
-                        "data".to_string(),
-                        Box::new(e),
-                    ))
-                })?;
-            let p: moonlink_proto::moonlink::MoonlinkRow = prost::Message::decode(bytes.as_slice())
-                .map_err(|e| {
-                    RestSourceError::JsonConversion(JsonToMoonlinkRowError::InvalidValueWithCause(
-                        "data".to_string(),
-                        Box::new(e),
-                    ))
-                })?;
-            moonlink::row::proto_to_moonlink_row(&p)
-        } else {
-            let converter = JsonToMoonlinkRowConverter::new(schema.clone());
-            converter.convert(&request.payload)?
+        // Decode based on payload type
+        let row = match &request.payload {
+            IngestRequestPayload::Json(value) => {
+                let converter = JsonToMoonlinkRowConverter::new(schema.clone());
+                converter.convert(value)?
+            }
+            IngestRequestPayload::Protobuf(bytes) => {
+                let p: moonlink_proto::moonlink::MoonlinkRow =
+                    prost::Message::decode(bytes.as_slice()).map_err(|e| {
+                        RestSourceError::JsonConversion(
+                            JsonToMoonlinkRowError::InvalidValueWithCause(
+                                "data".to_string(),
+                                Box::new(e),
+                            ),
+                        )
+                    })?;
+                moonlink::row::proto_to_moonlink_row(&p)
+            }
         };
 
         let row_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
@@ -302,11 +293,13 @@ impl RestSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{rest_ingest::event_request::FileEventRequest, Error};
+    use crate::{
+        rest_ingest::event_request::{FileEventRequest, IngestRequestPayload},
+        Error,
+    };
     use arrow::record_batch::RecordBatch;
     use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use moonlink::row::RowValue;
     use parquet::arrow::AsyncArrowWriter;
     use serde_json::json;
@@ -409,11 +402,10 @@ mod tests {
         let request = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({
+            payload: IngestRequestPayload::Json(json!({
                 "id": 42,
                 "name": "test"
-            }),
-            is_proto: false,
+            })),
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -468,17 +460,15 @@ mod tests {
             RowValue::ByteArray(b"proto".to_vec()),
         ]);
 
-        // Build RowEventRequest with is_proto set, JSON payload contains base64 string
         let request = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!(BASE64_STANDARD.encode({
+            payload: {
                 let p = moonlink::row::moonlink_row_to_proto(&direct_row);
                 let mut buf = Vec::new();
                 prost::Message::encode(&p, &mut buf).unwrap();
-                buf
-            })),
-            is_proto: true,
+                IngestRequestPayload::Protobuf(buf)
+            },
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -676,8 +666,7 @@ mod tests {
         let request = RowEventRequest {
             src_table_name: "unknown_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({"id": 1}),
-            is_proto: false,
+            payload: IngestRequestPayload::Json(json!({"id": 1})),
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -718,8 +707,7 @@ mod tests {
         let request1 = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({"id": 1, "name": "first"}),
-            is_proto: false,
+            payload: IngestRequestPayload::Json(json!({"id": 1, "name": "first"})),
             timestamp: SystemTime::now(),
             tx: None,
         };
@@ -727,8 +715,7 @@ mod tests {
         let request2 = RowEventRequest {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({"id": 2, "name": "second"}),
-            is_proto: false,
+            payload: IngestRequestPayload::Json(json!({"id": 2, "name": "second"})),
             timestamp: SystemTime::now(),
             tx: None,
         };

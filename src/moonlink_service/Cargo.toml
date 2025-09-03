@@ -17,7 +17,6 @@ storage-fs = ["moonlink/storage-fs"]
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.8"
-base64 = "0.22"
 clap = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }

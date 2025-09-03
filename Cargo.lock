@@ -4328,7 +4328,6 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
- "base64 0.22.1",
  "bigdecimal",
  "byteorder",
  "bytes",
@@ -4420,9 +4419,7 @@ dependencies = [
  "bytes",
  "prost",
  "prost-build",
- "prost-types",
  "protoc-bin-vendored",
- "tonic-build",
 ]
 
 [[package]]
@@ -4447,7 +4444,6 @@ dependencies = [
  "arrow-schema",
  "async-recursion",
  "axum 0.8.4",
- "base64 0.22.1",
  "bytes",
  "clap",
  "moonlink",
@@ -7341,20 +7337,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "tonic-build"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "prost-build",
- "prost-types",
- "quote",
- "syn 2.0.106",
 ]
 
 [[package]]

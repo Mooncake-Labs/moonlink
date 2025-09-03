@@ -14,8 +14,8 @@ pub use moonlink::ReadState;
 use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 pub use moonlink_connectors::rest_ingest::event_request::{
-    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
-    SnapshotRequest,
+    EventRequest, FileEventOperation, FileEventRequest, IngestRequestPayload, RowEventOperation,
+    RowEventRequest, SnapshotRequest,
 };
 pub use moonlink_connectors::rest_ingest::rest_event::RestEvent;
 pub use moonlink_connectors::rest_ingest::rest_source::RestSource;

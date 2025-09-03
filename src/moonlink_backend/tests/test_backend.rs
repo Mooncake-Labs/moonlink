@@ -11,7 +11,7 @@ mod tests {
     };
     use moonlink_backend::RowEventOperation;
     use moonlink_backend::{table_status::TableStatus, REST_API_URI};
-    use moonlink_backend::{EventRequest, MoonlinkBackend, RowEventRequest};
+    use moonlink_backend::{EventRequest, IngestRequestPayload, MoonlinkBackend, RowEventRequest};
     use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, SqliteMetadataStore};
 
     use arrow::datatypes::Schema as ArrowSchema;
@@ -467,12 +467,11 @@ mod tests {
         let row_event_request = RowEventRequest {
             src_table_name: "public.recovery_for_rest_table".to_string(),
             operation: RowEventOperation::Insert,
-            payload: json!({
+            payload: IngestRequestPayload::Json(json!({
                 "id": 1,
                 "name": "Alice Johnson",
                 "age": 30
-            }),
-            is_proto: false,
+            })),
             timestamp: SystemTime::now(),
             tx: Some(tx),
         };
