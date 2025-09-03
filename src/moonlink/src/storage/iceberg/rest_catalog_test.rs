@@ -2,7 +2,7 @@ use crate::storage::iceberg::rest_catalog::RestCatalog;
 use crate::storage::iceberg::rest_catalog_test_guard::RestCatalogTestGuard;
 use crate::storage::iceberg::rest_catalog_test_utils::*;
 use crate::to_set;
-use iceberg::{Catalog, NamespaceIdent, TableIdent};
+use iceberg::{Catalog, Namespace, NamespaceIdent, TableIdent};
 use std::collections::HashMap;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -190,4 +190,76 @@ async fn test_list_namespaces_returns_only_top_level_namespaces() {
     let _ = catalog.drop_namespace(&namespace_ident_1).await;
     let _ = catalog.drop_namespace(&namespace_ident_2).await;
     let _ = catalog.drop_namespace(&namespace_ident_3).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_get_namespace() {
+    let namespace = get_random_string();
+    let config = default_rest_catalog_config();
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    let namespace_ident = NamespaceIdent::new(namespace.clone());
+    let mut properties: HashMap<String, String> = HashMap::new();
+    properties.insert("k".into(), "v".into());
+    catalog
+        .create_namespace(&namespace_ident, properties.clone())
+        .await
+        .unwrap_or_else(|_| panic!("Namespace creation failed, namespace={namespace}"));
+    assert_eq!(
+        catalog.get_namespace(&namespace_ident).await.unwrap(),
+        Namespace::with_properties(namespace_ident.clone(), properties)
+    );
+    let _ = catalog.drop_namespace(&namespace_ident).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_drop_namespace() {
+    let namespace = get_random_string();
+    let config = default_rest_catalog_config();
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    let namespace_ident = NamespaceIdent::new(namespace.clone());
+    catalog
+        .create_namespace(&namespace_ident, /*properties=*/ HashMap::new())
+        .await
+        .unwrap_or_else(|_| panic!("Namespace creation failed, namespace={namespace}"));
+    let _ = catalog.drop_namespace(&namespace_ident).await;
+    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_namespace_exists_returns_false() {
+    let namespace = get_random_string();
+    let config = default_rest_catalog_config();
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    let namespace_ident = NamespaceIdent::new(namespace.clone());
+    catalog
+        .create_namespace(&namespace_ident, /*properties=*/ HashMap::new())
+        .await
+        .unwrap_or_else(|_| panic!("Namespace creation failed, namespace={namespace}"));
+
+    assert!(!catalog
+        .namespace_exists(&NamespaceIdent::new(get_random_string()))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn test_namespace_exists_returns_true() {
+    let namespace = get_random_string();
+    let config = default_rest_catalog_config();
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    let namespace_ident = NamespaceIdent::new(namespace.clone());
+    catalog
+        .create_namespace(&namespace_ident, /*properties=*/ HashMap::new())
+        .await
+        .unwrap_or_else(|_| panic!("Namespace creation failed, namespace={namespace}"));
+
+    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
 }
