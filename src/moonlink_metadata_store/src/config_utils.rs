@@ -195,6 +195,7 @@ pub(crate) fn parse_moonlink_table_config(
 /// Recover filesystem config from persisted config and secret.
 ///
 /// For local filesystem, atomic write option is by default disabled, and it's caller's responsibility to enable if necessary.
+#[allow(unreachable_patterns)]
 fn reconstruct_storage_config_from_root(
     root_uri: &str,
     secret_entry: Option<MoonlinkTableSecret>,
@@ -230,6 +231,15 @@ fn reconstruct_storage_config_from_root(
                     root_directory: root_uri.to_string(),
                     atomic_write_dir: None,
                 };
+            }
+
+            _ => {
+                panic!(
+                    "Storage backend {:?} is not supported or feature not enabled. \
+                     Please enable the corresponding feature flag or check your
+            configuration.",
+                    secret_entry.secret_type
+                );
             }
         }
     }
