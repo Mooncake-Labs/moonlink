@@ -868,31 +868,10 @@ components:
           example: "orders"
         mode: { type: string, enum: [snapshot, snapshot_and_cdc] }
       required: [source_uri, source_table]
-      examples:
-        fully_automatic:
-          summary: "Fully automatic mapping"
-          description: "Both namespace and table will be auto-inferred: ecommerce.orders"
-          value:
-            source_uri: "postgresql://user:password@localhost:5432/ecommerce"
-            source_table: "public.orders"
-            mode: "snapshot_and_cdc"
-        custom_namespace_auto_table:
-          summary: "Custom namespace, auto table"
-          description: "Custom namespace 'sales', table auto-inferred as 'orders'"
-          value:
-            source_uri: "postgresql://user:password@localhost:5432/ecommerce"
-            source_table: "public.orders"
-            target_namespace: "sales"
-            mode: "snapshot_and_cdc"
-        fully_custom:
-          summary: "Fully custom mapping"
-          description: "Both namespace and table explicitly specified"
-          value:
-            source_uri: "postgresql://user:password@localhost:5432/legacy_system"
-            source_table: "crm.user_accounts"
-            target_namespace: "users"
-            target_table: "profiles"
-            mode: "snapshot_and_cdc"
+      example:
+        source_uri: "postgresql://user:password@localhost:5432/ecommerce"
+        source_table: "public.orders"
+        mode: "snapshot_and_cdc"
 
     Replication:
       type: object
