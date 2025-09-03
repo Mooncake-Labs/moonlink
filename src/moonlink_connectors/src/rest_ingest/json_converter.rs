@@ -181,6 +181,49 @@ impl JsonToMoonlinkRowConverter {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
             }
+            DataType::Struct(child_fields) => {
+                if let Some(obj) = value.as_object() {
+                    let mut values = Vec::with_capacity(child_fields.len());
+                    for child in child_fields {
+                        let child_name = child.name();
+                        let child_value = match obj.get(child_name) {
+                            Some(v) => v,
+                            None => {
+                                if child.is_nullable() {
+                                    values.push(RowValue::Null);
+                                    continue;
+                                } else {
+                                    return Err(JsonToMoonlinkRowError::MissingField(format!(
+                                        "{}.{}",
+                                        field.name(),
+                                        child_name
+                                    )));
+                                }
+                            }
+                        };
+                        let mut converted =
+                            Self::convert_value(child, child_value).map_err(|e| {
+                                match e {
+                                    JsonToMoonlinkRowError::TypeMismatch(existing_path) => {
+                                        // Prepend parent struct name for clarity
+                                        JsonToMoonlinkRowError::TypeMismatch(format!(
+                                            "{}.{}",
+                                            field.name(),
+                                            existing_path
+                                        ))
+                                    }
+                                    other => other,
+                                }
+                            })?;
+                        values.push(std::mem::take(&mut converted));
+                    }
+                    Ok(RowValue::Struct(values))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
             _ => Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone())),
         }
     }

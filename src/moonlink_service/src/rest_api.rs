@@ -65,11 +65,17 @@ pub struct CreateTableRequest {
 }
 
 /// Field schema definition
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct FieldSchema {
     pub name: String,
     pub data_type: String,
     pub nullable: bool,
+    /// For `struct` type: list of child fields
+    #[serde(default)]
+    pub fields: Option<Vec<FieldSchema>>,
+    /// For `list` type: element/item schema
+    #[serde(default)]
+    pub item: Option<Box<FieldSchema>>,
 }
 
 /// Response structure for table creation
@@ -253,56 +259,144 @@ async fn create_table(
     // Convert field schemas to Arrow schema with proper field IDs (like PostgreSQL)
     use arrow_schema::{DataType, Field, Schema};
 
-    let mut field_id = 0;
+    fn parse_decimal(data_type_str: &str) -> Result<(u8, i8), String> {
+        let inner = &data_type_str[8..data_type_str.len() - 1];
+        let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+        if parts.len() == 1 {
+            let precision: u8 = parts[0]
+                .parse()
+                .map_err(|_| format!("Invalid decimal precision in: {data_type_str}"))?;
+            Ok((precision, 0))
+        } else if parts.len() == 2 {
+            let precision: u8 = parts[0]
+                .parse()
+                .map_err(|_| format!("Invalid decimal precision in: {data_type_str}"))?;
+            let scale: i8 = parts[1]
+                .parse()
+                .map_err(|_| format!("Invalid decimal scale in: {data_type_str}"))?;
+            Ok((precision, scale))
+        } else {
+            Err(format!("Invalid decimal type: {data_type_str}"))
+        }
+    }
+
+    fn build_field_from_schema(
+        field_schema: &FieldSchema,
+        override_name: Option<&str>,
+        override_nullable: Option<bool>,
+        field_id: &mut i32,
+    ) -> Result<Field, String> {
+        let name: String = override_name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| field_schema.name.clone());
+        let nullable: bool = override_nullable.unwrap_or(field_schema.nullable);
+        let data_type_str = field_schema.data_type.to_lowercase();
+        match data_type_str.as_str() {
+            "int16" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Int16, nullable).with_metadata(metadata))
+            }
+            "int32" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Int32, nullable).with_metadata(metadata))
+            }
+            "int64" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Int64, nullable).with_metadata(metadata))
+            }
+            "string" | "text" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Utf8, nullable).with_metadata(metadata))
+            }
+            "boolean" | "bool" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Boolean, nullable).with_metadata(metadata))
+            }
+            "float32" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Float32, nullable).with_metadata(metadata))
+            }
+            "float64" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Float64, nullable).with_metadata(metadata))
+            }
+            "date32" => {
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, DataType::Date32, nullable).with_metadata(metadata))
+            }
+            // Decimal type: decimal(precision[, scale])
+            dt if dt.starts_with("decimal(") && dt.ends_with(')') => {
+                let (precision, scale) = parse_decimal(&data_type_str)?;
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(
+                    Field::new(&name, DataType::Decimal128(precision, scale), nullable)
+                        .with_metadata(metadata),
+                )
+            }
+            // Struct type: { data_type: "struct", fields: [...] }
+            "struct" => {
+                let child_schemas = field_schema
+                    .fields
+                    .as_ref()
+                    .ok_or_else(|| format!("Missing 'fields' for struct '{}", field_schema.name))?;
+                let children: Result<Vec<Field>, String> = child_schemas
+                    .iter()
+                    .map(|child| build_field_from_schema(child, None, None, field_id))
+                    .collect();
+                let children = children?;
+                let field = Field::new_struct(&name, children, nullable);
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(field.with_metadata(metadata))
+            }
+            // List type: { data_type: "list", item: { ... } }
+            "list" | "array" => {
+                let item_schema = field_schema
+                    .item
+                    .as_ref()
+                    .ok_or_else(|| format!("Missing 'item' for list '{}", field_schema.name))?;
+                if item_schema.data_type == "struct" {
+                    return Err(format!(
+                        "Array of structs '{}' is not supported",
+                        field_schema.name
+                    ));
+                }
+                let item_field =
+                    build_field_from_schema(item_schema, Some("item"), Some(true), field_id)?;
+                let list_type = DataType::List(std::sync::Arc::new(item_field));
+                let mut metadata = HashMap::new();
+                metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+                *field_id += 1;
+                Ok(Field::new(&name, list_type, nullable).with_metadata(metadata))
+            }
+            _ => Err(format!("Unsupported data type: {}", field_schema.data_type)),
+        }
+    }
+
+    let mut field_id: i32 = 0;
     let fields: Result<Vec<Field>, String> = payload
         .schema
         .iter()
-        .map(|field| {
-            let data_type_str = field.data_type.to_lowercase();
-            let data_type = match data_type_str.as_str() {
-                "int32" => DataType::Int32,
-                "int64" => DataType::Int64,
-                "string" | "text" => DataType::Utf8,
-                "boolean" | "bool" => DataType::Boolean,
-                "float32" => DataType::Float32,
-                "float64" => DataType::Float64,
-                "date32" => DataType::Date32,
-                // Decimal type.
-                dt if dt.starts_with("decimal(") && dt.ends_with(')') => {
-                    let inner = &dt[8..dt.len() - 1];
-                    let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                    // Arrow type allows no "scale", which defaults to 0.
-                    if parts.len() == 1 {
-                        let precision: u8 = parts[0].parse().map_err(|_| {
-                            format!("Invalid decimal precision in: {}", field.data_type)
-                        })?;
-                        DataType::Decimal128(precision, 0)
-                    } else if parts.len() == 2 {
-                        // decimal(precision, scale)
-                        let precision: u8 = parts[0].parse().map_err(|_| {
-                            format!("Invalid decimal precision in: {}", field.data_type)
-                        })?;
-                        let scale: i8 = parts[1].parse().map_err(|_| {
-                            format!("Invalid decimal scale in: {}", field.data_type)
-                        })?;
-                        DataType::Decimal128(precision, scale)
-                    } else {
-                        return Err(format!("Invalid decimal type: {}", field.data_type));
-                    }
-                }
-                _ => return Err(format!("Unsupported data type: {}", field.data_type)),
-            };
-
-            // Create field with metadata (like PostgreSQL does)
-            let mut metadata = HashMap::new();
-            metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
-            field_id += 1;
-
-            let field_with_metadata =
-                Field::new(&field.name, data_type, field.nullable).with_metadata(metadata);
-
-            Ok(field_with_metadata)
-        })
+        .map(|fs| build_field_from_schema(fs, None, None, &mut field_id))
         .collect();
 
     let fields = match fields {
