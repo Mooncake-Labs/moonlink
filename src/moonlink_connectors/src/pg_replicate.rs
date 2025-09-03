@@ -34,6 +34,7 @@ use std::mem::take;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::pin;
+use tokio::sync::oneshot;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -65,6 +66,7 @@ pub enum PostgresReplicationCommand {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
+        ready_tx: oneshot::Sender<()>,
     },
     DropTable {
         src_table_id: SrcTableId,
@@ -376,7 +378,8 @@ impl PostgresConnection {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
-    ) -> Result<()> {
+    ) -> Result<oneshot::Receiver<()>> {
+        let (ready_tx, ready_rx) = oneshot::channel();
         let cmd = PostgresReplicationCommand::AddTable {
             src_table_id,
             schema,
@@ -384,9 +387,10 @@ impl PostgresConnection {
             commit_lsn_tx,
             flush_lsn_rx,
             wal_flush_lsn_rx,
+            ready_tx,
         };
         self.cmd_tx.send(cmd).await?;
-        Ok(())
+        Ok(ready_rx)
     }
 
     /// Drop table from PostgreSQL replication
@@ -494,21 +498,27 @@ impl PostgresConnection {
             .take()
             .expect("commit_lsn_tx is None");
         let commit_lsn_tx_for_copy = commit_lsn_tx.clone();
-        self.add_table_to_replication(
-            table_schema.src_table_id,
-            table_schema.clone(),
-            table_resources.event_sender.clone(),
-            commit_lsn_tx,
-            table_resources
-                .flush_lsn_rx
-                .take()
-                .expect("flush_lsn_rx is None"),
-            table_resources
-                .wal_flush_lsn_rx
-                .take()
-                .expect("wal_flush_lsn_rx is None"),
-        )
-        .await?;
+        let ready_rx = self
+            .add_table_to_replication(
+                table_schema.src_table_id,
+                table_schema.clone(),
+                table_resources.event_sender.clone(),
+                commit_lsn_tx,
+                table_resources
+                    .flush_lsn_rx
+                    .take()
+                    .expect("flush_lsn_rx is None"),
+                table_resources
+                    .wal_flush_lsn_rx
+                    .take()
+                    .expect("wal_flush_lsn_rx is None"),
+            )
+            .await?;
+
+        // Wait until the event loop has registered sink and schema
+        if let Err(e) = ready_rx.await {
+            error!(error = ?e, "failed to add table to replication");
+        }
 
         // Perform initial copy
         let initial_copy_performed = self
@@ -674,11 +684,14 @@ pub async fn run_event_loop(
                 }
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
-                PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
+                PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx, ready_tx } => {
                     sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                     wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
                     stream.as_mut().add_table_schema(schema);
+                    if let Err(e) = ready_tx.send(()) {
+                        error!(error = ?e, "failed to send ready signal");
+                    }
                 }
                 PostgresReplicationCommand::DropTable { src_table_id } => {
                     sink.drop_table(src_table_id);
