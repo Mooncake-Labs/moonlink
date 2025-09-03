@@ -34,12 +34,12 @@ pub mod moonlink {
         }
         pub fn bytes<B: Into<Vec<u8>>>(b: B) -> Self {
             Self {
-                kind: Some(row_value::Kind::Bytes(b.into().into())),
+                kind: Some(row_value::Kind::Bytes(b.into())),
             }
         }
         pub fn fixed_len_bytes<B: Into<Vec<u8>>>(b: B) -> Self {
             Self {
-                kind: Some(row_value::Kind::FixedLenBytes(b.into().into())),
+                kind: Some(row_value::Kind::FixedLenBytes(b.into())),
             }
         }
         pub fn array(a: Array) -> Self {

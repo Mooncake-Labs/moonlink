@@ -12,10 +12,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     prost_build::Config::new()
-        .bytes([
-            ".moonlink.RowValue.bytes",
-            ".moonlink.RowValue.fixed_len_bytes",
-        ]) // map bytes fields to bytes::Bytes if desired
         .compile_protos(proto_files, proto_includes)
         .expect("Failed to compile protos");
 }

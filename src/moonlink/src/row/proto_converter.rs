@@ -61,9 +61,13 @@ fn proto_to_row_value(p: moonlink_pb::RowValue) -> Result<RowValue> {
             RowValue::Decimal(i128::from_be_bytes(arr))
         }
         Kind::Bool(x) => RowValue::Bool(x),
-        Kind::Bytes(b) => RowValue::ByteArray(b.to_vec()),
+        Kind::Bytes(b) => RowValue::ByteArray(b),
         Kind::FixedLenBytes(b) => {
-            assert_eq!(b.len(), 16, "fixed_len_bytes must be 16 bytes");
+            if b.len() != 16 {
+                return Err(Error::pb_conversion_error(
+                    "fixed_len_bytes must be 16 bytes".to_string(),
+                ));
+            }
             let mut arr = [0u8; 16];
             arr.copy_from_slice(&b);
             RowValue::FixedLenByteArray(arr)
