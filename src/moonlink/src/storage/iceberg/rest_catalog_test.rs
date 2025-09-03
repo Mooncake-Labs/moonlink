@@ -112,5 +112,74 @@ async fn test_create_namespace() {
     catalog
         .create_namespace(&namespace_ident, HashMap::new())
         .await
-        .unwrap_or_else(|_| panic!("Namespace creation fail, namespace={namespace}"));
+        .unwrap_or_else(|_| panic!("Namespace creation failed, namespace={namespace}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_list_namespaces_returns_empty_vector() {
+    let config = default_rest_catalog_config();
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    assert_eq!(catalog.list_namespaces(None).await.unwrap(), vec![]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_list_namespaces_returns_single_namespace() {
+    let namespace = get_random_string();
+    let config = default_rest_catalog_config();
+    let namespace_ident = NamespaceIdent::new(namespace.clone());
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    catalog
+        .create_namespace(&namespace_ident, HashMap::new())
+        .await
+        .unwrap_or_else(|_| panic!("Namespace creation failed, namespace={namespace}"));
+    assert_eq!(
+        catalog.list_namespaces(None).await.unwrap(),
+        vec![namespace_ident]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_list_namespaces_returns_multiple_namespaces() {
+    let namespace_1 = get_random_string();
+    let namespace_2 = get_random_string();
+    let config = default_rest_catalog_config();
+    let namespace_ident_1 = NamespaceIdent::new(namespace_1.clone());
+    let namespace_ident_2 = NamespaceIdent::new(namespace_2.clone());
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    create_namespaces(&catalog, &vec![&namespace_ident_1, &namespace_ident_2]).await;
+    assert_eq!(
+        to_set(catalog.list_namespaces(None).await.unwrap()),
+        to_set(vec![namespace_ident_1, namespace_ident_2])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_list_namespaces_returns_only_top_level_namespaces() {
+    let namespace_1 = get_random_string();
+    let namespace_2_1 = get_random_string();
+    let namespace_2_2 = get_random_string();
+    let namespace_3 = get_random_string();
+    let config = default_rest_catalog_config();
+    let namespace_ident_1 = NamespaceIdent::new(namespace_1.clone());
+    let namespace_ident_2 = NamespaceIdent::from_strs(vec![namespace_2_1, namespace_2_2]).unwrap();
+    let namespace_ident_3 = NamespaceIdent::new(namespace_3.clone());
+
+    let catalog = RestCatalog::new(config)
+        .await
+        .expect("Catalog creation fail");
+    create_namespaces(
+        &catalog,
+        &vec![&namespace_ident_1, &namespace_ident_2, &namespace_ident_3],
+    )
+    .await;
+    assert_eq!(
+        to_set(catalog.list_namespaces(None).await.unwrap()),
+        to_set(vec![namespace_ident_1, namespace_ident_3])
+    );
 }
