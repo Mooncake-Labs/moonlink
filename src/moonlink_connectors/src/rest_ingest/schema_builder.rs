@@ -65,13 +65,12 @@ fn parse_decimal(data_type_str: &str) -> Result<DecimalType, SchemaBuildError> {
 fn build_field_from_schema(
     field_schema: &FieldSchema,
     override_name: Option<&str>,
-    override_nullable: Option<bool>,
     field_id: &mut i32,
 ) -> Result<Field, SchemaBuildError> {
     let name: String = override_name
         .map(|s| s.to_string())
         .unwrap_or_else(|| field_schema.name.clone());
-    let nullable: bool = override_nullable.unwrap_or(field_schema.nullable);
+    let nullable: bool = field_schema.nullable;
     let data_type_str = field_schema.data_type.to_lowercase();
     match data_type_str.as_str() {
         "int16" => {
@@ -143,7 +142,7 @@ fn build_field_from_schema(
             })?;
             let children: Result<Vec<Field>, SchemaBuildError> = child_schemas
                 .iter()
-                .map(|child| build_field_from_schema(child, None, None, field_id))
+                .map(|child| build_field_from_schema(child, None, field_id))
                 .collect();
             let children = children?;
             let field = Field::new_struct(&name, children, nullable);
@@ -168,11 +167,9 @@ fn build_field_from_schema(
                 )));
             }
             // We override the field as "item" to indicate it is the item of the list.
-            // And make it nullable, because for list, Arrow schema allows nullable elements.
             let item_field = build_field_from_schema(
                 item_schema,
                 /*override_name=*/ Some("item"),
-                /*override_nullable=*/ Some(true),
                 field_id,
             )?;
             let list_type = DataType::List(std::sync::Arc::new(item_field));
@@ -189,7 +186,7 @@ pub fn build_arrow_schema(fields: &[FieldSchema]) -> Result<Schema, SchemaBuildE
     let mut field_id: i32 = 0;
     let built_fields: Result<Vec<Field>, SchemaBuildError> = fields
         .iter()
-        .map(|fs| build_field_from_schema(fs, None, None, &mut field_id))
+        .map(|fs| build_field_from_schema(fs, None, &mut field_id))
         .collect();
     Ok(Schema::new(built_fields?))
 }

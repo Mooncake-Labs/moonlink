@@ -312,22 +312,22 @@ mod tests {
         Arc::new(Schema::new(vec![
             Field::new(
                 "int_list",
-                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
                 false,
             ),
             Field::new(
                 "string_list",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
                 false,
             ),
             Field::new(
                 "bool_list",
-                DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Boolean, false))),
                 false,
             ),
             Field::new(
                 "float_list",
-                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, false))),
                 false,
             ),
         ]))
@@ -338,7 +338,7 @@ mod tests {
             "nested_list",
             DataType::List(Arc::new(Field::new(
                 "item",
-                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
                 true,
             ))),
             false,
