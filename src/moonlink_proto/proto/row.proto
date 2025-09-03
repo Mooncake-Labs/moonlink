@@ -35,6 +35,3 @@ message Null {}
 message MoonlinkRow {
   repeated RowValue values = 1;
 }
-
-
-

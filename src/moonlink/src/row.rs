@@ -28,8 +28,8 @@ mod tests {
             RowValue::Null,
         ]);
 
-        let p = moonlink_row_to_proto(&row);
-        let row2 = proto_to_moonlink_row(&p);
+        let p = moonlink_row_to_proto(row.clone());
+        let row2 = proto_to_moonlink_row(p);
         assert_eq!(row, row2);
     }
 
@@ -37,8 +37,8 @@ mod tests {
     fn test_decimal_conversion() {
         let val: i128 = -123456789012345678901234567890i128;
         let row = MoonlinkRow::new(vec![RowValue::Decimal(val)]);
-        let p = moonlink_row_to_proto(&row);
-        let row2 = proto_to_moonlink_row(&p);
+        let p = moonlink_row_to_proto(row.clone());
+        let row2 = proto_to_moonlink_row(p);
         assert_eq!(row2.values.len(), 1);
         if let RowValue::Decimal(v2) = row2.values[0] {
             assert_eq!(v2, val);

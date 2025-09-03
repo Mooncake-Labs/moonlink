@@ -249,7 +249,7 @@ impl RestSource {
                             ),
                         )
                     })?;
-                moonlink::row::proto_to_moonlink_row(&p)
+                moonlink::row::proto_to_moonlink_row(p)
             }
         };
 
@@ -464,7 +464,7 @@ mod tests {
             src_table_name: "test_table".to_string(),
             operation: RowEventOperation::Insert,
             payload: {
-                let p = moonlink::row::moonlink_row_to_proto(&direct_row);
+                let p = moonlink::row::moonlink_row_to_proto(direct_row.clone());
                 let mut buf = Vec::new();
                 prost::Message::encode(&p, &mut buf).unwrap();
                 IngestRequestPayload::Protobuf(buf)
