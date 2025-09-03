@@ -5,7 +5,7 @@ use rand::{distr::Alphanumeric, Rng};
 use std::collections::HashMap;
 
 const DEFAULT_REST_CATALOG_NAME: &str = "test";
-const DEFAULT_REST_CATALOG_URI: &str = "http://localhost:8181";
+const DEFAULT_REST_CATALOG_URI: &str = "http://iceberg-rest.local:8181";
 const DEFAULT_WAREHOUSE_PATH: &str = "warehouse";
 
 pub(crate) fn get_random_string() -> String {
