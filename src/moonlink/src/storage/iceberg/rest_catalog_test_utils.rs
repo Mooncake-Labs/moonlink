@@ -2,10 +2,7 @@ use crate::storage::iceberg::{iceberg_table_config::RestCatalogConfig, rest_cata
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
 use iceberg::{Catalog, NamespaceIdent, TableCreation};
 use rand::{distr::Alphanumeric, Rng};
-use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
-use std::iter::FromIterator;
-use std::vec;
+use std::collections::HashMap;
 
 const DEFAULT_REST_CATALOG_NAME: &str = "test";
 const DEFAULT_REST_CATALOG_URI: &str = "http://iceberg-rest.local:8181";
@@ -28,11 +25,6 @@ pub(crate) fn default_rest_catalog_config() -> RestCatalogConfig {
     }
 }
 
-/// Util function to transaction vec into set
-pub(crate) fn to_set<T: Eq + Hash>(vec: Vec<T>) -> HashSet<T> {
-    HashSet::from_iter(vec)
-}
-
 /// Util function to test multiple_namespaces
 pub(crate) async fn create_namespaces(
     catalog: &RestCatalog,
@@ -40,7 +32,7 @@ pub(crate) async fn create_namespaces(
 ) {
     for namespace_ident in namespace_idents {
         let _ = catalog
-            .create_namespace(namespace_ident, HashMap::new())
+            .create_namespace(namespace_ident, /*properties=*/ HashMap::new())
             .await
             .unwrap_or_else(|_| {
                 panic!(

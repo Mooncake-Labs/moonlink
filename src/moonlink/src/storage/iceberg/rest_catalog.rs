@@ -69,12 +69,10 @@ impl Catalog for RestCatalog {
 
     async fn update_namespace(
         &self,
-        namespace_ident: &NamespaceIdent,
-        properties: HashMap<String, String>,
+        _namespace_ident: &NamespaceIdent,
+        _properties: HashMap<String, String>,
     ) -> IcebergResult<()> {
-        self.catalog
-            .update_namespace(namespace_ident, properties)
-            .await
+        todo!("Update namespace is not supported");
     }
 
     async fn create_table(
