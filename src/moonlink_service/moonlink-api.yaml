@@ -1,8 +1,26 @@
 openapi: 3.0.3
 info:
-  title: Moonlink API – Simplified Specification
-  description: Simplified and more RESTful version of the Moonlink API
-  version: 2.0.0
+  title: Moonlink API 
+  description: |
+    Moonlink is managed + real-time Iceberg lakehouse. It allows you to stream data into Iceberg, while optimizing and maintaining Iceberg state. 
+    It also caches + indexes data so reads are fast. 
+
+    ## Default Catalog Behavior
+    
+    Moonlink uses a reserved catalog name "default" to simplify common workflows:
+    
+    - **Reserved Name**: Use `default` as the catalog name in API paths: `/v1/catalogs/default/namespaces/{namespace}`
+    - **No Configuration Required**: The "default" catalog works automatically without explicit configuration
+    - **Storage Requirement**: You must configure at least one storage backend for the default catalog to function
+    - **Consistent API**: All operations use the same `/v1/catalogs/{catalog}/...` pattern, just use "default" for the catalog parameter
+    
+    ## Quick Start
+    
+    1. Configure a storage backend: `POST /v1/storages`
+    2. Create a namespace: `POST /v1/catalogs/default/namespaces`
+    3. Create a table: `POST /v1/catalogs/default/namespaces/{namespace}/tables`
+    4. Start working with your data!
+  version: 1.0.0
   contact:
     name: Moonlink API Support
     url: "https://mooncake.dev"
@@ -30,11 +48,11 @@ tags:
 
 paths:
   # ============================================================================
-  # SIMPLIFIED STORAGE MANAGEMENT
+  #  STORAGE MANAGEMENT
   # ============================================================================
   /v1/storages:
     get:
-      summary: List storages
+      summary: List storage backends configured in Moonlink
       operationId: listStorages
       tags: [storages]
       responses:
@@ -48,8 +66,11 @@ paths:
                   storages:
                     type: array
                     items: { $ref: '#/components/schemas/Storage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     post:
-      summary: Create storage
+      summary: Add Storage Backend where Moonlink written data will be stored.
       operationId: createStorage
       tags: [storages]
       requestBody:
@@ -63,10 +84,61 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Storage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   /v1/storages/{storage_id}:
+    get:
+      summary: Get storage configuration
+      description: Retrieve configuration details of a specific storage backend
+      operationId: getStorage
+      tags: [storages]
+      parameters:
+        - name: storage_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Storage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
+    patch:
+      summary: Update storage configuration
+      description: Update configuration settings for an existing storage backend (partial updates)
+      operationId: updateStorage
+      tags: [storages]
+      parameters:
+        - name: storage_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Storage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     delete:
-      summary: Delete storage
+      summary: Remove storage configuration of a given storage backend from Moonlink. The bucket will not be deleted.
       operationId: deleteStorage
       tags: [storages]
       parameters:
@@ -75,14 +147,21 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '204': { description: Deleted }
+        '204':
+          description: Deleted - Storage configuration removed successfully
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   # ============================================================================
-  # SIMPLIFIED CATALOG MANAGEMENT
+  #  CATALOG MANAGEMENT
   # ============================================================================
+  # Note: "default" is a reserved catalog name that works automatically without configuration
   /v1/catalogs:
     get:
-      summary: List catalogs
+      summary: List all catalogs configured with Moonlink
       operationId: listCatalogs
       tags: [catalogs]
       responses:
@@ -96,8 +175,11 @@ paths:
                   catalogs:
                     type: array
                     items: { $ref: '#/components/schemas/Catalog' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     post:
-      summary: Create catalog
+      summary: add an Iceberg Catalog to Moonlink – Moonlink will write data to this catalog
       operationId: createCatalog
       tags: [catalogs]
       requestBody:
@@ -111,10 +193,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Catalog' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   /v1/catalogs/{catalog}:
     get:
-      summary: Get catalog details and settings
+      summary: Get configuration of a partiuclar catalog. 
       description: Retrieve catalog information including all configuration settings
       operationId: getCatalog
       tags: [catalogs]
@@ -128,10 +215,39 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/CatalogWithSettings' }
-
+              schema: { $ref: '#/components/schemas/Catalog' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
+    patch:
+      summary: Update catalog configuration
+      description: Update configuration settings for an existing catalog (partial updates)
+      operationId: updateCatalog
+      tags: [catalogs]
+      parameters:
+        - name: catalog
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Catalog' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     delete:
-      summary: Delete catalog
+      summary: Delete catalog configuration from Moonlink. The catalog will not be deleted.
       operationId: deleteCatalog
       tags: [catalogs]
       parameters:
@@ -140,15 +256,21 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '204': { description: Deleted }
+        '204':
+          description: Deleted - Catalog removed successfully
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   # ============================================================================
   # NAMESPACE MANAGEMENT
   # ============================================================================
   /v1/catalogs/{catalog}/namespaces:
     get:
-      summary: List namespaces
-      description: List all namespaces in the catalog
+      summary: List namespaces in a catalog
+      description: List all namespaces in the catalog. Use "default" as the catalog name to work with the default catalog without explicit configuration.
       operationId: listNamespaces
       tags: [namespaces]
       parameters:
@@ -156,6 +278,7 @@ paths:
           in: path
           required: true
           schema: { type: string }
+          description: 'Catalog name. Use "default" for the default catalog that requires no configuration.'
       responses:
         '200':
           description: OK
@@ -168,9 +291,13 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/Namespace' }
                 required: [namespaces]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     post:
-      summary: Create namespace
-      description: Create a new namespace in the catalog
+      summary: Create namespace in a catalog
+      description: Create a new namespace in the catalog. Use "default" as the catalog name to work with the default catalog without explicit configuration.
       operationId: createNamespace
       tags: [namespaces]
       parameters:
@@ -178,6 +305,7 @@ paths:
           in: path
           required: true
           schema: { type: string }
+          description: 'Catalog name. Use "default" for the default catalog that requires no configuration.'
       requestBody:
         required: true
         content:
@@ -189,10 +317,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Namespace' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   /v1/catalogs/{catalog}/namespaces/{namespace}:
     get:
-      summary: Get namespace details
+      summary: Get namespace configuration
       description: Get details and properties of a specific namespace
       operationId: getNamespace
       tags: [namespaces]
@@ -211,9 +345,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Namespace' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
     delete:
-      summary: Delete namespace
+      summary: Delete namespace and all its tables
       description: Delete a namespace and all its tables
       operationId: deleteNamespace
       tags: [namespaces]
@@ -227,14 +365,20 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '204': { description: Deleted }
+        '204':
+          description: Deleted - Namespace removed successfully
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   # ============================================================================
   # TABLE MANAGEMENT
   # ============================================================================
   /v1/catalogs/{catalog}/namespaces/{namespace}/tables:
     get:
-      summary: List tables
+      summary: List tables in a namespace
       operationId: listTables
       tags: [tables]
       parameters:
@@ -242,6 +386,7 @@ paths:
           in: path
           required: true
           schema: { type: string }
+          description: 'Catalog name. Use "default" for the default catalog that requires no configuration.'
         - name: namespace
           in: path
           required: true
@@ -255,8 +400,12 @@ paths:
                 type: object
                 properties:
                   tables: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     post:
-      summary: Create table
+      summary: Create table in a namespace
       operationId: createTable
       tags: [tables]
       parameters:
@@ -264,6 +413,7 @@ paths:
           in: path
           required: true
           schema: { type: string }
+          description: 'Catalog name. Use "default" for the default catalog that requires no configuration.'
         - name: namespace
           in: path
           required: true
@@ -279,6 +429,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Table' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}:
     delete:
@@ -299,7 +455,13 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '204': { description: Deleted }
+        '204':
+          description: Deleted - Table removed successfully
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     patch:
       summary: Optimize table
       operationId: optimizeTable
@@ -338,19 +500,25 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/JobResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   # TABLE ROW OPERATIONS  
   /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}/rows:
     post:
-      summary: Insert rows
-      description: Insert new rows into the table
-      operationId: insertRows
+      summary: Perform row operations (insert or delete)
+      description: Insert new rows or delete existing rows from the table
+      operationId: performRowOperation
       tags: [tables]
       parameters:
         - name: catalog
           in: path
           required: true
           schema: { type: string }
+          description: 'Catalog name. Use "default" for the default catalog that requires no configuration.'
         - name: namespace
           in: path
           required: true
@@ -363,48 +531,22 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/InsertRowsRequest' }
-      responses:
-        '201':
-          description: Rows inserted successfully
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/RowOperationResult' }
-
-  /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}/rows:delete:
-    post:
-      summary: Delete rows by keys
-      description: Delete specific rows identified by their primary keys
-      operationId: deleteRows
-      tags: [tables]
-      parameters:
-        - name: catalog
-          in: path
-          required: true
-          schema: { type: string }
-        - name: namespace
-          in: path
-          required: true
-          schema: { type: string }
-        - name: table
-          in: path
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/DeleteRowsRequest' }
+            schema: { $ref: '#/components/schemas/RowOperationRequest' }
       responses:
         '200':
-          description: Rows deleted successfully
+          description: Row operation completed successfully
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RowOperationResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   /v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}/load:
     post:
-      summary: Load data from files
+      summary: Load data from files into a table.
       description: Load data into the table from files (Parquet, CSV, JSON, etc.)
       operationId: loadTableData
       tags: [tables]
@@ -432,13 +574,18 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/JobResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   # ============================================================================
   # SIMPLIFIED REPLICATION
   # ============================================================================
   /v1/replications:
     get:
-      summary: List replications
+      summary: List replications in Moonlink.
       operationId: listReplications
       tags: [replications]
       responses:
@@ -452,8 +599,22 @@ paths:
                   replications:
                     type: array
                     items: { $ref: '#/components/schemas/Replication' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     post:
-      summary: Create replication
+      summary: Create replication in Moonlink.
+      description: |
+        Set up replication from a source database to Moonlink. 
+        
+        **Automatic Mapping**: 
+        - target_namespace: Inferred from database name in source_uri if not specified
+        - target_table: Inferred from table name in source_table (without schema) if not specified
+        
+        **Examples**:
+        - source_uri "postgresql://host:5432/ecommerce" → target_namespace "ecommerce"
+        - source_table "public.orders" → target_table "orders"
+        - source_table "analytics.user_events" → target_table "user_events"
       operationId: createReplication
       tags: [replications]
       requestBody:
@@ -467,10 +628,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/JobResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   /v1/replications/{replication_id}:
     delete:
-      summary: Delete replication
+      summary: Delete replication from Moonlink.
       operationId: deleteReplication
       tags: [replications]
       parameters:
@@ -479,7 +644,13 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '204': { description: Deleted }
+        '204':
+          description: Deleted - Replication removed successfully
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
   # ============================================================================
   # JOBS
@@ -500,6 +671,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
     delete:
       summary: Cancel job
       operationId: cancelJob
@@ -510,7 +685,13 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: Canceled }
+        '200':
+          description: Canceled - Job cancelled successfully
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5XX': { $ref: '#/components/responses/ServerError' }
 
 components:
   securitySchemes:
@@ -518,19 +699,60 @@ components:
       type: http
       scheme: bearer
 
+  responses:
+    # ============================================================================
+    #  ERROR RESPONSES
+    # ============================================================================
+    
+    BadRequest:
+      description: Bad Request - Invalid or malformed request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    
+    Unauthorized:
+      description: Unauthorized - Authentication required
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    
+    Forbidden:
+      description: Forbidden - Insufficient permissions
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    
+    NotFound:
+      description: Not Found - Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    
+    Conflict:
+      description: Conflict - Resource already exists
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    
+    ServerError:
+      description: Server Error - Internal server error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   schemas:
     # ============================================================================
-    # SIMPLIFIED SCHEMAS
+    # SCHEMAS
     # ============================================================================
     StorageRequest:
       type: object
       properties:
         name: { type: string }
-        type: { type: string, enum: [s3, s3_compatible] }
+        type: { type: string, enum: [s3, s3_compatible, gcs, filesystem] }
         bucket: { type: string }
         region: { type: string } # required for s3, optional for s3_compatible
         endpoint: { type: string } # required for s3_compatible
-        base_path: { type: string, default: "" }
+        default_path: { type: string, default: "" }
         credentials:
           type: object
           properties:
@@ -543,16 +765,17 @@ components:
     Storage:
       type: object
       properties:
-        id: { type: string }
-        name: { type: string }
-        type: { type: string }
-        bucket: { type: string }
-        region: { type: string }
-        endpoint: { type: string }
-        base_path: { type: string }
-        status: { type: string, enum: [ready, error] }
-        created_at: { type: string, format: date-time }
-      required: [id, name, type, bucket, status, created_at]
+        id: { type: string, description: "Unique identifier assigned by Moonlink for this storage configuration" }
+        name: { type: string, description: "User-friendly name for this storage configuration" }
+        type: { type: string, description: "Storage provider type" }
+        bucket: { type: string, description: "Name of the storage bucket/container" }
+        region: { type: string, description: "Storage region" }
+        endpoint: { type: string, description: "Custom endpoint URL (for S3-compatible storage)" }
+        default_path: { type: string, description: "Default path prefix within the bucket" }
+        configured_at: { type: string, format: date-time, description: "When this storage configuration was added to Moonlink" }
+      required: [id, name, type, bucket, configured_at]
+
+
 
     CatalogRequest:
       type: object
@@ -566,13 +789,31 @@ components:
     Catalog:
       type: object
       properties:
-        id: { type: string }
-        name: { type: string }
-        type: { type: string }
-        storage_id: { type: string }
-        status: { type: string, enum: [ready, error] }
-        created_at: { type: string, format: date-time }
-      required: [id, name, type, status, created_at]
+        id: { type: string, description: "Unique identifier assigned by Moonlink for this catalog" }
+        name: { type: string, description: "User-friendly name for this catalog" }
+        type: { type: string, description: "Catalog type (internal, glue, unity)" }
+        storage_id: { type: string, description: "ID of the storage configuration used by this catalog" }
+        settings: 
+          type: object
+          additionalProperties: { type: string }
+          description: "Key-value configuration settings for the catalog"
+          example:
+            warehouse: "s3://my-bucket/warehouse/"
+            io_impl: "org.apache.iceberg.aws.s3.S3FileIO"
+            s3_region: "us-east-1"
+            format_version: "2"
+            write_format_default: "parquet"
+        configured_at: { type: string, format: date-time, description: "When this catalog was configured in Moonlink" }
+      required: [id, name, type, configured_at]
+
+    # Unified update pattern for all resources
+    UpdateRequest:
+      type: object
+      description: "Generic update request. All fields are optional - only provided fields will be updated."
+      additionalProperties: true
+      example:
+        name: "new-name"
+        config: { "key": "value" }
 
     TableRequest:
       type: object
@@ -594,44 +835,84 @@ components:
     Table:
       type: object
       properties:
-        id: { type: string }
-        catalog: { type: string }
-        namespace: { type: string }
-        name: { type: string }
-        primary_key: { type: array, items: { type: string } }
-        created_at: { type: string, format: date-time }
+        id: { type: string, description: "Unique identifier assigned by Moonlink for this table" }
+        catalog: { type: string, description: "Catalog containing this table" }
+        namespace: { type: string, description: "Namespace containing this table" }
+        name: { type: string, description: "Table name" }
+        primary_key: { type: array, items: { type: string }, description: "Primary key column names" }
+        created_at: { type: string, format: date-time, description: "When this table was created" }
       required: [id, catalog, namespace, name, created_at]
 
     ReplicationRequest:
       type: object
       properties:
-        source_uri: { type: string }
-        source_table: { type: string }
-        target_catalog: { type: string, default: "default" }
-        target_namespace: { type: string }
-        target_table: { type: string }
+        source_uri: 
+          type: string
+          description: "Database connection URI (e.g., postgresql://user:pass@host:5432/database_name)"
+          example: "postgresql://user:password@localhost:5432/ecommerce"
+        source_table: 
+          type: string
+          description: "Source table in schema.table format"
+          example: "public.orders"
+        target_catalog: 
+          type: string 
+          default: "default"
+          description: "Target catalog in Moonlink"
+        target_namespace: 
+          type: string
+          description: "Target namespace in Moonlink. If not specified, will be inferred from the database name in source_uri"
+          example: "ecommerce"
+        target_table: 
+          type: string
+          description: "Target table name in Moonlink. If not specified, will be inferred from the table name in source_table (without schema prefix)"
+          example: "orders"
         mode: { type: string, enum: [snapshot, snapshot_and_cdc] }
-      required: [source_uri, source_table, target_table]
+      required: [source_uri, source_table]
+      examples:
+        fully_automatic:
+          summary: "Fully automatic mapping"
+          description: "Both namespace and table will be auto-inferred: ecommerce.orders"
+          value:
+            source_uri: "postgresql://user:password@localhost:5432/ecommerce"
+            source_table: "public.orders"
+            mode: "snapshot_and_cdc"
+        custom_namespace_auto_table:
+          summary: "Custom namespace, auto table"
+          description: "Custom namespace 'sales', table auto-inferred as 'orders'"
+          value:
+            source_uri: "postgresql://user:password@localhost:5432/ecommerce"
+            source_table: "public.orders"
+            target_namespace: "sales"
+            mode: "snapshot_and_cdc"
+        fully_custom:
+          summary: "Fully custom mapping"
+          description: "Both namespace and table explicitly specified"
+          value:
+            source_uri: "postgresql://user:password@localhost:5432/legacy_system"
+            source_table: "crm.user_accounts"
+            target_namespace: "users"
+            target_table: "profiles"
+            mode: "snapshot_and_cdc"
 
     Replication:
       type: object
       properties:
-        id: { type: string }
-        status: { type: string, enum: [pending, running, completed, failed] }
-        source_table: { type: string }
-        target_table: { type: string }
-        mode: { type: string }
-        created_at: { type: string, format: date-time }
-      required: [id, status, source_table, target_table, mode, created_at]
+        id: { type: string, description: "Unique identifier assigned by Moonlink for this replication" }
+        status: { type: string, enum: [pending, running, completed, failed], description: "Current replication status" }
+        source_table: { type: string, description: "Source table identifier" }
+        target_table: { type: string, description: "Target table identifier" }
+        mode: { type: string, description: "Replication mode (snapshot, snapshot_and_cdc)" }
+        started_at: { type: string, format: date-time, description: "When this replication was started" }
+      required: [id, status, source_table, target_table, mode, started_at]
 
     Job:
       type: object
       properties:
-        job_id: { type: string }
-        status: { type: string, enum: [queued, running, completed, failed, canceled] }
-        created_at: { type: string, format: date-time }
-        completed_at: { type: string, format: date-time }
-        error: { type: string }
+        job_id: { type: string, description: "Unique identifier for this job" }
+        status: { type: string, enum: [queued, running, completed, failed, canceled], description: "Current job status" }
+        created_at: { type: string, format: date-time, description: "When this job was created/queued" }
+        completed_at: { type: string, format: date-time, description: "When this job finished (success or failure)" }
+        error: { type: string, description: "Error message if job failed" }
       required: [job_id, status, created_at]
 
     JobResponse:
@@ -639,25 +920,6 @@ components:
       properties:
         job_id: { type: string }
       required: [job_id]
-
-    CatalogSettings:
-      type: object
-      description: Key-value configuration settings for the catalog
-      additionalProperties: { type: string }
-      example:
-        warehouse: "s3://my-bucket/warehouse/"
-        io_impl: "org.apache.iceberg.aws.s3.S3FileIO"
-        s3_region: "us-east-1"
-        format_version: "2"
-        write_format_default: "parquet"
-
-    CatalogWithSettings:
-      allOf:
-        - $ref: '#/components/schemas/Catalog'
-        - type: object
-          properties:
-            settings: { $ref: '#/components/schemas/CatalogSettings' }
-          required: [settings]
 
 
 
@@ -674,46 +936,38 @@ components:
     Namespace:
       type: object
       properties:
-        catalog: { type: string }
-        name: { type: string }
+        catalog: { type: string, description: "Catalog this namespace belongs to" }
+        name: { type: string, description: "Namespace name" }
         properties:
           type: object
           additionalProperties: { type: string }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-      required: [catalog, name, created_at, updated_at]
+          description: "Key-value properties for the namespace"
+        configured_at: { type: string, format: date-time, description: "When this namespace was created in Moonlink" }
+        updated_at: { type: string, format: date-time, description: "When this namespace was last modified" }
+      required: [catalog, name, configured_at, updated_at]
 
-    InsertRowsRequest:
+    RowOperationRequest:
       type: object
       properties:
-        rows:
+        operation: 
+          type: string
+          enum: [insert, delete]
+          description: "Type of row operation to perform"
+        data:
           type: array
           items: { type: object }
-          description: Array of row objects to insert
+          description: "For insert: full row objects. For delete: primary key objects only"
           minItems: 1
-      required: [rows]
+      required: [operation, data]
       example:
-        rows:
+        operation: "insert"
+        data:
           - id: "user_123"
             name: "John Doe"
             email: "john@example.com"
           - id: "user_124"
             name: "Jane Smith"
             email: "jane@example.com"
-
-    DeleteRowsRequest:
-      type: object
-      properties:
-        keys:
-          type: array
-          items: { type: object }
-          description: Array of primary key objects identifying rows to delete
-          minItems: 1
-      required: [keys]
-      example:
-        keys:
-          - id: "user_123"
-          - id: "user_124"
 
     RowOperationResult:
       type: object
@@ -743,3 +997,41 @@ components:
             header: { type: boolean, default: true, description: "For CSV files" }
             delimiter: { type: string, default: ",", description: "For CSV files" }
       required: [source]
+
+    # ============================================================================
+    # ERROR RESPONSE SCHEMAS
+    # ============================================================================
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: 
+              type: string
+              enum: [
+                # Bad Request
+                INVALID_REQUEST, VALIDATION_ERROR, MALFORMED_REQUEST,
+                # Unauthorized  
+                UNAUTHORIZED, INVALID_TOKEN, TOKEN_EXPIRED,
+                # Forbidden
+                FORBIDDEN, ACCESS_DENIED, INSUFFICIENT_PERMISSIONS,
+                # Not Found
+                NOT_FOUND, RESOURCE_NOT_FOUND, CATALOG_NOT_FOUND, NAMESPACE_NOT_FOUND, TABLE_NOT_FOUND,
+                # Conflict
+                CONFLICT, RESOURCE_ALREADY_EXISTS, NAMESPACE_ALREADY_EXISTS, TABLE_ALREADY_EXISTS,
+                # Server Error
+                INTERNAL_ERROR, SERVICE_UNAVAILABLE, DATABASE_ERROR
+              ]
+            message: { type: string }
+            type: 
+              type: string
+              enum: [BadRequestException, UnauthorizedException, ForbiddenException, NotFoundException, ConflictException, InternalServerException]
+            details: { type: object, description: "Optional additional error context" }
+          required: [code, message, type]
+      required: [error]
+      example:
+        error:
+          code: "VALIDATION_ERROR"
+          message: "Invalid column type specified"
+          type: "BadRequestException"
