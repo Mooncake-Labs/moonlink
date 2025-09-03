@@ -4053,9 +4053,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.27"
+version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 
 [[package]]
 name = "loom"
@@ -5239,7 +5239,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35#a7398c75b5cfd62fc016306a71d83306ad4ddf35"
+source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455#14c8e599f5551a8caa96ff5023685a6f537a1455"
 dependencies = [
  "native-tls",
  "tokio",
@@ -5250,7 +5250,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.7"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35#a7398c75b5cfd62fc016306a71d83306ad4ddf35"
+source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455#14c8e599f5551a8caa96ff5023685a6f537a1455"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -5267,7 +5267,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35#a7398c75b5cfd62fc016306a71d83306ad4ddf35"
+source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455#14c8e599f5551a8caa96ff5023685a6f537a1455"
 dependencies = [
  "byteorder",
  "bytes",
@@ -5282,7 +5282,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.7"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35#a7398c75b5cfd62fc016306a71d83306ad4ddf35"
+source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455#14c8e599f5551a8caa96ff5023685a6f537a1455"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -7270,7 +7270,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.11"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35#a7398c75b5cfd62fc016306a71d83306ad4ddf35"
+source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455#14c8e599f5551a8caa96ff5023685a6f537a1455"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7511,9 +7511,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "twox-hash"
-version = "2.1.1"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b907da542cbced5261bd3256de1b3a1bf340a3d37f93425a07362a1d687de56"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typed-builder"

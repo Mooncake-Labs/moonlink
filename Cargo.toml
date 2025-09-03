@@ -60,9 +60,9 @@ parquet = { version = "55", default-features = false, features = [
   "arrow_canonical_extension_types",
 ] }
 paste = "1"
-postgres-native-tls = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "a7398c75b5cfd62fc016306a71d83306ad4ddf35" }
-postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "a7398c75b5cfd62fc016306a71d83306ad4ddf35" }
-postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "a7398c75b5cfd62fc016306a71d83306ad4ddf35", features = [
+postgres-native-tls = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
+postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
+postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455", features = [
   "with-serde_json-1",
 ] }
 prost = "0.13"
@@ -88,7 +88,7 @@ tokio = { version = "1.47", default-features = false, features = [
   "tracing",
 ] }
 tokio-bitstream-io = "0.0"
-tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "a7398c75b5cfd62fc016306a71d83306ad4ddf35", features = [
+tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455", features = [
   "with-serde_json-1",
 ] }
 tracing = "0.1"
@@ -101,5 +101,5 @@ inherits = "release"
 debug = true
 
 [patch.crates-io]
-postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "a7398c75b5cfd62fc016306a71d83306ad4ddf35" }
-postgres-protocol = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "a7398c75b5cfd62fc016306a71d83306ad4ddf35" }
+postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
+postgres-protocol = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
