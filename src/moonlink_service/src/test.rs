@@ -1,4 +1,4 @@
-use arrow_array::{ListArray, RecordBatch, StructArray};
+use arrow_array::RecordBatch;
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use more_asserts as ma;
@@ -139,6 +139,28 @@ fn get_create_table_payload(database: &str, table: &str) -> serde_json::Value {
     create_table_payload
 }
 
+/// Optional nested schema payload for testing nested struct/list without adding a new test.
+fn get_create_table_payload_nested(database: &str, table: &str) -> serde_json::Value {
+    json!({
+        "database": database,
+        "table": table,
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false},
+            {"name": "user", "data_type": "struct", "nullable": true, "fields": [
+                {"name": "name", "data_type": "string", "nullable": true},
+                {"name": "age", "data_type": "int32", "nullable": true},
+                {"name": "emails", "data_type": "list", "nullable": true, "item": {"name": "email", "data_type": "string", "nullable": true}},
+                {"name": "location", "data_type": "struct", "nullable": true, "fields": [
+                    {"name": "lat", "data_type": "float64", "nullable": true},
+                    {"name": "lon", "data_type": "float64", "nullable": true}
+                ]}
+            ]},
+            {"name": "events", "data_type": "list", "nullable": true, "item": {"name": "ts", "data_type": "int64", "nullable": true}}
+        ],
+        "table_config": {"mooncake": {"append_only": true, "row_identity": "None"}}
+    })
+}
+
 /// Util function to get table drop payload.
 fn get_drop_table_payload(database: &str, table: &str) -> serde_json::Value {
     let drop_table_payload = json!({
@@ -169,11 +191,16 @@ fn get_create_snapshot_payload(database: &str, table: &str, lsn: u64) -> serde_j
 }
 
 /// Util function to create table via REST API.
-async fn create_table(client: &reqwest::Client, database: &str, table: &str) {
+async fn create_table(client: &reqwest::Client, database: &str, table: &str, nested: bool) {
     // REST API doesn't allow duplicate source table name.
     let crafted_src_table_name = format!("{database}.{table}");
 
-    let payload = get_create_table_payload(database, table);
+    // Use nested schema when explicitly requested to keep tests lightweight and explicit.
+    let payload = if nested {
+        get_create_table_payload_nested(database, table)
+    } else {
+        get_create_table_payload(database, table)
+    };
     let response = client
         .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
         .header("content-type", "application/json")
@@ -290,49 +317,7 @@ async fn test_schema() {
             {"name": "decimal(10,2)", "data_type": "decimal(10,2)", "nullable": false}, // lowercase
             {"name": "Decimal(10,2)", "data_type": "decimal(10,2)", "nullable": false}, // uppercase
             {"name": "Decimal(10,0)", "data_type": "decimal(10,0)", "nullable": false}, // scale = 0
-            {"name": "Decimal(2,-3)", "data_type": "decimal(2,-3)", "nullable": false} // negative scale value
-        ],
-        "table_config": {
-            "mooncake": {
-                "append_only": true
-            }
-        }
-    });
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-    let response: CreateTableResponse = response.json().await.unwrap();
-    assert_eq!(response.database, DATABASE);
-    assert_eq!(response.table, crafted_src_table_name);
-    assert_eq!(response.lsn, 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_schema_with_struct_and_list() {
-    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
-    let config = get_service_config();
-    tokio::spawn(async move {
-        start_with_config(config).await.unwrap();
-    });
-    test_readiness_probe().await;
-
-    // Create test table with struct and list types.
-    let client = reqwest::Client::new();
-    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let payload = json!({
-        "database": DATABASE,
-        "table": TABLE,
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
+            {"name": "Decimal(2,-3)", "data_type": "decimal(2,-3)", "nullable": false}, // negative scale value
             {"name": "props", "data_type": "struct", "nullable": true, "fields": [
                 {"name": "score", "data_type": "float64", "nullable": true},
                 {"name": "labels", "data_type": "list", "nullable": true, "item": {"name": "label", "data_type": "string", "nullable": true}},
@@ -349,7 +334,6 @@ async fn test_schema_with_struct_and_list() {
             }
         }
     });
-
     let response = client
         .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
         .header("content-type", "application/json")
@@ -365,309 +349,6 @@ async fn test_schema_with_struct_and_list() {
     assert_eq!(response.database, DATABASE);
     assert_eq!(response.table, crafted_src_table_name);
     assert_eq!(response.lsn, 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_schema_with_nested_lists() {
-    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
-    let config = get_service_config();
-    tokio::spawn(async move {
-        start_with_config(config).await.unwrap();
-    });
-    test_readiness_probe().await;
-
-    let client = reqwest::Client::new();
-    let crafted_src_table_name = format!("{DATABASE}.array-alias-table");
-    let payload = json!({
-        "database": DATABASE,
-        "table": "array-alias-table",
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
-            // Use 'array' alias and nested list: List<List<Int32>>
-            {"name": "matrix", "data_type": "array", "nullable": true, "item": {
-                "name": "row", "data_type": "list", "nullable": true, "item": {
-                    "name": "cell", "data_type": "int32", "nullable": true
-                }
-            }}
-        ],
-        "table_config": {"mooncake": {"append_only": true}}
-    });
-
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-    let response: CreateTableResponse = response.json().await.unwrap();
-    assert_eq!(response.database, DATABASE);
-    assert_eq!(response.table, crafted_src_table_name);
-    assert_eq!(response.lsn, 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_schema_invalid_struct_missing_fields() {
-    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
-    let config = get_service_config();
-    tokio::spawn(async move {
-        start_with_config(config).await.unwrap();
-    });
-    test_readiness_probe().await;
-
-    let client = reqwest::Client::new();
-    let crafted_src_table_name = format!("{DATABASE}.invalid-struct-table");
-    let payload = json!({
-        "database": DATABASE,
-        "table": "invalid-struct-table",
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
-            {"name": "bad_struct", "data_type": "struct", "nullable": true}
-        ],
-        "table_config": {"mooncake": {"append_only": true}}
-    });
-
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(!response.status().is_success());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_schema_invalid_list_missing_item() {
-    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
-    let config = get_service_config();
-    tokio::spawn(async move {
-        start_with_config(config).await.unwrap();
-    });
-    test_readiness_probe().await;
-
-    let client = reqwest::Client::new();
-    let crafted_src_table_name = format!("{DATABASE}.invalid-list-table");
-    let payload = json!({
-        "database": DATABASE,
-        "table": "invalid-list-table",
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
-            {"name": "bad_list", "data_type": "list", "nullable": true}
-        ],
-        "table_config": {"mooncake": {"append_only": true}}
-    });
-
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(!response.status().is_success());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_nested_schema_and_ingest_data() {
-    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
-    let config = get_service_config();
-    tokio::spawn(async move {
-        start_with_config(config).await.unwrap();
-    });
-    test_readiness_probe().await;
-
-    // 1) Create table with nested struct and list fields.
-    let client = reqwest::Client::new();
-    let table = "nested-table";
-    let crafted_src_table_name = format!("{DATABASE}.{table}");
-    let payload = json!({
-        "database": DATABASE,
-        "table": table,
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false},
-            {"name": "user", "data_type": "struct", "nullable": true, "fields": [
-                {"name": "name", "data_type": "string", "nullable": true},
-                {"name": "age", "data_type": "int32", "nullable": true},
-                {"name": "emails", "data_type": "list", "nullable": true, "item": {"name": "email", "data_type": "string", "nullable": true}},
-                {"name": "location", "data_type": "struct", "nullable": true, "fields": [
-                    {"name": "lat", "data_type": "float64", "nullable": true},
-                    {"name": "lon", "data_type": "float64", "nullable": true}
-                ]}
-            ]},
-            {"name": "events", "data_type": "list", "nullable": true, "item": {"name": "ts", "data_type": "int64", "nullable": true}}
-        ],
-        "table_config": {"mooncake": {"append_only": true}}
-    });
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(response.status().is_success());
-
-    // 2) Ingest nested row.
-    let insert_payload = json!({
-        "operation": "insert",
-        "request_mode": "async",
-        "data": {
-            "id": 1,
-            "user": {
-                "name": "Alice",
-                "age": 30,
-                "emails": ["alice@example.com", "a@ex.io"],
-                "location": {"lat": 1.23, "lon": 4.56}
-            },
-            "events": [1000, 2000]
-        }
-    });
-    let response = client
-        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&insert_payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(response.status().is_success());
-
-    // 3) Scan the table and validate the produced Arrow batch contains the nested shapes.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let bytes = scan_table_begin(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        table.to_string(),
-        /*lsn=*/ 1,
-    )
-    .await
-    .unwrap();
-    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
-    assert_eq!(data_file_paths.len(), 1);
-    assert!(puffin_file_paths.is_empty());
-    assert!(puffin_deletion.is_empty());
-    assert!(positional_deletion.is_empty());
-
-    let batches = read_all_batches(&data_file_paths[0]).await;
-    assert_eq!(batches.len(), 1);
-    let batch = &batches[0];
-    assert_eq!(batch.num_columns(), 3);
-    assert_eq!(batch.num_rows(), 1);
-
-    // Column 0: id (Int32)
-    {
-        use arrow_array::Int32Array;
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(col.value(0), 1);
-    }
-
-    // Column 1: user (Struct)
-    {
-        let struct_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap();
-        assert_eq!(struct_array.columns().len(), 4);
-        // name
-        {
-            let arr = struct_array
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
-                .unwrap();
-            assert_eq!(arr.value(0), "Alice");
-        }
-        // age
-        {
-            let arr = struct_array
-                .column(1)
-                .as_any()
-                .downcast_ref::<arrow_array::Int32Array>()
-                .unwrap();
-            assert_eq!(arr.value(0), 30);
-        }
-        // emails (List<Utf8>)
-        {
-            let list = struct_array
-                .column(2)
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .unwrap();
-            let values = list
-                .values()
-                .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
-                .unwrap();
-            let offsets = list.value_offsets();
-            let offset_start = offsets[0] as usize;
-            let offset_end = offsets[1] as usize;
-            assert_eq!(offset_end - offset_start, 2);
-            assert_eq!(values.value(offset_start), "alice@example.com");
-            assert_eq!(values.value(offset_start + 1), "a@ex.io");
-        }
-        // location (Struct{lat,lon})
-        {
-            let location = struct_array
-                .column(3)
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .unwrap();
-            let lat = location
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow_array::Float64Array>()
-                .unwrap();
-            let lon = location
-                .column(1)
-                .as_any()
-                .downcast_ref::<arrow_array::Float64Array>()
-                .unwrap();
-            assert_eq!(lat.value(0), 1.23);
-            assert_eq!(lon.value(0), 4.56);
-        }
-    }
-
-    // Column 2: events (List<Int64>)
-    {
-        let list = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
-        let values = list
-            .values()
-            .as_any()
-            .downcast_ref::<arrow_array::Int64Array>()
-            .unwrap();
-        let offsets = list.value_offsets();
-        let start = offsets[0] as usize;
-        let end = offsets[1] as usize;
-        assert_eq!(end - start, 2);
-        assert_eq!(values.value(start), 1000);
-        assert_eq!(values.value(start + 1), 2000);
-    }
-
-    scan_table_end(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        table.to_string(),
-    )
-    .await
-    .unwrap();
 }
 
 /// Util function to optimize table via REST API.
@@ -698,9 +379,9 @@ async fn run_optimize_table_test(mode: &str) {
     });
     test_readiness_probe().await;
 
-    // Create test table.
+    // Create test table
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Ingest some data.
     let insert_payload = json!({
@@ -809,7 +490,7 @@ async fn test_create_snapshot() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Ingest some data.
     let insert_payload = json!({
@@ -883,21 +564,12 @@ async fn test_moonlink_standalone_data_ingestion() {
     });
     test_readiness_probe().await;
 
-    // Create test table.
+    // Create test table (nested schema).
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ true).await;
 
-    // Ingest some data.
-    let insert_payload = json!({
-        "operation": "insert",
-        "request_mode": "async",
-        "data": {
-            "id": 1,
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "age": 30
-        }
-    });
+    // Ingest nested data.
+    let insert_payload = create_test_arrow_insert_payload_nested();
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
     let response = client
         .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
@@ -925,7 +597,7 @@ async fn test_moonlink_standalone_data_ingestion() {
         decode_serialized_read_state_for_testing(bytes);
     assert_eq!(data_file_paths.len(), 1);
     let record_batches = read_all_batches(&data_file_paths[0]).await;
-    let expected_arrow_batch = create_test_arrow_batch();
+    let expected_arrow_batch = create_test_arrow_batch_nested();
     assert_eq!(record_batches, vec![expected_arrow_batch]);
 
     assert!(puffin_file_paths.is_empty());
@@ -954,7 +626,7 @@ async fn test_moonlink_standalone_file_upload() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Upload a file.
     let parquet_file = generate_parquet_file(&get_moonlink_backend_dir()).await;
@@ -1027,7 +699,7 @@ async fn test_moonlink_standalone_file_insert() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Upload a file.
     let parquet_file = generate_parquet_file(&get_moonlink_backend_dir()).await;
@@ -1100,10 +772,10 @@ async fn test_multiple_tables_creation() {
 
     // Create the first test table.
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Create the second test table.
-    create_table(&client, "second-database", TABLE).await;
+    create_table(&client, "second-database", TABLE, /*nested=*/ false).await;
 }
 
 #[tokio::test]
@@ -1118,7 +790,7 @@ async fn test_drop_table() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // List table before drop.
     let list_results = list_tables(&client).await;
@@ -1145,8 +817,8 @@ async fn test_list_tables() {
 
     // Create two test tables.
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, "database-1", "table-1").await;
-    create_table(&client, "database-2", "table-2").await;
+    create_table(&client, "database-1", "table-1", /*nested=*/ false).await;
+    create_table(&client, "database-2", "table-2", /*nested=*/ false).await;
 
     // List test tables.
     let mut list_results = list_tables(&client).await;
@@ -1188,7 +860,7 @@ async fn test_bulk_ingest_files() {
     test_readiness_probe().await;
 
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // A dummy stub-level interface testing.
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
@@ -1219,7 +891,7 @@ async fn test_invalid_operation() {
 
     // Create test table.
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Test invalid operation to upload a file.
     let file_upload_payload = json!({
@@ -1276,7 +948,7 @@ async fn test_non_existent_table() {
 
     // Create the test table.
     let client: reqwest::Client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Test invalid operation to upload a file.
     let file_upload_payload = json!({
@@ -1378,6 +1050,70 @@ async fn test_create_table_with_invalid_config() {
             }
         }
     });
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_schema_invalid_struct_missing_fields() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    let client = reqwest::Client::new();
+    let crafted_src_table_name = format!("{DATABASE}.invalid-struct-table");
+    let payload = json!({
+        "database": DATABASE,
+        "table": "invalid-struct-table",
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false},
+            {"name": "bad_struct", "data_type": "struct", "nullable": true}
+        ],
+        "table_config": {"mooncake": {"append_only": true}}
+    });
+
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_schema_invalid_list_missing_item() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    let client = reqwest::Client::new();
+    let crafted_src_table_name = format!("{DATABASE}.invalid-list-table");
+    let payload = json!({
+        "database": DATABASE,
+        "table": "invalid-list-table",
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false},
+            {"name": "bad_list", "data_type": "list", "nullable": true}
+        ],
+        "table_config": {"mooncake": {"append_only": true}}
+    });
+
     let response = client
         .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
         .header("content-type", "application/json")

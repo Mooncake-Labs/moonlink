@@ -20,6 +20,7 @@ axum = "0.8"
 clap = { workspace = true }
 moonlink = { path = "../moonlink" }
 moonlink_backend = { path = "../moonlink_backend" }
+moonlink_connectors = { path = "../moonlink_connectors" }
 moonlink_error = { path = "../moonlink_error" }
 moonlink_metadata_store = { path = "../moonlink_metadata_store" }
 moonlink_rpc = { path = "../moonlink_rpc" }
@@ -34,6 +35,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 arrow = { workspace = true }
 arrow-array = { workspace = true }
+arrow-buffer = "55"
 async-recursion = "1"
 bytes = "1"
 more-asserts = { workspace = true }

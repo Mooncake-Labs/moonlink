@@ -5,6 +5,7 @@ pub mod json_converter;
 pub mod moonlink_rest_sink;
 pub mod rest_event;
 pub mod rest_source;
+pub mod schema_builder;
 
 use crate::replication_state::ReplicationState;
 use crate::rest_ingest::event_request::EventRequest;
