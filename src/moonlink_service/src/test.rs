@@ -380,7 +380,7 @@ async fn run_optimize_table_test(mode: &str) {
     });
     test_readiness_probe().await;
 
-    // Create test table
+    // Create test table.
     let client = reqwest::Client::new();
     create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
@@ -1165,7 +1165,10 @@ async fn test_schema_invalid_struct_missing_fields() {
         .send()
         .await
         .unwrap();
-    assert!(!response.status().is_success());
+    assert!(
+        !response.status().is_success(),
+        "Response status is {response:?}"
+    );
 }
 
 #[tokio::test]

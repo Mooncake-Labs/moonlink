@@ -61,7 +61,7 @@ pub(crate) fn create_test_arrow_insert_payload_nested() -> serde_json::Value {
     insert_payload
 }
 
-/// Util function to create a nested test arrow schema matching get_create_table_payload_nested
+/// Util function to create a nested test arrow schema matching [`get_create_table_payload_nested`].
 pub(crate) fn create_test_arrow_schema_nested() -> Arc<ArrowSchema> {
     use arrow::datatypes::{DataType, Field};
 
@@ -121,7 +121,7 @@ pub(crate) fn create_test_arrow_schema_nested() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![id, user_struct, events_list]))
 }
 
-/// Util function to create a nested test arrow batch matching get_create_table_payload_nested
+/// Util function to create a nested test arrow batch matching [`get_create_table_payload_nested`].
 pub(crate) fn create_test_arrow_batch_nested() -> RecordBatch {
     use arrow::datatypes::DataType;
     use arrow_array::{ArrayRef, Float64Array, Int32Array, ListArray, StringArray, StructArray};

@@ -261,7 +261,7 @@ async fn create_table(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     message: format!(
-                        "Invalid schema on table {} creation {:?} because {}",
+                        "Invalid schema on table {} creation {:?}: {}",
                         table, payload.schema, e
                     ),
                 }),

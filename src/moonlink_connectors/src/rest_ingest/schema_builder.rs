@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FieldSchema {
     pub name: String,
-    pub data_type: String,
+    pub data_type: String, // case insensitive
     pub nullable: bool,
     #[serde(default)]
     pub fields: Option<Vec<FieldSchema>>, // for struct
@@ -59,8 +59,7 @@ fn parse_decimal(data_type_str: &str) -> Result<DecimalType, SchemaBuildError> {
 
 /// Build an Arrow `Field` from a `FieldSchema`.
 ///
-/// Returns an Arrow field and mutates the `field_id` as a side effect (used to
-/// populate Parquet field-id metadata similar to PostgreSQL column IDs).
+/// Returns an Arrow field and mutates the `field_id` as a side effect
 /// Returns an error if the field schema is invalid.
 fn build_field_from_schema(
     field_schema: &FieldSchema,
@@ -161,7 +160,7 @@ fn build_field_from_schema(
             })?;
 
             if matches!(item_schema.data_type.as_str(), "list" | "array" | "struct") {
-                return Err(SchemaBuildError::InvalidSchema(format!(
+                return Err(SchemaBuildError::UnsupportedType(format!(
                     "Invalid 'item' for list '{}': list/array/struct is not supported as a list item",
                     field_schema.name
                 )));
@@ -182,13 +181,17 @@ fn build_field_from_schema(
     }
 }
 
-pub fn build_arrow_schema(fields: &[FieldSchema]) -> Result<Schema, SchemaBuildError> {
+pub fn build_arrow_schema_impl(fields: &[FieldSchema]) -> Result<Schema, SchemaBuildError> {
     let mut field_id: i32 = 0;
     let built_fields: Result<Vec<Field>, SchemaBuildError> = fields
         .iter()
         .map(|fs| build_field_from_schema(fs, /*override_name=*/ None, &mut field_id))
         .collect();
     Ok(Schema::new(built_fields?))
+}
+
+pub fn build_arrow_schema(fields: &[FieldSchema]) -> crate::Result<Schema> {
+    build_arrow_schema_impl(fields).map_err(crate::Error::from)
 }
 
 #[cfg(test)]
@@ -204,7 +207,7 @@ mod tests {
             fields: None,
             item: None,
         }];
-        let schema = build_arrow_schema(&fields).unwrap();
+        let schema = build_arrow_schema_impl(&fields).unwrap();
         assert_eq!(schema.fields.len(), 1);
         assert_eq!(schema.fields[0].name(), "id");
     }
@@ -261,7 +264,7 @@ mod tests {
                 })),
             },
         ];
-        let schema = build_arrow_schema(&fields).unwrap();
+        let schema = build_arrow_schema_impl(&fields).unwrap();
         assert_eq!(schema.fields.len(), 3);
     }
 
@@ -286,9 +289,9 @@ mod tests {
                 })),
             })),
         }];
-        let err = build_arrow_schema(&fields).unwrap_err();
+        let err = build_arrow_schema_impl(&fields).unwrap_err();
         match err {
-            SchemaBuildError::InvalidSchema(_) => {}
+            SchemaBuildError::UnsupportedType(_) => {}
             _ => panic!("unexpected error: {err:?}"),
         }
     }
@@ -302,7 +305,7 @@ mod tests {
             fields: None,
             item: None,
         }];
-        let err = build_arrow_schema(&fields).unwrap_err();
+        let err = build_arrow_schema_impl(&fields).unwrap_err();
         match err {
             SchemaBuildError::InvalidSchema(_) => {}
             _ => panic!("unexpected error"),
@@ -318,7 +321,7 @@ mod tests {
             fields: None,
             item: None,
         }];
-        let err = build_arrow_schema(&fields).unwrap_err();
+        let err = build_arrow_schema_impl(&fields).unwrap_err();
         match err {
             SchemaBuildError::InvalidSchema(_) => {}
             _ => panic!("unexpected error"),
@@ -350,7 +353,7 @@ mod tests {
                 item: None,
             },
         ];
-        let schema = build_arrow_schema(&fields).unwrap();
+        let schema = build_arrow_schema_impl(&fields).unwrap();
         assert_eq!(schema.fields.len(), 3);
     }
 }

@@ -1236,7 +1236,7 @@ mod tests {
     }
 
     // Tests that combine schema_builder and json_converter in unit tests
-    use crate::rest_ingest::schema_builder::{build_arrow_schema, FieldSchema};
+    use crate::rest_ingest::schema_builder::{build_arrow_schema_impl, FieldSchema};
 
     fn make_schema_via_field_schema() -> Arc<Schema> {
         let fields = vec![
@@ -1311,7 +1311,7 @@ mod tests {
                 item: None,
             },
         ];
-        Arc::new(build_arrow_schema(&fields).expect("schema should build"))
+        Arc::new(build_arrow_schema_impl(&fields).expect("schema should build"))
     }
 
     #[test]
