@@ -442,56 +442,14 @@ async fn create_snapshot(client: &reqwest::Client, database: &str, table: &str, 
     );
 }
 
-/// Test Create Snapshot
-#[tokio::test]
-#[serial]
-async fn test_create_snapshot() {
-    cleanup_directory(&get_moonlink_backend_dir()).await;
-    let config = get_service_config();
-    tokio::spawn(async move {
-        start_with_config(config).await.unwrap();
-    });
-    test_readiness_probe().await;
-
-    // Create test table.
-    let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE).await;
-
-    // Ingest some data.
-    let insert_payload = json!({
-        "operation": "insert",
-        "request_mode": "sync",
-        "data": {
-            "id": 1,
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "age": 30
-        }
-    });
-    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&insert_payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-    let response: IngestResponse = response.json().await.unwrap();
-    let lsn = response.lsn.unwrap();
-
-    // After all changes reflected at mooncake snapshot, trigger an iceberg snapshot.
-    create_snapshot(&client, DATABASE, TABLE, lsn).await;
-
+/// Util function to check data file and puffin
+async fn assert_data_and_puffin(table: &str, lsn: u64) {
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
     let bytes = scan_table_begin(
         &mut moonlink_stream,
         DATABASE.to_string(),
-        TABLE.to_string(),
-        /*lsn=*/ lsn,
+        table.to_string(),
+        lsn,
     )
     .await
     .unwrap();
@@ -509,10 +467,42 @@ async fn test_create_snapshot() {
     scan_table_end(
         &mut moonlink_stream,
         DATABASE.to_string(),
-        TABLE.to_string(),
+        table.to_string(),
     )
     .await
     .unwrap();
+}
+
+/// Test Create Snapshot
+#[tokio::test]
+#[serial]
+async fn test_create_snapshot() {
+    cleanup_directory(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE).await;
+
+    // Ingest some data.
+    let insert_payload = create_test_json_payload();
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
+    let response = send_test_ingest(&client, &crafted_src_table_name, &insert_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: IngestResponse = response.json().await.unwrap();
+    let lsn = response.lsn.unwrap();
+
+    // After all changes reflected at mooncake snapshot, trigger an iceberg snapshot.
+    create_snapshot(&client, DATABASE, TABLE, lsn).await;
+
+    assert_data_and_puffin(TABLE, lsn).await;
 
     // Cleanup shared directory.
     cleanup_directory(&get_moonlink_backend_dir()).await;
@@ -534,57 +524,16 @@ async fn test_moonlink_standalone_data_ingestion() {
     create_table(&client, DATABASE, TABLE).await;
 
     // Ingest some data.
-    let insert_payload = json!({
-        "operation": "insert",
-        "request_mode": "async",
-        "data": {
-            "id": 1,
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "age": 30
-        }
-    });
+    let insert_payload = create_test_json_payload();
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&insert_payload)
-        .send()
-        .await
-        .unwrap();
+    let response = send_test_ingest(&client, &crafted_src_table_name, &insert_payload).await;
     assert!(
         response.status().is_success(),
         "Response status is {response:?}"
     );
 
     // Scan table and get data file and puffin files back.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let bytes = scan_table_begin(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-        /*lsn=*/ 1,
-    )
-    .await
-    .unwrap();
-    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
-    assert_eq!(data_file_paths.len(), 1);
-    let record_batches = read_all_batches(&data_file_paths[0]).await;
-    let expected_arrow_batch = create_test_arrow_batch();
-    assert_eq!(record_batches, vec![expected_arrow_batch]);
-
-    assert!(puffin_file_paths.is_empty());
-    assert!(puffin_deletion.is_empty());
-    assert!(positional_deletion.is_empty());
-
-    scan_table_end(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-    )
-    .await
-    .unwrap();
+    assert_data_and_puffin(TABLE, 1).await;
 }
 
 /// Test basic table creation, file upload and query.
@@ -603,26 +552,9 @@ async fn test_moonlink_standalone_file_upload() {
     create_table(&client, DATABASE, TABLE).await;
 
     // Upload a file.
-    let parquet_file = generate_parquet_file(&get_moonlink_backend_dir()).await;
-    let file_upload_payload = json!({
-        "operation": "upload",
-        "request_mode": "sync",
-        "files": [parquet_file],
-        "storage_config": {
-            "fs": {
-                "root_directory": get_moonlink_backend_dir(),
-                "atomic_write_dir": get_moonlink_backend_dir()
-            }
-        }
-    });
+    let file_upload_payload = create_test_load_parquet_payload(&get_moonlink_backend_dir()).await;
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/upload/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&file_upload_payload)
-        .send()
-        .await
-        .unwrap();
+    let response = send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
     assert!(
         response.status().is_success(),
         "Response status is {response:?}"
@@ -631,33 +563,7 @@ async fn test_moonlink_standalone_file_upload() {
     let lsn = response.lsn.unwrap();
 
     // Scan table and get data file and puffin files back.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let bytes = scan_table_begin(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-        lsn,
-    )
-    .await
-    .unwrap();
-    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
-    assert_eq!(data_file_paths.len(), 1);
-    let record_batches = read_all_batches(&data_file_paths[0]).await;
-    let expected_arrow_batch = create_test_arrow_batch();
-    assert_eq!(record_batches, vec![expected_arrow_batch]);
-
-    assert!(puffin_file_paths.is_empty());
-    assert!(puffin_deletion.is_empty());
-    assert!(positional_deletion.is_empty());
-
-    scan_table_end(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-    )
-    .await
-    .unwrap();
+    assert_data_and_puffin(TABLE, lsn).await;
 }
 
 #[tokio::test]
@@ -751,61 +657,157 @@ async fn test_moonlink_standalone_file_insert() {
     create_table(&client, DATABASE, TABLE).await;
 
     // Upload a file.
-    let parquet_file = generate_parquet_file(&get_moonlink_backend_dir()).await;
-    let file_upload_payload = json!({
-        "operation": "insert",
-        "files": [parquet_file],
-        "request_mode": "async",
-        "storage_config": {
-            "fs": {
-                "root_directory": get_moonlink_backend_dir(),
-                "atomic_write_dir": get_moonlink_backend_dir()
-            }
-        }
-    });
+    let file_upload_payload = create_test_insert_parquet_payload(&get_moonlink_backend_dir()).await;
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/upload/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&file_upload_payload)
-        .send()
-        .await
-        .unwrap();
+    let response = send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: FileUploadResponse = response.json().await.unwrap();
+    let lsn = response.lsn.unwrap();
+
+    // Scan table and get data file and puffin files back.
+    assert_data_and_puffin(TABLE, lsn).await;
+}
+
+/// Testing scenario: payload insert and query on multiple tables, under same database.
+#[tokio::test]
+#[serial]
+async fn test_moonlink_standalone_multiple_tables_data_ingestion() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test tables.
+    let table_a = "test-table-A";
+    let table_b = "test-table-B";
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, table_a).await;
+    create_table(&client, DATABASE, table_b).await;
+
+    // Create test payload.
+    let insert_payload = create_test_json_payload();
+
+    // Ingest some data into table A.
+    let crafted_src_table_a_name = format!("{DATABASE}.{table_a}");
+    let response = send_test_ingest(&client, &crafted_src_table_a_name, &insert_payload).await;
     assert!(
         response.status().is_success(),
         "Response status is {response:?}"
     );
 
-    // Scan table and get data file and puffin files back.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let bytes = scan_table_begin(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-        // Four events generated: one append and one commit, with commit LSN 2.
-        /*lsn=*/
-        2,
-    )
-    .await
-    .unwrap();
-    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
-    assert_eq!(data_file_paths.len(), 1);
-    let record_batches = read_all_batches(&data_file_paths[0]).await;
-    let expected_arrow_batch = create_test_arrow_batch();
-    assert_eq!(record_batches, vec![expected_arrow_batch]);
+    // Ingest some data into table B.
+    let crafted_src_table_b_name = format!("{DATABASE}.{table_b}");
+    let response = send_test_ingest(&client, &crafted_src_table_b_name, &insert_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
 
-    assert!(puffin_file_paths.is_empty());
-    assert!(puffin_deletion.is_empty());
-    assert!(positional_deletion.is_empty());
+    // Scan table A and get data file and puffin files back.
+    assert_data_and_puffin(table_a, 1).await;
 
-    scan_table_end(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-    )
-    .await
-    .unwrap();
+    // Scan table B and get data file and puffin files back.
+    assert_data_and_puffin(table_b, 1).await;
+}
+
+/// Testing scenario: file upload and query on multiple tables, under same database.
+#[tokio::test]
+#[serial]
+async fn test_moonlink_standalone_multiple_tables_file_upload() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test tables.
+    let table_a = "test-table-A";
+    let table_b = "test-table-B";
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, table_a).await;
+    create_table(&client, DATABASE, table_b).await;
+
+    // Create test parquest payload.
+    let file_upload_payload = create_test_load_parquet_payload(&get_moonlink_backend_dir()).await;
+
+    // Upload a file into table A.
+    let crafted_src_table_a_name = format!("{DATABASE}.{table_a}");
+    let response = send_test_upload(&client, &crafted_src_table_a_name, &file_upload_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: FileUploadResponse = response.json().await.unwrap();
+    let lsn_a = response.lsn.unwrap();
+
+    // Upload a file into table B.
+    let crafted_src_table_b_name = format!("{DATABASE}.{table_b}");
+    let response = send_test_upload(&client, &crafted_src_table_b_name, &file_upload_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: FileUploadResponse = response.json().await.unwrap();
+    let lsn_b = response.lsn.unwrap();
+
+    // Scan table A and get data file and puffin files back.
+    assert_data_and_puffin(table_a, lsn_a).await;
+
+    // Scan table B and get data file and puffin files back.
+    assert_data_and_puffin(table_b, lsn_b).await;
+}
+
+/// Testing scenario: file insert and query on multiple tables, under same database.
+#[tokio::test]
+#[serial]
+async fn test_moonlink_standalone_multiple_tables_file_insert() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir()).await;
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test tables.
+    let table_a = "test-table-A";
+    let table_b = "test-table-B";
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, table_a).await;
+    create_table(&client, DATABASE, table_b).await;
+
+    let file_upload_payload = create_test_insert_parquet_payload(&get_moonlink_backend_dir()).await;
+
+    // Insert file into table A.
+    let crafted_src_table_a_name = format!("{DATABASE}.{table_a}");
+    let response = send_test_upload(&client, &crafted_src_table_a_name, &file_upload_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: FileUploadResponse = response.json().await.unwrap();
+    let lsn_a = response.lsn.unwrap();
+
+    // Insert file into table B.
+    let crafted_src_table_b_name = format!("{DATABASE}.{table_b}");
+    let response = send_test_upload(&client, &crafted_src_table_b_name, &file_upload_payload).await;
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    let response: FileUploadResponse = response.json().await.unwrap();
+    let lsn_b = response.lsn.unwrap();
+
+    // Scan table A and get data file and puffin files back.
+    assert_data_and_puffin(table_a, lsn_a).await;
+
+    // Scan table B and get data file and puffin files back.
+    assert_data_and_puffin(table_b, lsn_b).await;
 }
 
 /// Testing scenario: two tables with the same name, but under different databases are created.
@@ -943,44 +945,15 @@ async fn test_invalid_operation() {
     create_table(&client, DATABASE, TABLE).await;
 
     // Test invalid operation to upload a file.
-    let file_upload_payload = json!({
-        "operation": "invalid_upload_operation",
-        "files": ["parquet_file"],
-        "storage_config": {
-            "fs": {
-                "root_directory": get_moonlink_backend_dir(),
-                "atomic_write_dir": get_moonlink_backend_dir()
-            }
-        }
-    });
+    let file_upload_payload = create_test_invalid_upload_operation(&get_moonlink_backend_dir());
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/upload/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&file_upload_payload)
-        .send()
-        .await
-        .unwrap();
+    let response = send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
     assert!(!response.status().is_success());
 
     // Test invalid operation to ingest data.
-    let insert_payload = json!({
-        "operation": "invalid_ingest_operation",
-        "data": {
-            "id": 1,
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "age": 30
-        }
-    });
+    let insert_payload = create_test_invalid_ingest_operation();
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&insert_payload)
-        .send()
-        .await
-        .unwrap();
+    let response = send_test_ingest(&client, &crafted_src_table_name, &insert_payload).await;
     assert!(!response.status().is_success());
 }
 
@@ -998,45 +971,16 @@ async fn test_non_existent_table() {
     // Create the test table.
     let client: reqwest::Client = reqwest::Client::new();
     create_table(&client, DATABASE, TABLE).await;
+    let wrong_table = "non_existent_source_table";
 
     // Test invalid operation to upload a file.
-    let file_upload_payload = json!({
-        "operation": "upload",
-        "request_mode": "async",
-        "files": ["parquet_file"],
-        "storage_config": {
-            "fs": {
-                "root_directory": get_moonlink_backend_dir(),
-                "atomic_write_dir": get_moonlink_backend_dir()
-            }
-        }
-    });
-    let _response = client
-        .post(format!("{REST_ADDR}/upload/non_existent_source_table"))
-        .header("content-type", "application/json")
-        .json(&file_upload_payload)
-        .send()
-        .await
-        .unwrap();
+    let file_upload_payload = create_test_invalid_parquet_file_upload(&get_moonlink_backend_dir());
+    send_test_upload(&client, wrong_table, &file_upload_payload).await;
     // Make sure service doesn't crash.
 
     // Test invalid operation to ingest data.
-    let insert_payload = json!({
-        "operation": "invalid_ingest_operation",
-        "data": {
-            "id": 1,
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "age": 30
-        }
-    });
-    let _response = client
-        .post(format!("{REST_ADDR}/ingest/non_existent_source_table"))
-        .header("content-type", "application/json")
-        .json(&insert_payload)
-        .send()
-        .await
-        .unwrap();
+    let insert_payload = create_test_invalid_ingest_operation();
+    send_test_ingest(&client, wrong_table, &insert_payload).await;
     // Make sure service doesn't crash.
 }
 
@@ -1059,26 +1003,8 @@ async fn test_create_table_with_invalid_config() {
     // ==================
     //
     // Create an invalid config payload.
-    let payload = json!({
-        "database": DATABASE,
-        "table": TABLE,
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false}
-        ],
-        "table_config": {
-            "mooncake": {
-                "append_only": false,
-                "row_identity": "None"
-            }
-        }
-    });
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
+    let payload = create_test_invalid_config_payload(DATABASE, TABLE);
+    let response = send_test_tables(&client, &crafted_src_table_name, &payload).await;
     assert!(!response.status().is_success());
 
     // ==================
@@ -1086,25 +1012,7 @@ async fn test_create_table_with_invalid_config() {
     // ==================
     //
     // Create an invalid config payload.
-    let payload = json!({
-        "database": DATABASE,
-        "table": TABLE,
-        "schema": [
-            {"name": "id", "data_type": "int32", "nullable": false}
-        ],
-        "table_config": {
-            "mooncake": {
-                "append_only": true,
-                "row_identity": "FullRow"
-            }
-        }
-    });
-    let response = client
-        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
+    let payload = create_test_invalid_config_payload(DATABASE, TABLE);
+    let response = send_test_tables(&client, &crafted_src_table_name, &payload).await;
     assert!(!response.status().is_success());
 }
