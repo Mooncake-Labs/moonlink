@@ -269,7 +269,7 @@ impl From<schema_builder::SchemaBuildError> for Error {
     fn from(source: schema_builder::SchemaBuildError) -> Self {
         Error::SchemaBuildError(ErrorStruct {
             message: "Schema building error".to_string(),
-            status: ErrorStatus::Temporary,
+            status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })
