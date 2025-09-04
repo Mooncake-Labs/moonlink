@@ -15,7 +15,7 @@ RUN rustup target add x86_64-unknown-linux-gnu
 RUN cargo build --target x86_64-unknown-linux-gnu --verbose
 
 # Use a slim image for docker image used for cloud deployment.
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 RUN apt-get update && \
     apt-get install -y ca-certificates libssl3 libpq5 && \
