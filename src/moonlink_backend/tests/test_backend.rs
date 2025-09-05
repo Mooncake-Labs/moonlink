@@ -25,6 +25,8 @@ mod tests {
 
     // Helper: terminate replication using a separate connection to avoid borrowing conflicts
     #[cfg(feature = "test-utils")]
+    use crate::common::nonunique_ids_from_state;
+    #[cfg(feature = "test-utils")]
     use crate::common::SRC_URI;
     #[cfg(feature = "test-utils")]
     use tokio_postgres::NoTls;
