@@ -25,6 +25,10 @@ pub(super) mod puffin_writer_proxy;
 #[cfg(test)]
 pub(super) mod rest_catalog;
 
+#[cfg(feature = "catalog-glue")]
+#[cfg(test)]
+pub(super) mod glue_catalog;
+
 mod schema_utils;
 mod snapshot_utils;
 mod table_commit_proxy;

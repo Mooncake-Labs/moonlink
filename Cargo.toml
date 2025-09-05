@@ -42,6 +42,7 @@ hashbrown = "0.15"
 iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "8f288ab0098bdd1f1afe81e4dd1c3c181d63890b", default-features = false, features = [
   "storage-fs",
 ] }
+iceberg-catalog-glue = { git = "https://github.com/apache/iceberg-rust.git", rev = "8f288ab0098bdd1f1afe81e4dd1c3c181d63890b" }
 iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev = "8f288ab0098bdd1f1afe81e4dd1c3c181d63890b" }
 itertools = { version = "0.14" }
 lru = { version = "0.14" }
