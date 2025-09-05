@@ -177,8 +177,8 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(dirs)
     }
 
-    /// TODO(hjiang): Check whether we could unify the implementation with [`remove_directory`].
-    #[cfg(feature = "storage-gcs")]
+    // TODO(hjiang): Remove fake-gcs feature once fake-gcs PR is merged.
+    #[cfg(all(feature = "storage-gcs", feature = "fake-gcs"))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {
         let path = if directory.ends_with('/') {
             directory.to_string()
@@ -212,7 +212,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(())
     }
 
-    #[cfg(not(feature = "storage-gcs"))]
+    #[cfg(not(feature = "fake-gcs"))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {
         let sanitized_directory = self.sanitize_path(directory);
         let op = self.get_operator().await?.clone();

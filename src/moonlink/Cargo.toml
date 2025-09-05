@@ -37,6 +37,7 @@ catalog-glue = []
 bench = []
 
 chaos-test = ["function_name"]
+fake-gcs = ["storage-gcs"]
 
 [dependencies]
 ahash = "0.8"
