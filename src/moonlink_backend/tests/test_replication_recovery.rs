@@ -2,7 +2,9 @@ mod common;
 
 #[cfg(test)]
 mod tests {
-    use super::common::{current_wal_lsn, get_database_uri, TestGuard, DATABASE, TABLE};
+    use super::common::{
+        connect_to_postgres, current_wal_lsn, get_database_uri, TestGuard, DATABASE, TABLE,
+    };
     use serial_test::serial;
 
     // Helper: terminate replication using a separate connection to avoid borrowing conflicts
@@ -11,10 +13,9 @@ mod tests {
 
     use crate::common::SRC_URI;
 
-    use tokio_postgres::NoTls;
-
     async fn terminate_replication_new_conn() {
-        let (client, connection) = tokio_postgres::connect(SRC_URI, NoTls).await.unwrap();
+        let uri = get_database_uri();
+        let (client, connection) = connect_to_postgres(&uri).await;
         tokio::spawn(async move {
             let _ = connection.await;
         });
