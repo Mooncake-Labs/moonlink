@@ -2,12 +2,12 @@ mod common;
 
 #[cfg(test)]
 mod tests {
-    use crate::common::{ids_from_state, nonunique_ids_from_state};
+    use crate::common::ids_from_state;
 
     use super::common::{
         assert_scan_ids_eq, crash_and_recover_backend_with_guard, create_backend_from_base_path,
         current_wal_lsn, get_database_uri, get_serialized_table_config, smoke_create_and_insert,
-        TestGuard, TestGuardMode, DATABASE, SRC_URI, TABLE,
+        TestGuard, TestGuardMode, DATABASE, TABLE,
     };
     use moonlink_backend::RowEventOperation;
     use moonlink_backend::{table_status::TableStatus, REST_API_URI};
@@ -22,9 +22,14 @@ mod tests {
     use std::time::SystemTime;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
-    use tokio_postgres::NoTls;
 
     // Helper: terminate replication using a separate connection to avoid borrowing conflicts
+    #[cfg(feature = "test-utils")]
+    use crate::common::SRC_URI;
+    #[cfg(feature = "test-utils")]
+    use tokio_postgres::NoTls;
+
+    #[cfg(feature = "test-utils")]
     async fn terminate_replication_new_conn() {
         let (client, connection) = tokio_postgres::connect(SRC_URI, NoTls).await.unwrap();
         tokio::spawn(async move {
@@ -973,6 +978,7 @@ mod tests {
     }
 
     /// Reconnect resumes replication (single table)
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_reconnect_resumes_replication_single_table() {
@@ -1018,6 +1024,7 @@ mod tests {
     }
 
     /// Reconnect mid-traffic with a large batch (100k rows) to exercise streaming; no duplicates or drops.
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_reconnect_resumes_replication_large_streaming_batch() {
@@ -1070,6 +1077,7 @@ mod tests {
     }
 
     /// Reconnect preserves multiple tables
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_reconnect_preserves_multiple_tables() {
@@ -1173,6 +1181,7 @@ mod tests {
     }
 
     /// Large transaction across client termination: abort mid-streaming, re-issue, no duplicates.
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_abort_client_mid_streaming_no_duplicates() {
@@ -1234,6 +1243,7 @@ mod tests {
     }
 
     /// Large transaction across reconnect
+    #[cfg(feature = "test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_large_transaction_across_reconnect() {
