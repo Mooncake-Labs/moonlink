@@ -514,8 +514,6 @@ mod tests {
     #[cfg(feature = "test-utils")]
     use super::common::{assert_scan_nonunique_ids_eq, crash_and_recover_backend};
     #[cfg(feature = "test-utils")]
-    use crate::common::nonunique_ids_from_state;
-    #[cfg(feature = "test-utils")]
     use rstest::*;
 
     /// Multiple failures and recovery from just the WAL
@@ -1195,8 +1193,7 @@ mod tests {
         tx.execute(
             &format!(
                 "INSERT INTO abort_mid_streaming (id, name)
-                 SELECT gs, 'v_' || gs::text FROM generate_series(1, {}) AS gs;",
-                total
+                 SELECT gs, 'v_' || gs::text FROM generate_series(1, {total}) AS gs;"
             ),
             &[],
         )
@@ -1206,7 +1203,7 @@ mod tests {
         // Terminate the actual client session running the transaction to force an abort.
         let (admin, _ha) = crate::common::connect_to_postgres(&uri).await;
         let _ = admin
-            .simple_query(&format!("SELECT pg_terminate_backend({});", client1_pid))
+            .simple_query(&format!("SELECT pg_terminate_backend({client1_pid});"))
             .await
             .unwrap();
 
@@ -1215,8 +1212,7 @@ mod tests {
         client2
             .simple_query(&format!(
                 "INSERT INTO abort_mid_streaming (id, name)
-                 SELECT gs, 'v_' || gs::text FROM generate_series(1, {}) AS gs;",
-                total
+                 SELECT gs, 'v_' || gs::text FROM generate_series(1, {total}) AS gs;"
             ))
             .await
             .unwrap();
