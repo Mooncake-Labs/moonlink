@@ -35,6 +35,10 @@ spec:
         # nginx serves local files under certain directory.
         - name: shared-cache-directory
           mountPath: /usr/share/nginx/html
+        # mount nginx.conf from ConfigMap
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
 
       # Act as remote postgres instance.
       - name: postgres
@@ -54,3 +58,7 @@ spec:
       # Shared cache directory between data server and moonlink.
       - name: shared-cache-directory
         emptyDir: {}
+      # ConfigMap providing nginx.conf
+      - name: nginx-config
+        configMap:
+          name: moonlink-nginx-config

@@ -32,6 +32,9 @@ echo "==> Loading image into kind nodes"
 kind load docker-image moonlink:dev --name kind-moonlink-dev
 
 echo "==> Applying Kubernetes manifests from: $DEPLOYMENT_CONFIG_FILE and $SERVICE_CONFIG_FILE"
+
+kubectl apply -f "$MANIFEST_DIR/config/moonlink_nginx_config.yaml" -n "$NS"
+
 kubectl apply -f "$DEPLOYMENT_CONFIG_FILE" -f "$SERVICE_CONFIG_FILE" -n "$NS"
 
 DEPLOY_NAME="$(yq '.metadata.name' "$DEPLOYMENT_CONFIG_FILE")"
