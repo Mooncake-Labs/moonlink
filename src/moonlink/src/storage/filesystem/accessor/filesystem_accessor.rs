@@ -1,6 +1,6 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
-#[cfg(feature = "storage-gcs")]
+#[cfg(all(feature = "storage-gcs", test))]
 use futures::TryStreamExt;
 use futures::{Stream, StreamExt};
 use opendal::options::WriteOptions;
@@ -177,8 +177,8 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(dirs)
     }
 
-    // TODO(hjiang): Remove fake-gcs feature once fake-gcs PR is merged.
-    #[cfg(all(feature = "storage-gcs", feature = "fake-gcs"))]
+    // TODO(hjiang): Remove this test function once fake-gcs fix the sending empty body will be error issue.
+    #[cfg(all(feature = "storage-gcs", test))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {
         let path = if directory.ends_with('/') {
             directory.to_string()
@@ -212,7 +212,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(())
     }
 
-    #[cfg(not(feature = "fake-gcs"))]
+    #[cfg(not(all(feature = "storage-gcs", test)))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {
         let sanitized_directory = self.sanitize_path(directory);
         let op = self.get_operator().await?.clone();

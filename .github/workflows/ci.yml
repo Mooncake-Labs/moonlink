@@ -71,12 +71,12 @@ jobs:
             name: GCS feature test
             timeout-minutes: 10
             cmd: |
-              cargo test --lib --features=fake-gcs
+              cargo test --lib --features=storage-gcs
           - type: chaos
             name: GCS chaos test
             timeout-minutes: 10
             cmd: |
-              RUST_BACKTRACE=1 cargo test test_gcs_chaos --features=chaos-test,fake-gcs -p moonlink -- --nocapture
+              RUST_BACKTRACE=1 cargo test test_gcs_chaos --features=chaos-test,storage-gcs -p moonlink -- --nocapture
     steps:
       - uses: actions/checkout@v5
 

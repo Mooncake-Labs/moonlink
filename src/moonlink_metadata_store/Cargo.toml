@@ -18,7 +18,6 @@ metadata-sqlite = ["sqlx"]
 
 test-tls = []
 test-utils = ["moonlink/test-utils"]
-fake-gcs = ["moonlink/fake-gcs", "storage-gcs"]
 
 [dependencies]
 async-trait = { workspace = true }
