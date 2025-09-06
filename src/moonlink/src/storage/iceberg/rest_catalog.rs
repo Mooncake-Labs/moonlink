@@ -33,22 +33,23 @@ impl RestCatalog {
 impl Catalog for RestCatalog {
     async fn list_namespaces(
         &self,
-        _parent: Option<&NamespaceIdent>,
+        parent: Option<&NamespaceIdent>,
     ) -> IcebergResult<Vec<NamespaceIdent>> {
-        todo!("list namespaces is not supported");
+        self.catalog.list_namespaces(parent).await
     }
+
     async fn create_namespace(
         &self,
-        namespace_ident: &iceberg::NamespaceIdent,
+        namespace_ident: &NamespaceIdent,
         properties: HashMap<String, String>,
-    ) -> IcebergResult<iceberg::Namespace> {
+    ) -> IcebergResult<Namespace> {
         self.catalog
             .create_namespace(namespace_ident, properties)
             .await
     }
 
-    async fn get_namespace(&self, _namespace_ident: &NamespaceIdent) -> IcebergResult<Namespace> {
-        todo!("get namespace is not supported");
+    async fn get_namespace(&self, namespace_ident: &NamespaceIdent) -> IcebergResult<Namespace> {
+        self.catalog.get_namespace(namespace_ident).await
     }
 
     async fn namespace_exists(&self, namespace_ident: &NamespaceIdent) -> IcebergResult<bool> {

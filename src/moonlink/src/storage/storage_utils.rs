@@ -2,9 +2,16 @@ use crate::row::MoonlinkRow;
 use more_asserts as ma;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::iter::FromIterator;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Util function to transaction vec into set
+pub fn to_set<T: Eq + Hash>(vec: Vec<T>) -> HashSet<T> {
+    HashSet::from_iter(vec)
+}
 
 #[derive(Debug)]
 pub struct MooncakeDataFile {
