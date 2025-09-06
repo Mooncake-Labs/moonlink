@@ -84,6 +84,12 @@ impl Sink {
             max_keepalive_lsn_seen: 0,
         }
     }
+
+    /// Reset the per-connection keepalive floor. Should be called after establishing a new CDC stream
+    /// with the connection's confirmed flush LSN.
+    pub fn reset_keepalive_floor(&mut self) {
+        self.max_keepalive_lsn_seen = 0;
+    }
 }
 
 pub struct SchemaChangeRequest(pub SrcTableId);
