@@ -2,7 +2,7 @@ use super::puffin_writer_proxy::append_puffin_metadata_and_rewrite;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-use crate::storage::iceberg::catalog_utils::reflect_table_updates;
+use crate::storage::iceberg::catalog_utils::{reflect_table_updates, validate_table_requirements};
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
 use crate::storage::iceberg::moonlink_catalog::{PuffinBlobType, PuffinWrite, SchemaUpdate};
 use crate::storage::iceberg::puffin_writer_proxy::{
@@ -51,9 +51,9 @@ use iceberg::spec::{
     Schema as IcebergSchema, TableMetadata, TableMetadataBuildResult, TableMetadataBuilder,
 };
 use iceberg::table::Table;
+use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
 use iceberg::{Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent};
-use iceberg::{Error as IcebergError, TableRequirement};
 
 /// Object storage usually doesn't have "folder" concept, when creating a new namespace, we create an indicator file under certain folder.
 pub(super) const NAMESPACE_INDICATOR_OBJECT_NAME: &str = "indicator.text";
@@ -191,17 +191,6 @@ impl FileCatalog {
         let metadata = self.load_table_metadata(&metadata_filepath).await?;
 
         Ok((metadata_filepath, metadata))
-    }
-
-    /// Validate table commit requirements.
-    fn validate_table_requirements(
-        table_requirements: Vec<TableRequirement>,
-        table_metadata: &TableMetadata,
-    ) -> IcebergResult<()> {
-        for cur_requirement in table_requirements.into_iter() {
-            cur_requirement.check(Some(table_metadata))?;
-        }
-        Ok(())
     }
 
     /// This is a hack function to work-around iceberg-rust.
@@ -664,7 +653,7 @@ impl Catalog for FileCatalog {
         );
 
         // Validate existing table metadata with requirements.
-        Self::validate_table_requirements(commit.take_requirements(), &metadata)?;
+        validate_table_requirements(commit.take_requirements(), &metadata)?;
 
         // Construct new metadata with updates.
         let updates = commit.take_updates();

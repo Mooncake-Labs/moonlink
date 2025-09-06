@@ -6,7 +6,8 @@ use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
 
 use iceberg::spec::Schema as IcebergSchema;
-use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableUpdate};
+use iceberg::spec::TableMetadata;
+use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableRequirement, TableUpdate};
 
 /// Create a catelog based on the provided type.
 ///
@@ -88,6 +89,17 @@ pub(crate) fn reflect_table_updates(
         }
     }
     Ok(builder)
+}
+
+/// Validate table commit requirements.
+pub(crate) fn validate_table_requirements(
+    table_requirements: Vec<TableRequirement>,
+    table_metadata: &TableMetadata,
+) -> IcebergResult<()> {
+    for cur_requirement in table_requirements.into_iter() {
+        cur_requirement.check(Some(table_metadata))?;
+    }
+    Ok(())
 }
 
 /// Test util function to create catalog with provided filesystem accessor.

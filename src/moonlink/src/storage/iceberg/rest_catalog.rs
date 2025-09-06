@@ -1,10 +1,13 @@
 use super::moonlink_catalog::{PuffinBlobType, PuffinWrite};
 use crate::storage::filesystem::accessor_config::AccessorConfig;
+use crate::storage::iceberg::catalog_utils::{reflect_table_updates, validate_table_requirements};
 use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
 use crate::storage::iceberg::moonlink_catalog::SchemaUpdate;
 use async_trait::async_trait;
+use iceberg::io::FileIO;
 use iceberg::puffin::PuffinWriter;
 use iceberg::spec::Schema as IcebergSchema;
+use iceberg::spec::TableMetadataBuilder;
 use iceberg::table::Table;
 use iceberg::CatalogBuilder;
 use iceberg::Result as IcebergResult;
@@ -15,16 +18,32 @@ use iceberg_catalog_rest::{
 };
 use std::collections::{HashMap, HashSet};
 
+use crate::storage::iceberg::io_utils as iceberg_io_utils;
+use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
+
+use super::puffin_writer_proxy::{
+    append_puffin_metadata_and_rewrite, get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
+};
+
 #[derive(Debug)]
 pub struct RestCatalog {
     pub(crate) catalog: IcebergRestCatalog,
+    file_io: FileIO,
+    ///
+    /// Maps from "puffin filepath" to "puffin blob metadata".
+    deletion_vector_blobs_to_add: HashMap<String, Vec<PuffinBlobMetadataProxy>>,
+    file_index_blobs_to_add: HashMap<String, Vec<PuffinBlobMetadataProxy>>,
+    /// A vector of "puffin filepath"s.
+    puffin_blobs_to_remove: HashSet<String>,
+    /// A set of data files to remove, along with their corresponding deletion vectors and file indices.
+    data_files_to_remove: HashSet<String>,
 }
 
 impl RestCatalog {
     #[allow(dead_code)]
     pub async fn new(
         mut config: RestCatalogConfig,
-        _accessor_config: AccessorConfig,
+        accessor_config: AccessorConfig,
     ) -> IcebergResult<Self> {
         let builder = IcebergRestCatalogBuilder::default();
         config
@@ -34,7 +53,15 @@ impl RestCatalog {
             .props
             .insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), config.warehouse);
         let catalog = builder.load(config.name, config.props).await?;
-        Ok(Self { catalog })
+        let file_io = iceberg_io_utils::create_file_io(&accessor_config)?;
+        Ok(Self {
+            catalog,
+            file_io,
+            deletion_vector_blobs_to_add: HashMap::new(),
+            file_index_blobs_to_add: HashMap::new(),
+            puffin_blobs_to_remove: HashSet::new(),
+            data_files_to_remove: HashSet::new(),
+        })
     }
 }
 
@@ -107,8 +134,46 @@ impl Catalog for RestCatalog {
         todo!("rename table is not supported");
     }
 
-    async fn update_table(&self, mut _commit: TableCommit) -> IcebergResult<Table> {
-        todo!("update table is not supported");
+    /// Transaction commit:
+    /// - sdk write metadata file and manifest file
+    /// - catalog check requirement
+    /// - catalog craft request body
+    /// - catalog commit
+    async fn update_table(&self, mut commit: TableCommit) -> IcebergResult<Table> {
+        let table = self.load_table(commit.identifier()).await?;
+        let metadata = table.metadata();
+        let requirements = commit.take_requirements();
+        validate_table_requirements(requirements.clone(), metadata)?;
+
+        let builder = TableMetadataBuilder::new_from_metadata(metadata.clone(), None);
+        let updates = commit.take_updates();
+        let builder = reflect_table_updates(builder, updates)?;
+        let build_result = builder.build()?;
+
+        // Rewrite manifest list/entries to append puffin metadata and handle removals before commit
+        append_puffin_metadata_and_rewrite(
+            &build_result.metadata,
+            &self.file_io,
+            &self.deletion_vector_blobs_to_add,
+            &self.file_index_blobs_to_add,
+            &self.data_files_to_remove,
+            &self.puffin_blobs_to_remove,
+        )
+        .await?;
+
+        let normalized_updates = build_result.changes;
+
+        // Repackage normalized updates and original requirements into a TableCommit
+        // and delegate to the underlying REST catalog implementation.
+        let new_commit = TableCommitProxy {
+            ident: commit.identifier().clone(),
+            requirements,
+            updates: normalized_updates,
+        }
+        .take_as_table_commit();
+
+        let table = self.catalog.update_table(new_commit).await?;
+        Ok(table)
     }
 
     async fn register_table(
@@ -124,23 +189,37 @@ impl Catalog for RestCatalog {
 impl PuffinWrite for RestCatalog {
     async fn record_puffin_metadata_and_close(
         &mut self,
-        _puffin_filepath: String,
-        _puffin_writer: PuffinWriter,
-        _puffin_blob_type: PuffinBlobType,
+        puffin_filepath: String,
+        puffin_writer: PuffinWriter,
+        puffin_blob_type: PuffinBlobType,
     ) -> IcebergResult<()> {
-        todo!("record puffin metadata and close is not supported")
+        let puffin_metadata = get_puffin_metadata_and_close(puffin_writer).await?;
+        match &puffin_blob_type {
+            PuffinBlobType::DeletionVector => self
+                .deletion_vector_blobs_to_add
+                .insert(puffin_filepath, puffin_metadata),
+            PuffinBlobType::FileIndex => self
+                .file_index_blobs_to_add
+                .insert(puffin_filepath, puffin_metadata),
+        };
+        Ok(())
     }
 
-    fn set_data_files_to_remove(&mut self, _data_files: HashSet<String>) {
-        todo!("set data files to remove is not supported")
+    fn set_data_files_to_remove(&mut self, data_files: HashSet<String>) {
+        assert!(self.data_files_to_remove.is_empty());
+        self.data_files_to_remove = data_files;
     }
 
-    fn set_index_puffin_files_to_remove(&mut self, _puffin_filepaths: HashSet<String>) {
-        todo!("set index puffin files to remove is not supported")
+    fn set_index_puffin_files_to_remove(&mut self, puffin_filepaths: HashSet<String>) {
+        assert!(self.puffin_blobs_to_remove.is_empty());
+        self.puffin_blobs_to_remove = puffin_filepaths;
     }
 
     fn clear_puffin_metadata(&mut self) {
-        todo!("clear puffin metadata is not supported")
+        self.deletion_vector_blobs_to_add.clear();
+        self.file_index_blobs_to_add.clear();
+        self.puffin_blobs_to_remove.clear();
+        self.data_files_to_remove.clear();
     }
 }
 
