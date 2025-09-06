@@ -73,7 +73,7 @@ pub struct IcebergTableManager {
 }
 
 impl IcebergTableManager {
-    pub fn new(
+    pub async fn new(
         mooncake_table_metadata: Arc<MooncakeTableMetadata>,
         object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -81,8 +81,12 @@ impl IcebergTableManager {
     ) -> IcebergResult<IcebergTableManager> {
         let iceberg_schema =
             iceberg::arrow::arrow_schema_to_schema(mooncake_table_metadata.schema.as_ref())?;
-        let catalog =
-            catalog_utils::create_catalog(config.metadata_accessor_config.clone(), iceberg_schema)?;
+        let catalog = catalog_utils::create_catalog(
+            config.data_accessor_config.clone(),
+            config.metadata_accessor_config.clone(),
+            iceberg_schema,
+        )
+        .await?;
         Ok(Self {
             snapshot_loaded: false,
             config,

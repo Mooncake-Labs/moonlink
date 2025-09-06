@@ -176,7 +176,7 @@ impl TestEnvironment {
     }
 
     /// Create iceberg table manager.
-    pub fn create_iceberg_table_manager(
+    pub async fn create_iceberg_table_manager(
         &self,
         mooncake_table_config: MooncakeTableConfig,
     ) -> IcebergTableManager {
@@ -200,6 +200,7 @@ impl TestEnvironment {
             create_test_filesystem_accessor(&iceberg_table_config),
             iceberg_table_config.clone(),
         )
+        .await
         .unwrap()
     }
 

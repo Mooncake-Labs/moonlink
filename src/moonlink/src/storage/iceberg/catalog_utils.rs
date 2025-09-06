@@ -3,7 +3,9 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::iceberg::file_catalog::FileCatalog;
 use crate::storage::iceberg::iceberg_table_config::IcebergCatalogConfig;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
-
+#[cfg(feature = "catalog-rest")]
+use crate::storage::iceberg::rest_catalog::RestCatalog;
+use crate::AccessorConfig;
 use iceberg::spec::Schema as IcebergSchema;
 use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableUpdate};
 
@@ -11,7 +13,9 @@ use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableUpdate};
 ///
 /// It's worth noting catalog and warehouse uri are not 1-1 mapping; for example, rest catalog could handle warehouse.
 /// Here we simply deduce catalog type from warehouse because both filesystem and object storage catalog are only able to handle certain scheme.
-pub fn create_catalog(
+pub async fn create_catalog(
+    // TODO: Workaround: add prefix underscore to avoid linting error. Refactor needed.
+    _data_accessor_config: AccessorConfig,
     catalog: IcebergCatalogConfig,
     iceberg_schema: IcebergSchema,
 ) -> IcebergResult<Box<dyn MoonlinkCatalog>> {
@@ -20,9 +24,10 @@ pub fn create_catalog(
             Ok(Box::new(FileCatalog::new(accessor_config, iceberg_schema)?))
         }
         #[cfg(feature = "catalog-rest")]
-        IcebergCatalogConfig::Rest { .. } => Err(iceberg::Error::new(
-            iceberg::ErrorKind::FeatureUnsupported,
-            "Only File catalog is supported currently",
+        IcebergCatalogConfig::Rest {
+            rest_catalog_config,
+        } => Ok(Box::new(
+            RestCatalog::new(rest_catalog_config, _data_accessor_config).await?,
         )),
         #[cfg(feature = "catalog-glue")]
         IcebergCatalogConfig::Glue { .. } => Err(iceberg::Error::new(
@@ -33,7 +38,9 @@ pub fn create_catalog(
 }
 
 /// Create a catalog with no schema provided.
-pub fn create_catalog_without_schema(
+pub async fn create_catalog_without_schema(
+    // TODO: Workaround: add prefix underscore to avoid linting error. Refactor needed.
+    _data_accessor_config: AccessorConfig,
     catalog: IcebergCatalogConfig,
 ) -> IcebergResult<Box<dyn MoonlinkCatalog>> {
     match catalog {
@@ -41,9 +48,10 @@ pub fn create_catalog_without_schema(
             Ok(Box::new(FileCatalog::new_without_schema(accessor_config)?))
         }
         #[cfg(feature = "catalog-rest")]
-        IcebergCatalogConfig::Rest { .. } => Err(iceberg::Error::new(
-            iceberg::ErrorKind::FeatureUnsupported,
-            "Only File catalog is supported currently",
+        IcebergCatalogConfig::Rest {
+            rest_catalog_config,
+        } => Ok(Box::new(
+            RestCatalog::new(rest_catalog_config, _data_accessor_config).await?,
         )),
         #[cfg(feature = "catalog-glue")]
         IcebergCatalogConfig::Glue { .. } => Err(iceberg::Error::new(

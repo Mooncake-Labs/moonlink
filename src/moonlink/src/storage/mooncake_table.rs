@@ -494,12 +494,15 @@ impl MooncakeTable {
             config: table_config.clone(),
             path: base_path,
         });
-        let iceberg_table_manager = Box::new(IcebergTableManager::new(
-            metadata.clone(),
-            object_storage_cache.clone(),
-            table_filesystem_accessor.clone(),
-            iceberg_table_config,
-        )?);
+        let iceberg_table_manager = Box::new(
+            IcebergTableManager::new(
+                metadata.clone(),
+                object_storage_cache.clone(),
+                table_filesystem_accessor.clone(),
+                iceberg_table_config,
+            )
+            .await?,
+        );
 
         Self::new_with_table_manager(
             metadata,

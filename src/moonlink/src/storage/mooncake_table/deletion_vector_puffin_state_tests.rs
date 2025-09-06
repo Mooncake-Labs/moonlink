@@ -219,6 +219,7 @@ async fn test_1_recover_2_without_local_optimization(#[case] use_batch_write: bo
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
+    .await
     .unwrap();
     let (next_file_id, mooncake_snapshot) = iceberg_table_manager_to_recover
         .load_snapshot_from_table()
@@ -278,6 +279,7 @@ async fn test_1_recover_2_with_local_optimization(#[case] use_batch_write: bool)
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
+    .await
     .unwrap();
     let (next_file_id, mooncake_snapshot) = iceberg_table_manager_to_recover
         .load_snapshot_from_table()

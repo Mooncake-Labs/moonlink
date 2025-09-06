@@ -685,7 +685,9 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -729,7 +731,9 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -783,7 +787,9 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -892,7 +898,9 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -942,7 +950,9 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -999,7 +1009,9 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1148,7 +1160,9 @@ async fn test_multiple_snapshot_requests() {
     }
 
     // Check iceberg snapshot content.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1255,8 +1269,9 @@ async fn test_flush_lsn_consistency_across_snapshots() {
         assert_eq!(*flush_lsn_rx.borrow(), lsn);
 
         // Verify persistence by loading from iceberg
-        let mut iceberg_table_manager =
-            env.create_iceberg_table_manager(MooncakeTableConfig::default());
+        let mut iceberg_table_manager = env
+            .create_iceberg_table_manager(MooncakeTableConfig::default())
+            .await;
         let (_, snapshot) = iceberg_table_manager
             .load_snapshot_from_table()
             .await
@@ -1369,8 +1384,9 @@ async fn test_periodical_force_snapshot() {
     .unwrap();
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (_, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1412,8 +1428,9 @@ async fn test_index_merge_with_sufficient_file_indices() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1441,8 +1458,9 @@ async fn test_index_merge_with_sufficient_file_indices() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1487,8 +1505,9 @@ async fn test_data_compaction_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1516,8 +1535,9 @@ async fn test_data_compaction_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1580,8 +1600,9 @@ async fn test_full_maintenance_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1609,8 +1630,9 @@ async fn test_full_maintenance_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -2175,7 +2197,9 @@ async fn test_append_only_table_full_pipeline() {
         .unwrap();
 
     // Verify snapshot was created successfully
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -2217,8 +2241,9 @@ async fn test_append_only_table_full_pipeline() {
         .unwrap();
 
     // Verify final snapshot
-    let mut final_iceberg_table_manager =
-        env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut final_iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (final_next_file_id, final_snapshot) = final_iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -2674,7 +2699,9 @@ async fn test_force_snapshot_for_empty_stream_flush() {
     // Verify iceberg snapshot content.
     let mooncake_table_config =
         MooncakeTableConfig::new(env.temp_dir.path().to_str().unwrap().to_string());
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config);
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config)
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await

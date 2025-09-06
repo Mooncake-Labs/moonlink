@@ -11,6 +11,8 @@ use crate::storage::filesystem::gcs::gcs_test_utils;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils;
 use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
+#[cfg(feature = "catalog-rest")]
+use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 #[cfg(feature = "chaos-test")]
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
@@ -50,11 +52,33 @@ pub(crate) fn get_iceberg_table_config(temp_dir: &TempDir) -> IcebergTableConfig
         atomic_write_dir: None,
     };
     let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+    // Select catalog based solely on features: REST when `catalog-rest` is enabled; otherwise FILE.
+    let metadata_accessor_config = {
+        #[cfg(feature = "catalog-rest")]
+        {
+            let rest_config = RestCatalogConfig {
+                name: REST_CATALOG_TEST_NAME.to_string(),
+                uri: REST_CATALOG_TEST_URI.to_string(),
+                warehouse: accessor_config.get_root_path(),
+                props: HashMap::new(),
+            };
+            crate::IcebergCatalogConfig::Rest {
+                rest_catalog_config: rest_config,
+            }
+        }
+        #[cfg(not(feature = "catalog-rest"))]
+        {
+            crate::IcebergCatalogConfig::File {
+                accessor_config: accessor_config.clone(),
+            }
+        }
+    };
+
     IcebergTableConfig {
         namespace: vec![ICEBERG_TEST_NAMESPACE.to_string()],
         table_name: ICEBERG_TEST_TABLE.to_string(),
         data_accessor_config: accessor_config.clone(),
-        metadata_accessor_config: crate::IcebergCatalogConfig::File { accessor_config },
+        metadata_accessor_config,
     }
 }
 
@@ -128,9 +152,31 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
         AccessorConfig::new_with_storage_config(storage_config)
     };
 
+    // Select catalog based solely on features: REST when `catalog-rest` is enabled; otherwise FILE.
+    let metadata_accessor_config = {
+        #[cfg(feature = "catalog-rest")]
+        {
+            let rest_config = RestCatalogConfig {
+                name: REST_CATALOG_TEST_NAME.to_string(),
+                uri: REST_CATALOG_TEST_URI.to_string(),
+                warehouse: warehouse_uri.clone(),
+                props: HashMap::new(),
+            };
+            crate::IcebergCatalogConfig::Rest {
+                rest_catalog_config: rest_config,
+            }
+        }
+        #[cfg(not(feature = "catalog-rest"))]
+        {
+            crate::IcebergCatalogConfig::File {
+                accessor_config: accessor_config.clone(),
+            }
+        }
+    };
+
     IcebergTableConfig {
         data_accessor_config: accessor_config.clone(),
-        metadata_accessor_config: crate::IcebergCatalogConfig::File { accessor_config },
+        metadata_accessor_config,
         ..Default::default()
     }
 }
@@ -369,6 +415,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
 
     let (notify_tx, notify_rx) = mpsc::channel(100);

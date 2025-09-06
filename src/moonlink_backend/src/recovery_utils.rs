@@ -29,7 +29,7 @@ async fn recover_rest_table(
         .moonlink_table_config
         .iceberg_table_config
         .clone();
-    let iceberg_snapshot_fetcher = IcebergSnapshotFetcher::new(iceberg_table_config)?;
+    let iceberg_snapshot_fetcher = IcebergSnapshotFetcher::new(iceberg_table_config).await?;
     let arrow_schema = iceberg_snapshot_fetcher.fetch_table_schema().await?;
     let flush_lsn = iceberg_snapshot_fetcher.get_flush_lsn().await?;
 
