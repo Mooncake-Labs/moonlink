@@ -45,6 +45,9 @@ pub struct Sink {
     /// Streaming hot-path cache of the last processed (xid, table_id, lsn).
     /// Skips streaming state lookup when the next row has the same xid and table.
     streaming_last_key: Option<(u32, SrcTableId, u64)>,
+    /// Tracks the maximum LSN observed from primary keepalive messages.
+    /// Used to assert that subsequent LSN-bearing CDC events are not older.
+    max_keepalive_lsn_seen: u64,
 }
 
 impl Sink {
@@ -77,6 +80,7 @@ impl Sink {
             relation_cache: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
+            max_keepalive_lsn_seen: 0,
         }
     }
 }
@@ -192,6 +196,12 @@ impl Sink {
         match event {
             CdcEvent::Begin(begin_body) => {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
+                assert!(
+                    begin_body.final_lsn() >= self.max_keepalive_lsn_seen,
+                    "Begin.final_lsn={} older than last keepalive LSN {}",
+                    begin_body.final_lsn(),
+                    self.max_keepalive_lsn_seen
+                );
                 self.transaction_state.final_lsn = begin_body.final_lsn();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
@@ -201,6 +211,12 @@ impl Sink {
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
+                assert!(
+                    commit_body.end_lsn() >= self.max_keepalive_lsn_seen,
+                    "Commit.end_lsn={} older than last keepalive LSN {}",
+                    commit_body.end_lsn(),
+                    self.max_keepalive_lsn_seen
+                );
                 let pg_lsn = PgLsn::from(commit_body.end_lsn());
                 self.replication_state.mark(pg_lsn.into());
                 for table_id in &self.transaction_state.touched_tables {
@@ -235,6 +251,12 @@ impl Sink {
                     xact_id,
                     end_lsn = stream_commit_body.end_lsn(),
                     "stream commit"
+                );
+                assert!(
+                    stream_commit_body.end_lsn() >= self.max_keepalive_lsn_seen,
+                    "StreamCommit.end_lsn={} older than last keepalive LSN {}",
+                    stream_commit_body.end_lsn(),
+                    self.max_keepalive_lsn_seen
                 );
                 let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
                 self.replication_state.mark(pg_lsn.into());
@@ -358,6 +380,16 @@ impl Sink {
             }
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
                 let pg_lsn = PgLsn::from(primary_keepalive_body.wal_end());
+                let wal_end = primary_keepalive_body.wal_end();
+                assert!(
+                    wal_end >= self.max_keepalive_lsn_seen,
+                    "PrimaryKeepAlive.wal_end={} older than last keepalive LSN {}",
+                    wal_end,
+                    self.max_keepalive_lsn_seen
+                );
+                if wal_end > self.max_keepalive_lsn_seen {
+                    self.max_keepalive_lsn_seen = wal_end;
+                }
                 self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::StreamStop(_stream_stop_body) => {
