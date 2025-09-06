@@ -1,6 +1,7 @@
 use crate::{error::Error, Result};
 use arrow_ipc::writer::StreamWriter;
 use moonlink_backend::MoonlinkBackend;
+use moonlink_backend::Result as BackendResult;
 use moonlink_rpc::{read, write, Request, Table};
 use std::collections::HashMap;
 use std::error::Error as _;
@@ -103,8 +104,8 @@ where
                 table,
                 lsn,
             } => {
-                backend.create_snapshot(database, table, lsn).await?;
-                write(&mut stream, &()).await?;
+                let resp = backend.create_snapshot(database, table, lsn).await;
+                write(&mut stream, &resp).await?;
             }
             Request::CreateTable {
                 database,
@@ -114,7 +115,7 @@ where
                 table_config,
             } => {
                 // Use default mooncake config, and local filesystem for storage layer.
-                backend
+                let resp = backend
                     .create_table(
                         database,
                         table,
@@ -123,45 +124,52 @@ where
                         table_config,
                         None, /* input_database */
                     )
-                    .await?;
-                write(&mut stream, &()).await?;
+                    .await;
+                write(&mut stream, &resp).await?;
             }
             Request::DropTable { database, table } => {
-                backend.drop_table(database, table).await?;
-                write(&mut stream, &()).await?;
+                let resp = backend.drop_table(database, table).await;
+
+                write(&mut stream, &resp).await?;
             }
             Request::GetParquetMetadatas { data_files } => {
-                let metadata = backend.get_parquet_metadatas(data_files).await?;
-                write(&mut stream, &metadata).await?;
+                let metadata_resp = backend.get_parquet_metadatas(data_files).await;
+                write(&mut stream, &metadata_resp).await?;
             }
             Request::GetTableSchema { database, table } => {
-                let database = backend.get_table_schema(database, table).await?;
-                let writer = StreamWriter::try_new(vec![], &database)?;
-                let data = writer.into_inner()?;
-                write(&mut stream, &data).await?;
+                let resp = async {
+                    let schema = backend.get_table_schema(database, table).await?;
+                    let writer = StreamWriter::try_new(vec![], &schema)?;
+                    writer.into_inner().map_err(Error::from)
+                }
+                .await;
+
+                write(&mut stream, &resp).await?;
             }
             Request::ListTables {} => {
-                let tables = backend.list_tables().await?;
-                let tables: Vec<Table> = tables
-                    .into_iter()
-                    .map(|table| Table {
-                        database: table.database,
-                        table: table.table,
-                        cardinality: table.cardinality,
-                        commit_lsn: table.commit_lsn,
-                        flush_lsn: table.flush_lsn,
-                        iceberg_warehouse_location: table.iceberg_warehouse_location,
-                    })
-                    .collect();
-                write(&mut stream, &tables).await?;
+                let tables_resp = backend.list_tables().await;
+                let tables_resp: BackendResult<Vec<Table>> = tables_resp.map(|tables| {
+                    tables
+                        .into_iter()
+                        .map(|table| Table {
+                            database: table.database,
+                            table: table.table,
+                            cardinality: table.cardinality,
+                            commit_lsn: table.commit_lsn,
+                            flush_lsn: table.flush_lsn,
+                            iceberg_warehouse_location: table.iceberg_warehouse_location,
+                        })
+                        .collect()
+                });
+                write(&mut stream, &tables_resp).await?;
             }
             Request::OptimizeTable {
                 database,
                 table,
                 mode,
             } => {
-                backend.optimize_table(database, table, &mode).await?;
-                write(&mut stream, &()).await?;
+                let resp = backend.optimize_table(database, table, &mode).await;
+                write(&mut stream, &resp).await?;
             }
             Request::ScanTableBegin {
                 database,
@@ -170,8 +178,9 @@ where
             } => {
                 let state = backend
                     .scan_table(database.to_string(), table.to_string(), Some(lsn))
-                    .await?;
-                write(&mut stream, &state.data).await?;
+                    .await;
+
+                write(&mut stream, &state.as_ref().map(|s| s.data.clone())).await?;
                 assert!(map.insert((database, table), state).is_none());
             }
             Request::ScanTableEnd { database, table } => {
@@ -183,8 +192,8 @@ where
                 table,
                 files,
             } => {
-                backend.load_files(database, table, files).await?;
-                write(&mut stream, &()).await?;
+                let resp = backend.load_files(database, table, files).await;
+                write(&mut stream, &resp).await?;
             }
         }
     }
