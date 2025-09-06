@@ -3,7 +3,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_cli::exec::exec_from_repl;
 use datafusion_cli::print_format::PrintFormat;
 use datafusion_cli::print_options::{MaxRows, PrintOptions};
-use moonlink_datafusion::MooncakeCatalogProvider;
+use moonlink_datafusion::{start_maintenance_task, MooncakeCatalogProvider};
 use std::error::Error;
 use std::sync::Arc;
 
@@ -18,6 +18,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let ctx = SessionContext::new();
     let catalog = MooncakeCatalogProvider::try_new(cli.uri).await?;
     ctx.register_catalog("mooncake", Arc::new(catalog));
+
+    tokio::spawn(start_maintenance_task());
 
     // EXAMPLE:
     // let df = ctx
