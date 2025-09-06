@@ -35,23 +35,23 @@ pub struct RestCatalogConfig {
 pub struct GlueCatalogConfig {
     #[serde(rename = "name")]
     #[serde(default)]
-    name: Option<String>,
+    pub name: Option<String>,
 
     #[serde(rename = "uri")]
     #[serde(default)]
-    uri: Option<String>,
+    pub uri: Option<String>,
 
     #[serde(rename = "catalog_id")]
     #[serde(default)]
-    catalog_id: Option<String>,
+    pub catalog_id: Option<String>,
 
     #[serde(rename = "warehouse")]
     #[serde(default)]
-    warehouse: String,
+    pub warehouse: String,
 
     #[serde(rename = "props")]
     #[serde(default)]
-    props: HashMap<String, String>,
+    pub props: HashMap<String, String>,
 }
 
 pub type FileCatalogConfig = AccessorConfig;
