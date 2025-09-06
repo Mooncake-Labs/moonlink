@@ -13,7 +13,7 @@ use moonlink_backend::{
     EventRequest, FileEventOperation, FileEventRequest, FlushRequest, IngestRequestPayload,
     RowEventOperation, RowEventRequest, SnapshotRequest, REST_API_URI,
 };
-use moonlink_connectors::rest_ingest::schema_builder::{build_arrow_schema, FieldSchema};
+use moonlink_connectors::rest_ingest::schema_util::{build_arrow_schema, FieldSchema};
 use moonlink_error::ErrorStatus;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;

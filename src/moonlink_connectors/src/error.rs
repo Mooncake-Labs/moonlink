@@ -2,7 +2,7 @@ use crate::pg_replicate::postgres_source::{
     CdcStreamError, PostgresSourceError, TableCopyStreamError,
 };
 use crate::rest_ingest::rest_source::RestSourceError;
-use crate::rest_ingest::{json_converter, schema_builder, SrcTableId};
+use crate::rest_ingest::{json_converter, schema_util, SrcTableId};
 use moonlink::Error as MoonlinkError;
 use moonlink_error::{io_error_utils, ErrorStatus, ErrorStruct};
 use serde::{Deserialize, Serialize};
@@ -264,9 +264,9 @@ impl From<parquet::errors::ParquetError> for Error {
     }
 }
 
-impl From<schema_builder::SchemaBuildError> for Error {
+impl From<schema_util::SchemaBuildError> for Error {
     #[track_caller]
-    fn from(source: schema_builder::SchemaBuildError) -> Self {
+    fn from(source: schema_util::SchemaBuildError) -> Self {
         Error::SchemaBuildError(ErrorStruct {
             message: "Schema building error".to_string(),
             status: ErrorStatus::Permanent,
