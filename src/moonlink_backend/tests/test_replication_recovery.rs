@@ -11,8 +11,6 @@ mod tests {
 
     use crate::common::nonunique_ids_from_state;
 
-    use crate::common::SRC_URI;
-
     async fn terminate_replication_new_conn() {
         let uri = get_database_uri();
         let (client, connection) = connect_to_postgres(&uri).await;
@@ -138,12 +136,13 @@ mod tests {
             .await
             .unwrap();
         let table_b = format!("{TABLE}_b");
+        let uri = get_database_uri();
         backend
             .create_table(
                 DATABASE.to_string(),
                 table_b.clone(),
                 /*table_name=*/ "public.reconnect_multi_b".to_string(),
-                SRC_URI.to_string(),
+                uri.to_string(),
                 guard.get_serialized_table_config(),
                 None,
             )
