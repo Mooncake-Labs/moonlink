@@ -4385,6 +4385,7 @@ dependencies = [
  "clap",
  "datafusion",
  "datafusion-cli",
+ "datafusion-pruning",
  "moonlink_error",
  "moonlink_rpc",
  "moonlink_table_metadata",

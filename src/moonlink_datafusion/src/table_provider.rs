@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::segment_elimination::{analyze_file_for_segment_elimination, FileStatistics};
 use arrow::datatypes::SchemaRef;
 use arrow_ipc::reader::StreamReader;
 use async_trait::async_trait;
@@ -76,8 +77,8 @@ impl TableProvider for MooncakeTableProvider {
             .map(|predicate| state.create_physical_expr(predicate, &schema))
             .transpose()?;
         let mut source = ParquetSource::default();
-        if let Some(predicate) = predicate {
-            source = source.with_predicate(predicate);
+        if let Some(ref predicate) = predicate {
+            source = source.with_predicate(Arc::clone(predicate));
         }
         let url = ObjectStoreUrl::local_filesystem();
         let store = state.runtime_env().object_store(&url)?;
@@ -133,12 +134,25 @@ impl TableProvider for MooncakeTableProvider {
             let file = File::open(data_file).await?;
             let size = file.metadata().await?.len();
             let stream_builder = ParquetRecordBatchStreamBuilder::new(file).await?;
+
+            let metadata = stream_builder.metadata();
+            let file_stats = FileStatistics::from_parquet_metadata(metadata, &self.schema)?;
+            let include_row_groups =
+                analyze_file_for_segment_elimination(&file_stats, predicate.clone(), &self.schema)?;
+
             let mut access_plan =
                 ParquetAccessPlan::new_all(stream_builder.metadata().num_row_groups());
             let mut data_file_row_number = 0;
+
             for (row_group_number, row_group) in
                 stream_builder.metadata().row_groups().iter().enumerate()
             {
+                // Skip row groups that don't match the predicate
+                if !include_row_groups[row_group_number] {
+                    data_file_row_number += row_group.num_rows();
+                    continue;
+                }
+
                 let row_group_row_number = data_file_row_number + row_group.num_rows();
                 let mut selectors = vec![];
                 while data_file_row_number < row_group_row_number {
