@@ -85,8 +85,7 @@ impl Sink {
         }
     }
 
-    /// Reset the per-connection keepalive floor. Should be called after establishing a new CDC stream
-    /// with the connection's confirmed flush LSN.
+    /// Reset the per-connection keepalive floor. Should be called after establishing a new CDC stream.
     pub fn reset_keepalive_floor(&mut self) {
         self.max_keepalive_lsn_seen = 0;
     }

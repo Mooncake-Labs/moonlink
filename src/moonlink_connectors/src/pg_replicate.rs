@@ -677,7 +677,7 @@ pub async fn run_event_loop(
             }
         };
 
-        // Reset keepalive floor for this connection to the confirmed flush LSN
+        // Reset keepalive floor for this connection
         sink.reset_keepalive_floor();
 
         // Reset backoff after a successful stream creation
