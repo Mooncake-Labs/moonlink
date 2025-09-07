@@ -20,6 +20,11 @@ use crate::{MooncakeTable, ReadStateFilepathRemap, SnapshotReadOutput};
 use crate::{ReadState, Result};
 use tracing::{debug, error};
 
+#[cfg(test)]
+use crate::storage::verify_files_and_deletions;
+#[cfg(test)]
+use crate::union_read::decode_read_state_for_testing;
+
 /// ===============================
 /// Flush
 /// ===============================
@@ -689,4 +694,36 @@ pub(crate) async fn alter_table(table: &mut MooncakeTable) {
         dropped_columns: vec!["age".to_string()],
     };
     table.alter_table(alter_table_request);
+}
+
+#[cfg(test)]
+pub(crate) async fn check_mooncake_table_snapshot(
+    table: &mut MooncakeTable,
+    target_lsn: Option<u64>,
+    expected_ids: &[i32],
+) {
+    let snapshot_read_output = perform_read_request_for_test(table).await;
+    let read_state = snapshot_read_output
+        .take_as_read_state(get_read_state_filepath_remap())
+        .await
+        .unwrap();
+    let (data_files, puffin_files, deletion_vectors, position_deletes) =
+        decode_read_state_for_testing(&read_state);
+
+    if data_files.is_empty() && !expected_ids.is_empty() {
+        unreachable!(
+            "No snapshot files returned for LSN {:?} when rows (IDs: {:?})
+     were expected. Expected files because expected_ids is not empty.",
+            target_lsn, expected_ids
+        );
+    }
+
+    verify_files_and_deletions(
+        &data_files,
+        &puffin_files,
+        position_deletes,
+        deletion_vectors,
+        expected_ids,
+    )
+    .await;
 }
