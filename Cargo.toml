@@ -1,14 +1,15 @@
 [workspace]
 members = [
-    "src/moonlink",
-    "src/moonlink_backend",
-    "src/moonlink_connectors",
-    "src/moonlink_datafusion",
-    "src/moonlink_metadata_store",
-    "src/moonlink_proto",
-    "src/moonlink_rpc",
-    "src/moonlink_service",
-    "src/moonlink_table_metadata",
+  "src/moonlink",
+  "src/moonlink_backend",
+  "src/moonlink_connectors",
+  "src/moonlink_datafusion",
+  "src/moonlink_error",
+  "src/moonlink_metadata_store",
+  "src/moonlink_proto",
+  "src/moonlink_rpc",
+  "src/moonlink_service",
+  "src/moonlink_table_metadata",
 ]
 resolver = "2"
 
@@ -23,11 +24,12 @@ arrow = { version = "55", default-features = false, features = [
   "canonical_extension_types",
 ] }
 arrow-array = "55"
+arrow-buffer = "55"
 arrow-ipc = "55"
 arrow-schema = { version = "55", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
-backon = { version = "1.5" }
+backon = "1.5"
 bincode = { version = "2", features = ["serde"] }
 bitstream-io = "4.5"
 bytes = "1.0"
@@ -43,20 +45,31 @@ iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "8f288ab00
   "storage-fs",
 ] }
 iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev = "8f288ab0098bdd1f1afe81e4dd1c3c181d63890b" }
-itertools = { version = "0.14" }
-lru = { version = "0.14" }
+itertools = "0.14"
+lru = "0.14"
 moka = { version = "0.12", features = ["future"] }
 more-asserts = "0.3"
 multimap = { version = "0.10", default-features = false }
-native-tls = "0.2"
+native-tls = "0.2.14"
 nix = { version = "0.30", default-features = false, features = ["fs"] }
-num-bigint = { version = "0.4" }
+num-bigint = "0.4"
 num-traits = "0.2"
 object_store = "0.12"
 opendal = { version = "0.54", default-features = false }
-opentelemetry = { version = "0.30", default-features = false, features = ["trace", "metrics"] }
-opentelemetry-otlp = { version = "0.30", default-features = false, features = ["reqwest-blocking-client", "http-proto", "trace", "metrics"] }
-opentelemetry_sdk = { version = "0.30", default-features = false, features = ["trace", "metrics"] }
+opentelemetry = { version = "0.30", default-features = false, features = [
+  "trace",
+  "metrics",
+] }
+opentelemetry-otlp = { version = "0.30", default-features = false, features = [
+  "reqwest-blocking-client",
+  "http-proto",
+  "trace",
+  "metrics",
+] }
+opentelemetry_sdk = { version = "0.30", default-features = false, features = [
+  "trace",
+  "metrics",
+] }
 parquet = { version = "55", default-features = false, features = [
   "arrow",
   "async",
@@ -74,6 +87,7 @@ rand = "0.9"
 regex = "1.11"
 reqwest = { version = "0.12", features = ["json"] }
 roaring = "0.11"
+rstest = "0.26"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = "1"
 serial_test = "3.0"
@@ -100,6 +114,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 typed-builder = "0.20"
 url = "2.5"
 uuid = { version = "1.18", default-features = false, features = ["v4"] }
+
+# Workspace Members #
+moonlink = { path = "src/moonlink" }
+moonlink_backend = { path = "src/moonlink_backend" }
+moonlink_connectors = { path = "src/moonlink_connectors" }
+moonlink_datafusion = { path = "src/moonlink_datafusion" }
+moonlink_error = { path = "src/moonlink_error" }
+moonlink_metadata_store = { path = "src/moonlink_metadata_store" }
+moonlink_proto = { path = "src/moonlink_proto" }
+moonlink_rpc = { path = "src/moonlink_rpc" }
+moonlink_service = { path = "src/moonlink_service" }
+moonlink_table_metadata = { path = "src/moonlink_table_metadata" }
 
 [profile.release-with-debug]
 inherits = "release"
