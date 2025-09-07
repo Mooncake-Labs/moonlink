@@ -17,7 +17,7 @@ async fn test_health_check_endpoint() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     let client = reqwest::Client::new();
     let response = client
@@ -45,7 +45,7 @@ async fn test_schema() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -118,7 +118,7 @@ async fn run_optimize_table_test(mode: &str) {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -227,7 +227,7 @@ async fn test_create_snapshot() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -300,7 +300,7 @@ async fn test_moonlink_standalone_data_ingestion() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -369,7 +369,7 @@ async fn test_moonlink_standalone_file_upload() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -442,7 +442,7 @@ async fn test_moonlink_standalone_file_insert() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -515,7 +515,7 @@ async fn test_multiple_tables_creation() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create the first test table.
     let client: reqwest::Client = reqwest::Client::new();
@@ -533,7 +533,7 @@ async fn test_drop_table() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -560,7 +560,7 @@ async fn test_list_tables() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create two test tables.
     let client: reqwest::Client = reqwest::Client::new();
@@ -604,7 +604,7 @@ async fn test_bulk_ingest_files() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     let client: reqwest::Client = reqwest::Client::new();
     create_table(&client, DATABASE, TABLE).await;
@@ -634,7 +634,7 @@ async fn test_invalid_operation() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table.
     let client = reqwest::Client::new();
@@ -691,7 +691,7 @@ async fn test_non_existent_table() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create the test table.
     let client: reqwest::Client = reqwest::Client::new();
@@ -747,7 +747,7 @@ async fn test_create_table_with_invalid_config() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     let client: reqwest::Client = reqwest::Client::new();
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");

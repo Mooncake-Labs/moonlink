@@ -136,8 +136,8 @@ pub(crate) fn get_service_config() -> ServiceConfig {
     }
 }
 
-/// Send request to readiness endpoint.
-pub(crate) async fn test_readiness_probe() {
+/// Send request to readiness endpoint and wait until the server is ready.
+pub(crate) async fn wait_for_server_ready() {
     let url = format!("http://127.0.0.1:{READINESS_PROBE_PORT}/ready");
     loop {
         if let Ok(resp) = reqwest::get(&url).await {
