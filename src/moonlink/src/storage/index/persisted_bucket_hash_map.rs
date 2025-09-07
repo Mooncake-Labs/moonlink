@@ -398,7 +398,9 @@ impl IndexBlockBuilder {
                 self.entry_writer.flush().await?;
             }
         }
-        self.entry_writer.byte_align();
+        if self.entry_writer.byte_align() {
+            self.entry_writer.flush().await?;
+        }
         self.entry_writer.flush().await?;
         drop(self.entry_writer);
 

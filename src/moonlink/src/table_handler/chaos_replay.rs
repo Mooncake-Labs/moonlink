@@ -581,9 +581,6 @@ pub(crate) async fn replay(replay_filepath: &str) {
 
                 // Validate mooncake snapshot.
                 let commit_lsn = snapshot_completion_event.lsn;
-
-                println!("validate mooncake lsn = {}", commit_lsn);
-
                 let mut expected_ids = versioned_committed_ids
                     .get(&commit_lsn)
                     .as_ref()
@@ -634,9 +631,6 @@ pub(crate) async fn replay(replay_filepath: &str) {
 
                 // Validate iceberg snapshot.
                 let commit_lsn = snapshot_completion_event.lsn;
-
-                println!("validate iceberg lsn = {}", commit_lsn);
-
                 let mut expected_ids = versioned_committed_ids
                     .get(&commit_lsn)
                     .as_ref()
