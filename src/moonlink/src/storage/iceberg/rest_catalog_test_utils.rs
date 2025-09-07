@@ -7,7 +7,7 @@ use rand::{distr::Alphanumeric, Rng};
 use std::collections::HashMap;
 
 const DEFAULT_REST_CATALOG_NAME: &str = "test";
-const DEFAULT_WAREHOUSE_PATH: &str = "warehouse";
+const DEFAULT_WAREHOUSE_PATH: &str = "/tmp/moonlink_iceberg";
 
 pub(crate) fn get_random_string() -> String {
     let rng = rand::rng();
