@@ -1,4 +1,4 @@
-use super::moonlink_catalog::{PuffinBlobType, PuffinWrite};
+use super::moonlink_catalog::{CatalogAccess, PuffinBlobType, PuffinWrite};
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::catalog_utils::{reflect_table_updates, validate_table_requirements};
 use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
@@ -6,8 +6,8 @@ use crate::storage::iceberg::moonlink_catalog::SchemaUpdate;
 use async_trait::async_trait;
 use iceberg::io::FileIO;
 use iceberg::puffin::PuffinWriter;
-use iceberg::spec::Schema as IcebergSchema;
 use iceberg::spec::TableMetadataBuilder;
+use iceberg::spec::{Schema as IcebergSchema, TableMetadata};
 use iceberg::table::Table;
 use iceberg::CatalogBuilder;
 use iceberg::Result as IcebergResult;
@@ -29,6 +29,7 @@ use super::puffin_writer_proxy::{
 pub struct RestCatalog {
     pub(crate) catalog: IcebergRestCatalog,
     file_io: FileIO,
+    warehouse_location: String,
     ///
     /// Maps from "puffin filepath" to "puffin blob metadata".
     deletion_vector_blobs_to_add: HashMap<String, Vec<PuffinBlobMetadataProxy>>,
@@ -49,14 +50,17 @@ impl RestCatalog {
         config
             .props
             .insert(REST_CATALOG_PROP_URI.to_string(), config.uri);
-        config
-            .props
-            .insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), config.warehouse);
+        config.props.insert(
+            REST_CATALOG_PROP_WAREHOUSE.to_string(),
+            config.warehouse.clone(),
+        );
+        let warehouse_location = config.warehouse.clone();
         let catalog = builder.load(config.name, config.props).await?;
         let file_io = iceberg_io_utils::create_file_io(&accessor_config)?;
         Ok(Self {
             catalog,
             file_io,
+            warehouse_location,
             deletion_vector_blobs_to_add: HashMap::new(),
             file_index_blobs_to_add: HashMap::new(),
             puffin_blobs_to_remove: HashSet::new(),
@@ -231,5 +235,25 @@ impl SchemaUpdate for RestCatalog {
         _table_ident: TableIdent,
     ) -> IcebergResult<Table> {
         todo!("update table schema is not supported")
+    }
+}
+
+#[async_trait]
+impl CatalogAccess for RestCatalog {
+    fn get_warehouse_location(&self) -> &str {
+        &self.warehouse_location
+    }
+
+    async fn load_metadata(
+        &self,
+        table_ident: &TableIdent,
+    ) -> IcebergResult<(String /*metadata_filepath*/, TableMetadata)> {
+        let table = self.catalog.load_table(table_ident).await?;
+        let metadata = table.metadata().clone();
+        let metadata_location = table
+            .metadata_location()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        Ok((metadata_location, metadata))
     }
 }
