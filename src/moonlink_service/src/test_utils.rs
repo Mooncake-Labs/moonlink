@@ -14,22 +14,22 @@ use crate::{ServiceConfig, READINESS_PROBE_PORT};
 use moonlink_backend::table_status::TableStatus;
 
 /// Local nginx server IP/port address.
-pub const NGINX_ADDR: &str = "http://nginx.local:80";
+pub(crate) const NGINX_ADDR: &str = "http://nginx.local:80";
 /// Local moonlink REST API IP/port address.
-pub const REST_ADDR: &str = "http://127.0.0.1:3030";
+pub(crate) const REST_ADDR: &str = "http://127.0.0.1:3030";
 /// Local moonlink server IP/port address.
-pub const MOONLINK_ADDR: &str = "127.0.0.1:3031";
+pub(crate) const MOONLINK_ADDR: &str = "127.0.0.1:3031";
 /// Test database name.
-pub const DATABASE: &str = "test-database";
+pub(crate) const DATABASE: &str = "test-database";
 /// Test table name.
-pub const TABLE: &str = "test-table";
+pub(crate) const TABLE: &str = "test-table";
 
-pub struct TestGuard {
+pub(crate) struct TestGuard {
     dir: String,
 }
 
 impl TestGuard {
-    pub async fn new(dir: &str) -> Self {
+    pub(crate) async fn new(dir: &str) -> Self {
         cleanup_directory(dir);
         Self {
             dir: dir.to_string(),
@@ -60,7 +60,7 @@ fn cleanup_directory(dir: &str) {
 }
 
 /// Util function to create test arrow schema.
-pub(crate) fn create_test_arrow_schema() -> Arc<ArrowSchema> {
+fn create_test_arrow_schema() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![
         Field::new("id", DataType::Int32, /*nullable=*/ false).with_metadata(HashMap::from([(
             "PARQUET:field_id".to_string(),
@@ -111,7 +111,7 @@ pub(crate) async fn generate_parquet_file(directory: &str) -> String {
 }
 
 /// Moonlink backend directory.
-pub fn get_moonlink_backend_dir() -> String {
+pub(crate) fn get_moonlink_backend_dir() -> String {
     if let Ok(backend_dir) = env::var("MOONLINK_BACKEND_DIR") {
         backend_dir
     } else {
@@ -124,7 +124,7 @@ fn get_nginx_addr() -> String {
     env::var("NGINX_ADDR").unwrap_or_else(|_| NGINX_ADDR.to_string())
 }
 
-pub fn get_service_config() -> ServiceConfig {
+pub(crate) fn get_service_config() -> ServiceConfig {
     let moonlink_backend_dir = get_moonlink_backend_dir();
     let nginx_addr = get_nginx_addr();
 
@@ -137,7 +137,7 @@ pub fn get_service_config() -> ServiceConfig {
 }
 
 /// Send request to readiness endpoint.
-pub async fn test_readiness_probe() {
+pub(crate) async fn test_readiness_probe() {
     let url = format!("http://127.0.0.1:{READINESS_PROBE_PORT}/ready");
     loop {
         if let Ok(resp) = reqwest::get(&url).await {
@@ -180,7 +180,11 @@ fn get_drop_table_payload(database: &str, table: &str) -> serde_json::Value {
 }
 
 /// Util function to get table optimize payload.
-pub fn get_optimize_table_payload(database: &str, table: &str, mode: &str) -> serde_json::Value {
+pub(crate) fn get_optimize_table_payload(
+    database: &str,
+    table: &str,
+    mode: &str,
+) -> serde_json::Value {
     let optimize_table_payload = json!({
         "database": database,
         "table": table,
@@ -190,7 +194,11 @@ pub fn get_optimize_table_payload(database: &str, table: &str, mode: &str) -> se
 }
 
 /// Util function to get create snapshot payload.
-pub fn get_create_snapshot_payload(database: &str, table: &str, lsn: u64) -> serde_json::Value {
+pub(crate) fn get_create_snapshot_payload(
+    database: &str,
+    table: &str,
+    lsn: u64,
+) -> serde_json::Value {
     let snapshot_creation_payload = json!({
         "database": database,
         "table": table,
@@ -200,7 +208,7 @@ pub fn get_create_snapshot_payload(database: &str, table: &str, lsn: u64) -> ser
 }
 
 /// Util function to create table via REST API.
-pub async fn create_table(client: &reqwest::Client, database: &str, table: &str) {
+pub(crate) async fn create_table(client: &reqwest::Client, database: &str, table: &str) {
     // REST API doesn't allow duplicate source table name.
     let crafted_src_table_name = format!("{database}.{table}");
 
@@ -219,7 +227,7 @@ pub async fn create_table(client: &reqwest::Client, database: &str, table: &str)
 }
 
 /// Util function to drop table via REST API.
-pub async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
+pub(crate) async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
     let payload = get_drop_table_payload(database, table);
     let crafted_src_table_name = format!("{database}.{table}");
     let response = client
@@ -235,7 +243,7 @@ pub async fn drop_table(client: &reqwest::Client, database: &str, table: &str) {
     );
 }
 
-pub async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
+pub(crate) async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
     let response = client
         .get(format!("{REST_ADDR}/tables"))
         .header("content-type", "application/json")
@@ -251,7 +259,7 @@ pub async fn list_tables(client: &reqwest::Client) -> Vec<TableStatus> {
 }
 
 /// Util function to load all record batches for the given [`url`].
-pub async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
+pub(crate) async fn read_all_batches(url: &str) -> Vec<RecordBatch> {
     let resp = reqwest::get(url).await.unwrap();
     assert!(resp.status().is_success(), "Response status is {resp:?}");
     let data: Bytes = resp.bytes().await.unwrap();
