@@ -9,5 +9,5 @@ bytes = { workspace = true }
 prost = { workspace = true }
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "0.14"
 protoc-bin-vendored = "3"
