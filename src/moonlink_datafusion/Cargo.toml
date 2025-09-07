@@ -12,6 +12,7 @@ bincode = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
 datafusion-cli = { workspace = true }
+datafusion-pruning = { workspace = true }
 moonlink_error = { path = "../moonlink_error" }
 moonlink_rpc = { path = "../moonlink_rpc" }
 moonlink_table_metadata = { path = "../moonlink_table_metadata" }
