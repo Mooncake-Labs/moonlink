@@ -32,28 +32,36 @@ allow-git = [
 ignore = [
     "RUSTSEC-2023-0071", # rsa - marvin attack
     "RUSTSEC-2024-0436", # paste - unmaintained
-    "RUSTSEC-2025-0055", # tracing-subscriber - injection attacks
 ]
 
 # TODO(hjiang): Resolve all duplicate dependencies.
 [bans]
 skip = [
+    { name = "axum" },
+    { name = "axum-core" },
     { name = "base64" },
+    { name = "bzip2" },
+    { name = "core-foundation" },
     { name = "getrandom" },
     { name = "hashbrown" },
+    { name = "http" },
+    { name = "http-body" },
     { name = "indexmap" },
     { name = "itertools" },
+    { name = "matchit" },
     { name = "ordered-float" },
+    { name = "petgraph" },
+    { name = "phf" },
     { name = "phf_shared" },
+    { name = "quick-xml" },
     { name = "rand" },
     { name = "rand_chacha" },
     { name = "rand_core" },
-    { name = "regex-automata" },
-    { name = "regex-syntax" },
     { name = "security-framework" },
     { name = "socket2" },
     { name = "strum" },
     { name = "strum_macros" },
+    { name = "tonic" },
     { name = "thiserror" },
     { name = "thiserror-impl" },
     { name = "tower" },
