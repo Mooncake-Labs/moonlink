@@ -47,7 +47,7 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 arrow = { workspace = true }
 arrow-array = { workspace = true }
-arrow-buffer = "55"
+arrow-buffer = "56"
 async-recursion = "1"
 bytes = "1"
 more-asserts = { workspace = true }
