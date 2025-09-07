@@ -1,7 +1,6 @@
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::datatypes::{DataType, Field};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
-use async_recursion::async_recursion;
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::AsyncArrowWriter;
@@ -31,7 +30,7 @@ pub struct TestGuard {
 
 impl TestGuard {
     pub async fn new(dir: &str) -> Self {
-        cleanup_directory(dir).await;
+        cleanup_directory(dir);
         Self {
             dir: dir.to_string(),
         }
@@ -40,23 +39,23 @@ impl TestGuard {
 
 impl Drop for TestGuard {
     fn drop(&mut self) {
-        fn cleanup_sync(dir: &str) {
-            let dir = std::path::Path::new(dir);
-            if dir.exists() {
-                for entry in std::fs::read_dir(dir).unwrap() {
-                    let entry = entry.unwrap();
-                    let path = entry.path();
-                    if path.is_dir() {
-                        cleanup_sync(path.to_str().unwrap());
-                        std::fs::remove_dir_all(path).unwrap();
-                    } else {
-                        std::fs::remove_file(path).unwrap();
-                    }
-                }
+        cleanup_directory(&self.dir);
+    }
+}
+
+fn cleanup_directory(dir: &str) {
+    let dir = std::path::Path::new(dir);
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                cleanup_directory(path.to_str().unwrap());
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
             }
         }
-
-        cleanup_sync(&self.dir);
     }
 }
 
@@ -134,22 +133,6 @@ pub fn get_service_config() -> ServiceConfig {
         data_server_uri: Some(nginx_addr),
         rest_api_port: Some(3030),
         tcp_port: Some(3031),
-    }
-}
-
-/// Util function to delete and all subdirectories and files in the given directory.
-#[async_recursion]
-async fn cleanup_directory(dir: &str) {
-    let dir = std::path::Path::new(dir);
-    let mut entries = tokio::fs::read_dir(dir).await.unwrap();
-    while let Some(entry) = entries.next_entry().await.unwrap() {
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            cleanup_directory(entry_path.to_str().unwrap()).await;
-            tokio::fs::remove_dir_all(&entry_path).await.unwrap();
-        } else {
-            tokio::fs::remove_file(&entry_path).await.unwrap();
-        }
     }
 }
 
