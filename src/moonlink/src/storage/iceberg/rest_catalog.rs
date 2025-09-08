@@ -1,14 +1,19 @@
+use super::moonlink_catalog::{PuffinBlobType, PuffinWrite};
+use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
+use crate::storage::iceberg::moonlink_catalog::SchemaUpdate;
 use async_trait::async_trait;
+use iceberg::puffin::PuffinWriter;
+use iceberg::spec::Schema as IcebergSchema;
 use iceberg::table::Table;
 use iceberg::CatalogBuilder;
 use iceberg::Result as IcebergResult;
-use iceberg::{Catalog, Namespace, NamespaceIdent, Result, TableCommit, TableCreation, TableIdent};
+use iceberg::{Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent};
 use iceberg_catalog_rest::{
     RestCatalog as IcebergRestCatalog, RestCatalogBuilder as IcebergRestCatalogBuilder,
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct RestCatalog {
@@ -16,7 +21,11 @@ pub struct RestCatalog {
 }
 
 impl RestCatalog {
-    pub async fn new(mut config: RestCatalogConfig) -> Result<Self> {
+    #[allow(dead_code)]
+    pub async fn new(
+        mut config: RestCatalogConfig,
+        _accessor_config: AccessorConfig,
+    ) -> IcebergResult<Self> {
         let builder = IcebergRestCatalogBuilder::default();
         config
             .props
@@ -108,5 +117,40 @@ impl Catalog for RestCatalog {
         _metadata_location: String,
     ) -> IcebergResult<Table> {
         todo!("register existing table is not supported")
+    }
+}
+
+#[async_trait]
+impl PuffinWrite for RestCatalog {
+    async fn record_puffin_metadata_and_close(
+        &mut self,
+        _puffin_filepath: String,
+        _puffin_writer: PuffinWriter,
+        _puffin_blob_type: PuffinBlobType,
+    ) -> IcebergResult<()> {
+        todo!("record puffin metadata and close is not supported")
+    }
+
+    fn set_data_files_to_remove(&mut self, _data_files: HashSet<String>) {
+        todo!("set data files to remove is not supported")
+    }
+
+    fn set_index_puffin_files_to_remove(&mut self, _puffin_filepaths: HashSet<String>) {
+        todo!("set index puffin files to remove is not supported")
+    }
+
+    fn clear_puffin_metadata(&mut self) {
+        todo!("clear puffin metadata is not supported")
+    }
+}
+
+#[async_trait]
+impl SchemaUpdate for RestCatalog {
+    async fn update_table_schema(
+        &mut self,
+        _new_schema: IcebergSchema,
+        _table_ident: TableIdent,
+    ) -> IcebergResult<Table> {
+        todo!("update table schema is not supported")
     }
 }

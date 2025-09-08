@@ -10,6 +10,7 @@ use more_asserts as ma;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::AsyncArrowWriter;
 
+use crate::storage::cache::object_storage::base_cache::InlineEvictedFiles;
 use crate::storage::compaction::table_compaction::{
     CompactedDataEntry, DataCompactionPayload, DataCompactionResult, RemappedRecordLocation,
     SingleFileToCompact,
@@ -64,11 +65,17 @@ struct DataFileCompactionResult {
     data_file_remap: DataFileRemap,
     /// Cache evicted files to delete.
     evicted_files_to_delete: Vec<String>,
+    /// Updated single file to compact, which contains updated cache handle.
+    files_compacted: Vec<SingleFileToCompact>,
 }
 
 impl DataFileCompactionResult {
-    fn into_parts(self) -> (DataFileRemap, Vec<String>) {
-        (self.data_file_remap, self.evicted_files_to_delete)
+    fn into_parts(self) -> (DataFileRemap, Vec<String>, Vec<SingleFileToCompact>) {
+        (
+            self.data_file_remap,
+            self.evicted_files_to_delete,
+            self.files_compacted,
+        )
     }
 }
 
@@ -166,24 +173,36 @@ impl CompactionBuilder {
 
     /// Util function to read the given parquet file, apply the corresponding deletion vector, and write it to the given arrow writer.
     /// Return the data file mapping, and cache evicted data files to delete.
+    ///
+    /// Before compaction, remote files will be attempted to download and pin in cache.
+    /// If cache succeeds, [`data_file_to_compact`] will be updated accordingly to unpin all references after compaction completion.
     #[tracing::instrument(name = "apply_deletion_vec", skip_all)]
     async fn apply_deletion_vector_and_write(
         &mut self,
-        data_file_to_compact: SingleFileToCompact,
+        mut data_file_to_compact: SingleFileToCompact,
     ) -> Result<DataFileCompactionResult> {
         // Aggregate evicted files to delete.
         let mut evicted_files_to_delete = vec![];
 
-        let (cache_handle, evicted_files) = self
-            .compaction_payload
-            .object_storage_cache
-            .get_cache_entry(
-                data_file_to_compact.file_id,
-                &data_file_to_compact.filepath,
-                self.compaction_payload.filesystem_accessor.as_ref(),
-            )
-            .await?;
-        evicted_files_to_delete.extend(evicted_files);
+        // All data files with cache handle have been pinned in cache before compaction take place, only attempt to download and pin remote files here.
+        let (cache_handle, cur_evicted_files) =
+            if data_file_to_compact.data_file_cache_handle.is_some() {
+                (
+                    data_file_to_compact.data_file_cache_handle.clone(),
+                    InlineEvictedFiles::new(),
+                )
+            } else {
+                self.compaction_payload
+                    .object_storage_cache
+                    .get_cache_entry(
+                        data_file_to_compact.file_id,
+                        &data_file_to_compact.filepath,
+                        self.compaction_payload.filesystem_accessor.as_ref(),
+                    )
+                    .await?
+            };
+        data_file_to_compact.data_file_cache_handle = cache_handle.clone();
+        evicted_files_to_delete.extend(cur_evicted_files);
 
         let filepath = if let Some(cache_handle) = &cache_handle {
             cache_handle.get_cache_filepath()
@@ -202,8 +221,8 @@ impl CompactionBuilder {
         let mut reader = builder.build().unwrap();
 
         let batch_deletion_vector =
-            if let Some(puffin_blob_ref) = data_file_to_compact.deletion_vector {
-                puffin_utils::load_deletion_vector_from_blob(&puffin_blob_ref).await?
+            if let Some(puffin_blob_ref) = &data_file_to_compact.deletion_vector {
+                puffin_utils::load_deletion_vector_from_blob(puffin_blob_ref).await?
             } else {
                 BatchDeletionVector::new(/*max_rows=*/ 0)
             };
@@ -272,13 +291,6 @@ impl CompactionBuilder {
             self.flush_arrow_writer().await?;
         }
 
-        // Unpin cache handle after usage, if necessary.
-        // TODO(hjiang): Better error propagation, cache handle should be always unpinned whether success or failure.
-        if let Some(mut cache_handle) = cache_handle {
-            let evicted_files = cache_handle.unreference().await;
-            evicted_files_to_delete.extend(evicted_files);
-        }
-
         // Sanity check on compaction result.
         let expected_compacted_num_rows = total_num_rows - deleted_rows_num;
         let actual_compacted_num_rows = old_to_new_remap.len();
@@ -287,6 +299,7 @@ impl CompactionBuilder {
         let data_file_compaction_result = DataFileCompactionResult {
             data_file_remap: old_to_new_remap,
             evicted_files_to_delete,
+            files_compacted: vec![data_file_to_compact],
         };
 
         Ok(data_file_compaction_result)
@@ -299,17 +312,20 @@ impl CompactionBuilder {
 
         let disk_files = std::mem::take(&mut self.compaction_payload.disk_files);
         let mut evicted_files_to_delete = vec![];
+        let mut files_compacted = vec![];
         for single_file_to_compact in disk_files.into_iter() {
             let data_file_compaction_result = self
                 .apply_deletion_vector_and_write(single_file_to_compact)
                 .await?;
             evicted_files_to_delete.extend(data_file_compaction_result.evicted_files_to_delete);
             old_to_new_remap.extend(data_file_compaction_result.data_file_remap);
+            files_compacted.extend(data_file_compaction_result.files_compacted);
         }
 
         let data_file_compaction_result = DataFileCompactionResult {
             data_file_remap: old_to_new_remap,
             evicted_files_to_delete,
+            files_compacted,
         };
         Ok(data_file_compaction_result)
     }
@@ -365,6 +381,8 @@ impl CompactionBuilder {
     }
 
     /// Perform a compaction operation, and get the result back.
+    ///
+    /// TODO(hjiang): Error handling, all references should be unpinned on error.
     #[tracing::instrument(name = "compaction_build", skip_all)]
     #[allow(clippy::mutable_key_type)]
     pub(crate) async fn build(mut self) -> Result<DataCompactionResult> {
@@ -386,11 +404,20 @@ impl CompactionBuilder {
             .cloned()
             .collect::<HashSet<_>>();
         let data_file_compaction_result = self.compact_data_files().await?;
-        let (old_record_loc_to_new_mapping, evicted_files_to_delete) =
+        let (old_record_loc_to_new_mapping, mut evicted_files_to_delete, files_compacted) =
             data_file_compaction_result.into_parts();
+        // Update compaction payload with compacted files.
+        self.compaction_payload.disk_files = files_compacted;
 
         // All rows have been deleted.
         if old_record_loc_to_new_mapping.is_empty() {
+            // After compaction finishes, unpin all pinned cache handles.
+            let cur_evicted_files = self
+                .compaction_payload
+                .unpin_referenced_compaction_payload()
+                .await;
+            evicted_files_to_delete.extend(cur_evicted_files);
+
             return Ok(DataCompactionResult {
                 uuid: self.compaction_payload.uuid,
                 remapped_data_files: old_record_loc_to_new_mapping,
@@ -418,6 +445,13 @@ impl CompactionBuilder {
                 .await?;
             new_file_indices.push(cur_new_file_indices);
         }
+
+        // After compaction finishes, unpin all pinned cache handles.
+        let cur_evicted_files = self
+            .compaction_payload
+            .unpin_referenced_compaction_payload()
+            .await;
+        evicted_files_to_delete.extend(cur_evicted_files);
 
         Ok(DataCompactionResult {
             uuid: self.compaction_payload.uuid,

@@ -1,11 +1,12 @@
 use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
+use crate::storage::mooncake_table::test_utils_commons::REST_CATALOG_TEST_URI;
+use crate::{AccessorConfig, StorageConfig};
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
 use iceberg::TableCreation;
 use rand::{distr::Alphanumeric, Rng};
 use std::collections::HashMap;
 
 const DEFAULT_REST_CATALOG_NAME: &str = "test";
-const DEFAULT_REST_CATALOG_URI: &str = "http://localhost:8181";
 const DEFAULT_WAREHOUSE_PATH: &str = "warehouse";
 
 pub(crate) fn get_random_string() -> String {
@@ -16,10 +17,18 @@ pub(crate) fn get_random_string() -> String {
         .collect()
 }
 
+pub(crate) fn default_accessor_config() -> AccessorConfig {
+    let storage_config = StorageConfig::FileSystem {
+        root_directory: DEFAULT_WAREHOUSE_PATH.to_string(),
+        atomic_write_dir: None,
+    };
+    AccessorConfig::new_with_storage_config(storage_config)
+}
+
 pub(crate) fn default_rest_catalog_config() -> RestCatalogConfig {
     RestCatalogConfig {
-        name: DEFAULT_REST_CATALOG_NAME.to_string(),
-        uri: DEFAULT_REST_CATALOG_URI.to_string(),
+        name: format!("{}-{}", DEFAULT_REST_CATALOG_NAME, get_random_string()),
+        uri: REST_CATALOG_TEST_URI.to_string(),
         warehouse: DEFAULT_WAREHOUSE_PATH.to_string(),
         props: HashMap::new(),
     }

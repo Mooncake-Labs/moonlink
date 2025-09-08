@@ -32,6 +32,12 @@ impl<T> TableMaintenanceStatus<T> {
     pub fn has_payload(&self) -> bool {
         matches!(self, TableMaintenanceStatus::Payload(_))
     }
+    pub fn get_payload_reference(&self) -> Option<&T> {
+        match self {
+            TableMaintenanceStatus::Payload(payload) => Some(payload),
+            _ => None,
+        }
+    }
     pub fn take_payload(self) -> Option<T> {
         match self {
             TableMaintenanceStatus::Payload(payload) => Some(payload),

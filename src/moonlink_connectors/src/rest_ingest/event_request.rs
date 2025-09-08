@@ -15,10 +15,16 @@ pub enum RowEventOperation {
 }
 
 #[derive(Debug, Clone)]
+pub enum IngestRequestPayload {
+    Json(serde_json::Value),
+    Protobuf(Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
 pub struct RowEventRequest {
     pub src_table_name: String,
     pub operation: RowEventOperation,
-    pub payload: serde_json::Value,
+    pub payload: IngestRequestPayload,
     pub timestamp: SystemTime,
     /// An optional channel for commit LSN, used to synchronize request completion.
     /// TODO(hjiang): Handle error propagation.
@@ -67,6 +73,20 @@ pub struct SnapshotRequest {
 }
 
 /// ======================
+/// Table flush request
+/// ======================
+///
+#[derive(Debug, Clone)]
+pub struct FlushRequest {
+    /// Src table name.
+    pub src_table_name: String,
+    /// Requested LSN.
+    pub lsn: u64,
+    /// Channel used to synchronize flush completion.
+    pub tx: mpsc::Sender<u64>,
+}
+
+/// ======================
 /// Event request
 /// ======================
 ///
@@ -75,6 +95,7 @@ pub enum EventRequest {
     RowRequest(RowEventRequest),
     FileRequest(FileEventRequest),
     SnapshotRequest(SnapshotRequest),
+    FlushRequest(FlushRequest),
 }
 
 impl EventRequest {
@@ -84,6 +105,7 @@ impl EventRequest {
             EventRequest::RowRequest(req) => req.tx.clone(),
             EventRequest::FileRequest(req) => req.tx.clone(),
             EventRequest::SnapshotRequest(req) => Some(req.tx.clone()),
+            EventRequest::FlushRequest(req) => Some(req.tx.clone()),
         }
     }
 }

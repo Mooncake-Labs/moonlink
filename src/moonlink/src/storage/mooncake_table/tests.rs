@@ -3037,7 +3037,9 @@ async fn test_late_arriving_high_flush_lsn() {
     // Create mooncake and iceberg snapshot, so we could check flush LSN.
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
     let iceberg_table_config = test_iceberg_table_config(&context, "late_arriving_high_flush_lsn");
-    let iceberg_snapshot_fetcher = IcebergSnapshotFetcher::new(iceberg_table_config).unwrap();
+    let iceberg_snapshot_fetcher = IcebergSnapshotFetcher::new(iceberg_table_config)
+        .await
+        .unwrap();
     let flush_lsn = iceberg_snapshot_fetcher
         .get_flush_lsn()
         .await
@@ -3125,7 +3127,9 @@ async fn test_out_of_order_flush_for_iceberg_snapshot() {
     // Create mooncake and iceberg snapshot, so we could check flush LSN.
     create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
     let iceberg_table_config = test_iceberg_table_config(&context, "late_arriving_high_flush_lsn");
-    let iceberg_snapshot_fetcher = IcebergSnapshotFetcher::new(iceberg_table_config).unwrap();
+    let iceberg_snapshot_fetcher = IcebergSnapshotFetcher::new(iceberg_table_config)
+        .await
+        .unwrap();
     let flush_lsn = iceberg_snapshot_fetcher.get_flush_lsn().await.unwrap();
     assert!(flush_lsn.is_none());
 }
@@ -3213,6 +3217,26 @@ async fn test_delete_if_exists() -> Result<()> {
         .await;
         drop(snapshot);
     }
+
+    Ok(())
+}
+
+#[apply(shared_cases)]
+#[tokio::test]
+async fn test_check_mooncake_table_snapshot_function(#[case] identity: IdentityProp) -> Result<()> {
+    let context = TestContext::new("snapshot_check_test");
+    let mut table = test_table(&context, "test_snapshot_table", identity).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Insert some test data
+    append_rows(&mut table, vec![test_row(1, "A", 20), test_row(2, "B", 21)])?;
+    table.commit(1);
+
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Test check_mooncake_table_snapshot function!
+    check_mooncake_table_snapshot(&mut table, Some(1), &[1, 2]).await;
 
     Ok(())
 }

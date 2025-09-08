@@ -456,6 +456,7 @@ impl TableHandler {
                         mooncake_snapshot_result,
                     } => {
                         // Record mooncake snapshot completion.
+                        // Notice: operation completion record should be the first thing to do on event notification, and contains all information.
                         table.record_mooncake_snapshot_completion(&mooncake_snapshot_result);
 
                         // Spawn a detached best-effort task to delete evicted object storage cache.
@@ -471,6 +472,14 @@ impl TableHandler {
                         if table_handler_state.special_table_state == SpecialTableState::DropTable
                             && table_handler_state.can_drop_table_now(table.has_ongoing_flush())
                         {
+                            // Decrement reference count for data compaction payload if applicable.
+                            if let Some(payload) = mooncake_snapshot_result
+                                .data_compaction_payload
+                                .take_payload()
+                            {
+                                payload.unpin_referenced_compaction_payload().await;
+                            }
+
                             drop_table(&mut table, event_sync_sender).await;
                             return;
                         }
@@ -497,6 +506,9 @@ impl TableHandler {
                                     .unwrap();
                             }
                         }
+
+                        // Record whether data compaction actually takes place.
+                        let mut data_compaction_take_place = false;
 
                         // Only attempt new maintenance when there's no ongoing one.
                         if table_handler_state.table_maintenance_process_status
@@ -527,11 +539,12 @@ impl TableHandler {
                             // Get payload and try perform maintenance operations.
                             if let Some(data_compaction_payload) = mooncake_snapshot_result
                                 .data_compaction_payload
-                                .take_payload()
+                                .get_payload_reference()
                             {
+                                data_compaction_take_place = true;
                                 table_handler_state.table_maintenance_process_status =
                                     MaintenanceProcessStatus::InProcess;
-                                table.perform_data_compaction(data_compaction_payload);
+                                table.perform_data_compaction(data_compaction_payload.clone());
                             }
 
                             // ==========================
@@ -569,6 +582,16 @@ impl TableHandler {
                                 table.perform_index_merge(file_indices_merge_payload);
                             }
                         }
+
+                        // Decrement reference count for data compaction payload if applicable.
+                        if let Some(payload) = mooncake_snapshot_result
+                            .data_compaction_payload
+                            .take_payload()
+                        {
+                            if !data_compaction_take_place {
+                                payload.unpin_referenced_compaction_payload().await;
+                            }
+                        }
                     }
                     TableEvent::IcebergSnapshotResult {
                         iceberg_snapshot_result,
@@ -577,7 +600,13 @@ impl TableHandler {
                         match iceberg_snapshot_result {
                             Ok(snapshot_res) => {
                                 // Record iceberg snapshot completion.
+                                // Notice: operation completion record should be the first thing to do on event notification, and contains all information.
                                 table.record_iceberg_snapshot_completion(&snapshot_res);
+
+                                // Start a background task to delete evicted files at best-effort.
+                                start_task_to_delete_evicted(
+                                    snapshot_res.evicted_files_to_delete.clone(),
+                                );
 
                                 // Update table maintenance operation status.
                                 if table_handler_state.table_maintenance_process_status
@@ -739,10 +768,20 @@ impl TableHandler {
                         flush_result,
                     } => match flush_result {
                         Some(Ok(disk_slice)) => {
+                            let rows_persisted = disk_slice.output_files().len();
+
                             if let Some(xact_id) = xact_id {
                                 table.apply_stream_flush_result(xact_id, disk_slice, event_id);
                             } else {
                                 table.apply_flush_result(disk_slice, event_id);
+                            }
+
+                            // Handle a special case: if there're no rows persisted in the flush operation (i.e., in a streaming transaction, all appended rows get deleted), mooncake and iceberg snapshot won't get created.
+                            // In case of pending force snapshot requests, we should force iceberg snapshot even if the payload to persist is empty, so snapshot requests never get blocked.
+                            if rows_persisted == 0
+                                && table_handler_state.has_pending_force_snapshot_request()
+                            {
+                                table.force_empty_iceberg_payload();
                             }
                         }
                         Some(Err(e)) => {

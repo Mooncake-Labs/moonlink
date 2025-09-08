@@ -215,13 +215,13 @@ impl ReadOutput {
             cache_handles.len() + self.puffin_cache_handles.len() + self.associated_files.len();
         let mut evicted_files_to_delete_on_error: Vec<String> = Vec::with_capacity(total_size);
         // Unpin all previously pinned cache handles before propagating error.
-        for mut handle in cache_handles.drain(..) {
+        for handle in cache_handles.drain(..) {
             let files_to_delete = handle.unreference().await;
             evicted_files_to_delete_on_error.extend(files_to_delete);
         }
 
         // Also unpin any puffin cache handles included in this read output.
-        for mut handle in self.puffin_cache_handles.drain(..) {
+        for handle in self.puffin_cache_handles.drain(..) {
             let files_to_delete = handle.unreference().await;
             evicted_files_to_delete_on_error.extend(files_to_delete);
         }

@@ -10,8 +10,9 @@ async fn test_create_table() {
     let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
-    let config = default_rest_catalog_config();
-    let catalog = RestCatalog::new(config)
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(rest_catalog_config, accessor_config)
         .await
         .expect("Catalog creation fail");
     let namespace = NamespaceIdent::new(namespace);
@@ -31,8 +32,9 @@ async fn test_drop_table() {
     let mut guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
-    let config = default_rest_catalog_config();
-    let catalog = RestCatalog::new(config)
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(rest_catalog_config, accessor_config)
         .await
         .expect("Catalog creation fail");
     let table_ident = guard.table.clone().unwrap();
@@ -62,8 +64,9 @@ async fn test_table_exists() {
     let guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
-    let config = default_rest_catalog_config();
-    let catalog = RestCatalog::new(config)
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(rest_catalog_config, accessor_config)
         .await
         .expect("Catalog creation fail");
 
@@ -88,8 +91,9 @@ async fn test_load_table() {
     let guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
         .await
         .unwrap_or_else(|_| panic!("Rest catalog test guard creation fail, namespace={namespace}"));
-    let config = default_rest_catalog_config();
-    let catalog = RestCatalog::new(config)
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(rest_catalog_config, accessor_config)
         .await
         .expect("Catalog creation fail");
     let table_ident = guard.table.clone().unwrap();

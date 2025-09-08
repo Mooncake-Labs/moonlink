@@ -1030,7 +1030,7 @@ async fn test_2_read_and_pinned_3_without_local_optimization(#[case] use_batch_w
     )
     .await;
     // Import second data file into cache, so the cached entry will be evicted.
-    let mut fake_cache_handle = import_fake_cache_entry(&temp_dir, &mut cache).await;
+    let fake_cache_handle = import_fake_cache_entry(&temp_dir, &mut cache).await;
 
     // State input: read, but no reference count hold within read state.
     let snapshot_read_output_1 = perform_read_request_for_test(&mut table).await;
@@ -1077,7 +1077,7 @@ async fn test_2_read_and_pinned_3_with_local_optimization(#[case] use_batch_writ
     );
 
     // Prepare initial state.
-    let (mut table, mut table_notify, mut fake_cache_handle) = prepare_state_2(
+    let (mut table, mut table_notify, fake_cache_handle) = prepare_state_2(
         &temp_dir,
         cache.clone(),
         use_batch_write,
@@ -1779,7 +1779,7 @@ async fn test_1_compact_1_5_without_local_optimization() {
     assert!(data_compaction_payload.has_payload());
 
     // Import second data file into cache, so the cached entry will be evicted.
-    let mut fake_cache_handle = import_fake_cache_entry(&temp_dir, &mut cache).await;
+    let fake_cache_handle = import_fake_cache_entry(&temp_dir, &mut cache).await;
     let evicted_files_to_delete = fake_cache_handle.unreference().await;
     assert!(evicted_files_to_delete.is_empty());
 
@@ -1855,7 +1855,7 @@ async fn test_1_compact_1_5_with_local_optimization() {
     assert!(data_compaction_payload.has_payload());
 
     // Import second data file into cache, so the cached entry will be evicted.
-    let mut fake_cache_handle = import_fake_cache_entry(&temp_dir, &mut cache).await;
+    let fake_cache_handle = import_fake_cache_entry(&temp_dir, &mut cache).await;
     let evicted_files_to_delete = fake_cache_handle.unreference().await;
     assert!(evicted_files_to_delete.is_empty());
 

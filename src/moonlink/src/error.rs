@@ -35,9 +35,19 @@ pub enum Error {
 
     #[error("{0}")]
     Json(ErrorStruct),
+
+    #[error("{0}")]
+    PbToMoonlinkRowError(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
+
+impl Error {
+    #[track_caller]
+    pub fn pb_conversion_error(message: String) -> Self {
+        Self::PbToMoonlinkRowError(ErrorStruct::new(message, ErrorStatus::Permanent))
+    }
+}
 
 impl From<watch::error::RecvError> for Error {
     #[track_caller]
@@ -172,6 +182,7 @@ impl Error {
             | Error::IcebergError(err)
             | Error::OpenDal(err)
             | Error::JoinError(err)
+            | Error::PbToMoonlinkRowError(err)
             | Error::Json(err) => err.status,
         }
     }
@@ -202,7 +213,7 @@ mod tests {
         if let Error::Io(ref inner) = io_error {
             let loc = inner.location.as_ref().unwrap();
             assert!(loc.contains("src/moonlink/src/error.rs"));
-            assert!(loc.contains("186"));
+            assert!(loc.contains("197"));
             assert!(loc.contains("9"));
         }
     }

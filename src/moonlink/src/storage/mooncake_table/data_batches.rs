@@ -153,10 +153,9 @@ impl ColumnStoreBuffer {
             new_batch = self.finalize_current_batch()?;
         }
 
-        row.values.iter().enumerate().for_each(|(i, cell)| {
-            let _res = self.current_batch_builder[i].append_value(cell);
-            assert!(_res.is_ok());
-        });
+        for (idx, cell) in row.values.iter().enumerate() {
+            self.current_batch_builder[idx].append_value(cell)?;
+        }
         self.current_row_count += 1;
         self.current_rows.push(row);
 

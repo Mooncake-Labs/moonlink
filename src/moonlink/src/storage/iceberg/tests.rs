@@ -21,6 +21,7 @@ use crate::storage::iceberg::test_utils::*;
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndex;
 use crate::storage::index::MooncakeIndex;
+use crate::storage::io_utils;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
@@ -44,10 +45,13 @@ use crate::storage::storage_utils;
 use crate::storage::storage_utils::create_data_file;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::MooncakeDataFileRef;
+use crate::storage::verify_files_and_deletions;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::DataCompactionConfig;
 use crate::FileSystemAccessor;
+use crate::ObjectStorageCache;
+use crate::ObjectStorageCacheConfig;
 use crate::TableEvent;
 use crate::WalConfig;
 use crate::WalManager;
@@ -235,6 +239,7 @@ async fn test_snapshot_load_for_multiple_times() {
         create_test_filesystem_accessor(&config),
         config.clone(),
     )
+    .await
     .unwrap();
 
     iceberg_table_manager
@@ -338,6 +343,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     assert!(iceberg_table_manager.persisted_data_files.is_empty());
 
@@ -535,6 +541,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (_, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -618,6 +625,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (_, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -691,6 +699,7 @@ async fn test_store_and_load_snapshot_impl(iceberg_table_config: IcebergTableCon
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (_, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -767,6 +776,7 @@ async fn test_drop_table_impl(iceberg_table_config: IcebergTableConfig) {
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     iceberg_table_manager
         .initialize_iceberg_table_for_once()
@@ -851,6 +861,7 @@ async fn test_empty_snapshot_load_impl(iceberg_table_config: IcebergTableConfig)
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_table_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -941,6 +952,7 @@ async fn test_recover_from_failed_snapshot_impl(iceberg_table_config: IcebergTab
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
@@ -988,6 +1000,7 @@ async fn test_recover_from_failed_snapshot_impl(iceberg_table_config: IcebergTab
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1075,6 +1088,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1112,6 +1126,7 @@ async fn test_index_merge_and_create_snapshot_impl(iceberg_table_config: Iceberg
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1239,6 +1254,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1282,6 +1298,7 @@ async fn test_data_compaction_and_create_snapshot_impl(iceberg_table_config: Ice
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1409,6 +1426,7 @@ async fn test_data_compaction_with_update_impl(iceberg_table_config: IcebergTabl
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1432,6 +1450,149 @@ async fn test_data_compaction_with_update() {
 
     // Common testing logic.
     test_data_compaction_with_update_impl(iceberg_table_config).await;
+}
+
+/// ================================
+/// Test delayed data compaction
+/// ================================
+///
+/// Testing scenario and testing order:
+/// - mooncake snapshot, and get iceberg snapshot payload and data compaction payload
+/// - create iceberg snapshot, and reflect the change to mooncake snapshot
+/// - trigger data compaction
+async fn test_delayed_compaction_impl(iceberg_table_config: IcebergTableConfig) {
+    // Local filesystem to store write-through cache.
+    let table_temp_dir = tempdir().unwrap();
+    let data_compaction_config = DataCompactionConfig {
+        min_data_file_to_compact: 2,
+        max_data_file_to_compact: 3,
+        data_file_final_size: u64::MAX,
+        data_file_deletion_percentage: 0,
+    };
+    let mut config = MooncakeTableConfig::new(table_temp_dir.path().to_str().unwrap().to_string());
+    config.data_compaction_config = data_compaction_config;
+    let mooncake_table_metadata = create_test_table_metadata_with_config(
+        table_temp_dir.path().to_str().unwrap().to_string(),
+        config,
+    );
+
+    // Local filesystem to store read-through cache.
+    let cache_temp_dir = tempdir().unwrap();
+
+    // Create mooncake table and table event notification receiver.
+    let object_storage_cache = ObjectStorageCache::new(ObjectStorageCacheConfig::new(
+        /*max_bytes=*/ u64::MAX,
+        cache_temp_dir.path().to_str().unwrap().to_string(),
+        /*optimize_local_filesystem=*/ false,
+    ));
+    let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+        Arc::new(object_storage_cache.clone()), // Use separate cache for each table.
+    )
+    .await;
+    let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+
+    // Append two row, used for two deletions later.
+    let row_1 = test_row_1();
+    let row_2 = test_row_2();
+    table.append(row_1.clone()).unwrap();
+    table.append(row_2.clone()).unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+
+    // Append another row, delete one row in the current transaction.
+    let row_3 = test_row_3();
+    table.delete(row_1.clone(), /*lsn=*/ 2).await;
+    table.append(row_3.clone()).unwrap();
+    table.commit(/*lsn=*/ 3);
+    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 3)
+        .await
+        .unwrap();
+
+    // Attempt data compaction and flush to iceberg table.
+    let (_, iceberg_snapshot_payload, _, _, _) =
+        create_mooncake_snapshot_for_test(&mut table, &mut notify_rx).await;
+
+    // Persist iceberg snapshot and reflect to mooncake snapshot.
+    let iceberg_snapshot_payload = iceberg_snapshot_payload.unwrap();
+    let (_, _, _, data_compaction_payload, _) =
+        create_iceberg_snapshot_and_reflect_to_mooncake_snapshot(
+            iceberg_snapshot_payload,
+            &mut table,
+            &mut notify_rx,
+        )
+        .await;
+    // Now we're eligible to perform data compaction, the data compaction payload should contains deletion vector for one row deleted.
+
+    // Append a new row, delete one existing row to trigger a new puffin blob file; create mooncake and iceberg snapshot.
+    let row_4 = test_row_4();
+    table.delete(row_2, /*lsn=*/ 4).await;
+    table.append(row_4.clone()).unwrap();
+    table.commit(/*lsn=*/ 5);
+    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 5)
+        .await
+        .unwrap();
+
+    // Create mooncake and iceberg snapshot, the old puffin blob will gets deleted.
+    create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
+    let (_, _, _, _, evicted_files_to_delete) =
+        create_mooncake_snapshot_for_test(&mut table, &mut notify_rx).await;
+    io_utils::delete_local_files(&evicted_files_to_delete)
+        .await
+        .unwrap();
+
+    // Now trigger a data compaction operation and block wait its completion.
+    let data_compaction_payload = data_compaction_payload.take_payload().unwrap();
+    table.perform_data_compaction(data_compaction_payload);
+    let data_compaction_result = sync_data_compaction(&mut notify_rx).await;
+    table.set_data_compaction_res(data_compaction_result);
+
+    // Persist iceberg snapshot and reflect to mooncake snapshot.
+    let (_, iceberg_snapshot_payload, _, _, _) =
+        create_mooncake_snapshot_for_test(&mut table, &mut notify_rx).await;
+    let iceberg_snapshot_payload = iceberg_snapshot_payload.unwrap();
+    create_iceberg_snapshot_and_reflect_to_mooncake_snapshot(
+        iceberg_snapshot_payload,
+        &mut table,
+        &mut notify_rx,
+    )
+    .await;
+
+    // Create a new iceberg table manager and check states.
+    let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
+        filesystem_accessor.clone(),
+        iceberg_table_config.clone(),
+    )
+    .await
+    .unwrap();
+    let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    // Data compaction only take place on two data files.
+    assert_eq!(next_file_id, 5); // two data files (one compacted, one uncompacted), one deletion vector, two file index
+    assert_eq!(snapshot.disk_files.len(), 2);
+    assert_eq!(snapshot.indices.file_indices.len(), 2);
+    assert_eq!(snapshot.flush_lsn.unwrap(), 5);
+    check_deletion_vector_consistency_for_snapshot(&snapshot).await;
+
+    // Validate iceberg snapshot.
+    verify_recovered_mooncake_snapshot(&snapshot, /*expected_ids=*/ &[3, 4]).await;
+}
+
+#[tokio::test]
+async fn test_delayed_compaction() {
+    // Local filesystem for iceberg.
+    let iceberg_temp_dir = tempdir().unwrap();
+    let iceberg_table_config = get_iceberg_table_config(&iceberg_temp_dir);
+
+    // Common testing logic.
+    test_delayed_compaction_impl(iceberg_table_config).await;
 }
 
 /// ================================
@@ -1503,6 +1664,7 @@ async fn test_data_compaction_append_only_and_create_snapshot_impl(
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1640,6 +1802,7 @@ async fn test_data_compaction_by_deletion_and_create_snapshot_impl(
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1716,6 +1879,7 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
@@ -1742,6 +1906,7 @@ async fn test_empty_content_snapshot_creation_impl(iceberg_table_config: Iceberg
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1839,6 +2004,7 @@ async fn test_snapshot_creation_with_duplicate_filename_impl(
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let iceberg_snapshot_payload = IcebergSnapshotPayload {
         uuid: uuid::Uuid::new_v4(),
@@ -1869,6 +2035,7 @@ async fn test_snapshot_creation_with_duplicate_filename_impl(
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -1991,6 +2158,7 @@ async fn test_small_batch_size_and_large_parquet_size() {
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -2173,6 +2341,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -2232,6 +2401,7 @@ async fn test_async_iceberg_snapshot_impl(iceberg_table_config: IcebergTableConf
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, mut snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -2395,6 +2565,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -2471,6 +2642,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -2538,6 +2710,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -2609,6 +2782,7 @@ async fn mooncake_table_snapshot_persist_impl(iceberg_table_config: IcebergTable
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, mut snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
@@ -2734,6 +2908,7 @@ async fn test_schema_for_table_creation_impl(iceberg_table_config: IcebergTableC
         filesystem_accessor,
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
 
     // Load table metadata and verify schema.
@@ -2818,6 +2993,7 @@ async fn test_schema_update_with_no_table_write_impl(iceberg_table_config: Icebe
         filesystem_accessor,
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -2860,6 +3036,7 @@ async fn test_schema_update_with_no_table_write_impl(iceberg_table_config: Icebe
         filesystem_accessor,
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -2955,6 +3132,7 @@ async fn test_schema_update_impl(iceberg_table_config: IcebergTableConfig) {
         filesystem_accessor,
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -2993,6 +3171,7 @@ async fn test_schema_update_impl(iceberg_table_config: IcebergTableConfig) {
         filesystem_accessor,
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (next_file_id, snapshot) = iceberg_table_manager_for_load
         .load_snapshot_from_table()
@@ -3192,6 +3371,7 @@ async fn test_persisted_deletion_record_remap() {
         filesystem_accessor.clone(),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
     let (_, snapshot) = iceberg_table_manager_for_recovery
         .load_snapshot_from_table()
@@ -3200,4 +3380,386 @@ async fn test_persisted_deletion_record_remap() {
 
     // Validate iceberg snapshot.
     verify_recovered_mooncake_snapshot(&snapshot, /*expected_ids=*/ &[1]).await;
+}
+
+/// ================================
+/// Test iceberg snapshot creation with partial stream flush results
+/// ================================
+///
+/// Testing scenario and event stream:
+/// - a non-streaming transaction finishes
+/// - start a streaming transaction, start an async flush
+/// - async flush finishes
+/// - commit the streaming transaction, still async flush ongoing
+/// - create mooncake and iceberg snapshot
+///
+/// Linked issue: https://github.com/Mooncake-Labs/moonlink/issues/1946
+async fn test_async_flush_for_streaming_partial_finish_impl(
+    iceberg_table_config: IcebergTableConfig,
+) {
+    // Local filesystem to store write-through cache.
+    let table_temp_dir = tempdir().unwrap();
+    let mooncake_table_metadata =
+        create_test_table_metadata(table_temp_dir.path().to_str().unwrap().to_string());
+
+    // Local filesystem to store read-through cache.
+    let cache_temp_dir = tempdir().unwrap();
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
+
+    // Create mooncake table and table event notification receiver.
+    let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+        object_storage_cache.clone(),
+    )
+    .await;
+
+    // Perform a non-streaming append, commit and flush.
+    let row1 = MoonlinkRow::new(vec![
+        RowValue::Int32(1),
+        RowValue::ByteArray("Alice".as_bytes().to_vec()),
+        RowValue::Int32(10),
+    ]);
+    table.append(row1.clone()).unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+
+    // Perform a streaming append and flush, but not commit.
+    let row2 = MoonlinkRow::new(vec![
+        RowValue::Int32(2),
+        RowValue::ByteArray("Bob".as_bytes().to_vec()),
+        RowValue::Int32(20),
+    ]);
+    table
+        .append_in_stream_batch(row2.clone(), /*xact_id=*/ 1)
+        .unwrap();
+    let disk_slice = flush_stream_and_sync_no_apply(
+        &mut table,
+        &mut notify_rx,
+        /*xact_id=*/ 1,
+        /*lsn=*/ None,
+    )
+    .await
+    .unwrap();
+
+    // Perform a streaming append, flush and commit.
+    let row3 = MoonlinkRow::new(vec![
+        RowValue::Int32(3),
+        RowValue::ByteArray("Cat".as_bytes().to_vec()),
+        RowValue::Int32(30),
+    ]);
+    table
+        .append_in_stream_batch(row3.clone(), /*xact_id=*/ 1)
+        .unwrap();
+    table
+        .commit_transaction_stream(
+            /*xact_id=*/ 1,
+            /*lsn=*/ 2,
+            /*event_id=*/ uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+    // Block wait its completion but not apply it to snapshot buffer.
+    let _ = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
+
+    // Apply the first flush result to snapshot buffer.
+    table.apply_stream_flush_result(
+        /*xact_id=*/ 1,
+        disk_slice,
+        /*flush_event_id=*/ uuid::Uuid::new_v4(),
+    );
+
+    // Create mooncake and iceberg snapshot.
+    create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
+
+    // Validate iceberg snapshot content.
+    let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+    let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
+        filesystem_accessor.clone(),
+        iceberg_table_config.clone(),
+    )
+    .await
+    .unwrap();
+    let (_, snapshot) = iceberg_table_manager_for_recovery
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    let data_files = snapshot
+        .disk_files
+        .iter()
+        .map(|f| f.0.file_path.clone())
+        .collect::<Vec<_>>();
+    // Now partially flushed transaction data files are in mooncake snapshot, we don't create new iceberg snapshot for now.
+    verify_files_and_deletions(
+        data_files.as_slice(),
+        /*puffin_file_paths=*/ &[],
+        /*position_deletes=*/ Vec::new(),
+        /*deletion_vectors=*/ Vec::new(),
+        /*expected_ids=*/ &[],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_async_flush_for_streaming_partial_finish() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let iceberg_table_config = get_iceberg_table_config(&iceberg_temp_dir);
+    test_async_flush_for_streaming_partial_finish_impl(iceberg_table_config).await;
+}
+
+/// ================================
+/// Test iceberg snapshot creation with completely reversed order of stream flush
+/// ================================
+///
+/// Testing scenario and event stream:
+/// - a non-streaming transaction finishes
+/// - start streaming txn 1, async flush, and commit
+/// - start streaming txn 2, async flush, commit and complete
+/// - commit the streaming transaction, still async flush ongoing
+/// - create mooncake and iceberg snapshot
+async fn test_reversed_order_of_completed_streaming_flush_impl(
+    iceberg_table_config: IcebergTableConfig,
+) {
+    // Local filesystem to store write-through cache.
+    let table_temp_dir = tempdir().unwrap();
+    let mooncake_table_metadata =
+        create_test_table_metadata(table_temp_dir.path().to_str().unwrap().to_string());
+
+    // Local filesystem to store read-through cache.
+    let cache_temp_dir = tempdir().unwrap();
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
+
+    // Create mooncake table and table event notification receiver.
+    let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+        object_storage_cache.clone(),
+    )
+    .await;
+
+    // Perform a non-streaming append, commit and flush.
+    let row1 = MoonlinkRow::new(vec![
+        RowValue::Int32(1),
+        RowValue::ByteArray("Alice".as_bytes().to_vec()),
+        RowValue::Int32(10),
+    ]);
+    table.append(row1.clone()).unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+
+    // Perform a streaming append and commit, but not apply.
+    let row2 = MoonlinkRow::new(vec![
+        RowValue::Int32(2),
+        RowValue::ByteArray("Bob".as_bytes().to_vec()),
+        RowValue::Int32(20),
+    ]);
+    table
+        .append_in_stream_batch(row2.clone(), /*xact_id=*/ 2)
+        .unwrap();
+    table
+        .commit_transaction_stream(
+            /*xact_id=*/ 2,
+            /*lsn=*/ 2,
+            /*event_id=*/ uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+    // Block wait its completion but not apply it to snapshot buffer.
+    let _ = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
+
+    // Perform a streaming append, commit, and apply.
+    let row3 = MoonlinkRow::new(vec![
+        RowValue::Int32(3),
+        RowValue::ByteArray("Cat".as_bytes().to_vec()),
+        RowValue::Int32(30),
+    ]);
+    table
+        .append_in_stream_batch(row3.clone(), /*xact_id=*/ 3)
+        .unwrap();
+    table
+        .commit_transaction_stream(
+            /*xact_id=*/ 3,
+            /*lsn=*/ 3,
+            /*event_id=*/ uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+    // Block wait its completion but not apply it to snapshot buffer.
+    let disk_slices = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
+    let disk_slice = disk_slices.into_values().next().unwrap();
+    assert_eq!(*disk_slice.lsn().as_ref().unwrap(), 3);
+    table.apply_stream_flush_result(
+        /*xact_id=*/ 3,
+        disk_slice,
+        /*flush_event_id=*/ uuid::Uuid::new_v4(),
+    );
+
+    // Create mooncake and iceberg snapshot.
+    create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
+
+    // Validate iceberg snapshot content.
+    let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+    let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
+        filesystem_accessor.clone(),
+        iceberg_table_config.clone(),
+    )
+    .await
+    .unwrap();
+    let (_, snapshot) = iceberg_table_manager_for_recovery
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    let data_files = snapshot
+        .disk_files
+        .iter()
+        .map(|f| f.0.file_path.clone())
+        .collect::<Vec<_>>();
+    // Now partially flushed transaction data files are in mooncake snapshot, we don't create new iceberg snapshot for now.
+    verify_files_and_deletions(
+        data_files.as_slice(),
+        /*puffin_file_paths=*/ &[],
+        /*position_deletes=*/ Vec::new(),
+        /*deletion_vectors=*/ Vec::new(),
+        /*expected_ids=*/ &[],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_reversed_order_of_completed_streaming_flush() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let iceberg_table_config = get_iceberg_table_config(&iceberg_temp_dir);
+    test_reversed_order_of_completed_streaming_flush_impl(iceberg_table_config).await;
+}
+
+/// ================================
+/// Test iceberg snapshot creation with completely ordered stream flush
+/// ================================
+///
+/// Testing scenario and event stream:
+/// - a non-streaming transaction finishes
+/// - start streaming txn 1, async flush, commit
+/// - start streaming txn 2, async flush, commit
+/// - complete txn 1 stream flush and apply
+/// - create mooncake and iceberg snapshot
+async fn test_ordered_completed_streaming_flush_impl(iceberg_table_config: IcebergTableConfig) {
+    // Local filesystem to store write-through cache.
+    let table_temp_dir = tempdir().unwrap();
+    let mooncake_table_metadata =
+        create_test_table_metadata(table_temp_dir.path().to_str().unwrap().to_string());
+
+    // Local filesystem to store read-through cache.
+    let cache_temp_dir = tempdir().unwrap();
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
+
+    // Create mooncake table and table event notification receiver.
+    let (mut table, mut notify_rx) = create_mooncake_table_and_notify(
+        mooncake_table_metadata.clone(),
+        iceberg_table_config.clone(),
+        object_storage_cache.clone(),
+    )
+    .await;
+
+    // Perform a non-streaming append, commit and flush.
+    let row1 = MoonlinkRow::new(vec![
+        RowValue::Int32(1),
+        RowValue::ByteArray("Alice".as_bytes().to_vec()),
+        RowValue::Int32(10),
+    ]);
+    table.append(row1.clone()).unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut notify_rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+
+    // Perform a streaming append and commit, but not apply.
+    let row2 = MoonlinkRow::new(vec![
+        RowValue::Int32(2),
+        RowValue::ByteArray("Bob".as_bytes().to_vec()),
+        RowValue::Int32(20),
+    ]);
+    table
+        .append_in_stream_batch(row2.clone(), /*xact_id=*/ 2)
+        .unwrap();
+    table
+        .commit_transaction_stream(
+            /*xact_id=*/ 2,
+            /*lsn=*/ 2,
+            /*event_id=*/ uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+    // Block wait its completion but not apply it to snapshot buffer.
+    let disk_slices = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
+    let disk_slice = disk_slices.into_values().next().unwrap();
+    assert_eq!(*disk_slice.lsn().as_ref().unwrap(), 2);
+
+    // Perform a streaming append, commit, and apply.
+    let row3 = MoonlinkRow::new(vec![
+        RowValue::Int32(3),
+        RowValue::ByteArray("Cat".as_bytes().to_vec()),
+        RowValue::Int32(30),
+    ]);
+    table
+        .append_in_stream_batch(row3.clone(), /*xact_id=*/ 3)
+        .unwrap();
+    table
+        .commit_transaction_stream(
+            /*xact_id=*/ 3,
+            /*lsn=*/ 3,
+            /*event_id=*/ uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+    // Block wait its completion but not apply it to snapshot buffer.
+    let _ = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
+
+    // Apply the first arriving flush result.
+    table.apply_stream_flush_result(
+        /*xact_id=*/ 2,
+        disk_slice,
+        /*flush_event_id=*/ uuid::Uuid::new_v4(),
+    );
+
+    // Create mooncake and iceberg snapshot.
+    create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
+
+    // Validate iceberg snapshot content.
+    let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+    let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        create_test_object_storage_cache(&cache_temp_dir), // Use separate cache for each table.
+        filesystem_accessor.clone(),
+        iceberg_table_config.clone(),
+    )
+    .await
+    .unwrap();
+    let (_, snapshot) = iceberg_table_manager_for_recovery
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    let data_files = snapshot
+        .disk_files
+        .iter()
+        .map(|f| f.0.file_path.clone())
+        .collect::<Vec<_>>();
+    // Now partially flushed transaction data files are in mooncake snapshot, we don't create new iceberg snapshot for now.
+    verify_files_and_deletions(
+        data_files.as_slice(),
+        /*puffin_file_paths=*/ &[],
+        /*position_deletes=*/ Vec::new(),
+        /*deletion_vectors=*/ Vec::new(),
+        /*expected_ids=*/ &[1, 2],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ordered_completed_streaming_flush() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let iceberg_table_config = get_iceberg_table_config(&iceberg_temp_dir);
+    test_ordered_completed_streaming_flush_impl(iceberg_table_config).await;
 }

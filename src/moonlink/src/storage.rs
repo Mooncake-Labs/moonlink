@@ -30,10 +30,10 @@ pub use iceberg::base_iceberg_snapshot_fetcher::BaseIcebergSnapshotFetcher;
 pub use iceberg::iceberg_snapshot_fetcher::IcebergSnapshotFetcher;
 pub use iceberg::iceberg_table_config::{IcebergCatalogConfig, IcebergTableConfig};
 pub use iceberg::iceberg_table_manager::IcebergTableManager;
-pub use iceberg::table_event_manager::TableEventManager;
 pub use iceberg::table_manager::TableManager;
 pub use index::index_merge_config::FileIndexMergeConfig;
 pub use mooncake_table::table_config::TableConfig as MoonlinkTableConfig;
+pub use mooncake_table::table_event_manager::TableEventManager;
 pub use mooncake_table::table_secret::{
     SecretEntry as MoonlinkTableSecret, SecretType as MoonlinkSecretType,
 };

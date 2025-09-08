@@ -24,7 +24,7 @@ allow = [
 unknown-git = "deny"
 allow-git = [
     "https://github.com/apache/iceberg-rust.git",
-    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=a7398c75b5cfd62fc016306a71d83306ad4ddf35",
+    "https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455",
 ]
 
 # TODO(hjiang): Cleanup these unmaintained crates.
@@ -37,22 +37,31 @@ ignore = [
 # TODO(hjiang): Resolve all duplicate dependencies.
 [bans]
 skip = [
+    { name = "axum" },
+    { name = "axum-core" },
     { name = "base64" },
+    { name = "bzip2" },
+    { name = "core-foundation" },
     { name = "getrandom" },
     { name = "hashbrown" },
+    { name = "http" },
+    { name = "http-body" },
     { name = "indexmap" },
     { name = "itertools" },
+    { name = "matchit" },
     { name = "ordered-float" },
+    { name = "petgraph" },
+    { name = "phf" },
     { name = "phf_shared" },
+    { name = "quick-xml" },
     { name = "rand" },
     { name = "rand_chacha" },
     { name = "rand_core" },
-    { name = "regex-automata" },
-    { name = "regex-syntax" },
     { name = "security-framework" },
     { name = "socket2" },
     { name = "strum" },
     { name = "strum_macros" },
+    { name = "tonic" },
     { name = "thiserror" },
     { name = "thiserror-impl" },
     { name = "tower" },

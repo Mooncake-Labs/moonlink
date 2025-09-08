@@ -175,7 +175,8 @@ impl<W: AsyncWrite + Unpin + Send + Sync, E: Endianness> BitWriter<W, E> {
     /// Pads the current bit queue with zeros until aligned to the next byte boundary.
     /// This should be called before the final flush to ensure the output is byte-aligned.
     /// Returns `true` if a flush is required due to buffer spill.
-    pub fn byte_align(&mut self) -> bool {
+    #[must_use]
+    fn byte_align(&mut self) -> bool {
         let cur_bit_len = self.bitqueue.len();
         if cur_bit_len == 0 {
             return false;
@@ -185,6 +186,19 @@ impl<W: AsyncWrite + Unpin + Send + Sync, E: Endianness> BitWriter<W, E> {
             to_flush = self.write_bit(false);
         }
         to_flush
+    }
+
+    /// Close the current bit writer, several steps involved:
+    /// - Pads the current bit queue with zeros until aligned to the next byte boundary.
+    /// - Flush both active buffer and inactive one.
+    pub async fn close(mut self) -> io::Result<()> {
+        if self.byte_align() {
+            // If active buffer full, the flush here clear the active buffer and do a switch with inactive one.
+            self.flush().await?;
+        }
+        // Flush whatever left in the active buffer.
+        self.flush().await?;
+        Ok(())
     }
 }
 
@@ -214,7 +228,9 @@ mod tests {
             }
         }
 
-        bit_writer.byte_align();
+        if bit_writer.byte_align() {
+            bit_writer.flush().await.unwrap();
+        }
         bit_writer.flush().await.unwrap();
 
         // Build expected byte buffer.
@@ -251,7 +267,9 @@ mod tests {
                 bit_writer.flush().await.unwrap();
             }
         }
-        bit_writer.byte_align();
+        if bit_writer.byte_align() {
+            bit_writer.flush().await.unwrap();
+        }
         bit_writer.flush().await.unwrap();
 
         let result = bit_writer.writer.into_inner();
@@ -280,7 +298,9 @@ mod tests {
             }
         }
 
-        bit_writer.byte_align();
+        if bit_writer.byte_align() {
+            bit_writer.flush().await.unwrap();
+        }
         bit_writer.flush().await.unwrap();
 
         let result = bit_writer.writer.into_inner();
@@ -320,7 +340,9 @@ mod tests {
         let flush_required = bit_writer.write::<u16>(16, 0b1010_1010_1100_1100);
         assert!(!flush_required);
 
-        bit_writer.byte_align();
+        if bit_writer.byte_align() {
+            bit_writer.flush().await.unwrap();
+        }
         bit_writer.flush().await.unwrap();
 
         let result = bit_writer.writer.into_inner();
@@ -339,7 +361,9 @@ mod tests {
         let flush_required = bit_writer.write::<u32>(18, value);
         assert!(!flush_required);
 
-        bit_writer.byte_align();
+        if bit_writer.byte_align() {
+            bit_writer.flush().await.unwrap();
+        }
         bit_writer.flush().await.unwrap();
 
         let result = bit_writer.writer.into_inner();

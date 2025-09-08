@@ -5,6 +5,7 @@ use crate::pg_replicate::{
 };
 use crate::replication_state::ReplicationState;
 use moonlink::TableEvent;
+use more_asserts as ma;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -45,6 +46,9 @@ pub struct Sink {
     /// Streaming hot-path cache of the last processed (xid, table_id, lsn).
     /// Skips streaming state lookup when the next row has the same xid and table.
     streaming_last_key: Option<(u32, SrcTableId, u64)>,
+    /// Tracks the maximum LSN observed from primary keepalive messages.
+    /// Used to assert that subsequent LSN-bearing CDC events are not older.
+    max_keepalive_lsn_seen: u64,
 }
 
 impl Sink {
@@ -77,7 +81,13 @@ impl Sink {
             relation_cache: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
+            max_keepalive_lsn_seen: 0,
         }
+    }
+
+    /// Reset the per-connection keepalive floor. Should be called after establishing a new CDC stream.
+    pub fn reset_keepalive_floor(&mut self) {
+        self.max_keepalive_lsn_seen = 0;
     }
 }
 
@@ -192,6 +202,7 @@ impl Sink {
         match event {
             CdcEvent::Begin(begin_body) => {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
+                ma::assert_ge!(begin_body.final_lsn(), self.max_keepalive_lsn_seen);
                 self.transaction_state.final_lsn = begin_body.final_lsn();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
@@ -201,6 +212,7 @@ impl Sink {
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
+                ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
                 let pg_lsn = PgLsn::from(commit_body.end_lsn());
                 self.replication_state.mark(pg_lsn.into());
                 for table_id in &self.transaction_state.touched_tables {
@@ -236,6 +248,7 @@ impl Sink {
                     end_lsn = stream_commit_body.end_lsn(),
                     "stream commit"
                 );
+                ma::assert_ge!(stream_commit_body.end_lsn(), self.max_keepalive_lsn_seen);
                 let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
                 self.replication_state.mark(pg_lsn.into());
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
@@ -358,6 +371,11 @@ impl Sink {
             }
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
                 let pg_lsn = PgLsn::from(primary_keepalive_body.wal_end());
+                let wal_end = primary_keepalive_body.wal_end();
+                ma::assert_ge!(wal_end, self.max_keepalive_lsn_seen);
+                if wal_end > self.max_keepalive_lsn_seen {
+                    self.max_keepalive_lsn_seen = wal_end;
+                }
                 self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::StreamStop(_stream_stop_body) => {
@@ -726,8 +744,9 @@ mod tests {
     #[tokio::test]
     async fn test_send_table_event_ok() {
         let (tx, mut rx) = mpsc::channel(1);
-        let res = Sink::send_table_event(&tx, TableEvent::DropTable).await;
-        assert!(res.is_ok());
+        Sink::send_table_event(&tx, TableEvent::DropTable)
+            .await
+            .unwrap();
         let msg = rx.recv().await;
         assert!(matches!(msg, Some(TableEvent::DropTable)));
     }

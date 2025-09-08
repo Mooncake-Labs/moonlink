@@ -2,7 +2,7 @@ use crate::pg_replicate::postgres_source::{
     CdcStreamError, PostgresSourceError, TableCopyStreamError,
 };
 use crate::rest_ingest::rest_source::RestSourceError;
-use crate::rest_ingest::{json_converter, SrcTableId};
+use crate::rest_ingest::{json_converter, schema_util, SrcTableId};
 use moonlink::Error as MoonlinkError;
 use moonlink_error::{io_error_utils, ErrorStatus, ErrorStruct};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,10 @@ pub enum Error {
     // Background writer task failed (panic/cancel/join error).
     #[error("{0}")]
     WriterTaskFailed(ErrorStruct),
+
+    // Schema building error
+    #[error("{0}")]
+    SchemaBuildError(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -253,6 +257,18 @@ impl From<parquet::errors::ParquetError> for Error {
     fn from(source: parquet::errors::ParquetError) -> Self {
         Error::ParquetError(ErrorStruct {
             message: "Parquet error".to_string(),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(source.into())),
+            location: Some(Location::caller().to_string()),
+        })
+    }
+}
+
+impl From<schema_util::SchemaBuildError> for Error {
+    #[track_caller]
+    fn from(source: schema_util::SchemaBuildError) -> Self {
+        Error::SchemaBuildError(ErrorStruct {
+            message: "Schema building error".to_string(),
             status: ErrorStatus::Permanent,
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),

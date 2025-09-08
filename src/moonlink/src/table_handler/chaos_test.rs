@@ -16,14 +16,14 @@ use crate::storage::filesystem::s3::s3_test_utils::*;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::test_guard::TestGuard as S3TestGuard;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
+use crate::storage::mooncake_table::table_event_manager::TableEventManager;
 use crate::storage::mooncake_table::{table_creation_test_utils::*, TableMetadata};
 use crate::table_handler::chaos_table_metadata::ReplayTableMetadata;
 use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::ReadStateManager;
-use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig};
-use crate::{StorageConfig, TableEventManager};
+use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
 use function_name::named;
 use more_asserts as ma;
@@ -1174,7 +1174,7 @@ async fn test_chaos_on_local_fs_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 4000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1197,7 +1197,7 @@ async fn test_chaos_on_local_fs_with_index_merge() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1220,7 +1220,7 @@ async fn test_chaos_on_local_fs_with_data_compaction() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1247,7 +1247,7 @@ async fn test_local_system_optimization_chaos_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 4000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1270,7 +1270,7 @@ async fn test_local_system_optimization_chaos_with_index_merge() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1293,7 +1293,7 @@ async fn test_local_system_optimization_chaos_with_data_compaction() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1322,7 +1322,7 @@ async fn test_s3_chaos_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 4000,
         storage_config: accessor_config.storage_config,
     };
     let env = TestEnvironment::new(test_env_config).await;
@@ -1344,7 +1344,7 @@ async fn test_s3_chaos_with_index_merge() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: accessor_config.storage_config,
     };
     let env = TestEnvironment::new(test_env_config).await;
@@ -1366,7 +1366,7 @@ async fn test_s3_chaos_with_data_compaction() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: accessor_config.storage_config,
     };
     let env = TestEnvironment::new(test_env_config).await;
@@ -1392,7 +1392,7 @@ async fn test_gcs_chaos_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 4000,
         storage_config: accessor_config.storage_config,
     };
     let env = TestEnvironment::new(test_env_config).await;
@@ -1414,7 +1414,7 @@ async fn test_gcs_chaos_with_index_merge() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: accessor_config.storage_config,
     };
     let env = TestEnvironment::new(test_env_config).await;
@@ -1436,7 +1436,7 @@ async fn test_gcs_chaos_with_data_compaction() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: accessor_config.storage_config,
     };
     let env = TestEnvironment::new(test_env_config).await;
@@ -1533,7 +1533,7 @@ async fn test_append_only_chaos_on_local_fs_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::AppendOnly,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 4000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1556,7 +1556,7 @@ async fn test_append_only_chaos_on_local_fs_with_data_compaction() {
         special_table_option: SpecialTableOption::AppendOnly,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1583,7 +1583,7 @@ async fn test_upsert_chaos_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::UpsertDeleteIfExists,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 4000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1606,7 +1606,7 @@ async fn test_upsert_chaos_with_index_merge() {
         special_table_option: SpecialTableOption::UpsertDeleteIfExists,
         maintenance_option: TableMaintenanceOption::IndexMerge,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,
@@ -1629,7 +1629,7 @@ async fn test_upsert_chaos_with_data_compaction() {
         special_table_option: SpecialTableOption::UpsertDeleteIfExists,
         maintenance_option: TableMaintenanceOption::DataCompaction,
         error_injection_enabled: false,
-        event_count: 3500,
+        event_count: 5000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,

@@ -1,7 +1,6 @@
 mod config_utils;
 mod error;
 pub mod file_utils;
-mod logging;
 mod parquet_utils;
 mod recovery_utils;
 pub mod table_config;
@@ -14,8 +13,8 @@ pub use moonlink::ReadState;
 use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 pub use moonlink_connectors::rest_ingest::event_request::{
-    EventRequest, FileEventOperation, FileEventRequest, RowEventOperation, RowEventRequest,
-    SnapshotRequest,
+    EventRequest, FileEventOperation, FileEventRequest, FlushRequest, IngestRequestPayload,
+    RowEventOperation, RowEventRequest, SnapshotRequest,
 };
 pub use moonlink_connectors::rest_ingest::rest_event::RestEvent;
 pub use moonlink_connectors::rest_ingest::rest_source::RestSource;
@@ -57,8 +56,6 @@ impl MoonlinkBackend {
         data_server_uri: Option<String>,
         metadata_store_accessor: Box<dyn MetadataStoreTrait>,
     ) -> Result<Self> {
-        logging::init_logging();
-
         // Create local filepath remap logic, so IO requests could be routed to data server.
         let base_path_arc = Arc::new(base_path.clone());
         let data_server_uri_arc = Arc::new(data_server_uri.clone());
@@ -213,7 +210,6 @@ impl MoonlinkBackend {
                         /*is_recovery=*/ false,
                     )
                     .await?;
-                manager.start_replication(&src_uri).await?;
                 Ok(cur_moonlink_table_config)
             }
         };
@@ -364,7 +360,6 @@ impl MoonlinkBackend {
 
     /// Wait for the WAL flush LSN to reach the requested LSN. Note that WAL flush LSN will update
     /// up till the latest commit that has been persisted in to the WAL.
-    #[cfg(feature = "test-utils")]
     pub async fn wait_for_wal_flush(
         &self,
         database: String,

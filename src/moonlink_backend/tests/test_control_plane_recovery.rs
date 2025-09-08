@@ -1,7 +1,7 @@
 mod common;
 
 #[cfg(test)]
-mod control_plane_retry_tests {
+mod tests {
 
     use super::common::{connect_to_postgres, get_database_uri};
     use moonlink_connectors::pg_replicate::PostgresConnection;

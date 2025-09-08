@@ -19,7 +19,7 @@ fn get_test_row() -> MoonlinkRow {
 async fn test_snapshot_for_empty_table() {
     let iceberg_temp_dir = tempdir().unwrap();
     let config = get_iceberg_table_config(&iceberg_temp_dir);
-    let snapshot_fetcher = IcebergSnapshotFetcher::new(config).unwrap();
+    let snapshot_fetcher = IcebergSnapshotFetcher::new(config).await.unwrap();
     let arrow_schema = snapshot_fetcher.fetch_table_schema().await.unwrap();
     assert!(arrow_schema.is_none());
     let flush_lsn = snapshot_fetcher.get_flush_lsn().await.unwrap();
@@ -37,7 +37,7 @@ async fn test_snapshot_fetch() {
     create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
 
     let config = get_iceberg_table_config(&temp_dir);
-    let snapshot_fetcher = IcebergSnapshotFetcher::new(config).unwrap();
+    let snapshot_fetcher = IcebergSnapshotFetcher::new(config).await.unwrap();
     let arrow_schema = snapshot_fetcher.fetch_table_schema().await.unwrap();
     assert_eq!(arrow_schema.unwrap(), *create_test_arrow_schema());
     let flush_lsn = snapshot_fetcher.get_flush_lsn().await.unwrap();

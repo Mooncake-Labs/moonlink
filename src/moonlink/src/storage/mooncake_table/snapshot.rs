@@ -388,7 +388,7 @@ impl SnapshotTableState {
             //
             // If the old entry is pinned cache handle, unreference.
             let old_entry = old_entry.unwrap();
-            if let Some(mut cache_handle) = old_entry.cache_handle {
+            if let Some(cache_handle) = old_entry.cache_handle {
                 // The old entry is no longer needed for mooncake table, directly mark it deleted from cache, so we could reclaim the disk space back ASAP.
                 let cur_evicted_files = cache_handle.unreference_and_delete().await;
                 evicted_files_to_delete.extend(cur_evicted_files);
@@ -413,7 +413,7 @@ impl SnapshotTableState {
             }
 
             // Unpin and request to delete all cached puffin files.
-            if let Some(mut puffin_deletion_blob) = old_entry.puffin_deletion_blob {
+            if let Some(puffin_deletion_blob) = old_entry.puffin_deletion_blob {
                 let cur_evicted_files = puffin_deletion_blob
                     .puffin_file_cache_handle
                     .unreference_and_delete()
@@ -542,6 +542,16 @@ impl SnapshotTableState {
             self.current_snapshot.flush_lsn = Some(new_flush_lsn);
         }
 
+        // Update LSN if applicable.
+        if let Some(new_largest_flush_lsn) = task.new_largest_flush_lsn {
+            // It's ok for new largest flush LSN to regress.
+            if self.current_snapshot.largest_flush_lsn.is_none()
+                || new_largest_flush_lsn > self.current_snapshot.largest_flush_lsn.unwrap()
+            {
+                self.current_snapshot.largest_flush_lsn = Some(new_largest_flush_lsn);
+            }
+        }
+
         if task.commit_lsn_baseline != 0 {
             self.current_snapshot.snapshot_version = task.commit_lsn_baseline;
         }
@@ -563,11 +573,12 @@ impl SnapshotTableState {
         let force_empty_iceberg_payload = task.force_empty_iceberg_payload;
 
         // Decide whether to perform a data compaction.
-        //
-        // No need to pin puffin file during compaction:
-        // - only compaction deletes puffin file
-        // - there's no two ongoing compaction
         let data_compaction_payload = self.get_payload_to_compact(&opt.data_compaction_option);
+
+        // Before compaction actually taking place, we need to increment reference count for already pinned files.
+        if let Some(payload) = data_compaction_payload.get_payload_reference() {
+            payload.pin_referenced_compaction_payload().await;
+        }
 
         // Decide whether to merge an index merge, which cannot be performed together with data compaction.
         let mut file_indices_merge_payload = IndexMergeMaintenanceStatus::Unknown;
@@ -580,9 +591,11 @@ impl SnapshotTableState {
 
         // TODO(hjiang): When there's only schema evolution, we should also flush even no flush.
         let flush_lsn = self.current_snapshot.flush_lsn.unwrap_or(0);
+        let largest_flush_lsn = self.current_snapshot.largest_flush_lsn.unwrap_or(0);
         if opt.iceberg_snapshot_option != IcebergSnapshotOption::Skip
             && (force_empty_iceberg_payload || flush_by_table_write)
             && flush_lsn < task.min_ongoing_flush_lsn
+            && flush_lsn == largest_flush_lsn
         {
             // Getting persistable committed deletion logs is not cheap, which requires iterating through all logs,
             // so we only aggregate when there's committed deletion.

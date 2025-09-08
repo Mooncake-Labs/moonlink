@@ -194,6 +194,7 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
                     remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
                     puffin_blob_ref: HashMap::new(),
+                    evicted_files_to_delete: Vec::new(),
                 };
                 Ok(mock_persistence_result)
             })
@@ -207,6 +208,7 @@ async fn test_force_index_merge_with_failed_iceberg_persistence() {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
                     remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
                     puffin_blob_ref: HashMap::new(),
+                    evicted_files_to_delete: Vec::new(),
                 };
                 Ok(mock_persistence_result)
             })
@@ -301,6 +303,7 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
                     remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
                     puffin_blob_ref: HashMap::new(),
+                    evicted_files_to_delete: Vec::new(),
                 };
                 Ok(mock_persistence_result)
             })
@@ -314,6 +317,7 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
                     remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
                     puffin_blob_ref: HashMap::new(),
+                    evicted_files_to_delete: Vec::new(),
                 };
                 Ok(mock_persistence_result)
             })
@@ -409,6 +413,7 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
                     remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
                     puffin_blob_ref: HashMap::new(),
+                    evicted_files_to_delete: Vec::new(),
                 };
                 Ok(mock_persistence_result)
             })
@@ -422,6 +427,7 @@ async fn test_force_full_compaction_with_failed_iceberg_persistence() {
                     remote_data_files: snapshot_payload.import_payload.data_files.clone(),
                     remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
                     puffin_blob_ref: HashMap::new(),
+                    evicted_files_to_delete: Vec::new(),
                 };
                 Ok(mock_persistence_result)
             })

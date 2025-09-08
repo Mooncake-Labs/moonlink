@@ -7,7 +7,6 @@ license = { workspace = true }
 [features]
 default = ["storage-fs"]
 
-profiling = ["console-subscriber"]
 test-utils = ["moonlink/test-utils", "moonlink_metadata_store/test-utils"]
 metadata-postgres = ["moonlink_metadata_store/metadata-postgres"]
 test-tls = ["moonlink_connectors/test-tls", "moonlink_metadata_store/test-tls"]
@@ -21,13 +20,7 @@ storage-all = ["storage-s3", "storage-gcs", "storage-fs"]
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-console-subscriber = { version = "0.4", optional = true }
 futures = { workspace = true }
-moonlink = { path = "../moonlink", features = ["test-utils"] }
-moonlink_connectors = { path = "../moonlink_connectors" }
-moonlink_error = { path = "../moonlink_error" }
-moonlink_metadata_store = { path = "../moonlink_metadata_store" }
-moonlink_table_metadata = { path = "../moonlink_table_metadata" }
 more-asserts = { workspace = true }
 native-tls = { workspace = true }
 nix = { workspace = true }
@@ -37,12 +30,19 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+tracing-subscriber = { workspace = true }
+
+# Workspace Members #
+moonlink = { workspace = true, features = ["test-utils"] }
+moonlink_connectors = { workspace = true }
+moonlink_error = { workspace = true }
+moonlink_metadata_store = { workspace = true }
+moonlink_table_metadata = { workspace = true }
 
 [dev-dependencies]
 iceberg = { workspace = true }
 roaring = { workspace = true }
-rstest = "0.26"
+rstest = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 thrift = "0.17"

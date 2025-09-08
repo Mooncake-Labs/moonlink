@@ -2,6 +2,7 @@
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::file_catalog::FileCatalog;
 use crate::storage::iceberg::iceberg_table_config::IcebergCatalogConfig;
+use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
 
 use iceberg::spec::Schema as IcebergSchema;
@@ -11,11 +12,11 @@ use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableUpdate};
 ///
 /// It's worth noting catalog and warehouse uri are not 1-1 mapping; for example, rest catalog could handle warehouse.
 /// Here we simply deduce catalog type from warehouse because both filesystem and object storage catalog are only able to handle certain scheme.
-pub fn create_catalog(
-    catalog: IcebergCatalogConfig,
+pub async fn create_catalog(
+    config: IcebergTableConfig,
     iceberg_schema: IcebergSchema,
 ) -> IcebergResult<Box<dyn MoonlinkCatalog>> {
-    match catalog {
+    match config.metadata_accessor_config {
         IcebergCatalogConfig::File { accessor_config } => {
             Ok(Box::new(FileCatalog::new(accessor_config, iceberg_schema)?))
         }
@@ -33,10 +34,10 @@ pub fn create_catalog(
 }
 
 /// Create a catalog with no schema provided.
-pub fn create_catalog_without_schema(
-    catalog: IcebergCatalogConfig,
+pub async fn create_catalog_without_schema(
+    config: IcebergTableConfig,
 ) -> IcebergResult<Box<dyn MoonlinkCatalog>> {
-    match catalog {
+    match config.metadata_accessor_config {
         IcebergCatalogConfig::File { accessor_config } => {
             Ok(Box::new(FileCatalog::new_without_schema(accessor_config)?))
         }

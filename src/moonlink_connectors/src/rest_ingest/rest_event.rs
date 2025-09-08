@@ -47,6 +47,10 @@ pub enum RestEvent {
         /// LSN to create snapshot.
         lsn: u64,
     },
+    Flush {
+        /// Source table id.
+        src_table_id: SrcTableId,
+    },
 }
 
 impl RestEvent {
@@ -58,6 +62,7 @@ impl RestEvent {
             RestEvent::FileInsertEvent { .. } => None,
             RestEvent::FileUploadEvent { lsn, .. } => Some(*lsn),
             RestEvent::Snapshot { .. } => None,
+            RestEvent::Flush { .. } => None,
         }
     }
 }

@@ -31,6 +31,7 @@ fn get_single_file_to_compact(
             table_id: TEST_TABLE_ID,
             file_id: file.file_id(),
         },
+        data_file_cache_handle: None,
         filepath: file.file_path().clone(),
         deletion_vector,
     }

@@ -123,6 +123,7 @@ impl SnapshotTableState {
                     table_id: TableId(self.mooncake_table_metadata.table_id),
                     file_id: cur_data_file.file_id(),
                 },
+                data_file_cache_handle: disk_file_entry.cache_handle.clone(),
                 filepath: cur_data_file.file_path().to_string(),
                 deletion_vector: disk_file_entry.puffin_deletion_blob.clone(),
             };

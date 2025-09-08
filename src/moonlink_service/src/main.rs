@@ -1,6 +1,13 @@
 use clap::Parser;
 use moonlink_service::{start_with_config, Result, ServiceConfig};
 
+/// Default REST API port
+const DEFAULT_REST_PORT: u16 = 3030;
+/// Default moonlink TCP API port.
+const DEFAULT_TCP_PORT: u16 = 3031;
+/// Default otel API port.
+const DEFAULT_OTEL_PORT: u16 = 3435;
+
 #[derive(Parser)]
 #[command(name = "moonlink-service")]
 #[command(about = "Moonlink data ingestion service")]
@@ -22,6 +29,13 @@ struct Cli {
     #[arg(long)]
     no_tcp_api: bool,
 
+    /// Port for otel API server (optional, defaults to 3435).
+    #[arg(long)]
+    otel_port: Option<u16>,
+    /// Disable standalone deployment.
+    #[arg(long)]
+    no_otel_api: bool,
+
     /// IP/port for data server.
     /// For example: http://34.19.1.175:8080.
     #[arg(long)]
@@ -40,12 +54,17 @@ pub async fn main() -> Result<()> {
         rest_api_port: if cli.no_rest_api {
             None
         } else {
-            Some(cli.rest_api_port.unwrap_or(3030))
+            Some(cli.rest_api_port.unwrap_or(DEFAULT_REST_PORT))
         },
         tcp_port: if cli.no_tcp_api {
             None
         } else {
-            Some(cli.tcp_port.unwrap_or(3031))
+            Some(cli.tcp_port.unwrap_or(DEFAULT_TCP_PORT))
+        },
+        otel_api_port: if cli.no_otel_api {
+            None
+        } else {
+            Some(cli.otel_port.unwrap_or(DEFAULT_OTEL_PORT))
         },
     };
 

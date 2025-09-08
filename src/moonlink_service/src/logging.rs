@@ -9,8 +9,10 @@ pub fn init_logging() {
 
     let fmt_layer = fmt::layer()
         .with_timer(time::ChronoLocal::new("%Y-%m-%d %H:%M:%S%:z".to_string()))
-        .with_test_writer()
-        .with_ansi(true)
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true)
+        .with_ansi(false)
         .with_filter(env_filter);
 
     // Compose the subscriber.

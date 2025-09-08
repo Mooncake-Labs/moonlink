@@ -1,22 +1,32 @@
+use arrow_ipc::writer::StreamWriter;
 use axum::{
+    error_handling::HandleErrorLayer,
     extract::{Path, State},
     http::{Method, StatusCode},
-    response::Json,
+    response::{Json, Response},
     routing::{delete, get, post},
-    Router,
+    BoxError, Router,
 };
 use moonlink::StorageConfig;
 use moonlink_backend::{table_config::TableConfig, table_status::TableStatus};
-use moonlink_backend::{EventRequest, FileEventOperation, RowEventOperation};
-use moonlink_backend::{FileEventRequest, RowEventRequest, SnapshotRequest, REST_API_URI};
+use moonlink_backend::{
+    EventRequest, FileEventOperation, FileEventRequest, FlushRequest, IngestRequestPayload,
+    RowEventOperation, RowEventRequest, SnapshotRequest, REST_API_URI,
+};
+use moonlink_connectors::rest_ingest::schema_util::{build_arrow_schema, FieldSchema};
 use moonlink_error::ErrorStatus;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, oneshot};
+use tower::timeout::TimeoutLayer;
+use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info};
+
+/// Default timeout for all REST API calls.
+const DEFAULT_REST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// API state shared across handlers
 #[derive(Clone)]
@@ -52,6 +62,16 @@ pub struct ErrorResponse {
 }
 
 /// ====================
+/// Get table schema
+/// ====================
+///
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetTableSchemaResponse {
+    /// Serialized arrow schema in ipc format.
+    pub serialized_schema: Vec<u8>,
+}
+
+/// ====================
 /// Create table
 /// ====================
 ///
@@ -62,14 +82,6 @@ pub struct CreateTableRequest {
     pub table: String,
     pub schema: Vec<FieldSchema>,
     pub table_config: TableConfig,
-}
-
-/// Field schema definition
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FieldSchema {
-    pub name: String,
-    pub data_type: String,
-    pub nullable: bool,
 }
 
 /// Response structure for table creation
@@ -150,6 +162,15 @@ pub struct IngestRequest {
     pub request_mode: RequestMode,
 }
 
+/// Request structure for data ingestion with protobuf
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngestProtobufRequest {
+    pub operation: String,
+    pub data: Vec<u8>,
+    /// Whether to enable synchronous mode.
+    pub request_mode: RequestMode,
+}
+
 /// Response structure for data ingestion
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestResponse {
@@ -182,6 +203,20 @@ pub struct FileUploadResponse {
 }
 
 /// ====================
+/// Flush
+/// ====================
+///
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncFlushRequest {
+    pub database: String,
+    pub table: String,
+    pub lsn: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncFlushResponse {}
+
+/// ====================
 /// Health check
 /// ====================
 ///
@@ -209,15 +244,33 @@ fn get_backend_error_status_code(error: &moonlink_backend::Error) -> StatusCode 
 
 /// Create the router with all API endpoints    
 pub fn create_router(state: ApiState) -> Router {
+    let timeout_layer = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(|err: BoxError| async move {
+            if err.is::<tower::timeout::error::Elapsed>() {
+                return Response::builder()
+                    .status(StatusCode::REQUEST_TIMEOUT)
+                    .body::<String>("request timed out".into())
+                    .unwrap();
+            }
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body("internal middleware error".into())
+                .unwrap()
+        }))
+        .layer(TimeoutLayer::new(DEFAULT_REST_TIMEOUT));
+
     Router::new()
         .route("/health", get(health_check))
         .route("/tables", get(list_tables))
         .route("/tables/{table}", post(create_table))
         .route("/tables/{table}", delete(drop_table))
-        .route("/ingest/{table}", post(ingest_data))
+        .route("/schema/{database}/{table}", get(fetch_schema))
+        .route("/ingest/{table}", post(ingest_data_json))
+        .route("/ingestpb/{table}", post(ingest_data_protobuf))
         .route("/upload/{table}", post(upload_files))
         .route("/tables/{table}/optimize", post(optimize_table))
         .route("/tables/{table}/snapshot", post(create_snapshot))
+        .route("/tables/{table}/flush", post(flush_table))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -225,6 +278,7 @@ pub fn create_router(state: ApiState) -> Router {
                 .allow_methods([Method::GET, Method::POST, Method::DELETE])
                 .allow_headers(Any),
         )
+        .layer(timeout_layer)
 }
 
 /// Health check endpoint
@@ -250,77 +304,20 @@ async fn create_table(
         table, payload
     );
 
-    // Convert field schemas to Arrow schema with proper field IDs (like PostgreSQL)
-    use arrow_schema::{DataType, Field, Schema};
-
-    let mut field_id = 0;
-    let fields: Result<Vec<Field>, String> = payload
-        .schema
-        .iter()
-        .map(|field| {
-            let data_type_str = field.data_type.to_lowercase();
-            let data_type = match data_type_str.as_str() {
-                "int32" => DataType::Int32,
-                "int64" => DataType::Int64,
-                "string" | "text" => DataType::Utf8,
-                "boolean" | "bool" => DataType::Boolean,
-                "float32" => DataType::Float32,
-                "float64" => DataType::Float64,
-                "date32" => DataType::Date32,
-                // Decimal type.
-                dt if dt.starts_with("decimal(") && dt.ends_with(')') => {
-                    let inner = &dt[8..dt.len() - 1];
-                    let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                    // Arrow type allows no "scale", which defaults to 0.
-                    if parts.len() == 1 {
-                        let precision: u8 = parts[0].parse().map_err(|_| {
-                            format!("Invalid decimal precision in: {}", field.data_type)
-                        })?;
-                        DataType::Decimal128(precision, 0)
-                    } else if parts.len() == 2 {
-                        // decimal(precision, scale)
-                        let precision: u8 = parts[0].parse().map_err(|_| {
-                            format!("Invalid decimal precision in: {}", field.data_type)
-                        })?;
-                        let scale: i8 = parts[1].parse().map_err(|_| {
-                            format!("Invalid decimal scale in: {}", field.data_type)
-                        })?;
-                        DataType::Decimal128(precision, scale)
-                    } else {
-                        return Err(format!("Invalid decimal type: {}", field.data_type));
-                    }
-                }
-                _ => return Err(format!("Unsupported data type: {}", field.data_type)),
-            };
-
-            // Create field with metadata (like PostgreSQL does)
-            let mut metadata = HashMap::new();
-            metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
-            field_id += 1;
-
-            let field_with_metadata =
-                Field::new(&field.name, data_type, field.nullable).with_metadata(metadata);
-
-            Ok(field_with_metadata)
-        })
-        .collect();
-
-    let fields = match fields {
-        Ok(fields) => fields,
+    let arrow_schema = match build_arrow_schema(&payload.schema) {
+        Ok(s) => s,
         Err(e) => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     message: format!(
-                        "Invalid schema on table {} creation {:?} because {:?}",
+                        "Invalid schema on table {} creation {:?}: {}",
                         table, payload.schema, e
                     ),
                 }),
             ));
         }
     };
-
-    let arrow_schema = Schema::new(fields);
 
     // Serialization not expect to fail.
     let serialized_table_config = match serde_json::to_string(&payload.table_config) {
@@ -477,13 +474,13 @@ async fn upload_files(
 }
 
 async fn optimize_table(
-    Path(table): Path<String>,
+    Path(src_table_name): Path<String>,
     State(state): State<ApiState>,
     Json(payload): Json<OptimizeTableRequest>,
 ) -> Result<Json<OptimizeTableResponse>, (StatusCode, Json<ErrorResponse>)> {
     debug!(
         "Received table optimize request for '{}': {:?}",
-        table, payload
+        src_table_name, payload
     );
     match state
         .backend
@@ -502,12 +499,47 @@ async fn optimize_table(
                 Json(ErrorResponse {
                     message: format!(
                         "Failed to optimize table {} with ID {}.{}: {}",
-                        table, payload.database, payload.table, e
+                        src_table_name, payload.database, payload.table, e
                     ),
                 }),
             ))
         }
     }
+}
+
+/// Fetch schema for the requested table.
+async fn fetch_schema(
+    Path((database, table)): Path<(String, String)>,
+    State(state): State<ApiState>,
+) -> Result<Json<GetTableSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received fetch table schema request for '{}.{}'",
+        database, table
+    );
+    let schema = state
+        .backend
+        .get_table_schema(database.clone(), table.clone())
+        .await;
+    if schema.is_err() {
+        let err = schema.err().unwrap();
+        let status_code = get_backend_error_status_code(&err);
+        return Err((
+            status_code,
+            Json(ErrorResponse {
+                message: format!("Failed to get table schema for {database}.{table}: {err}"),
+            }),
+        ));
+    }
+
+    // Serialize with arrow-ipc.
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    // Serialization is not expected to fail.
+    let schema = schema.unwrap();
+    let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+    writer.finish().unwrap();
+    let serialized_schema = buf.into_inner();
+
+    Ok(Json(GetTableSchemaResponse { serialized_schema }))
 }
 
 /// Create snapshot endpoint
@@ -566,11 +598,108 @@ async fn create_snapshot(
     }
 }
 
-/// Data ingestion endpoint
-async fn ingest_data(
+/// Flush table endpoint.
+async fn flush_table(
     Path(src_table_name): Path<String>,
     State(state): State<ApiState>,
-    Json(payload): Json<IngestRequest>,
+    Json(payload): Json<SyncFlushRequest>,
+) -> Result<Json<SyncFlushResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received flush table request for table {} with ID {}.{}",
+        src_table_name, &payload.database, &payload.table,
+    );
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let flush_request = FlushRequest {
+        src_table_name: src_table_name.clone(),
+        lsn: payload.lsn,
+        tx,
+    };
+    let rest_event_request = EventRequest::FlushRequest(flush_request);
+    state
+        .backend
+        .send_event_request(rest_event_request)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    message: format!("Failed to process flush sync request: {e}"),
+                }),
+            )
+        })?;
+
+    // Block until flush sync event has been sent to moonlink table handler.
+    let _ = rx.recv().await;
+
+    // Now it's ensured all events before flush sync have been received by table handler, we could block wait flush completion.
+    match state
+        .backend
+        .wait_for_wal_flush(payload.database.clone(), payload.table.clone(), payload.lsn)
+        .await
+    {
+        Ok(_) => Ok(Json(SyncFlushResponse {})),
+        Err(e) => {
+            let status_code = get_backend_error_status_code(&e);
+            Err((
+                status_code,
+                Json(ErrorResponse {
+                    message: format!(
+                        "Failed to sync flush for table {} with ID {}.{}: {}",
+                        src_table_name, payload.database, payload.table, e
+                    ),
+                }),
+            ))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IngestRequestInternal {
+    operation: String,
+    data: IngestRequestPayload,
+    request_mode: RequestMode,
+}
+
+async fn ingest_data_protobuf(
+    Path(src_table_name): Path<String>,
+    State(state): State<ApiState>,
+    Json(request): Json<IngestProtobufRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    ingest_data_impl(
+        src_table_name,
+        state,
+        IngestRequestInternal {
+            operation: request.operation,
+            data: IngestRequestPayload::Protobuf(request.data),
+            request_mode: request.request_mode,
+        },
+    )
+    .await
+}
+
+async fn ingest_data_json(
+    Path(src_table_name): Path<String>,
+    State(state): State<ApiState>,
+    Json(request): Json<IngestRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    ingest_data_impl(
+        src_table_name,
+        state,
+        IngestRequestInternal {
+            operation: request.operation,
+            data: IngestRequestPayload::Json(request.data),
+            request_mode: request.request_mode,
+        },
+    )
+    .await
+}
+
+/// Data ingestion endpoint
+async fn ingest_data_impl(
+    src_table_name: String,
+    state: ApiState,
+    payload: IngestRequestInternal,
 ) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
     debug!(
         "Received ingestion request for table '{}': {:?}",

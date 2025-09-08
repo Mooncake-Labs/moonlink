@@ -231,13 +231,18 @@ jobs:
             -p 8181:8181 \
             apache/iceberg-rest-fixture
 
+      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
+      - name: Add iceberg-rest.local to /etc/hosts
+        run: |
+          echo "127.0.0.1 iceberg-rest.local" | sudo tee -a /etc/hosts
+
       # ───────────────────── Wait for Iceberg-rest to be ready ───────────────────
       - name: Wait for Iceberg-rest-fixture ready
         timeout-minutes: 2
         run: |
           set -euo pipefail
           for i in {1..10}; do
-            if curl -sS http://localhost:8181/v1/config; then
+            if curl -sS http://iceberg-rest.local:8181/v1/config; then
               echo "Iceberg-rest-fixture is ready!"
               exit 0
             fi
@@ -524,7 +529,7 @@ jobs:
   postgres_tests:
     name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest
-    
+
     services:
       postgres:
         image: postgres:latest
@@ -557,6 +562,7 @@ jobs:
           make-default: true
 
       - name: Wait for PostgreSQL
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           for i in {1..10}; do
@@ -571,11 +577,13 @@ jobs:
           exit 1
 
       - name: Configure PostgreSQL for logical replication
+        timeout-minutes: 2
         run: |
           PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'logical';"
           PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT pg_reload_conf();"
 
       - name: Restart PostgreSQL to apply wal_level
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           docker restart postgres
@@ -598,19 +606,19 @@ jobs:
           cargo test --package moonlink_connectors --lib --features connector-pg
           # want to test storing and retrieving different types of storage configs
           cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3 storage-gcs"
-      
+
       - name: Run Backend integration tests
         timeout-minutes: 10
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
-          cargo test --package moonlink_backend --test test_backend
+          cargo test --package moonlink_backend --test '*'
 
   # ───────────── 14 · Moonlink Service Integration Tests ─────────────
   moonlink_service_tests:
     name: Moonlink Service Integration Tests
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v5
 

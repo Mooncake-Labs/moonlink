@@ -64,7 +64,7 @@ async fn test_cache_state_3_persist_and_unreferenced_2() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle, evicted_files_to_delete) =
+    let (cache_handle, evicted_files_to_delete) =
         cache.import_cache_entry(file_id, cache_entry.clone()).await;
     assert_eq!(
         cache_handle.cache_entry.cache_filepath,
@@ -107,7 +107,7 @@ async fn test_cache_state_3_persist_and_referenced_3() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle_1, evicted_files_to_delete) =
+    let (cache_handle_1, evicted_files_to_delete) =
         cache.import_cache_entry(file_id, cache_entry.clone()).await;
     assert_eq!(
         cache_handle_1.cache_entry.cache_filepath,
@@ -220,7 +220,7 @@ async fn test_cache_state_2_request_to_delete_4() {
     let file_id = get_table_unique_file_id(0);
 
     // Import local cache entry.
-    let (mut cache_handle, evicted_files_to_delete) =
+    let (cache_handle, evicted_files_to_delete) =
         cache.import_cache_entry(file_id, cache_entry.clone()).await;
     assert_eq!(
         cache_handle.cache_entry.cache_filepath,
@@ -286,7 +286,7 @@ async fn test_cache_state_3_request_to_delete_5() {
     let file_id = get_table_unique_file_id(0);
 
     // Import local cache entry.
-    let (mut cache_handle_1, evicted_files_to_delete) =
+    let (cache_handle_1, evicted_files_to_delete) =
         cache.import_cache_entry(file_id, cache_entry.clone()).await;
     assert_eq!(
         cache_handle_1.cache_entry.cache_filepath,
@@ -339,7 +339,7 @@ async fn test_cache_state_5_unreference_4() {
     let file_id = get_table_unique_file_id(0);
 
     // Import local cache entry, and replace with remote one.
-    let (mut cache_handle, _) = cache.import_cache_entry(file_id, cache_entry.clone()).await;
+    let (cache_handle, _) = cache.import_cache_entry(file_id, cache_entry.clone()).await;
     let _ = cache_handle
         .unreference_and_replace_with_remote(test_remote_file.to_str().unwrap())
         .await;
@@ -407,7 +407,7 @@ async fn test_cache_state_2_new_entry_with_sufficient_space_4() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle, _) = cache
+    let (cache_handle, _) = cache
         .import_cache_entry(file_id_1, cache_entry_1.clone())
         .await;
     let _ = cache_handle
@@ -469,7 +469,7 @@ async fn test_cache_state_2_new_entry_with_insufficient_space_1() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle, _) = cache
+    let (cache_handle, _) = cache
         .import_cache_entry(file_id_1, cache_entry_1.clone())
         .await;
     let _ = cache_handle
@@ -519,7 +519,7 @@ async fn test_cache_state_2_request_to_read_sufficient_space_4() {
     let file_id = get_table_unique_file_id(0);
 
     // Import local cache entry.
-    let (mut cache_handle, evicted_files_to_delete) =
+    let (cache_handle, evicted_files_to_delete) =
         cache.import_cache_entry(file_id, cache_entry.clone()).await;
     assert_eq!(
         cache_handle.cache_entry.cache_filepath,
