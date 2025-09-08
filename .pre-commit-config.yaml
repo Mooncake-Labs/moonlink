@@ -1,34 +1,35 @@
 ---
 repos:
-    - repo: https://github.com/crate-ci/typos
-      rev: v1.35.1
-      hooks:
-          - id: typos
-    - repo: https://github.com/doublify/pre-commit-rust
-      rev: v1.0
-      hooks:
-          - id: fmt
-    - repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
-      rev: 0.2.3
-      hooks:
-          - id: yamlfmt
-    - repo: local
-      hooks:
-          - id: cargo-sort
-            name: cargo-sort
-            language: system
-            files: \.toml$
-            entry: cargo sort --workspace
-            pass_filenames: false
-          - id: clipper-check-fix
-            name: clipper-check-fix
-            language: system
-            files: \.rs$
-            entry: bash -c 'cargo clippy --all-targets --all-features -- -D warnings || cargo clippy --all-targets --all-features --fix --allow-dirty --allow-staged'
-            pass_filenames: false
-          - id: check-dependency-license
-            name: check-dependency-license
-            language: system
-            files: \.toml$
-            entry: cargo deny check
-            pass_filenames: false
+- repo: https://github.com/crate-ci/typos
+  rev: v1.35.1
+  hooks:
+  - id: typos
+- repo: https://github.com/doublify/pre-commit-rust
+  rev: v1.0
+  hooks:
+  - id: fmt
+- repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
+  rev: 0.2.3
+  hooks:
+  - id: yamlfmt
+    args: [--mapping, '2', --sequence, '2', --offset, '0', --width, '150']
+- repo: local
+  hooks:
+  - id: cargo-sort
+    name: cargo-sort
+    language: system
+    files: \.toml$
+    entry: cargo sort --workspace
+    pass_filenames: false
+  - id: clipper-check-fix
+    name: clipper-check-fix
+    language: system
+    files: \.rs$
+    entry: bash -c 'cargo clippy --all-targets --all-features -- -D warnings || cargo clippy --all-targets --all-features --fix --allow-dirty --allow-staged'
+    pass_filenames: false
+  - id: check-dependency-license
+    name: check-dependency-license
+    language: system
+    files: \.toml$
+    entry: cargo deny check
+    pass_filenames: false

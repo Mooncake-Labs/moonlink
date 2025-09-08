@@ -21,25 +21,25 @@
 version: 2
 updates:
   # Maintain dependencies for GitHub Actions
-    - package-ecosystem: github-actions
-      directory: /
-      schedule:
-          interval: weekly
-          day: sunday
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+    day: sunday
 
-    - package-ecosystem: cargo
-      directory: /
-      schedule:
-          interval: weekly
-          day: sunday
-      open-pull-requests-limit: 50
-      ignore:
+- package-ecosystem: cargo
+  directory: /
+  schedule:
+    interval: weekly
+    day: sunday
+  open-pull-requests-limit: 50
+  ignore:
        # For all packages, ignore all patch updates
-          - dependency-name: '*'
-            update-types: [version-update:semver-patch]
-      groups:
-          arrow-parquet:
-              applies-to: version-updates
-              patterns:
-                  - arrow*
-                  - parquet
+  - dependency-name: '*'
+    update-types: [version-update:semver-patch]
+  groups:
+    arrow-parquet:
+      applies-to: version-updates
+      patterns:
+      - arrow*
+      - parquet

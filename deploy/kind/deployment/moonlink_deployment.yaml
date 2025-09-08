@@ -2,56 +2,56 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-    name: moonlink-dev
+  name: moonlink-dev
 spec:
-    replicas: 1
-    selector:
-        matchLabels:
-            app: moonlink-dev
-    template:
-        metadata:
-            labels:
-                app: moonlink-dev
-        spec:
-            containers:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: moonlink-dev
+  template:
+    metadata:
+      labels:
+        app: moonlink-dev
+    spec:
+      containers:
       # Moonlink, which serves REST API and TCP rpc requests.
-                - name: moonlink-dev
-                  image: moonlink:dev
-                  env:
-                  volumeMounts:
-                      - name: shared-cache-directory
-                        mountPath: /tmp/moonlink
-                  ports:
+      - name: moonlink-dev
+        image: moonlink:dev
+        env:
+        volumeMounts:
+        - name: shared-cache-directory
+          mountPath: /tmp/moonlink
+        ports:
         # Port number for REST API server.
-                      - containerPort: 3030
+        - containerPort: 3030
         # Port number for TCP rpc server.
-                      - containerPort: 3031
+        - containerPort: 3031
 
       # Data server, which serves data plane requests.
-                - name: nginx
-                  image: nginx:latest
-                  ports:
-                      - containerPort: 80
-                  volumeMounts:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
         # nginx serves local files under certain directory.
-                      - name: shared-cache-directory
-                        mountPath: /usr/share/nginx/html
+        - name: shared-cache-directory
+          mountPath: /usr/share/nginx/html
 
       # Act as remote postgres instance.
-                - name: postgres
-                  image: mooncakelabs/pg_mooncake
-                  env:
-                      - name: POSTGRES_PASSWORD
-                        value: password
-                  ports:
-                      - containerPort: 5432
-                  volumeMounts:
-                      - name: pgdata
-                        mountPath: /var/lib/postgresql/data
+      - name: postgres
+        image: mooncakelabs/pg_mooncake
+        env:
+        - name: POSTGRES_PASSWORD
+          value: password
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
 
-            volumes:
-                - name: pgdata
-                  emptyDir: {}
+      volumes:
+      - name: pgdata
+        emptyDir: {}
       # Shared cache directory between data server and moonlink.
-                - name: shared-cache-directory
-                  emptyDir: {}
+      - name: shared-cache-directory
+        emptyDir: {}

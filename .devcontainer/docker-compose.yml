@@ -1,90 +1,90 @@
 ---
 services:
-    devcontainer:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        volumes:
-            - ..:/workspaces/moonlink:cached
-            - ../.shared-nginx:/tmp/moonlink_service_test
-        networks:
-            - shared_network
-        depends_on:
-            - minio
-            - postgres
-            - fake-gcs
-            - nginx
-        command: sleep infinity
+  devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+    - ..:/workspaces/moonlink:cached
+    - ../.shared-nginx:/tmp/moonlink_service_test
+    networks:
+    - shared_network
+    depends_on:
+    - minio
+    - postgres
+    - fake-gcs
+    - nginx
+    command: sleep infinity
 
-    postgres:
-        image: postgres:latest
-        environment:
-            POSTGRES_PASSWORD: postgres
-        networks:
-            - shared_network
-        command: [-c, wal_level=logical]
-        volumes:
-            - ./certs:/certs:ro
+  postgres:
+    image: postgres:latest
+    environment:
+      POSTGRES_PASSWORD: postgres
+    networks:
+    - shared_network
+    command: [-c, wal_level=logical]
+    volumes:
+    - ./certs:/certs:ro
 
-    minio:
-        image: minio/minio:latest
-        hostname: minio
-        environment:
-            MINIO_ROOT_USER: minioadmin
-            MINIO_ROOT_PASSWORD: minioadmin
-        volumes:
-            - minio-data:/data
-        command: server /data --console-address ":9001"
-        networks:
-            shared_network:
-                aliases:
-                    - s3.local
-        ports:
-            - 9000:9000 # S3 API
-            - 9001:9001 # Web UI
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+    - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      shared_network:
+        aliases:
+        - s3.local
+    ports:
+    - 9000:9000         # S3 API
+    - 9001:9001         # Web UI
 
-    iceberg-rest:
-        image: apache/iceberg-rest-fixture:latest
-        networks:
-            shared_network:
-                aliases:
-                    - iceberg-rest.local
-        ports:
-            - 8181:8181
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:latest
+    networks:
+      shared_network:
+        aliases:
+        - iceberg-rest.local
+    ports:
+    - 8181:8181
 
-    fake-gcs:
-        image: fsouza/fake-gcs-server:latest
-        hostname: gcs
-        command: -scheme http -port 4443
-        ports:
-            - 4443:4443
-        networks:
-            shared_network:
-                aliases:
-                    - gcs.local
-        environment:
-            - STORAGE_DIR=/data
-        volumes:
-            - fake-gcs-data:/data
+  fake-gcs:
+    image: fsouza/fake-gcs-server:latest
+    hostname: gcs
+    command: -scheme http -port 4443
+    ports:
+    - 4443:4443
+    networks:
+      shared_network:
+        aliases:
+        - gcs.local
+    environment:
+    - STORAGE_DIR=/data
+    volumes:
+    - fake-gcs-data:/data
 
-    nginx:
-        image: nginx:latest
-        hostname: nginx
-        ports:
-            - 8080:80
-        networks:
-            shared_network:
-                aliases:
-                    - nginx.local
-        volumes:
-            - ../.shared-nginx:/usr/share/nginx/html:ro
+  nginx:
+    image: nginx:latest
+    hostname: nginx
+    ports:
+    - 8080:80
+    networks:
+      shared_network:
+        aliases:
+        - nginx.local
+    volumes:
+    - ../.shared-nginx:/usr/share/nginx/html:ro
 
 volumes:
-    minio-data:
-    fake-gcs-data:
-    shared-nginx:
-        name: moonlink-shared-nginx
+  minio-data:
+  fake-gcs-data:
+  shared-nginx:
+    name: moonlink-shared-nginx
 
 networks:
-    shared_network:
-        driver: bridge
+  shared_network:
+    driver: bridge
