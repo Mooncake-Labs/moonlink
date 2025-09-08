@@ -2,6 +2,7 @@ use arrow::error::ArrowError;
 use iceberg::Error as IcebergError;
 use moonlink_error::io_error_utils::get_io_error_status;
 use moonlink_error::{ErrorStatus, ErrorStruct};
+use opentelemetry_otlp::ExporterBuildError;
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -38,6 +39,9 @@ pub enum Error {
 
     #[error("{0}")]
     PbToMoonlinkRowError(ErrorStruct),
+
+    #[error("{0}")]
+    ExporterBuildError(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -46,6 +50,16 @@ impl Error {
     #[track_caller]
     pub fn pb_conversion_error(message: String) -> Self {
         Self::PbToMoonlinkRowError(ErrorStruct::new(message, ErrorStatus::Permanent))
+    }
+}
+
+impl From<ExporterBuildError> for Error {
+    #[track_caller]
+    fn from(source: ExporterBuildError) -> Self {
+        Error::ExporterBuildError(
+            ErrorStruct::new("exporter build error".to_string(), ErrorStatus::Permanent)
+                .with_source(source),
+        )
     }
 }
 
@@ -183,6 +197,7 @@ impl Error {
             | Error::OpenDal(err)
             | Error::JoinError(err)
             | Error::PbToMoonlinkRowError(err)
+            | Error::ExporterBuildError(err)
             | Error::Json(err) => err.status,
         }
     }
@@ -213,7 +228,7 @@ mod tests {
         if let Error::Io(ref inner) = io_error {
             let loc = inner.location.as_ref().unwrap();
             assert!(loc.contains("src/moonlink/src/error.rs"));
-            assert!(loc.contains("197"));
+            assert!(loc.contains("212"));
             assert!(loc.contains("9"));
         }
     }
