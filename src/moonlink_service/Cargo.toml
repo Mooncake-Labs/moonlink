@@ -22,7 +22,6 @@ arrow-schema = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
-const_format = { workspace = true }
 
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
@@ -55,6 +54,7 @@ arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 async-recursion = "1"
 bytes = { workspace = true }
+const_format = { workspace = true }
 more-asserts = { workspace = true }
 parquet = { workspace = true }
 reqwest = { workspace = true }
