@@ -26,12 +26,18 @@ pub(crate) fn get_nginx_addr() -> String {
     std::env::var("NGINX_ADDR").unwrap_or_else(|_| NGINX_ADDR.to_string())
 }
 
+/// REST API port.
+pub(crate) const REST_API_PORT: u16 = 3030;
+/// OTEL API port.
+pub(crate) const OTEL_API_PORT: u16 = 3435;
+/// TCP port.
+pub(crate) const TCP_PORT: u16 = 3031;
 /// Local nginx server IP/port address.
 pub(crate) const NGINX_ADDR: &str = "http://nginx.local:80";
 /// Local moonlink REST API IP/port address.
-pub(crate) const REST_ADDR: &str = "http://127.0.0.1:3030";
+pub(crate) const REST_ADDR: &str = const_format::formatcp!("http://127.0.0.1:{}", REST_API_PORT);
 /// Local moonlink server IP/port address.
-pub(crate) const MOONLINK_ADDR: &str = "127.0.0.1:3031";
+pub(crate) const MOONLINK_ADDR: &str = const_format::formatcp!("127.0.0.1:{}", TCP_PORT);
 /// Test database name.
 pub(crate) const DATABASE: &str = "test-database";
 /// Test table name.
@@ -44,9 +50,9 @@ pub(crate) fn get_service_config() -> ServiceConfig {
     ServiceConfig {
         base_path: moonlink_backend_dir.clone(),
         data_server_uri: Some(nginx_addr),
-        rest_api_port: Some(3030),
-        otel_api_port: Some(3435),
-        tcp_port: Some(3031),
+        rest_api_port: Some(REST_API_PORT),
+        otel_api_port: Some(OTEL_API_PORT),
+        tcp_port: Some(TCP_PORT),
     }
 }
 

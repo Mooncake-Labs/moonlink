@@ -1,15 +1,15 @@
 [workspace]
 members = [
-  "src/moonlink",
-  "src/moonlink_backend",
-  "src/moonlink_connectors",
-  "src/moonlink_datafusion",
-  "src/moonlink_error",
-  "src/moonlink_metadata_store",
-  "src/moonlink_proto",
-  "src/moonlink_rpc",
-  "src/moonlink_service",
-  "src/moonlink_table_metadata",
+    "src/moonlink",
+    "src/moonlink_backend",
+    "src/moonlink_connectors",
+    "src/moonlink_datafusion",
+    "src/moonlink_error",
+    "src/moonlink_metadata_store",
+    "src/moonlink_proto",
+    "src/moonlink_rpc",
+    "src/moonlink_service",
+    "src/moonlink_table_metadata",
 ]
 resolver = "2"
 
@@ -35,6 +35,7 @@ bitstream-io = "4.5"
 bytes = "1.0"
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
+const_format = "0.2"
 crc32fast = "1"
 datafusion = "49"
 datafusion-cli = "49"
@@ -48,6 +49,18 @@ iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev
 itertools = "0.14"
 lru = "0.14"
 moka = { version = "0.12", features = ["future"] }
+
+# Workspace Members #
+moonlink = { path = "src/moonlink" }
+moonlink_backend = { path = "src/moonlink_backend" }
+moonlink_connectors = { path = "src/moonlink_connectors" }
+moonlink_datafusion = { path = "src/moonlink_datafusion" }
+moonlink_error = { path = "src/moonlink_error" }
+moonlink_metadata_store = { path = "src/moonlink_metadata_store" }
+moonlink_proto = { path = "src/moonlink_proto" }
+moonlink_rpc = { path = "src/moonlink_rpc" }
+moonlink_service = { path = "src/moonlink_service" }
+moonlink_table_metadata = { path = "src/moonlink_table_metadata" }
 more-asserts = "0.3"
 multimap = { version = "0.10", default-features = false }
 native-tls = "0.2.14"
@@ -114,18 +127,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 typed-builder = "0.20"
 url = "2.5"
 uuid = { version = "1.18", default-features = false, features = ["v4"] }
-
-# Workspace Members #
-moonlink = { path = "src/moonlink" }
-moonlink_backend = { path = "src/moonlink_backend" }
-moonlink_connectors = { path = "src/moonlink_connectors" }
-moonlink_datafusion = { path = "src/moonlink_datafusion" }
-moonlink_error = { path = "src/moonlink_error" }
-moonlink_metadata_store = { path = "src/moonlink_metadata_store" }
-moonlink_proto = { path = "src/moonlink_proto" }
-moonlink_rpc = { path = "src/moonlink_rpc" }
-moonlink_service = { path = "src/moonlink_service" }
-moonlink_table_metadata = { path = "src/moonlink_table_metadata" }
 
 [profile.release-with-debug]
 inherits = "release"

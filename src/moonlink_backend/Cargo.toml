@@ -21,6 +21,13 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 futures = { workspace = true }
+
+# Workspace Members #
+moonlink = { workspace = true, features = ["test-utils"] }
+moonlink_connectors = { workspace = true }
+moonlink_error = { workspace = true }
+moonlink_metadata_store = { workspace = true }
+moonlink_table_metadata = { workspace = true }
 more-asserts = { workspace = true }
 native-tls = { workspace = true }
 nix = { workspace = true }
@@ -31,13 +38,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-# Workspace Members #
-moonlink = { workspace = true, features = ["test-utils"] }
-moonlink_connectors = { workspace = true }
-moonlink_error = { workspace = true }
-moonlink_metadata_store = { workspace = true }
-moonlink_table_metadata = { workspace = true }
 
 [dev-dependencies]
 iceberg = { workspace = true }

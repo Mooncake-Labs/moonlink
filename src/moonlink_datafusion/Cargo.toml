@@ -12,13 +12,13 @@ bincode = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
 datafusion-cli = { workspace = true }
-object_store = { workspace = true }
-parquet = { workspace = true }
-roaring = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
 
 # Workspace Members #
 moonlink_error = { workspace = true }
 moonlink_rpc = { workspace = true }
 moonlink_table_metadata = { workspace = true }
+object_store = { workspace = true }
+parquet = { workspace = true }
+roaring = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
