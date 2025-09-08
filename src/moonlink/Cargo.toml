@@ -63,7 +63,6 @@ lru = { workspace = true }
 memmap2 = "0.9"
 moka = { workspace = true }
 
-# Workspace Members #
 moonlink_error = { workspace = true }
 moonlink_proto = { workspace = true }
 moonlink_table_metadata = { workspace = true }

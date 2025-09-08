@@ -22,7 +22,6 @@ test-utils = ["moonlink/test-utils"]
 [dependencies]
 async-trait = { workspace = true }
 
-# Workspace Members #
 moonlink = { workspace = true }
 moonlink_error = { workspace = true }
 more-asserts = { workspace = true }

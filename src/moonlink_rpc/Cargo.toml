@@ -7,7 +7,6 @@ license = "MIT"
 [dependencies]
 bincode = { workspace = true }
 
-# Workspace Members #
 moonlink_error = { workspace = true }
 paste = { workspace = true }
 serde = { workspace = true }

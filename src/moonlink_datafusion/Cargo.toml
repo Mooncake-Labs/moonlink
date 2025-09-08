@@ -13,7 +13,6 @@ clap = { workspace = true }
 datafusion = { workspace = true }
 datafusion-cli = { workspace = true }
 
-# Workspace Members #
 moonlink_error = { workspace = true }
 moonlink_rpc = { workspace = true }
 moonlink_table_metadata = { workspace = true }

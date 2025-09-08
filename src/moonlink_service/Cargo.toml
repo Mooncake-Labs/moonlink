@@ -24,7 +24,6 @@ clap = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
 const_format = { workspace = true }
 
-# Workspace Members #
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
 moonlink_connectors = { workspace = true }
