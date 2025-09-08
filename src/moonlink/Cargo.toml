@@ -62,6 +62,11 @@ itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"
 moka = { workspace = true }
+
+# Workspace Members #
+moonlink_error = { workspace = true }
+moonlink_proto = { workspace = true }
+moonlink_table_metadata = { workspace = true }
 more-asserts = { workspace = true }
 multimap = { workspace = true }
 num-bigint = { workspace = true }
@@ -83,11 +88,6 @@ tracing = { workspace = true }
 typed-builder = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-
-# Workspace Members #
-moonlink_error = { workspace = true }
-moonlink_proto = { workspace = true }
-moonlink_table_metadata = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

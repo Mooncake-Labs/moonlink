@@ -23,6 +23,11 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"
 futures = { workspace = true }
+
+# Workspace Members #
+moonlink = { workspace = true }
+moonlink_error = { workspace = true }
+moonlink_proto = { workspace = true }
 more-asserts = { workspace = true }
 native-tls = { workspace = true }
 num-traits = { workspace = true }
@@ -39,11 +44,6 @@ tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true }
-
-# Workspace Members #
-moonlink = { workspace = true }
-moonlink_error = { workspace = true }
-moonlink_proto = { workspace = true }
 
 [dev-dependencies]
 iceberg = { workspace = true }
