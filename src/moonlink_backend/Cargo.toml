@@ -21,7 +21,6 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 futures = { workspace = true }
-
 moonlink = { workspace = true, features = ["test-utils"] }
 moonlink_connectors = { workspace = true }
 moonlink_error = { workspace = true }

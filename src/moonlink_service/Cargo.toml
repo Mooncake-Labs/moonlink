@@ -22,7 +22,6 @@ arrow-schema = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
-
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
 moonlink_connectors = { workspace = true }

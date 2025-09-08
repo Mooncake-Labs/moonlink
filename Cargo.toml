@@ -49,7 +49,6 @@ iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev
 itertools = "0.14"
 lru = "0.14"
 moka = { version = "0.12", features = ["future"] }
-
 moonlink = { path = "src/moonlink" }
 moonlink_backend = { path = "src/moonlink_backend" }
 moonlink_connectors = { path = "src/moonlink_connectors" }

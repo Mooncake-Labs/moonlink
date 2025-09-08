@@ -62,7 +62,6 @@ itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"
 moka = { workspace = true }
-
 moonlink_error = { workspace = true }
 moonlink_proto = { workspace = true }
 moonlink_table_metadata = { workspace = true }
