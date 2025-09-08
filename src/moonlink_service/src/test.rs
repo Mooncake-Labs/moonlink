@@ -103,25 +103,6 @@ async fn test_schema() {
     assert_eq!(response.lsn, 1);
 }
 
-/// Util function to optimize table via REST API.
-async fn optimize_table(client: &reqwest::Client, database: &str, table: &str, mode: &str) {
-    let payload = get_optimize_table_payload(database, table, mode);
-    let crafted_src_table_name = format!("{database}.{table}");
-    let response = client
-        .post(format!(
-            "{REST_ADDR}/tables/{crafted_src_table_name}/optimize"
-        ))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
-}
-
 /// Util function to test optimize table
 async fn run_optimize_table_test(mode: &str) {
     let _guard = TestGuard::new(&get_moonlink_backend_dir());
@@ -208,25 +189,6 @@ async fn test_optimize_table_on_index_mode() {
 #[serial]
 async fn test_optimize_table_on_data_mode() {
     run_optimize_table_test("data").await;
-}
-
-/// Util function to create snapshot via REST API.
-async fn create_snapshot(client: &reqwest::Client, database: &str, table: &str, lsn: u64) {
-    let payload = get_create_snapshot_payload(database, table, lsn);
-    let crafted_src_table_name = format!("{database}.{table}");
-    let response = client
-        .post(format!(
-            "{REST_ADDR}/tables/{crafted_src_table_name}/snapshot"
-        ))
-        .header("content-type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
 }
 
 /// Test Create Snapshot
