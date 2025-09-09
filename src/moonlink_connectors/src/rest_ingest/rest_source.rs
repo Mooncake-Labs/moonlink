@@ -31,7 +31,7 @@ pub enum RestSourceError {
     #[error("avro conversion error: {0}")]
     AvroConversion(#[from] AvroToMoonlinkRowError),
     #[error("avro parsing error: {0}")]
-    AvroError(#[from] apache_avro::Error),
+    AvroError(#[from] Box<apache_avro::Error>),
     #[error("unknown table: {0}")]
     UnknownTable(String),
     #[error("invalid operation for table: {0}")]
@@ -288,10 +288,11 @@ impl RestSource {
 
                 // Parse the Avro data
                 let reader = Reader::with_schema(avro_schema, bytes.as_slice())
-                    .map_err(RestSourceError::AvroError)?;
+                    .map_err(|e| RestSourceError::AvroError(Box::new(e)))?;
                 let mut avro_values = Vec::new();
                 for value_result in reader {
-                    avro_values.push(value_result.map_err(RestSourceError::AvroError)?);
+                    avro_values
+                        .push(value_result.map_err(|e| RestSourceError::AvroError(Box::new(e)))?);
                 }
 
                 // Convert the first record (assuming single record per message)

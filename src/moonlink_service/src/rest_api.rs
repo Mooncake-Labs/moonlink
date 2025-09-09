@@ -120,14 +120,6 @@ pub struct SetAvroSchemaResponse {
 }
 
 /// ====================
-/// Kafka Avro data ingestion
-/// ====================
-///
-/// For Kafka Avro data ingestion, we accept raw binary Avro data in the request body.
-/// The operation defaults to "insert" and request_mode defaults to "async".
-/// Headers or query parameters can be used to override these defaults if needed.
-
-/// ====================
 /// Create table from PostgreSQL mirroring
 /// ====================
 ///
