@@ -156,7 +156,7 @@ impl FileCatalog {
         path.to_str().unwrap().to_string()
     }
 
-    /// Load metadata and its location foe the given table.
+    /// Load metadata and its location for the given table.
     pub(super) async fn load_metadata(
         &self,
         table_ident: &TableIdent,
