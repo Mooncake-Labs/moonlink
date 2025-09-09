@@ -176,7 +176,7 @@ impl AvroToArrowSchemaConverter {
                     DataType::Struct(vec![key_field, value_field].into()),
                     false,
                 );
-                Ok((DataType::List(Arc::new(struct_field)), false))
+                Ok((DataType::Map(Arc::new(struct_field), true), false))
             }
             AvroSchema::Union(union_schema) => {
                 // Handle nullable unions (null + another type)
@@ -221,10 +221,6 @@ impl AvroToArrowSchemaConverter {
                 }
 
                 Ok((DataType::Struct(struct_fields.into()), false))
-            }
-            AvroSchema::Enum { .. } => {
-                // Represent enums as strings
-                Ok((DataType::Utf8, false))
             }
             AvroSchema::Fixed(fixed_schema) => {
                 Ok((DataType::FixedSizeBinary(fixed_schema.size as i32), false))

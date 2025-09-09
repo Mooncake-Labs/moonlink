@@ -800,12 +800,13 @@ async fn set_avro_schema(
         .kafka_schema_id_cache
         .read()
         .await
-        .contains_key(&payload.kafka_schema)
+        .get(&payload.table)
+        .is_some_and(|id| *id == payload.schema_id)
     {
         return Ok(Json(SetAvroSchemaResponse {
             database: payload.database,
             table: payload.table,
-            schema_id: state.kafka_schema_id_cache.read().await[&payload.kafka_schema],
+            schema_id: payload.schema_id,
         }));
     }
     // Parse the Avro schema

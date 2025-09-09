@@ -1387,7 +1387,7 @@ mod tests {
         // Field must be non-null
         let entries_field = Field::new("entries", entries_struct, /* nullable = */ false);
 
-        let field_type = DataType::Map(Arc::new(entries_field), true);
+        let field_type = DataType::Map(Arc::new(entries_field), false);
 
         let mut builder = ColumnArrayBuilder::new(&field_type, 2);
 
