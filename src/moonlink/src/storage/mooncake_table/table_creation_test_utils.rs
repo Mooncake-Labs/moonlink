@@ -11,7 +11,11 @@ use crate::storage::filesystem::gcs::gcs_test_utils;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils;
 use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
+#[cfg(feature = "catalog-rest")]
+use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
+#[cfg(feature = "catalog-rest")]
+use crate::storage::iceberg::rest_catalog_test_utils::get_unique_rest_catalog_name;
 #[cfg(feature = "chaos-test")]
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::test_utils_commons::*;
@@ -50,7 +54,21 @@ pub(crate) fn get_iceberg_table_config(temp_dir: &TempDir) -> IcebergTableConfig
         atomic_write_dir: None,
     };
     let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+    // Select catalog based solely on features: REST when `catalog-rest` is enabled; otherwise FILE.
     let metadata_accessor_config = {
+        #[cfg(feature = "catalog-rest")]
+        {
+            let rest_config = RestCatalogConfig {
+                name: get_unique_rest_catalog_name().to_string(),
+                uri: REST_CATALOG_TEST_URI.to_string(),
+                warehouse: accessor_config.get_root_path(),
+                props: HashMap::new(),
+            };
+            crate::IcebergCatalogConfig::Rest {
+                rest_catalog_config: rest_config,
+            }
+        }
+        #[cfg(not(feature = "catalog-rest"))]
         {
             crate::IcebergCatalogConfig::File {
                 accessor_config: accessor_config.clone(),
@@ -136,7 +154,21 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
         AccessorConfig::new_with_storage_config(storage_config)
     };
 
+    // Select catalog based solely on features: REST when `catalog-rest` is enabled; otherwise FILE.
     let metadata_accessor_config = {
+        #[cfg(feature = "catalog-rest")]
+        {
+            let rest_config = RestCatalogConfig {
+                name: get_unique_rest_catalog_name().to_string(),
+                uri: REST_CATALOG_TEST_URI.to_string(),
+                warehouse: warehouse_uri.clone(),
+                props: HashMap::new(),
+            };
+            crate::IcebergCatalogConfig::Rest {
+                rest_catalog_config: rest_config,
+            }
+        }
+        #[cfg(not(feature = "catalog-rest"))]
         {
             crate::IcebergCatalogConfig::File {
                 accessor_config: accessor_config.clone(),

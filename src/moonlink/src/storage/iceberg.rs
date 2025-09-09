@@ -22,7 +22,6 @@ pub(super) mod puffin_utils;
 pub(super) mod puffin_writer_proxy;
 
 #[cfg(feature = "catalog-rest")]
-#[cfg(test)]
 pub(super) mod rest_catalog;
 
 mod schema_utils;

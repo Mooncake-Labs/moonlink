@@ -17,6 +17,10 @@ pub(crate) fn get_random_string() -> String {
         .collect()
 }
 
+pub(crate) fn get_unique_rest_catalog_name() -> String {
+    format!("{}-{}", DEFAULT_REST_CATALOG_NAME, get_random_string())
+}
+
 pub(crate) fn default_accessor_config() -> AccessorConfig {
     let storage_config = StorageConfig::FileSystem {
         root_directory: DEFAULT_WAREHOUSE_PATH.to_string(),
@@ -27,7 +31,7 @@ pub(crate) fn default_accessor_config() -> AccessorConfig {
 
 pub(crate) fn default_rest_catalog_config() -> RestCatalogConfig {
     RestCatalogConfig {
-        name: format!("{}-{}", DEFAULT_REST_CATALOG_NAME, get_random_string()),
+        name: get_unique_rest_catalog_name(),
         uri: REST_CATALOG_TEST_URI.to_string(),
         warehouse: DEFAULT_WAREHOUSE_PATH.to_string(),
         props: HashMap::new(),
