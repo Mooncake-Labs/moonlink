@@ -1,8 +1,13 @@
 use super::moonlink_catalog::{CatalogAccess, PuffinBlobType, PuffinWrite};
+use super::puffin_writer_proxy::{
+    append_puffin_metadata_and_rewrite, get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
+};
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::iceberg::catalog_utils::{reflect_table_updates, validate_table_requirements};
 use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
+use crate::storage::iceberg::io_utils as iceberg_io_utils;
 use crate::storage::iceberg::moonlink_catalog::SchemaUpdate;
+use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 use async_trait::async_trait;
 use iceberg::io::FileIO;
 use iceberg::puffin::PuffinWriter;
@@ -17,13 +22,6 @@ use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE,
 };
 use std::collections::{HashMap, HashSet};
-
-use crate::storage::iceberg::io_utils as iceberg_io_utils;
-use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
-
-use super::puffin_writer_proxy::{
-    append_puffin_metadata_and_rewrite, get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
-};
 
 #[derive(Debug)]
 pub struct RestCatalog {
