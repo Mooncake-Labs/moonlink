@@ -68,7 +68,7 @@ pub(super) mod rest_catalog_test_utils;
 
 #[cfg(feature = "catalog-rest")]
 #[cfg(test)]
-pub(super) mod rest_catalog_test_guard;
+pub(super) mod catalog_test_guard;
 
 #[cfg(feature = "catalog-rest")]
 #[cfg(test)]

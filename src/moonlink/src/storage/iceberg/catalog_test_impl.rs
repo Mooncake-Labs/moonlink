@@ -1,9 +1,11 @@
+use crate::storage::iceberg::catalog_test_guard::CatalogTestGuard;
 use crate::storage::iceberg::catalog_test_utils;
 use crate::storage::iceberg::file_catalog_test_utils::*;
 use crate::storage::iceberg::moonlink_catalog::MoonlinkCatalog;
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use iceberg::spec::{SnapshotReference, SnapshotRetention, MAIN_BRANCH};
@@ -14,10 +16,14 @@ use iceberg::{
 /// This file contains testing logic which is general to all types of catalogs.
 ///
 /// Test util function to create a new table.
-pub(crate) async fn create_test_table(catalog: &dyn MoonlinkCatalog) {
+pub(crate) async fn create_test_table(
+    catalog: &dyn MoonlinkCatalog,
+    namespace: String,
+    table_name: String,
+) {
     // Define namespace and table.
-    let namespace = NamespaceIdent::from_strs(["default"]).unwrap();
-    let table_name = "test_table".to_string();
+    let namespace = NamespaceIdent::from_strs([&namespace]).unwrap();
+    let table_name = table_name.clone();
 
     let schema = get_test_schema();
     let table_creation = TableCreation::builder()
@@ -83,7 +89,7 @@ pub(crate) async fn test_catalog_table_operations_impl(catalog: &dyn MoonlinkCat
     assert!(!table_already_exists,);
 
     // TODO(hjiang): Add testcase to check list table here.
-    create_test_table(catalog).await;
+    create_test_table(catalog, namespace.to_string(), table_name.clone()).await;
     assert!(catalog.table_exists(&table_ident).await.unwrap());
 
     let tables = catalog.list_tables(&namespace).await.unwrap();
@@ -200,11 +206,15 @@ pub(crate) async fn test_list_operation_impl(catalog: &dyn MoonlinkCatalog) {
     );
 }
 
-pub(crate) async fn test_update_table_impl(catalog: &mut dyn MoonlinkCatalog) {
-    create_test_table(catalog).await;
+pub(crate) async fn test_update_table_impl(
+    catalog: &mut dyn MoonlinkCatalog,
+    namespace: String,
+    table_name: String,
+) {
+    create_test_table(catalog, namespace.clone(), table_name.clone()).await;
 
-    let namespace = NamespaceIdent::from_strs(["default"]).unwrap();
-    let table_name = "test_table".to_string();
+    let namespace = NamespaceIdent::from_strs([&namespace]).unwrap();
+    let table_name = table_name.clone();
     let table_ident = TableIdent::new(namespace.clone(), table_name.clone());
     catalog.load_metadata(&table_ident).await.unwrap();
 
@@ -264,12 +274,17 @@ pub(crate) async fn test_update_table_impl(catalog: &mut dyn MoonlinkCatalog) {
     assert_eq!(table_metadata.current_snapshot_id(), Some(1),);
 }
 
-pub(crate) async fn test_update_schema_impl(catalog: &mut dyn MoonlinkCatalog) {
-    create_test_table(catalog).await;
+pub(crate) async fn test_update_schema_impl(
+    catalog: &mut dyn MoonlinkCatalog,
+    namespace: String,
+    table_name: String,
+) {
+    // create_test_table(catalog, namespace.clone(), table_name.clone()).await;
+    let _guard = CatalogTestGuard::new(catalog, namespace.clone(), Some(table_name.clone())).await;
 
-    let namespace_ident = NamespaceIdent::from_strs(["default"]).unwrap();
-    let table_name = "test_table".to_string();
-    let table_ident = TableIdent::new(namespace_ident, table_name);
+    let namespace_ident = NamespaceIdent::from_strs([&namespace]).unwrap();
+    let table_name = table_name.clone();
+    let table_ident = TableIdent::new(namespace_ident, table_name.clone());
 
     let new_schema = get_updated_test_schema();
     let new_schema_id = new_schema.schema_id();
@@ -289,11 +304,13 @@ pub(crate) async fn test_update_schema_impl(catalog: &mut dyn MoonlinkCatalog) {
 
 pub(crate) async fn test_update_table_with_requirement_check_failed_impl(
     catalog: &dyn MoonlinkCatalog,
+    namespace: String,
+    table_name: String,
 ) {
-    create_test_table(catalog).await;
+    let _guard = CatalogTestGuard::new(catalog, namespace.clone(), Some(table_name.clone())).await;
 
-    let namespace = NamespaceIdent::from_strs(["default"]).unwrap();
-    let table_name = "test_table".to_string();
+    let namespace = NamespaceIdent::from_strs([&namespace]).unwrap();
+    let table_name = table_name.clone();
     let table_ident = TableIdent::new(namespace.clone(), table_name.clone());
     catalog.load_metadata(&table_ident).await.unwrap();
 

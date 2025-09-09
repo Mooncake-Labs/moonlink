@@ -167,24 +167,27 @@ async fn test_list_operation_gcs() {
     test_list_operation_impl(&catalog).await
 }
 
+const NAMESPACE: &str = "default";
+const TABLE: &str = "test_table";
+
 /// Update table test.
 #[tokio::test]
 async fn test_update_table_filesystem() {
     let temp_dir = TempDir::new().unwrap();
     let mut catalog = create_test_file_catalog(&temp_dir, get_test_schema());
-    test_update_table_impl(&mut catalog).await;
+    test_update_table_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "storage-s3")]
 async fn test_update_table_s3() {
     let (mut catalog, _test_guard) = create_s3_catalog().await;
-    test_update_table_impl(&mut catalog).await;
+    test_update_table_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "storage-gcs")]
 async fn test_update_table_gcs() {
     let (mut catalog, _test_guard) = create_gcs_catalog().await;
-    test_update_table_impl(&mut catalog).await;
+    test_update_table_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 
 /// Update schema test.
@@ -192,19 +195,19 @@ async fn test_update_table_gcs() {
 async fn test_update_schema() {
     let temp_dir = TempDir::new().unwrap();
     let mut catalog = create_test_file_catalog(&temp_dir, get_test_schema());
-    test_update_schema_impl(&mut catalog).await;
+    test_update_schema_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "storage-s3")]
 async fn test_update_schema_s3() {
     let (mut catalog, _test_guard) = create_s3_catalog().await;
-    test_update_schema_impl(&mut catalog).await;
+    test_update_schema_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "storage-gcs")]
 async fn test_update_schema_gcs() {
     let (mut catalog, _test_guard) = create_gcs_catalog().await;
-    test_update_schema_impl(&mut catalog).await;
+    test_update_schema_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 
 /// Requirement check failure.
@@ -212,5 +215,10 @@ async fn test_update_schema_gcs() {
 async fn test_update_table_with_requirement_check_failed() {
     let temp_dir = TempDir::new().unwrap();
     let catalog = create_test_file_catalog(&temp_dir, get_test_schema());
-    test_update_table_with_requirement_check_failed_impl(&catalog).await;
+    test_update_table_with_requirement_check_failed_impl(
+        &catalog,
+        NAMESPACE.to_string(),
+        TABLE.to_string(),
+    )
+    .await;
 }
