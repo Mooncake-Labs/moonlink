@@ -1,6 +1,5 @@
-use crate::pg_replicate::table_init::build_table_components;
-use crate::pg_replicate::PostgresConnection;
-use crate::pg_replicate::{table::SrcTableId, table_init::TableComponents};
+use crate::pg_replicate::table_init::{build_table_components, TableComponents};
+use crate::pg_replicate::{table::SrcTableId, PostgresConnection};
 use crate::rest_ingest::event_request::EventRequest;
 use crate::rest_ingest::RestApiConnection;
 use crate::{Error, Result};
@@ -325,6 +324,33 @@ impl ReplicationConnection {
             }
             SourceType::Postgres(_) => {
                 panic!("Cannot add API table to PostgreSQL connection")
+            }
+        }
+    }
+
+    /// Set Avro schema for an existing REST table
+    ///
+    /// # Arguments
+    ///
+    /// * src_table_name: Source table name to set Avro schema for
+    /// * avro_schema: Avro schema for parsing data
+    pub async fn set_avro_schema(
+        &mut self,
+        src_table_name: String,
+        avro_schema: apache_avro::schema::Schema,
+    ) -> Result<()> {
+        match &mut self.source {
+            SourceType::RestApi(conn) => {
+                debug!(src_table_name, "setting Avro schema for REST table");
+
+                // Set Avro schema on the REST connection
+                conn.set_avro_schema(src_table_name, avro_schema).await?;
+
+                debug!("Avro schema set for REST table");
+                Ok(())
+            }
+            SourceType::Postgres(_) => {
+                panic!("Cannot set Avro schema on PostgreSQL connection")
             }
         }
     }

@@ -17,6 +17,7 @@ storage-fs = ["moonlink/storage-fs", "moonlink_metadata_store/storage-fs"]
 storage-all = ["storage-s3", "storage-gcs", "storage-fs"]
 
 [dependencies]
+apache-avro = "0.17"
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }

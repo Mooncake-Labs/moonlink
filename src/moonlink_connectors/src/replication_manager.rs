@@ -176,6 +176,37 @@ impl ReplicationManager {
         Ok(())
     }
 
+    /// Set Avro schema for an existing REST table
+    ///
+    /// # Arguments
+    ///
+    /// * src_table_name: Source table name to set Avro schema for
+    /// * avro_schema: Avro schema for parsing data
+    pub async fn set_avro_schema(
+        &mut self,
+        src_table_name: String,
+        avro_schema: apache_avro::schema::Schema,
+    ) -> Result<()> {
+        debug!(src_table_name, "setting Avro schema for REST table");
+
+        // Find REST API connection (should exist)
+        let rest_connection = self.connections.get_mut(REST_API_URI).ok_or_else(|| {
+            crate::Error::rest_api(
+                "REST API connection not found. Initialize REST API first.".to_string(),
+                None,
+            )
+        })?;
+
+        // Set Avro schema on the REST connection
+        rest_connection
+            .set_avro_schema(src_table_name.clone(), avro_schema)
+            .await?;
+
+        debug!(src_table_name, "Avro schema set for REST table");
+
+        Ok(())
+    }
+
     /// Initialize event API connection for data ingestion.
     /// Returns the event request sender channel for the API to use.
     pub async fn initialize_event_api_for_once(

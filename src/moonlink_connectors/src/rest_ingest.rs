@@ -1,8 +1,8 @@
+pub mod avro_converter;
 pub mod datetime_utils;
 pub mod decimal_utils;
 pub mod event_request;
 pub mod json_converter;
-pub mod avro_converter;
 pub mod moonlink_rest_sink;
 pub mod rest_event;
 pub mod rest_source;
@@ -14,6 +14,7 @@ use crate::rest_ingest::moonlink_rest_sink::RestSink;
 use crate::rest_ingest::moonlink_rest_sink::TableStatus;
 use crate::rest_ingest::rest_source::RestSource;
 use crate::Result;
+use apache_avro::schema::Schema as AvroSchema;
 use arrow_schema::Schema;
 use moonlink::TableEvent;
 use more_asserts as ma;
@@ -37,6 +38,10 @@ pub enum RestCommand {
         wal_flush_lsn_rx: watch::Receiver<u64>,
         /// Persist LSN, only assigned for tables to recovery; used to indicate and update replication LSN.
         persist_lsn: Option<u64>,
+    },
+    SetAvroSchema {
+        src_table_name: String,
+        avro_schema: AvroSchema,
     },
     DropTable {
         src_table_name: String,
@@ -114,6 +119,27 @@ impl RestApiConnection {
         self.cmd_tx.send(command).await.map_err(|e| {
             crate::Error::rest_api(
                 format!("Failed to send add table command: {e}"),
+                Some(Arc::new(e.into())),
+            )
+        })?;
+
+        Ok(())
+    }
+
+    /// Set Avro schema for an existing table
+    pub async fn set_avro_schema(
+        &self,
+        src_table_name: String,
+        avro_schema: AvroSchema,
+    ) -> Result<()> {
+        let command = RestCommand::SetAvroSchema {
+            src_table_name,
+            avro_schema,
+        };
+
+        self.cmd_tx.send(command).await.map_err(|e| {
+            crate::Error::rest_api(
+                format!("Failed to send set Avro schema command: {e}"),
                 Some(Arc::new(e.into())),
             )
         })?;
@@ -204,6 +230,10 @@ pub async fn run_rest_event_loop(
                         error!("Add table {src_table_name} with {src_table_id} to rest source failed: {e}");
                         continue;
                     }
+                }
+                RestCommand::SetAvroSchema { src_table_name, avro_schema } => {
+                    debug!("Setting Avro schema for table '{}'", src_table_name);
+                    rest_source.set_avro_schema(src_table_name.clone(), avro_schema)?;
                 }
                 RestCommand::DropTable { src_table_name, src_table_id } => {
                     debug!("Dropping REST table '{}' with src_table_id {}", src_table_name, src_table_id);

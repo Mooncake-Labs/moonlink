@@ -1,3 +1,4 @@
+use crate::rest_ingest::avro_converter::{AvroToMoonlinkRowConverter, AvroToMoonlinkRowError};
 use crate::rest_ingest::event_request::{
     EventRequest, FileEventOperation, FileEventRequest, FlushRequest, IngestRequestPayload,
     RowEventOperation, RowEventRequest, SnapshotRequest,
@@ -5,6 +6,8 @@ use crate::rest_ingest::event_request::{
 use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonlinkRowError};
 use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
+use apache_avro::schema::Schema as AvroSchema;
+use apache_avro::Reader;
 use arrow_schema::Schema;
 use bytes::Bytes;
 use moonlink::row::MoonlinkRow;
@@ -18,7 +21,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use apache_avro::schema::Schema as AvroSchema;
 
 pub type SrcTableId = u32;
 
@@ -26,6 +28,10 @@ pub type SrcTableId = u32;
 pub enum RestSourceError {
     #[error("json conversion error: {0}")]
     JsonConversion(#[from] JsonToMoonlinkRowError),
+    #[error("avro conversion error: {0}")]
+    AvroConversion(#[from] AvroToMoonlinkRowError),
+    #[error("avro parsing error: {0}")]
+    AvroError(#[from] apache_avro::Error),
     #[error("unknown table: {0}")]
     UnknownTable(String),
     #[error("invalid operation for table: {0}")]
@@ -82,7 +88,7 @@ impl RestSource {
         // Update rest source states.
         if self
             .table_schemas
-            .insert(src_table_name.clone(), schema)
+            .insert(src_table_name.clone(), (schema, None))
             .is_some()
         {
             return Err(RestSourceError::DuplicateTable(src_table_name).into());
@@ -93,6 +99,24 @@ impl RestSource {
             .insert(src_table_name, src_table_id)
             .is_none());
         Ok(())
+    }
+
+    /// Set Avro schema for an existing table
+    pub fn set_avro_schema(
+        &mut self,
+        src_table_name: String,
+        avro_schema: AvroSchema,
+    ) -> Result<()> {
+        // Find the existing table
+        if let Some((arrow_schema, _)) = self.table_schemas.get(&src_table_name) {
+            let arrow_schema = arrow_schema.clone();
+            // Update the table schema with the Avro schema
+            self.table_schemas
+                .insert(src_table_name, (arrow_schema, Some(avro_schema)));
+            Ok(())
+        } else {
+            Err(RestSourceError::UnknownTable(src_table_name).into())
+        }
     }
 
     pub fn remove_table(&mut self, src_table_name: &str) -> Result<()> {
@@ -242,7 +266,8 @@ impl RestSource {
         // Decode based on payload type
         let row = match &request.payload {
             IngestRequestPayload::Json(value) => {
-                let converter = JsonToMoonlinkRowConverter::new(schema.clone());
+                let (arrow_schema, _) = schema;
+                let converter = JsonToMoonlinkRowConverter::new(arrow_schema.clone());
                 converter.convert(value)?
             }
             IngestRequestPayload::Protobuf(bytes) => {
@@ -252,7 +277,35 @@ impl RestSource {
                 moonlink::row::proto_to_moonlink_row(p)?
             }
             IngestRequestPayload::Avro(bytes) => {
+                // Get the Avro schema for this table
+                let (_, avro_schema_opt) = schema;
+                let avro_schema = avro_schema_opt.as_ref().ok_or_else(|| {
+                    RestSourceError::InvalidOperation(format!(
+                        "Table {} does not have an Avro schema configured",
+                        request.src_table_name
+                    ))
+                })?;
 
+                // Parse the Avro data
+                let reader = Reader::with_schema(avro_schema, bytes.as_slice())
+                    .map_err(RestSourceError::AvroError)?;
+                let mut avro_values = Vec::new();
+                for value_result in reader {
+                    avro_values.push(value_result.map_err(RestSourceError::AvroError)?);
+                }
+
+                // Convert the first record (assuming single record per message)
+                if let Some(avro_value) = avro_values.into_iter().next() {
+                    AvroToMoonlinkRowConverter::convert(&avro_value)
+                        .map_err(RestSourceError::AvroConversion)?
+                } else {
+                    return Err(RestSourceError::AvroConversion(
+                        AvroToMoonlinkRowError::ConversionFailed(
+                            "No Avro record found in payload".to_string(),
+                        ),
+                    )
+                    .into());
+                }
             }
         };
 

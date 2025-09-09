@@ -6,6 +6,7 @@ mod recovery_utils;
 pub mod table_config;
 pub mod table_status;
 
+use apache_avro::schema::Schema as AvroSchema;
 use arrow_schema::Schema;
 pub use error::{Error, Result};
 use futures::{stream, StreamExt, TryStreamExt};
@@ -229,6 +230,24 @@ impl MoonlinkBackend {
                 moonlink_table_config?,
             )
             .await?;
+
+        Ok(())
+    }
+
+    /// Set Avro schema for an existing table
+    ///
+    /// # Arguments
+    ///
+    /// * src_table_name: Source table name (typically matches the table name used in create_table)
+    /// * avro_schema: Avro schema for parsing data
+    pub async fn set_avro_schema(
+        &self,
+        src_table_name: String,
+        avro_schema: AvroSchema,
+    ) -> Result<()> {
+        let mut manager = self.replication_manager.write().await;
+        // Set Avro schema on the existing REST table
+        manager.set_avro_schema(src_table_name, avro_schema).await?;
 
         Ok(())
     }
