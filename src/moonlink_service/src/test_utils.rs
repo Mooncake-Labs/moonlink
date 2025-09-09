@@ -1,20 +1,20 @@
+use crate::rest_api::{FileUploadResponse, IngestResponse, ListTablesResponse};
+use crate::{ServiceConfig, READINESS_PROBE_PORT};
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::datatypes::{DataType, Field};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use bytes::Bytes;
+use moonlink::decode_serialized_read_state_for_testing;
+use moonlink_backend::table_status::TableStatus;
+use moonlink_rpc::{scan_table_begin, scan_table_end};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::AsyncArrowWriter;
 use reqwest::Client;
+use reqwest::Response;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use reqwest::Response;
 use tokio::net::TcpStream;
-use crate::rest_api::{ListTablesResponse, IngestResponse, FileUploadResponse};
-use crate::{ServiceConfig, READINESS_PROBE_PORT};
-use moonlink_backend::table_status::TableStatus;
-use moonlink::decode_serialized_read_state_for_testing;
-use moonlink_rpc::{scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
 pub(crate) fn get_moonlink_backend_dir() -> String {
@@ -233,7 +233,6 @@ pub(crate) async fn send_test_invalid_ingest(
         .send()
         .await
         .unwrap()
-   
 }
 
 /// Test util function to send upload request.
@@ -255,7 +254,6 @@ pub(crate) async fn send_test_upload(
     );
     response.json().await.unwrap()
 }
-
 
 /// Test util function to send invalid upload request.
 pub(crate) async fn send_test_invalid_upload(
@@ -711,7 +709,7 @@ pub(crate) async fn create_snapshot(
 }
 
 /// Util function to check data file and puffin
-pub (crate) async fn assert_data_and_puffin(table: &str, lsn: u64) {
+pub(crate) async fn assert_data_and_puffin(table: &str, lsn: u64) {
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
     let bytes = scan_table_begin(
         &mut moonlink_stream,

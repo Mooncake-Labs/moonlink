@@ -209,7 +209,8 @@ async fn test_create_snapshot() {
     // Ingest some data.
     let insert_payload = create_test_json_payload();
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response: IngestResponse = send_test_ingest(&client, &crafted_src_table_name, &insert_payload).await;
+    let response: IngestResponse =
+        send_test_ingest(&client, &crafted_src_table_name, &insert_payload).await;
     let lsn = response.lsn.unwrap();
 
     // After all changes reflected at mooncake snapshot, flush table and trigger an iceberg snapshot.
@@ -287,7 +288,8 @@ async fn test_moonlink_standalone_file_upload() {
     // Upload a file.
     let file_upload_payload = create_test_load_parquet_payload(&get_moonlink_backend_dir()).await;
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response: FileUploadResponse = send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
+    let response: FileUploadResponse =
+        send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
 
     let lsn = response.lsn.unwrap();
 
@@ -388,7 +390,8 @@ async fn test_moonlink_standalone_file_insert() {
     // Upload a file.
     let file_upload_payload = create_test_insert_parquet_payload(&get_moonlink_backend_dir()).await;
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response: FileUploadResponse = send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
+    let response: FileUploadResponse =
+        send_test_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
     let lsn = response.lsn.unwrap();
 
     // Scan table and get data file and puffin files back.
@@ -454,12 +457,14 @@ async fn test_moonlink_standalone_multiple_tables_file_upload() {
 
     // Upload a file into table A.
     let crafted_src_table_a_name = format!("{DATABASE}.{table_a}");
-    let response: FileUploadResponse = send_test_upload(&client, &crafted_src_table_a_name, &file_upload_payload).await;
+    let response: FileUploadResponse =
+        send_test_upload(&client, &crafted_src_table_a_name, &file_upload_payload).await;
     let lsn_a = response.lsn.unwrap();
 
     // Upload a file into table B.
     let crafted_src_table_b_name = format!("{DATABASE}.{table_b}");
-    let response: FileUploadResponse = send_test_upload(&client, &crafted_src_table_b_name, &file_upload_payload).await;
+    let response: FileUploadResponse =
+        send_test_upload(&client, &crafted_src_table_b_name, &file_upload_payload).await;
     let lsn_b = response.lsn.unwrap();
 
     // Scan table A and get data file and puffin files back.
@@ -491,12 +496,14 @@ async fn test_moonlink_standalone_multiple_tables_file_insert() {
 
     // Insert file into table A.
     let crafted_src_table_a_name = format!("{DATABASE}.{table_a}");
-    let response: FileUploadResponse = send_test_upload(&client, &crafted_src_table_a_name, &file_upload_payload).await;
+    let response: FileUploadResponse =
+        send_test_upload(&client, &crafted_src_table_a_name, &file_upload_payload).await;
     let lsn_a = response.lsn.unwrap();
 
     // Insert file into table B.
     let crafted_src_table_b_name = format!("{DATABASE}.{table_b}");
-    let response: FileUploadResponse = send_test_upload(&client, &crafted_src_table_b_name, &file_upload_payload).await;
+    let response: FileUploadResponse =
+        send_test_upload(&client, &crafted_src_table_b_name, &file_upload_payload).await;
     let lsn_b = response.lsn.unwrap();
 
     // Scan table A and get data file and puffin files back.
@@ -650,13 +657,15 @@ async fn test_invalid_operation() {
     // Test invalid operation to upload a file.
     let file_upload_payload = create_test_invalid_upload_operation(&get_moonlink_backend_dir());
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = send_test_invalid_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
+    let response =
+        send_test_invalid_upload(&client, &crafted_src_table_name, &file_upload_payload).await;
     assert!(!response.status().is_success());
 
     // Test invalid operation to ingest data.
     let insert_payload = create_test_invalid_ingest_operation();
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = send_test_invalid_ingest(&client, &crafted_src_table_name, &insert_payload).await;
+    let response =
+        send_test_invalid_ingest(&client, &crafted_src_table_name, &insert_payload).await;
     assert!(!response.status().is_success());
 }
 
@@ -708,7 +717,6 @@ async fn test_create_table_with_invalid_config() {
     // Create an invalid config payload.
     let payload = create_test_invalid_config_payload(DATABASE, TABLE);
     send_test_tables(&client, &crafted_src_table_name, &payload).await;
-    
 
     // ==================
     // Invalid config 2
