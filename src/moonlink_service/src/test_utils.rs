@@ -4,13 +4,17 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::AsyncArrowWriter;
+use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use crate::rest_api::ListTablesResponse;
+use reqwest::Response;
+use tokio::net::TcpStream;
+use crate::rest_api::{ListTablesResponse, IngestResponse, FileUploadResponse};
 use crate::{ServiceConfig, READINESS_PROBE_PORT};
 use moonlink_backend::table_status::TableStatus;
+use moonlink::decode_serialized_read_state_for_testing;
+use moonlink_rpc::{scan_table_begin, scan_table_end};
 
 /// Moonlink backend directory.
 pub(crate) fn get_moonlink_backend_dir() -> String {
@@ -89,6 +93,199 @@ pub(crate) fn create_test_arrow_schema() -> Arc<ArrowSchema> {
             "3".to_string(),
         )])),
     ]))
+}
+
+/// Test util function to create json payload.
+pub(crate) fn create_test_json_payload() -> serde_json::Value {
+    json!({
+        "operation": "insert",
+        "request_mode": "sync",
+        "data": {
+            "id": 1,
+            "name": "Alice Johnson",
+            "email": "alice@example.com",
+            "age": 30
+        }
+    })
+}
+
+/// Test util function to create invalid upload operation.
+pub(crate) fn create_test_invalid_upload_operation(directory: &str) -> serde_json::Value {
+    json!({
+        "operation": "invalid_upload_operation",
+        "files": ["parquet_file"],
+        "storage_config": {
+            "fs": {
+                "root_directory": directory,
+                "atomic_write_dir": directory
+            }
+        }
+    })
+}
+
+/// Test util function to create invalid parquet upload.
+pub(crate) fn create_test_invalid_parquet_file_upload(directory: &str) -> serde_json::Value {
+    json!({
+        "operation": "upload",
+        "request_mode": "async",
+        "files": ["parquet_file"],
+        "storage_config": {
+            "fs": {
+                "root_directory": directory,
+                "atomic_write_dir": directory
+            }
+        }
+    })
+}
+
+/// Test util function to create invalid ingest operation.
+pub(crate) fn create_test_invalid_ingest_operation() -> serde_json::Value {
+    json!({
+        "operation": "invalid_ingest_operation",
+        "data": {
+            "id": 1,
+            "name": "Alice Johnson",
+            "email": "alice@example.com",
+            "age": 30
+        }
+    })
+}
+
+/// Test util function to create an invalid config payload.
+pub(crate) fn create_test_invalid_config_payload(database: &str, table: &str) -> serde_json::Value {
+    json!({
+        "database": database,
+        "table": table,
+        "schema": [
+            {"name": "id", "data_type": "int32", "nullable": false}
+        ],
+        "table_config": {
+            "mooncake": {
+                "append_only": true,
+                "row_identity": "FullRow"
+            }
+        }
+    })
+}
+
+/// Test util function to create load parquet file payload.
+pub(crate) async fn create_test_load_parquet_payload(directory: &str) -> serde_json::Value {
+    let parquet_file = generate_parquet_file(directory).await;
+    json!({
+        "operation": "upload",
+        "request_mode": "sync",
+        "files": [parquet_file],
+        "storage_config": {
+            "fs": {
+                "root_directory": directory,
+                "atomic_write_dir": directory
+            }
+        }
+    })
+}
+
+/// Test util function to create ingest parquet file payload.
+pub(crate) async fn create_test_insert_parquet_payload(directory: &str) -> serde_json::Value {
+    let parquet_file = generate_parquet_file(directory).await;
+    json!({
+        "operation": "insert",
+        "request_mode": "sync",
+        "files": [parquet_file],
+        "storage_config": {
+            "fs": {
+                "root_directory": directory,
+                "atomic_write_dir": directory
+            }
+        }
+    })
+}
+
+/// Test util function to send ingest request.
+pub(crate) async fn send_test_ingest(
+    client: &Client,
+    table_name: &str,
+    payload: &serde_json::Value,
+) -> IngestResponse {
+    let response = client
+        .post(format!("{REST_ADDR}/ingest/{table_name}"))
+        .header("content-type", "application/json")
+        .json(payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    response.json().await.unwrap()
+}
+
+/// Test util function to send invalid ingest request.
+pub(crate) async fn send_test_invalid_ingest(
+    client: &Client,
+    table_name: &str,
+    payload: &serde_json::Value,
+) -> Response {
+    client
+        .post(format!("{REST_ADDR}/ingest/{table_name}"))
+        .header("content-type", "application/json")
+        .json(payload)
+        .send()
+        .await
+        .unwrap()
+   
+}
+
+/// Test util function to send upload request.
+pub(crate) async fn send_test_upload(
+    client: &Client,
+    table_name: &str,
+    payload: &serde_json::Value,
+) -> FileUploadResponse {
+    let response = client
+        .post(format!("{REST_ADDR}/upload/{table_name}"))
+        .header("content-type", "application/json")
+        .json(payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+    response.json().await.unwrap()
+}
+
+
+/// Test util function to send invalid upload request.
+pub(crate) async fn send_test_invalid_upload(
+    client: &Client,
+    table_name: &str,
+    payload: &serde_json::Value,
+) -> Response {
+    client
+        .post(format!("{REST_ADDR}/upload/{table_name}"))
+        .header("content-type", "application/json")
+        .json(payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+// Test util function to send tables request.
+pub(crate) async fn send_test_tables(
+    client: &Client,
+    table_name: &str,
+    payload: &serde_json::Value,
+) {
+    let response = client
+        .post(format!("{REST_ADDR}/tables/{table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
 }
 
 /// Util function to create test arrow batch.
@@ -511,4 +708,35 @@ pub(crate) async fn create_snapshot(
         response.status().is_success(),
         "Response status is {response:?}"
     );
+}
+
+/// Util function to check data file and puffin
+pub (crate) async fn assert_data_and_puffin(table: &str, lsn: u64) {
+    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
+    let bytes = scan_table_begin(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        table.to_string(),
+        lsn,
+    )
+    .await
+    .unwrap();
+    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
+        decode_serialized_read_state_for_testing(bytes);
+    assert_eq!(data_file_paths.len(), 1);
+    let record_batches = read_all_batches(&data_file_paths[0]).await;
+    let expected_arrow_batch = create_test_arrow_batch();
+    assert_eq!(record_batches, vec![expected_arrow_batch]);
+
+    assert!(puffin_file_paths.is_empty());
+    assert!(puffin_deletion.is_empty());
+    assert!(positional_deletion.is_empty());
+
+    scan_table_end(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        table.to_string(),
+    )
+    .await
+    .unwrap();
 }
