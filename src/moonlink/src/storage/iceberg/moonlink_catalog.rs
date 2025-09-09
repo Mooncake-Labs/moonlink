@@ -53,7 +53,6 @@ pub trait CatalogAccess {
     fn get_warehouse_location(&self) -> &str;
 
     /// Load metadata and its location foe the given table.
-    #[allow(unused)]
     async fn load_metadata(
         &self,
         table_ident: &TableIdent,

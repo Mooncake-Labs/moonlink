@@ -156,39 +156,6 @@ impl FileCatalog {
         path.to_str().unwrap().to_string()
     }
 
-    /// Load metadata and its location for the given table.
-    pub(super) async fn load_metadata(
-        &self,
-        table_ident: &TableIdent,
-    ) -> IcebergResult<(String /*metadata_filepath*/, TableMetadata)> {
-        // Read version hint for the table to get latest version.
-        let version_hint_filepath = format!(
-            "{}/{}/{}/{}",
-            table_ident.namespace().to_url_string(),
-            table_ident.name(),
-            METADATA_DIRECTORY,
-            VERSION_HINT_FILENAME,
-        );
-
-        // Load and assign etag.
-        self.load_version_hint_etag(&version_hint_filepath).await?;
-
-        // Read version hint file.
-        let version = self.load_current_version(&version_hint_filepath).await?;
-
-        // Read and parse table metadata.
-        let metadata_filepath = format!(
-            "{}/{}/{}/v{}.metadata.json",
-            table_ident.namespace().to_url_string(),
-            table_ident.name(),
-            METADATA_DIRECTORY,
-            version,
-        );
-        let metadata = self.load_table_metadata(&metadata_filepath).await?;
-
-        Ok((metadata_filepath, metadata))
-    }
-
     /// This is a hack function to work-around iceberg-rust.
     /// iceberg-rust somehow reassign field id at table creation, which means it leads to inconsistency between iceberg table metadata and parquet metadata; query engines is possible to suffer schema inconsistency error.
     /// Here we overwrite iceberg schema with correctly populated field id.
