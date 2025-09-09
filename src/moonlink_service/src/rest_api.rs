@@ -123,14 +123,9 @@ pub struct SetAvroSchemaResponse {
 /// Kafka Avro data ingestion
 /// ====================
 ///
-/// Request structure for Kafka Avro data ingestion
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IngestAvroRequest {
-    pub operation: String,
-    pub data: Vec<u8>, // Avro serialized data
-    /// Whether to enable synchronous mode.
-    pub request_mode: RequestMode,
-}
+/// For Kafka Avro data ingestion, we accept raw binary Avro data in the request body.
+/// The operation defaults to "insert" and request_mode defaults to "async".
+/// Headers or query parameters can be used to override these defaults if needed.
 
 /// ====================
 /// Create table from PostgreSQL mirroring
@@ -334,7 +329,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/ingest/{table}", post(ingest_data_json))
         .route("/ingestpb/{table}", post(ingest_data_protobuf))
         .route("/kafka/{table}/schema", post(set_avro_schema))
-        .route("/kafka/{table}/ingest", post(ingest_data_avro))
+        .route("/kafka/{table}/ingest", post(ingest_data_kafka))
         .route("/upload/{table}", post(upload_files))
         .route("/tables/{table}/optimize", post(optimize_table))
         .route("/tables/{table}/snapshot", post(create_snapshot))
@@ -963,18 +958,26 @@ async fn ingest_data_impl(
     }))
 }
 
-async fn ingest_data_avro(
+async fn ingest_data_kafka(
     Path(src_table_name): Path<String>,
     State(state): State<ApiState>,
-    Json(request): Json<IngestAvroRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Json<IngestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received Kafka Avro data ingestion request for table '{}', data size: {} bytes",
+        src_table_name,
+        body.len()
+    );
+
+    // For now, we'll assume all Kafka ingestions are "insert" operations and async mode
+    // In a real scenario, you might want to include operation and mode in headers or query params
     ingest_data_impl(
         src_table_name,
         state,
         IngestRequestInternal {
-            operation: request.operation,
-            data: IngestRequestPayload::Avro(request.data),
-            request_mode: request.request_mode,
+            operation: "insert".to_string(),
+            data: IngestRequestPayload::Avro(body.to_vec()),
+            request_mode: RequestMode::Async,
         },
     )
     .await
