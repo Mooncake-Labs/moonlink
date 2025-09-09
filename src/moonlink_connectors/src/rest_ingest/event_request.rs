@@ -18,6 +18,7 @@ pub enum RowEventOperation {
 pub enum IngestRequestPayload {
     Json(serde_json::Value),
     Protobuf(Vec<u8>),
+    Avro(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]

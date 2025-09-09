@@ -93,6 +93,24 @@ pub struct CreateTableResponse {
 }
 
 /// ====================
+/// Create kafka schema
+/// ====================
+///
+/// Request structure for kafka schema creation.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateKafkaSchemaRequest {
+    pub database: String,
+    pub table: String,
+    pub kafka_schema: String,
+    pub schema_id: u64,
+}
+
+/// Response structure for kafka schema creation.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateKafkaSchemaResponse {}
+
+
+/// ====================
 /// Create table from PostgreSQL mirroring
 /// ====================
 ///
@@ -293,6 +311,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/schema/{database}/{table}", get(fetch_schema))
         .route("/ingest/{table}", post(ingest_data_json))
         .route("/ingestpb/{table}", post(ingest_data_protobuf))
+        .route("/kafka/{table}/schema", post(create_kafka_schema))
+        .route("/kafka/{table}/ingest", post(ingest_data_kafka))
         .route("/upload/{table}", post(upload_files))
         .route("/tables/{table}/optimize", post(optimize_table))
         .route("/tables/{table}/snapshot", post(create_snapshot))
@@ -742,6 +762,14 @@ async fn flush_table(
             ))
         }
     }
+}
+
+async fn create_kafka_schema(
+    Path(src_table_name): Path<String>,
+    State(state): State<ApiState>,
+    Json(payload): Json<CreateKafkaSchemaRequest>,
+) -> Result<Json<CreateKafkaSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
+    
 }
 
 #[derive(Debug)]

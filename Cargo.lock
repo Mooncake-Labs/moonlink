@@ -4611,6 +4611,7 @@ name = "moonlink_connectors"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "apache-avro 0.17.0",
  "arrow",
  "arrow-array",
  "arrow-schema",

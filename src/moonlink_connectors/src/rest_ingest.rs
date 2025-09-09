@@ -2,6 +2,7 @@ pub mod datetime_utils;
 pub mod decimal_utils;
 pub mod event_request;
 pub mod json_converter;
+pub mod avro_converter;
 pub mod moonlink_rest_sink;
 pub mod rest_event;
 pub mod rest_source;

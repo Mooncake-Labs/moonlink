@@ -13,6 +13,7 @@ test-tls = []
 
 [dependencies]
 anyhow = { workspace = true }
+apache-avro = "0.17"
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }

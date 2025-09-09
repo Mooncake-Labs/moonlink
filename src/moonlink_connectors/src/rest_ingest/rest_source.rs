@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use apache_avro::schema::Schema as AvroSchema;
 
 pub type SrcTableId = u32;
 
@@ -40,7 +41,7 @@ pub enum RestSourceError {
 }
 
 pub struct RestSource {
-    table_schemas: HashMap<String, Arc<Schema>>,
+    table_schemas: HashMap<String, (Arc<Schema>, Option<AvroSchema>)>,
     src_table_name_to_src_id: HashMap<String, SrcTableId>,
     lsn_generator: Arc<AtomicU64>,
 }
@@ -249,6 +250,9 @@ impl RestSource {
                     prost::Message::decode(bytes.as_slice())
                         .map_err(RestSourceError::ProtobufDecoding)?;
                 moonlink::row::proto_to_moonlink_row(p)?
+            }
+            IngestRequestPayload::Avro(bytes) => {
+
             }
         };
 
