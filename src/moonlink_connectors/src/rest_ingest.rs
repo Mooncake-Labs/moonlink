@@ -11,6 +11,7 @@ use crate::replication_state::ReplicationState;
 use crate::rest_ingest::event_request::EventRequest;
 use crate::rest_ingest::moonlink_rest_sink::RestSink;
 use crate::rest_ingest::moonlink_rest_sink::TableStatus;
+use crate::rest_ingest::rest_event::RestEvent;
 use crate::rest_ingest::rest_source::RestSource;
 use crate::Result;
 use arrow_schema::Schema;
@@ -178,6 +179,10 @@ pub async fn run_rest_event_loop(
     // Create RestSource that we'll use for processing
     let mut rest_source = RestSource::new();
 
+    // Channel for collecting results from async processing
+    let (results_tx, mut results_rx) =
+        mpsc::unbounded_channel::<(Option<mpsc::Sender<u64>>, Result<Vec<RestEvent>>)>();
+
     loop {
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => match cmd {
@@ -199,7 +204,7 @@ pub async fn run_rest_event_loop(
                 RestCommand::DropTable { src_table_name, src_table_id } => {
                     debug!("Dropping REST table '{}' with src_table_id {}", src_table_name, src_table_id);
 
-                    // Remove from sink
+                    // Remove from sink first
                     sink.drop_table(src_table_id)?;
 
                     // Remove from source
@@ -210,15 +215,16 @@ pub async fn run_rest_event_loop(
                     break;
                 }
             },
-            // Process REST requests directly (similar to how PostgreSQL processes CDC events)
+            // Process REST requests by sending them for async processing
             Some(request) = rest_request_rx.recv() => {
-                // TODO(hjiang): Handle recursive request like file insertion.
-                let mut lsn = 0;
-
-                // Process the request and generate events
-                match rest_source.process_request(&request) {
+                // Send request for processing - consuming it directly
+                rest_source.process_request(request, results_tx.clone());
+            },
+            // Handle results from async processing in separate branch
+            Some((request_tx, result)) = results_rx.recv() => {
+                match result {
                     Ok(rest_events) => {
-                        // Send all events to be processed by the sink
+                        let mut lsn = 0;
                         for rest_event in rest_events {
                             if let Some(rest_lsn) = rest_event.lsn() {
                                 ma::assert_gt!(rest_lsn, lsn);
@@ -234,16 +240,16 @@ pub async fn run_rest_event_loop(
                         }
 
                         // Send back event response if applicable.
-                        if let Some(rx) = request.get_request_tx() {
+                        if let Some(tx) = request_tx {
                             // Client connection could be cut down during request handling, so no guarantee send success.
-                            let _ = rx.send(lsn).await;
+                            let _ = tx.send(lsn).await;
                         }
                     }
                     Err(e) => {
-                        warn!(error = ?e, "failed to process REST request {:?}", request);
+                        warn!(error = ?e, "failed to process REST request");
                     }
                 }
-            }
+            },
             // All channels are closed.
             else => break,
         }

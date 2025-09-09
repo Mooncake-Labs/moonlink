@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 pub type SrcTableId = u32;
 
@@ -107,12 +106,58 @@ impl RestSource {
     }
 
     /// Process an event request.
-    pub fn process_request(&self, request: &EventRequest) -> Result<Vec<RestEvent>> {
+    pub fn process_request(
+        &self,
+        request: EventRequest,
+        results_tx: tokio::sync::mpsc::UnboundedSender<(
+            Option<tokio::sync::mpsc::Sender<u64>>,
+            Result<Vec<RestEvent>>,
+        )>,
+    ) {
+        // Extract the request_tx from the request
+        let request_tx = request.get_request_tx();
+
         match request {
-            EventRequest::FileRequest(request) => self.process_file_request(request),
-            EventRequest::RowRequest(request) => self.process_row_request(request),
-            EventRequest::SnapshotRequest(request) => self.process_snapshot_request(request),
-            EventRequest::FlushRequest(request) => self.process_flush_request(request),
+            EventRequest::FileRequest(file_request) => {
+                // Process file request synchronously and send to channel
+                self.process_file_request_async(file_request, request_tx, results_tx);
+            }
+            EventRequest::RowRequest(row_request) => {
+                // Use the async processing for row requests
+                self.process_row_request_async(row_request, request_tx, results_tx);
+            }
+            EventRequest::SnapshotRequest(snapshot_request) => {
+                // Process snapshot request synchronously and send to channel
+                let result = self.process_snapshot_request(&snapshot_request);
+                let _ = results_tx.send((request_tx, result));
+            }
+            EventRequest::FlushRequest(flush_request) => {
+                // Process flush request synchronously and send to channel
+                let result = self.process_flush_request(&flush_request);
+                let _ = results_tx.send((request_tx, result));
+            }
+        }
+    }
+
+    /// Async helper for tests - processes row request and returns results directly
+    #[cfg(test)]
+    async fn process_row_request_test_helper(
+        &self,
+        request: &RowEventRequest,
+    ) -> Result<Vec<RestEvent>> {
+        let (results_tx, mut results_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Call the async method
+        self.process_row_request_async(request.clone(), None, results_tx);
+
+        // Wait for the result
+        if let Some((_request_tx, result)) = results_rx.recv().await {
+            result
+        } else {
+            Err(crate::Error::rest_api(
+                "No result received".to_string(),
+                None,
+            ))
         }
     }
 
@@ -180,97 +225,145 @@ impl RestSource {
     }
 
     /// Process an event request, which is operated on a file.
-    fn process_file_request(&self, request: &FileEventRequest) -> Result<Vec<RestEvent>> {
-        let src_table_id = self
+    fn process_file_request_async(
+        &self,
+        request: FileEventRequest,
+        request_tx: Option<tokio::sync::mpsc::Sender<u64>>,
+        results_tx: tokio::sync::mpsc::UnboundedSender<(
+            Option<tokio::sync::mpsc::Sender<u64>>,
+            Result<Vec<RestEvent>>,
+        )>,
+    ) {
+        let src_table_id = match self
             .src_table_name_to_src_id
             .get(&request.src_table_name)
-            .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
-        let src_table_id = *src_table_id;
+            .copied()
+        {
+            Some(id) => id,
+            None => {
+                let error = Err(crate::Error::rest_api(
+                    format!("Unknown table: {}", request.src_table_name),
+                    None,
+                ));
+                let _ = results_tx.send((request_tx, error));
+                return;
+            }
+        };
 
         match request.operation {
             FileEventOperation::Insert => {
-                let (file_upload_row_tx, file_upload_row_rx) =
-                    tokio::sync::mpsc::unbounded_channel();
                 let lsn_generator = self.lsn_generator.clone();
                 let storage_config = request.storage_config.clone();
                 let parquet_files = request.files.clone();
 
                 tokio::task::spawn(async move {
-                    Self::generate_table_events_for_file_upload(
-                        src_table_id,
-                        lsn_generator,
-                        storage_config,
-                        parquet_files,
-                        file_upload_row_tx,
-                    )
-                    .await;
-                });
+                    let (file_upload_row_tx, mut file_upload_row_rx) =
+                        tokio::sync::mpsc::unbounded_channel();
 
-                let file_upload_row_rx = Arc::new(Mutex::new(file_upload_row_rx));
-                let file_rest_event = RestEvent::FileInsertEvent {
-                    src_table_id,
-                    table_events: file_upload_row_rx,
-                };
-                Ok(vec![file_rest_event])
+                    // Spawn the file processing task
+                    tokio::task::spawn(async move {
+                        Self::generate_table_events_for_file_upload(
+                            src_table_id,
+                            lsn_generator,
+                            storage_config,
+                            parquet_files,
+                            file_upload_row_tx,
+                        )
+                        .await;
+                    });
+
+                    // Collect all events from the file processing
+                    let mut events = Vec::new();
+                    while let Some(event_result) = file_upload_row_rx.recv().await {
+                        match event_result {
+                            Ok(event) => events.push(event),
+                            Err(e) => {
+                                let _ = results_tx.send((request_tx, Err(e)));
+                                return;
+                            }
+                        }
+                    }
+
+                    let _ = results_tx.send((request_tx, Ok(events)));
+                });
             }
             FileEventOperation::Upload => {
                 let lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
                 let file_rest_event = RestEvent::FileUploadEvent {
                     src_table_id,
-                    storage_config: request.storage_config.clone(),
-                    files: request.files.clone(),
+                    storage_config: request.storage_config,
+                    files: request.files,
                     lsn,
                 };
-                Ok(vec![file_rest_event])
+                let _ = results_tx.send((request_tx, Ok(vec![file_rest_event])));
             }
         }
     }
 
     /// Process an event request, which is operated on a row.
-    fn process_row_request(&self, request: &RowEventRequest) -> Result<Vec<RestEvent>> {
-        let schema = self
-            .table_schemas
-            .get(&request.src_table_name)
-            .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
-
+    fn process_row_request_async(
+        &self,
+        request: RowEventRequest,
+        request_tx: Option<tokio::sync::mpsc::Sender<u64>>,
+        results_tx: tokio::sync::mpsc::UnboundedSender<(
+            Option<tokio::sync::mpsc::Sender<u64>>,
+            Result<Vec<RestEvent>>,
+        )>,
+    ) {
+        // Clone the data needed for async processing
+        let schema = self.table_schemas.get(&request.src_table_name).cloned();
         let src_table_id = self
             .src_table_name_to_src_id
             .get(&request.src_table_name)
-            .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
+            .copied();
+        let lsn_generator = self.lsn_generator.clone();
 
-        // Decode based on payload type
-        let row = match &request.payload {
-            IngestRequestPayload::Json(value) => {
-                let converter = JsonToMoonlinkRowConverter::new(schema.clone());
-                converter.convert(value)?
-            }
-            IngestRequestPayload::Protobuf(bytes) => {
-                let p: moonlink_proto::moonlink::MoonlinkRow =
-                    prost::Message::decode(bytes.as_slice())
-                        .map_err(RestSourceError::ProtobufDecoding)?;
-                moonlink::row::proto_to_moonlink_row(p)?
-            }
-        };
+        // Spawn task to process row request asynchronously
+        tokio::spawn(async move {
+            let result = (|| -> Result<Vec<RestEvent>> {
+                let schema = schema
+                    .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
+                let src_table_id = src_table_id
+                    .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
 
-        let row_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
-        let commit_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
+                // Decode based on payload type
+                let row = match &request.payload {
+                    IngestRequestPayload::Json(value) => {
+                        let converter = JsonToMoonlinkRowConverter::new(schema);
+                        converter.convert(value)?
+                    }
+                    IngestRequestPayload::Protobuf(bytes) => {
+                        let p: moonlink_proto::moonlink::MoonlinkRow =
+                            prost::Message::decode(bytes.as_slice())
+                                .map_err(RestSourceError::ProtobufDecoding)?;
+                        moonlink::row::proto_to_moonlink_row(p)?
+                    }
+                };
 
-        // Generate both a row event and a commit event
-        let events = vec![
-            RestEvent::RowEvent {
-                src_table_id: *src_table_id,
-                operation: request.operation.clone(),
-                row,
-                lsn: row_lsn,
-                timestamp: request.timestamp,
-            },
-            RestEvent::Commit {
-                lsn: commit_lsn,
-                timestamp: request.timestamp,
-            },
-        ];
+                let row_lsn = lsn_generator.fetch_add(1, Ordering::SeqCst);
+                let commit_lsn = lsn_generator.fetch_add(1, Ordering::SeqCst);
 
-        Ok(events)
+                // Generate both a row event and a commit event
+                let events = vec![
+                    RestEvent::RowEvent {
+                        src_table_id,
+                        operation: request.operation.clone(),
+                        row,
+                        lsn: row_lsn,
+                        timestamp: request.timestamp,
+                    },
+                    RestEvent::Commit {
+                        lsn: commit_lsn,
+                        timestamp: request.timestamp,
+                    },
+                ];
+
+                Ok(events)
+            })();
+
+            // Send result to queue with request_tx
+            let _ = results_tx.send((request_tx, result));
+        });
     }
 
     /// Process a snapshot request.
@@ -360,16 +453,19 @@ mod tests {
         vec![row_1, row_2, row_3]
     }
 
-    /// Test util to get all rest events out of event channel.
-    async fn get_all_rest_events(
-        events_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<RestEvent>>>>,
+    /// Test util to get all rest events from the new result channel.
+    async fn get_all_rest_events_from_result_channel(
+        mut events_rx: tokio::sync::mpsc::UnboundedReceiver<(
+            Option<tokio::sync::mpsc::Sender<u64>>,
+            Result<Vec<RestEvent>>,
+        )>,
     ) -> Result<Vec<RestEvent>> {
-        let mut rest_events = vec![];
-        let mut guard = events_rx.lock().await;
-        while let Some(event) = guard.recv().await {
-            rest_events.push(event?);
+        let mut all_events = vec![];
+        while let Some((_request_tx, result)) = events_rx.recv().await {
+            let events = result?;
+            all_events.extend(events);
         }
-        Ok(rest_events)
+        Ok(all_events)
     }
 
     #[test]
@@ -399,8 +495,8 @@ mod tests {
         assert_eq!(source.src_table_name_to_src_id.len(), 0);
     }
 
-    #[test]
-    fn test_process_row_append_request_success() {
+    #[tokio::test]
+    async fn test_process_row_append_request_success() {
         let mut source = RestSource::new();
         let schema = make_test_schema();
         source
@@ -423,10 +519,15 @@ mod tests {
             tx: None,
         };
 
-        let events = source.process_row_request(&request).unwrap();
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        source.process_row_request_async(request, None, events_tx);
+
+        let events = get_all_rest_events_from_result_channel(events_rx)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 2); // Should have row event + commit event
 
-        // Check row event (first event)
+        // Check the row event
         match &events[0] {
             RestEvent::RowEvent {
                 src_table_id,
@@ -445,7 +546,7 @@ mod tests {
             _ => panic!("Expected RowEvent"),
         }
 
-        // Check commit event (second event)
+        // Check the commit event
         match &events[1] {
             RestEvent::Commit { lsn, .. } => {
                 assert_eq!(*lsn, 2);
@@ -454,8 +555,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_process_row_with_proto_row() {
+    #[tokio::test]
+    async fn test_process_row_with_proto_row() {
         let mut source = RestSource::new();
         let schema = make_test_schema();
         source
@@ -486,7 +587,12 @@ mod tests {
             tx: None,
         };
 
-        let events = source.process_row_request(&request).unwrap();
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        source.process_row_request_async(request, None, events_tx);
+
+        let events = get_all_rest_events_from_result_channel(events_rx)
+            .await
+            .unwrap();
         match &events[0] {
             RestEvent::RowEvent { row, .. } => {
                 assert_eq!(row, &direct_row);
@@ -521,43 +627,41 @@ mod tests {
             files: vec![filepath],
             tx: None,
         };
-        let events = source.process_file_request(&request).unwrap();
-        assert_eq!(events.len(), 1);
+
+        let (results_tx, results_rx) = tokio::sync::mpsc::unbounded_channel();
+        source.process_file_request_async(request, None, results_tx);
+        let events = get_all_rest_events_from_result_channel(results_rx)
+            .await
+            .unwrap();
+
         let moonlink_rows = generate_moonlink_rows();
+        // Should have 3 row events + 1 commit event = 4 events
+        assert_eq!(events.len(), 4);
 
-        // Check file events.
-        match &events[0] {
-            RestEvent::FileInsertEvent { table_events, .. } => {
-                let rest_events = get_all_rest_events(table_events.clone()).await.unwrap();
-                // There're 3 append events and 1 commit event.
-                assert_eq!(rest_events.len(), 4);
+        // Check that we get the expected row events and commit
+        for (idx, event) in events.iter().enumerate() {
+            match event {
+                RestEvent::RowEvent {
+                    src_table_id,
+                    operation,
+                    row,
+                    lsn,
+                    ..
+                } => {
+                    // LSN starts with 1.
+                    let expected_lsn = idx + 1;
 
-                for (idx, cur_rest_event) in rest_events.into_iter().enumerate() {
-                    match cur_rest_event {
-                        RestEvent::RowEvent {
-                            src_table_id,
-                            operation,
-                            row,
-                            lsn,
-                            ..
-                        } => {
-                            // LSN starts with 1.
-                            let expected_lsn = idx + 1;
-
-                            assert_eq!(src_table_id, 1);
-                            assert_eq!(operation, RowEventOperation::Insert);
-                            assert_eq!(row, moonlink_rows[idx]);
-                            assert_eq!(lsn, expected_lsn as u64);
-                        }
-                        RestEvent::Commit { lsn, .. } => {
-                            // Three table append events are with LSN 1, 2, 3.
-                            assert_eq!(lsn, 4);
-                        }
-                        _ => panic!("Receive unexpected rest event {cur_rest_event:?}"),
-                    }
+                    assert_eq!(*src_table_id, 1);
+                    assert_eq!(*operation, RowEventOperation::Insert);
+                    assert_eq!(*row, moonlink_rows[idx]);
+                    assert_eq!(*lsn, expected_lsn as u64);
                 }
+                RestEvent::Commit { lsn, .. } => {
+                    // The commit event should be after all row events
+                    assert_eq!(*lsn, 4);
+                }
+                _ => panic!("Unexpected event: {event:?}"),
             }
-            _ => panic!("Receive unexpected rest event {:?}", events[0]),
         }
     }
 
@@ -587,7 +691,12 @@ mod tests {
             files: vec![filepath.clone()],
             tx: None,
         };
-        let events = source.process_file_request(&request).unwrap();
+
+        let (results_tx, results_rx) = tokio::sync::mpsc::unbounded_channel();
+        source.process_file_request_async(request, None, results_tx);
+        let events = get_all_rest_events_from_result_channel(results_rx)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
 
         // Check file events.
@@ -629,17 +738,13 @@ mod tests {
             files: vec!["non_existent_file".to_string()],
             tx: None,
         };
-        let events = source.process_file_request(&request).unwrap();
-        assert_eq!(events.len(), 1);
 
-        // Check file events.
-        match &events[0] {
-            RestEvent::FileInsertEvent { table_events, .. } => {
-                let rest_events = get_all_rest_events(table_events.clone()).await;
-                assert!(rest_events.is_err());
-            }
-            _ => panic!("Receive unexpected rest event {:?}", events[0]),
-        }
+        let (results_tx, mut results_rx) = tokio::sync::mpsc::unbounded_channel();
+        source.process_file_request_async(request, None, results_tx);
+
+        // Should receive an error result
+        let (_request_tx, result) = results_rx.recv().await.unwrap();
+        assert!(result.is_err());
     }
 
     #[test]
@@ -671,10 +776,9 @@ mod tests {
         assert!(res.is_err());
     }
 
-    #[test]
-    fn test_process_request_unknown_table() {
+    #[tokio::test]
+    async fn test_process_request_unknown_table() {
         let source = RestSource::new();
-        // No schema added
 
         let request = RowEventRequest {
             src_table_name: "unknown_table".to_string(),
@@ -684,7 +788,10 @@ mod tests {
             tx: None,
         };
 
-        let err = source.process_row_request(&request).unwrap_err();
+        let err = source
+            .process_row_request_test_helper(&request)
+            .await
+            .unwrap_err();
         match err {
             Error::RestSource(es) => {
                 let inner = es
@@ -704,8 +811,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_lsn_generation() {
+    #[tokio::test]
+    async fn test_lsn_generation() {
         let mut source = RestSource::new();
         let schema = make_test_schema();
         source
@@ -733,31 +840,34 @@ mod tests {
             tx: None,
         };
 
-        let events1 = source.process_row_request(&request1).unwrap();
-        let events2 = source.process_row_request(&request2).unwrap();
+        let events1 = source
+            .process_row_request_test_helper(&request1)
+            .await
+            .unwrap();
+        let events2 = source
+            .process_row_request_test_helper(&request2)
+            .await
+            .unwrap();
 
         // Each request should generate 2 events (row + commit)
         assert_eq!(events1.len(), 2);
         assert_eq!(events2.len(), 2);
 
-        // Check first request events
-        match &events1[0] {
-            RestEvent::RowEvent { lsn, .. } => assert_eq!(*lsn, 1),
-            _ => panic!("Expected RowEvent"),
-        }
-        match &events1[1] {
-            RestEvent::Commit { lsn, .. } => assert_eq!(*lsn, 2),
-            _ => panic!("Expected Commit"),
+        // Check LSN ordering: first request should have LSNs 1,2 and second should have 3,4
+        match (&events1[0], &events1[1]) {
+            (RestEvent::RowEvent { lsn: lsn1, .. }, RestEvent::Commit { lsn: lsn2, .. }) => {
+                assert_eq!(*lsn1, 1);
+                assert_eq!(*lsn2, 2);
+            }
+            _ => panic!("Expected row event and commit event"),
         }
 
-        // Check second request events (LSNs should continue incrementing)
-        match &events2[0] {
-            RestEvent::RowEvent { lsn, .. } => assert_eq!(*lsn, 3),
-            _ => panic!("Expected RowEvent"),
-        }
-        match &events2[1] {
-            RestEvent::Commit { lsn, .. } => assert_eq!(*lsn, 4),
-            _ => panic!("Expected Commit"),
+        match (&events2[0], &events2[1]) {
+            (RestEvent::RowEvent { lsn: lsn1, .. }, RestEvent::Commit { lsn: lsn2, .. }) => {
+                assert_eq!(*lsn1, 3);
+                assert_eq!(*lsn2, 4);
+            }
+            _ => panic!("Expected row event and commit event"),
         }
     }
 }
