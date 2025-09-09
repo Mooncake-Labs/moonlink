@@ -179,8 +179,7 @@ impl RestSource {
         lsn_generator: Arc<AtomicU64>,
         storage_config: StorageConfig,
         parquet_files: Vec<String>,
-        event_sender: tokio::sync::mpsc::UnboundedSender<Result<RestEvent>>,
-    ) {
+    ) -> Result<Vec<RestEvent>> {
         let accessor_config = AccessorConfig {
             storage_config,
             timeout_config: FsTimeoutConfig::default(),
@@ -189,11 +188,12 @@ impl RestSource {
         };
         let filesystem_accessor: Arc<dyn BaseFileSystemAccess> =
             Arc::new(FileSystemAccessor::new(accessor_config));
+        let mut rest_events = Vec::new();
         // TODO(hjiang): Handle parallel read and error propagation.
         for cur_file in parquet_files.into_iter() {
             let res = Self::read_record_batches(filesystem_accessor.clone(), cur_file).await;
             if let Err(ref err) = res {
-                event_sender.send(Err(err.clone())).unwrap();
+                return Err(err.clone());
             }
 
             // Send row append events.
@@ -202,26 +202,23 @@ impl RestSource {
                 let batch = batch.unwrap();
                 let moonlink_rows = MoonlinkRow::from_record_batch(&batch);
                 for cur_row in moonlink_rows.into_iter() {
-                    event_sender
-                        .send(Ok(RestEvent::RowEvent {
-                            src_table_id,
-                            operation: RowEventOperation::Insert,
-                            row: cur_row,
-                            lsn: lsn_generator.fetch_add(1, Ordering::SeqCst),
-                            timestamp: std::time::SystemTime::now(),
-                        }))
-                        .unwrap();
+                    rest_events.push(RestEvent::RowEvent {
+                        src_table_id,
+                        operation: RowEventOperation::Insert,
+                        row: cur_row,
+                        lsn: lsn_generator.fetch_add(1, Ordering::SeqCst),
+                        timestamp: std::time::SystemTime::now(),
+                    });
                 }
             }
 
             // To avoid large transaction, send commit event after all events ingested.
-            event_sender
-                .send(Ok(RestEvent::Commit {
-                    lsn: lsn_generator.fetch_add(1, Ordering::SeqCst),
-                    timestamp: std::time::SystemTime::now(),
-                }))
-                .unwrap();
+            rest_events.push(RestEvent::Commit {
+                lsn: lsn_generator.fetch_add(1, Ordering::SeqCst),
+                timestamp: std::time::SystemTime::now(),
+            })
         }
+        Ok(rest_events)
     }
 
     /// Process an event request, which is operated on a file.
@@ -257,34 +254,15 @@ impl RestSource {
                 let parquet_files = request.files.clone();
 
                 tokio::task::spawn(async move {
-                    let (file_upload_row_tx, mut file_upload_row_rx) =
-                        tokio::sync::mpsc::unbounded_channel();
-
                     // Spawn the file processing task
-                    tokio::task::spawn(async move {
-                        Self::generate_table_events_for_file_upload(
-                            src_table_id,
-                            lsn_generator,
-                            storage_config,
-                            parquet_files,
-                            file_upload_row_tx,
-                        )
-                        .await;
-                    });
-
-                    // Collect all events from the file processing
-                    let mut events = Vec::new();
-                    while let Some(event_result) = file_upload_row_rx.recv().await {
-                        match event_result {
-                            Ok(event) => events.push(event),
-                            Err(e) => {
-                                let _ = results_tx.send((request_tx, Err(e)));
-                                return;
-                            }
-                        }
-                    }
-
-                    let _ = results_tx.send((request_tx, Ok(events)));
+                    let events = Self::generate_table_events_for_file_upload(
+                        src_table_id,
+                        lsn_generator,
+                        storage_config,
+                        parquet_files,
+                    )
+                    .await;
+                    let _ = results_tx.send((request_tx, events));
                 });
             }
             FileEventOperation::Upload => {
@@ -316,7 +294,8 @@ impl RestSource {
             .src_table_name_to_src_id
             .get(&request.src_table_name)
             .copied();
-        let lsn_generator = self.lsn_generator.clone();
+        let row_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
+        let commit_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
 
         // Spawn task to process row request asynchronously
         tokio::spawn(async move {
@@ -339,9 +318,6 @@ impl RestSource {
                         moonlink::row::proto_to_moonlink_row(p)?
                     }
                 };
-
-                let row_lsn = lsn_generator.fetch_add(1, Ordering::SeqCst);
-                let commit_lsn = lsn_generator.fetch_add(1, Ordering::SeqCst);
 
                 // Generate both a row event and a commit event
                 let events = vec![
