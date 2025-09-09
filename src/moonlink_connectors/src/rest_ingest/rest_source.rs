@@ -7,7 +7,7 @@ use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonl
 use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
 use apache_avro::schema::Schema as AvroSchema;
-use apache_avro::Reader;
+use apache_avro::from_avro_datum;
 use arrow_schema::Schema;
 use bytes::Bytes;
 use moonlink::row::MoonlinkRow;
@@ -286,27 +286,16 @@ impl RestSource {
                     ))
                 })?;
 
-                // Parse the Avro data
-                let reader = Reader::with_schema(avro_schema, bytes.as_slice())
-                    .map_err(|e| RestSourceError::AvroError(Box::new(e)))?;
-                let mut avro_values = Vec::new();
-                for value_result in reader {
-                    avro_values
-                        .push(value_result.map_err(|e| RestSourceError::AvroError(Box::new(e)))?);
-                }
+                let avro_value = {
+                    // Single datum (binary encoding)
+                    let mut cursor = std::io::Cursor::new(bytes.as_slice());
+                    from_avro_datum(avro_schema, &mut cursor, None)
+                        .map_err(|e| RestSourceError::AvroError(Box::new(e)))?
 
-                // Convert the first record (assuming single record per message)
-                if let Some(avro_value) = avro_values.into_iter().next() {
-                    AvroToMoonlinkRowConverter::convert(&avro_value)
-                        .map_err(RestSourceError::AvroConversion)?
-                } else {
-                    return Err(RestSourceError::AvroConversion(
-                        AvroToMoonlinkRowError::ConversionFailed(
-                            "No Avro record found in payload".to_string(),
-                        ),
-                    )
-                    .into());
-                }
+                };
+
+                AvroToMoonlinkRowConverter::convert(&avro_value)
+                    .map_err(RestSourceError::AvroConversion)?
             }
         };
 
