@@ -1,3 +1,4 @@
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,19 +21,19 @@ spec:
       # Moonlink deployment, which serves REST API and TCP rpc requests.
       - name: moonlink-deployment
         image: us-west1-docker.pkg.dev/coral-ring-465417-r0/moonlink-standalone-experiment/moonlink-deployment:478dc9ee-cc19-48f9-b741-21e6e8b27de7
-        command: ["/app/moonlink_service"]
+        command: [/app/moonlink_service]
         args:
-        - "/tmp/moonlink"
-        - "--no-rest-api"
-        - "--tcp-port=3031"
+        - /tmp/moonlink
+        - --no-rest-api
+        - --tcp-port=3031
         # TODO(hjiang): Revisit before release and production deployment, use a dummy guaranteed QoS for now. 
         resources:
           requests:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: 500m
+            memory: 1Gi
           limits:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: 500m
+            memory: 1Gi
         env:
         volumeMounts:
         - name: shared-cache-directory
@@ -43,7 +44,7 @@ spec:
         # Port number for TCP rpc server.
         - containerPort: 3031
         # Port number for readiness probe.
-        - containerPort: 5050 
+        - containerPort: 5050
         readinessProbe:
           httpGet:
             path: /ready

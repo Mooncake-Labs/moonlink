@@ -1,3 +1,4 @@
+---
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,10 +23,10 @@ name: Typos Check
 on:
   push:
     branches:
-      - main
+    - main
   pull_request:
     branches:
-      - main
+    - main
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -42,6 +43,6 @@ jobs:
     env:
       FORCE_COLOR: 1
     steps:
-      - uses: actions/checkout@v5
-      - name: Check typos
-        uses: crate-ci/typos@v1.36.2
+    - uses: actions/checkout@v5
+    - name: Check typos
+      uses: crate-ci/typos@v1.36.2

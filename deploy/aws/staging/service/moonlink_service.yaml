@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -5,11 +6,11 @@ metadata:
   annotations:
     # aws specific annotations
     # Use an L4 NLB instead of an ALB which is needed for the moonlink TCP rpc server
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "HTTP"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "5050"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/ready"
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: '5050'
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /ready
 spec:
   type: LoadBalancer
   # IP assigned by kubernetes automatically.

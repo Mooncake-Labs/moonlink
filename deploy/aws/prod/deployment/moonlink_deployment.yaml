@@ -1,3 +1,4 @@
+---
 # to deploy: DATA_SERVER_URI=http://myserver:8080 envsubst < deploy/aws/prod/deployment/moonlink_deployment.yaml | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -30,23 +31,23 @@ spec:
       # Moonlink deployment, which serves REST API and TCP rpc requests.
       - name: moonlink-deployment
         image: docker.io/lohpaul9/moonlink:latest
-        command: ["/app/moonlink_service"]
+        command: [/app/moonlink_service]
         args:
-        - "/tmp/moonlink"
-        - "--no-rest-api"
-        - "--tcp-port=3031"
-        - "--data-server-uri=$(DATA_SERVER_URI)"
+        - /tmp/moonlink
+        - --no-rest-api
+        - --tcp-port=3031
+        - --data-server-uri=$(DATA_SERVER_URI)
         # TODO(hjiang): Revisit before release and production deployment, use a dummy guaranteed QoS for now. 
         resources:
           requests:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: 500m
+            memory: 1Gi
           limits:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: 500m
+            memory: 1Gi
         env:
         - name: DATA_SERVER_URI
-          value: "${DATA_SERVER_URI}"
+          value: ${DATA_SERVER_URI}
         volumeMounts:
         - name: shared-cache-directory
           mountPath: /tmp/moonlink
@@ -56,7 +57,7 @@ spec:
         # Port number for TCP rpc server.
         - containerPort: 3031
         # Port number for readiness probe.
-        - containerPort: 5050 
+        - containerPort: 5050
         readinessProbe:
           httpGet:
             path: /ready
