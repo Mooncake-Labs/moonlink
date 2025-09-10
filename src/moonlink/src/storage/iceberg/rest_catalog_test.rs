@@ -5,7 +5,6 @@ use crate::storage::iceberg::catalog_test_utils::*;
 use crate::storage::iceberg::rest_catalog::RestCatalog;
 use crate::storage::iceberg::rest_catalog_test_guard::RestCatalogTestGuard;
 use crate::storage::iceberg::rest_catalog_test_utils::*;
-use iceberg::Namespace;
 use iceberg::{Catalog, NamespaceIdent, TableIdent};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -94,7 +93,7 @@ async fn test_namespace_operation() {
     // create a namespace
     let ns_name = get_random_string();
     let ns_ident = NamespaceIdent::new(ns_name);
-    writer
+    let expected_namespace = writer
         .catalog
         .create_namespace(&ns_ident, HashMap::new())
         .await
@@ -110,7 +109,7 @@ async fn test_namespace_operation() {
             .get_namespace(&ns_ident)
             .await
             .expect("error: fail to get namespace"),
-        Namespace::new(ns_ident.clone())
+        expected_namespace
     );
     assert!(writer
         .catalog
@@ -132,6 +131,10 @@ async fn test_namespace_operation() {
         .drop_namespace(&ns_ident)
         .await
         .expect("error: fail to drop the namespace");
+
+    if let Some(vec) = guard.namespace_idents.as_mut() {
+        vec.retain(|t| t != &ns_ident);
+    }
 
     assert!(!writer
         .catalog
