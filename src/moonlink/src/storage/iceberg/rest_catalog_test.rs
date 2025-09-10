@@ -19,7 +19,6 @@ async fn test_table_operation() {
     let ns_name = get_random_string();
     let ns_ident = NamespaceIdent::new(ns_name);
     writer
-        .catalog
         .create_namespace(&ns_ident, HashMap::new())
         .await
         .expect("error: fail to create a namespace");
@@ -32,7 +31,6 @@ async fn test_table_operation() {
     let table_name = get_random_string();
     let creation = default_table_creation(table_name.clone());
     writer
-        .catalog
         .create_table(&ns_ident, creation)
         .await
         .expect("error: fail to create an table");
@@ -58,7 +56,6 @@ async fn test_table_operation() {
 
     // drop the table
     writer
-        .catalog
         .drop_table(&table_ident)
         .await
         .expect("error: fail to drop the table");
@@ -91,10 +88,12 @@ async fn test_namespace_operation() {
     let writer = catalog.write().await;
 
     // create a namespace
-    let ns_name = get_random_string();
-    let ns_ident = NamespaceIdent::new(ns_name);
+    let ns_name_1 = get_random_string();
+    let ns_name_2 = get_random_string();
+    let ns_ident_parent = NamespaceIdent::new(ns_name_1.clone());
+    let ns_ident = NamespaceIdent::from_strs(vec![ns_name_1, ns_name_2.clone()]).unwrap();
+    let ns_ident_child = NamespaceIdent::new(ns_name_2);
     let expected_namespace = writer
-        .catalog
         .create_namespace(&ns_ident, HashMap::new())
         .await
         .expect("error: fail to create a namespace");
@@ -105,29 +104,25 @@ async fn test_namespace_operation() {
 
     assert_eq!(
         writer
-            .catalog
             .get_namespace(&ns_ident)
             .await
             .expect("error: fail to get namespace"),
         expected_namespace
     );
     assert!(writer
-        .catalog
         .namespace_exists(&ns_ident)
         .await
         .expect("error: fail to check if the namespace exist"));
 
     assert_eq!(
         writer
-            .catalog
-            .list_namespaces(None)
+            .list_namespaces(Some(&ns_ident_parent))
             .await
             .expect("error: fail to list the namespaces"),
-        vec![ns_ident.clone()]
+        vec![ns_ident_parent.clone(), ns_ident_child]
     );
 
     writer
-        .catalog
         .drop_namespace(&ns_ident)
         .await
         .expect("error: fail to drop the namespace");
@@ -137,20 +132,17 @@ async fn test_namespace_operation() {
     }
 
     assert!(!writer
-        .catalog
         .namespace_exists(&ns_ident)
         .await
         .expect("error: fail to check if the namespace exist"));
 
     assert_eq!(
         writer
-            .catalog
-            .list_namespaces(None)
+            .list_namespaces(Some(&ns_ident_parent))
             .await
             .expect("error: fail to list the namespaces"),
         vec![]
     );
-
     drop(writer);
 }
 
