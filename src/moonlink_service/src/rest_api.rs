@@ -969,7 +969,7 @@ async fn ingest_data_kafka(
         IngestRequestInternal {
             operation: "insert".to_string(),
             data: IngestRequestPayload::Avro(body.to_vec()),
-            request_mode: RequestMode::Async,
+            request_mode: RequestMode::Sync,
         },
     )
     .await

@@ -6,8 +6,8 @@ use crate::rest_ingest::event_request::{
 use crate::rest_ingest::json_converter::{JsonToMoonlinkRowConverter, JsonToMoonlinkRowError};
 use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
-use apache_avro::schema::Schema as AvroSchema;
 use apache_avro::from_avro_datum;
+use apache_avro::schema::Schema as AvroSchema;
 use arrow_schema::Schema;
 use bytes::Bytes;
 use moonlink::row::MoonlinkRow;
@@ -291,7 +291,6 @@ impl RestSource {
                     let mut cursor = std::io::Cursor::new(bytes.as_slice());
                     from_avro_datum(avro_schema, &mut cursor, None)
                         .map_err(|e| RestSourceError::AvroError(Box::new(e)))?
-
                 };
 
                 AvroToMoonlinkRowConverter::convert(&avro_value)

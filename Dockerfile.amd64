@@ -12,7 +12,7 @@ COPY . .
 RUN apt-get update && apt-get install -y gcc-x86-64-linux-gnu
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
 RUN rustup target add x86_64-unknown-linux-gnu
-RUN cargo build --target x86_64-unknown-linux-gnu --verbose
+RUN cargo build --target x86_64-unknown-linux-gnu --verbose --features storage-s3
 
 # Use a slim image for docker image used for cloud deployment.
 FROM ubuntu:24.04
