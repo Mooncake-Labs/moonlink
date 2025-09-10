@@ -7,10 +7,7 @@ use tokio::net::TcpStream;
 #[cfg(feature = "postgres-integration")]
 use tokio_postgres::NoTls;
 
-use crate::rest_api::{
-    CreateTableFromPostgresResponse, CreateTableResponse, FileUploadResponse, HealthResponse,
-    IngestResponse,
-};
+use crate::rest_api::{CreateTableResponse, FileUploadResponse, HealthResponse, IngestResponse};
 use crate::start_with_config;
 use crate::test_guard::TestGuard;
 use crate::test_utils::*;
@@ -931,6 +928,8 @@ async fn test_schema_invalid_list_missing_item() {
 #[tokio::test]
 #[serial]
 async fn test_create_table_from_postgres_endpoint() {
+    use crate::rest_api::CreateTableFromPostgresResponse;
+
     // Integration test for PostgreSQL table mirroring endpoint
     // This test creates a table in PostgreSQL, then tests mirroring it to Moonlink
     let _guard = TestGuard::new(&get_moonlink_backend_dir());
