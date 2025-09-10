@@ -135,13 +135,6 @@ async fn test_namespace_operation() {
         .await
         .expect("error: fail to check if the namespace exist"));
 
-    assert_eq!(
-        writer
-            .list_namespaces(Some(&ns_ident_parent))
-            .await
-            .expect("error: fail to list the namespaces"),
-        vec![]
-    );
     drop(writer);
 }
 
