@@ -18,14 +18,15 @@ use futures::StreamExt;
 use moonlink::TableEvent;
 use more_asserts as ma;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
-use tokio::sync::{mpsc, watch};
+use std::sync::Arc;
+use tokio::pin;
+use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, warn};
 
 pub type SrcTableId = u32;
 
 /// Commands for the REST API event loop (similar to PostgresReplicationCommand)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RestCommand {
     AddTable {
         src_table_name: String,
@@ -35,7 +36,6 @@ pub enum RestCommand {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
-        /// Persist LSN, only assigned for tables to recovery; used to indicate and update replication LSN.
         persist_lsn: Option<u64>,
     },
     DropTable {
@@ -176,8 +176,9 @@ pub async fn run_rest_event_loop(
 ) -> Result<()> {
     let rest_source = Arc::new(RwLock::new(RestSource::new()));
 
-    // Create the processing stream
-    let mut processing_stream = RestSource::create_stream(rest_source.clone(), rest_request_rx);
+    // Create the processing stream and pin it
+    let processing_stream = RestSource::create_stream(rest_source.clone(), rest_request_rx);
+    pin!(processing_stream);
 
     loop {
         tokio::select! {
@@ -195,7 +196,7 @@ pub async fn run_rest_event_loop(
                     sink.add_table(src_table_id, table_status, persist_lsn)?;
 
                     // Add to source (handles schema and request processing)
-                    let mut source = rest_source.write().unwrap();
+                    let mut source = rest_source.write().await;
                     source.add_table(src_table_name.clone(), src_table_id, schema, persist_lsn)?;
                 }
                 RestCommand::DropTable { src_table_name, src_table_id } => {
@@ -205,7 +206,7 @@ pub async fn run_rest_event_loop(
                     sink.drop_table(src_table_id)?;
 
                     // Remove from source
-                    let mut source = rest_source.write().unwrap();
+                    let mut source = rest_source.write().await;
                     source.remove_table(&src_table_name)?;
                 }
                 RestCommand::Shutdown => {
