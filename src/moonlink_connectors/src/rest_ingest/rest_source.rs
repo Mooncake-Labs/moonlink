@@ -16,6 +16,7 @@ use moonlink::{
     StorageConfig,
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use tracing::debug;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -77,6 +78,7 @@ impl RestSource {
         schema: Arc<Schema>,
         persist_lsn: Option<u64>,
     ) -> Result<()> {
+        debug!("adding table {}, src_table_id {}", src_table_name, src_table_id);
         // Update LSN at recovery.
         if let Some(persist_lsn) = persist_lsn {
             let old_lsn = self.lsn_generator.load(Ordering::SeqCst);
@@ -108,6 +110,7 @@ impl RestSource {
         avro_schema: AvroSchema,
     ) -> Result<()> {
         // Find the existing table
+        debug!("setting Avro schema for table {}", src_table_name);
         if let Some((arrow_schema, _)) = self.table_schemas.get(&src_table_name) {
             let arrow_schema = arrow_schema.clone();
             // Update the table schema with the Avro schema
@@ -253,6 +256,24 @@ impl RestSource {
 
     /// Process an event request, which is operated on a row.
     fn process_row_request(&self, request: &RowEventRequest) -> Result<Vec<RestEvent>> {
+        {
+            let opt_schema = self.table_schemas.get(&request.src_table_name);
+            if opt_schema.is_none() {
+                println!("table schema keys = {:?}, request src table name {}", 
+                    self.table_schemas.keys(),
+                    request.src_table_name,
+                );
+            }
+
+            let opt_src_table_id = self.src_table_name_to_src_id.get(&request.src_table_name);
+            if opt_src_table_id.is_none() {
+                println!("src table names to src id = {:?}, request src table name {}",
+                    self.src_table_name_to_src_id.keys(),
+                    request.src_table_name,
+                );
+            }
+        }
+
         let schema = self
             .table_schemas
             .get(&request.src_table_name)

@@ -233,7 +233,10 @@ pub async fn run_rest_event_loop(
                 }
                 RestCommand::SetAvroSchema { src_table_name, avro_schema } => {
                     debug!("Setting Avro schema for table '{}'", src_table_name);
-                    rest_source.set_avro_schema(src_table_name.clone(), avro_schema)?;
+                    if let Err(e) = rest_source.set_avro_schema(src_table_name.clone(), avro_schema) {
+                        error!("Set avro schema failed for {src_table_name} failed: {e}");
+                        continue;
+                    }
                 }
                 RestCommand::DropTable { src_table_name, src_table_id } => {
                     debug!("Dropping REST table '{}' with src_table_id {}", src_table_name, src_table_id);
