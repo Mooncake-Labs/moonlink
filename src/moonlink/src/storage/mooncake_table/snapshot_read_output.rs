@@ -84,8 +84,10 @@ impl ReadOutput {
             .unwrap();
     }
 
-    /// File ordering should be preserved because the index determines the position
-    /// in the final [`resolved_data_files`] array, which delete or other operations rely on.
+    /// Attempt to download remote files and cache them locally, if possible.
+    /// Resolved files will be updated to [`resolved_data_files`] in-place in the given order.
+    ///
+    /// If any error happens, all involved cache handles will unreferenced, temporary files will be deleted as well.
     async fn resolve_remote_files(
         &mut self,
         object_storage_cache: Arc<dyn CacheTrait>,
@@ -140,9 +142,9 @@ impl ReadOutput {
             self.handle_resolution_error(std::mem::take(cache_handles))
                 .await;
             return Err(crate::Error::from(std::io::Error::other(format!(
-                "Failed to resolve {} files: {}\n",
+                "Failed to resolve {} files: {}",
                 error_messages.len(),
-                error_messages.join("; ")
+                error_messages.join(";\n")
             ))));
         }
 
@@ -209,18 +211,17 @@ impl ReadOutput {
 
     /// Handle cleanup and notifications when resolving remote filepaths fails.
     async fn handle_resolution_error(&mut self, mut cache_handles: Vec<NonEvictableHandle>) {
-        // Pre-allocate based on known sizes: cache_handles + puffin_cache_handles + associated_files
         let total_size =
             cache_handles.len() + self.puffin_cache_handles.len() + self.associated_files.len();
         let mut evicted_files_to_delete_on_error: Vec<String> = Vec::with_capacity(total_size);
         // Unpin all previously pinned cache handles before propagating error.
-        for mut handle in cache_handles.drain(..) {
+        for handle in cache_handles.drain(..) {
             let files_to_delete = handle.unreference().await;
             evicted_files_to_delete_on_error.extend(files_to_delete);
         }
 
         // Also unpin any puffin cache handles included in this read output.
-        for mut handle in self.puffin_cache_handles.drain(..) {
+        for handle in self.puffin_cache_handles.drain(..) {
             let files_to_delete = handle.unreference().await;
             evicted_files_to_delete_on_error.extend(files_to_delete);
         }
@@ -466,13 +467,12 @@ mod tests {
         let filesystem_accessor = MockBaseFileSystemAccess::new();
         let (tx, _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
 
-        let temp_dir = tempdir().unwrap();
         let read_output = ReadOutput {
             data_file_paths: vec![
-                DataFileForRead::TemporaryDataFile(get_fake_file_path(&temp_dir)),
-                DataFileForRead::RemoteFilePath((FAKE_FILE_ID, get_fake_file_path(&temp_dir))),
-                DataFileForRead::RemoteFilePath((FAKE_FILE_ID, get_fake_file_path(&temp_dir))),
-                DataFileForRead::TemporaryDataFile(get_fake_file_path(&temp_dir)),
+                DataFileForRead::TemporaryDataFile("/tmp/filename_1".to_string()),
+                DataFileForRead::RemoteFilePath((FAKE_FILE_ID, "/tmp/filename_2".to_string())),
+                DataFileForRead::RemoteFilePath((FAKE_FILE_ID, "/tmp/filename_3".to_string())),
+                DataFileForRead::TemporaryDataFile("/tmp/filename_4".to_string()),
             ],
             puffin_cache_handles: Vec::new(),
             deletion_vectors: Vec::new(),
@@ -492,10 +492,10 @@ mod tests {
         let (data_files, _, _, _) = decode_read_state_for_testing(&read_state);
 
         assert_eq!(data_files.len(), 4);
-        assert_eq!(data_files[0], get_fake_file_path(&temp_dir));
-        assert_eq!(data_files[1], get_fake_file_path(&temp_dir));
-        assert_eq!(data_files[2], get_fake_file_path(&temp_dir));
-        assert_eq!(data_files[3], get_fake_file_path(&temp_dir));
+        assert_eq!(data_files[0], "/tmp/filename_1".to_string());
+        assert_eq!(data_files[1], "/tmp/filename_2".to_string());
+        assert_eq!(data_files[2], "/tmp/filename_3".to_string());
+        assert_eq!(data_files[3], "/tmp/filename_4".to_string());
     }
 
     // Test that the cache is correctly pinned when all file operations succeed
@@ -512,21 +512,15 @@ mod tests {
         let mut file_ids = Vec::new();
         let mut test_data_file_paths = Vec::new();
         for i in 0..test_size {
-            let file_id = get_unique_table_file_id(FileId(101 + i));
-            tokio::fs::write(
-                &temp_dir.path().join(format!("file_{i}.parquet")),
-                format!("test data_{i}").as_bytes(),
-            )
-            .await
-            .unwrap();
+            let file_id = get_unique_table_file_id(FileId(i));
+            let filepath = temp_dir.path().join(format!("file_{i}.parquet"));
+            tokio::fs::write(&filepath, format!("test data {i}").as_bytes())
+                .await
+                .unwrap();
             file_ids.push(file_id);
             test_data_file_paths.push(DataFileForRead::RemoteFilePath((
                 file_id,
-                temp_dir
-                    .path()
-                    .join(format!("file_{i}.parquet"))
-                    .to_string_lossy()
-                    .to_string(),
+                filepath.to_str().unwrap().to_string(),
             )));
         }
 
@@ -542,7 +536,6 @@ mod tests {
         let (tx, mut _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
 
         // Construct ReadOutput with two remote files; second call will error.
-        // let fake_remote_path = get_fake_file_path(&temp_dir);
         let associated_temp_dir = tempdir().unwrap();
         let read_output = ReadOutput {
             data_file_paths: test_data_file_paths,
@@ -586,23 +579,17 @@ mod tests {
         let mut file_ids = Vec::new();
         let mut test_data_file_paths = Vec::new();
         for i in 0..test_size {
-            let file_id = get_unique_table_file_id(FileId(101 + i));
+            let file_id = get_unique_table_file_id(FileId(i));
+            let filepath = temp_dir.path().join(format!("file_{i}.parquet"));
             if i % 2 == 0 {
-                tokio::fs::write(
-                    &temp_dir.path().join(format!("file_{i}.parquet")),
-                    format!("test data_{i}").as_bytes(),
-                )
-                .await
-                .unwrap();
+                tokio::fs::write(&filepath, format!("test data_{i}").as_bytes())
+                    .await
+                    .unwrap();
             }
             file_ids.push(file_id);
             test_data_file_paths.push(DataFileForRead::RemoteFilePath((
                 file_id,
-                temp_dir
-                    .path()
-                    .join(format!("file_{i}.parquet"))
-                    .to_string_lossy()
-                    .to_string(),
+                filepath.to_str().unwrap().to_string(),
             )));
         }
 
@@ -618,7 +605,6 @@ mod tests {
         let (tx, mut _rx) = tokio::sync::mpsc::channel::<TableEvent>(8);
 
         // Construct ReadOutput with two remote files; second call will error.
-        // let fake_remote_path = get_fake_file_path(&temp_dir);
         let associated_temp_dir = tempdir().unwrap();
         let read_output = ReadOutput {
             data_file_paths: test_data_file_paths,
@@ -632,7 +618,7 @@ mod tests {
             filesystem_accessor: Some(Arc::new(filesystem_accessor)),
         };
 
-        let _read_state = read_output
+        let _read_state_error = read_output
             .take_as_read_state(Arc::new(|p: String| p))
             .await
             .unwrap_err();

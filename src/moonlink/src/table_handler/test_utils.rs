@@ -176,7 +176,7 @@ impl TestEnvironment {
     }
 
     /// Create iceberg table manager.
-    pub fn create_iceberg_table_manager(
+    pub async fn create_iceberg_table_manager(
         &self,
         mooncake_table_config: MooncakeTableConfig,
     ) -> IcebergTableManager {
@@ -200,6 +200,7 @@ impl TestEnvironment {
             create_test_filesystem_accessor(&iceberg_table_config),
             iceberg_table_config.clone(),
         )
+        .await
         .unwrap()
     }
 
@@ -310,6 +311,7 @@ impl TestEnvironment {
         rx.recv().await.unwrap()
     }
 
+    /// Commit the transaction, flush and create mooncake/iceberg snapshot.
     pub async fn flush_table_and_sync(&mut self, lsn: u64, xact_id: Option<u32>) {
         self.send_event(TableEvent::CommitFlush {
             lsn,

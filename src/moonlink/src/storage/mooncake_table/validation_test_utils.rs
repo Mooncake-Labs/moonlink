@@ -19,7 +19,7 @@ use std::collections::HashSet;
 pub(crate) async fn check_deletion_vector_consistency(disk_file_entry: &DiskFileEntry) {
     if disk_file_entry.puffin_deletion_blob.is_none() {
         assert!(disk_file_entry
-            .batch_deletion_vector
+            .committed_deletion_vector
             .collect_deleted_rows()
             .is_empty());
         return;
@@ -39,7 +39,10 @@ pub(crate) async fn check_deletion_vector_consistency(disk_file_entry: &DiskFile
     .unwrap();
     let iceberg_deletion_vector = DeletionVector::deserialize(blob).unwrap();
     let batch_deletion_vector = iceberg_deletion_vector.take_as_batch_delete_vector();
-    assert_eq!(batch_deletion_vector, disk_file_entry.batch_deletion_vector);
+    assert_eq!(
+        batch_deletion_vector,
+        disk_file_entry.committed_deletion_vector
+    );
 }
 
 /// Test util function to check deletion vector consistency for the given snapshot.
@@ -197,7 +200,9 @@ pub(crate) async fn verify_recovered_mooncake_snapshot(snapshot: &Snapshot, expe
     let mut data_files = vec![];
     for (file_idx, (cur_data_file, cur_disk_entry)) in snapshot.disk_files.iter().enumerate() {
         data_files.push(cur_data_file.file_path().clone());
-        let rows_deleted = cur_disk_entry.batch_deletion_vector.collect_deleted_rows();
+        let rows_deleted = cur_disk_entry
+            .committed_deletion_vector
+            .collect_deleted_rows();
         for row_idx in rows_deleted.into_iter() {
             position_deletes.push(PositionDelete {
                 data_file_number: file_idx as u32,

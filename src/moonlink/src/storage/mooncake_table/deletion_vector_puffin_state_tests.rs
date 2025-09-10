@@ -219,6 +219,7 @@ async fn test_1_recover_2_without_local_optimization(#[case] use_batch_write: bo
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
+    .await
     .unwrap();
     let (next_file_id, mooncake_snapshot) = iceberg_table_manager_to_recover
         .load_snapshot_from_table()
@@ -278,6 +279,7 @@ async fn test_1_recover_2_with_local_optimization(#[case] use_batch_write: bool)
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config,
     )
+    .await
     .unwrap();
     let (next_file_id, mooncake_snapshot) = iceberg_table_manager_to_recover
         .load_snapshot_from_table()
@@ -519,13 +521,13 @@ async fn test_2_compact_without_local_optimization() {
         cache
             .get_non_evictable_entry_ref_count(&old_compacted_puffin_file_ids[0])
             .await,
-        1,
+        2, // one within mooncake snapshot, one pinned for compaction
     );
     assert_eq!(
         cache
             .get_non_evictable_entry_ref_count(&old_compacted_puffin_file_ids[1])
             .await,
-        1,
+        2, // one within mooncake snapshot, one pinned for compaction
     );
 
     // Use by compaction.
@@ -607,13 +609,13 @@ async fn test_2_compact_with_local_optimization() {
         cache
             .get_non_evictable_entry_ref_count(&old_compacted_puffin_file_ids[0])
             .await,
-        1,
+        2, // one within mooncake snapshot, one pinned for compaction
     );
     assert_eq!(
         cache
             .get_non_evictable_entry_ref_count(&old_compacted_puffin_file_ids[1])
             .await,
-        1,
+        2, // one within mooncake snapshot, one pinned for compaction
     );
 
     // Use by compaction.

@@ -199,12 +199,12 @@ impl SnapshotTableState {
         // Aggregate the evicted files to delete.
         let mut evicted_files_to_delete = vec![];
 
-        for (file_id, mut puffin_blob_ref) in puffin_blob_ref.into_iter() {
+        for (file_id, puffin_blob_ref) in puffin_blob_ref.into_iter() {
             // The data file referenced by puffin blob still exist.
             if let Some(entry) = self.current_snapshot.disk_files.get_mut(&file_id) {
                 // Unreference and delete old cache handle if any.
                 let old_puffin_blob = entry.puffin_deletion_blob.take();
-                if let Some(mut old_puffin_blob) = old_puffin_blob {
+                if let Some(old_puffin_blob) = old_puffin_blob {
                     let cur_evicted_files = old_puffin_blob
                         .puffin_file_cache_handle
                         .unreference_and_delete()

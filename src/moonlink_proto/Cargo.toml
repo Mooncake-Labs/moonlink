@@ -1,0 +1,13 @@
+[package]
+name = "moonlink_proto"
+version = { workspace = true }
+edition = { workspace = true }
+license = "MIT"
+
+[dependencies]
+bytes = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"

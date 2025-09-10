@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 
-// TODO(hjiang): Need to remove `'static` lifecycle annotation.
 #[async_trait]
 #[allow(dead_code)]
 pub trait MetadataCacheTrait<K, V>: Send + Sync

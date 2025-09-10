@@ -26,11 +26,14 @@ fn generate_unique_data_filepath(
         .unwrap()
         .to_string();
     let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
-    let remote_filepath = location_generator.generate_location(&format!(
-        "{}-{}.parquet",
-        filename_without_suffix,
-        uuid::Uuid::now_v7()
-    ));
+    let remote_filepath = location_generator.generate_location(
+        /*partition_key=*/ None,
+        &format!(
+            "{}-{}.parquet",
+            filename_without_suffix,
+            uuid::Uuid::now_v7()
+        ),
+    );
     Ok(remote_filepath)
 }
 
@@ -78,7 +81,8 @@ pub(crate) async fn upload_index_file(
         .unwrap()
         .to_string();
     let location_generator = DefaultLocationGenerator::new(table.metadata().clone()).unwrap();
-    let remote_filepath = location_generator.generate_location(&filename);
+    let remote_filepath =
+        location_generator.generate_location(/*partition_key=*/ None, &filename);
     filesystem_accessor
         .copy_from_local_to_remote(local_index_filepath, &remote_filepath)
         .await

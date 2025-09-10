@@ -120,7 +120,7 @@ impl MooncakeTable {
                         cache_handle: None,
                         num_rows,
                         file_size,
-                        batch_deletion_vector: BatchDeletionVector::new(num_rows),
+                        committed_deletion_vector: BatchDeletionVector::new(num_rows),
                         puffin_deletion_blob: None,
                     };
 
@@ -158,6 +158,7 @@ impl MooncakeTable {
             .new_streaming_xact
             .push(TransactionStreamOutput::Commit(commit));
         self.next_snapshot_task.new_flush_lsn = Some(lsn);
+        self.next_snapshot_task.new_largest_flush_lsn = Some(lsn);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
     }
 

@@ -60,4 +60,14 @@ pub trait CacheTrait: std::fmt::Debug + Send + Sync {
         Option<NonEvictableHandle>,
         InlineEvictedFiles, /*files_to_delete*/
     )>;
+
+    /// Increment reference count by 1 for the given cache handle.
+    ///
+    /// Precondition: the requested file id already has its cache entry pinned, otherwise panic.
+    ///
+    /// TODO(hjiang):
+    /// 1. Consider error propagation, since as a library it shouldn't panic for failed precondition.
+    /// 2. Add unit tests.
+    #[allow(async_fn_in_trait)]
+    async fn increment_reference_count(&self, cache_handle: &NonEvictableHandle);
 }

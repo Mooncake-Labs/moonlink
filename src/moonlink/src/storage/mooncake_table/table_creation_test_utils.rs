@@ -50,11 +50,19 @@ pub(crate) fn get_iceberg_table_config(temp_dir: &TempDir) -> IcebergTableConfig
         atomic_write_dir: None,
     };
     let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+    let metadata_accessor_config = {
+        {
+            crate::IcebergCatalogConfig::File {
+                accessor_config: accessor_config.clone(),
+            }
+        }
+    };
+
     IcebergTableConfig {
         namespace: vec![ICEBERG_TEST_NAMESPACE.to_string()],
         table_name: ICEBERG_TEST_TABLE.to_string(),
         data_accessor_config: accessor_config.clone(),
-        metadata_accessor_config: crate::IcebergCatalogConfig::File { accessor_config },
+        metadata_accessor_config,
     }
 }
 
@@ -128,9 +136,17 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
         AccessorConfig::new_with_storage_config(storage_config)
     };
 
+    let metadata_accessor_config = {
+        {
+            crate::IcebergCatalogConfig::File {
+                accessor_config: accessor_config.clone(),
+            }
+        }
+    };
+
     IcebergTableConfig {
         data_accessor_config: accessor_config.clone(),
-        metadata_accessor_config: crate::IcebergCatalogConfig::File { accessor_config },
+        metadata_accessor_config,
         ..Default::default()
     }
 }
@@ -369,6 +385,7 @@ pub(crate) async fn create_table_and_iceberg_manager_with_data_compaction_config
         create_test_filesystem_accessor(&iceberg_table_config),
         iceberg_table_config.clone(),
     )
+    .await
     .unwrap();
 
     let (notify_tx, notify_rx) = mpsc::channel(100);

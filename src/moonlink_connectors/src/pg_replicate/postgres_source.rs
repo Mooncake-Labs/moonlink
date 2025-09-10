@@ -57,6 +57,16 @@ impl PostgresSource {
     pub fn get_confirmed_flush_lsn(&self) -> PgLsn {
         self.confirmed_flush_lsn
     }
+
+    /// Open a fresh replication client + connection using the stored URI.
+    pub async fn connect_replication(
+        &self,
+    ) -> Result<(ReplicationClient, Connection<Socket, TlsStream<Socket>>), PostgresSourceError>
+    {
+        ReplicationClient::connect(&self.uri, true)
+            .await
+            .map_err(PostgresSourceError::from)
+    }
 }
 
 /// Configuration needed to create a CDC stream
@@ -251,6 +261,7 @@ impl PostgresSource {
             table_schemas: HashMap::new(),
             postgres_epoch,
             message_scratch: Vec::new(),
+            skip_before_end_lsn: None,
         })
     }
 }
@@ -313,6 +324,7 @@ pin_project! {
         table_schemas: HashMap<SrcTableId, TableSchema>,
         postgres_epoch: SystemTime,
         message_scratch: Vec<Result<ReplicationMessage<LogicalReplicationMessage>, Error>>,
+        skip_before_end_lsn: Option<PgLsn>,
     }
 }
 
@@ -326,6 +338,21 @@ pub enum StatusUpdateError {
 }
 
 impl CdcStream {
+    /// Decide whether to process an XLogData frame based on a skip watermark.
+    /// Returns (should_process, end_lsn_u64).
+    pub fn should_process_xlogdata(
+        skip_before_end_lsn: Option<PgLsn>,
+        wal_start: u64,
+        payload_len: usize,
+    ) -> (bool, u64) {
+        let end = wal_start + payload_len as u64;
+        let should = match skip_before_end_lsn {
+            Some(lsn) => end > lsn.into(),
+            None => true,
+        };
+        (should, end)
+    }
+
     pub async fn send_status_update(
         self: Pin<&mut Self>,
         lsn: PgLsn,
@@ -338,6 +365,17 @@ impl CdcStream {
             .await?;
 
         Ok(())
+    }
+
+    pub fn set_skip_before_end_lsn(self: Pin<&mut Self>, lsn: Option<PgLsn>) {
+        let mut this = self.project();
+        *this.skip_before_end_lsn = lsn;
+    }
+
+    /// Clone a snapshot of the currently known table schemas.
+    pub fn schemas_snapshot(self: Pin<&mut Self>) -> Vec<TableSchema> {
+        let this = self.project();
+        this.table_schemas.values().cloned().collect()
     }
 
     pub fn add_table_schema(self: Pin<&mut Self>, schema: TableSchema) {
@@ -365,7 +403,7 @@ impl CdcStream {
         self: core::pin::Pin<&mut Self>,
         out: &mut Vec<Result<CdcEvent, CdcStreamError>>,
         max: usize,
-    ) -> usize {
+    ) -> (usize, Option<PgLsn>) {
         let mut this = self.project();
         let mut messages = &mut *this.message_scratch;
         messages.clear();
@@ -379,7 +417,26 @@ impl CdcStream {
 
         out.clear();
         out.reserve(n);
+
+        // Track the last XLogData end LSN observed in this batch
+        let mut last_end_lsn: Option<PgLsn> = None;
+        let skip_threshold = *this.skip_before_end_lsn;
+
         for f in messages.drain(..n) {
+            // Inspect by reference first so we can still move `f` into conversion
+            if let Ok(ReplicationMessage::XLogData(body)) = &f {
+                let (should_process, end_u64) = CdcStream::should_process_xlogdata(
+                    skip_threshold,
+                    body.wal_start(),
+                    body.data_len(),
+                );
+                if !should_process {
+                    continue;
+                }
+
+                let end_pg_lsn = PgLsn::from(end_u64);
+                last_end_lsn = Some(end_pg_lsn);
+            }
             match f {
                 Ok(msg) => match CdcEventConverter::try_from(msg, &this.table_schemas) {
                     Ok(evt) => out.push(Ok(evt)),
@@ -388,7 +445,7 @@ impl CdcStream {
                 Err(e) => out.push(Err(CdcStreamError::from(e))),
             }
         }
-        n
+        (out.len(), last_end_lsn)
     }
 }
 
@@ -405,5 +462,95 @@ impl Stream for CdcStream {
             Some(Err(e)) => Poll::Ready(Some(Err(e.into()))),
             None => Poll::Ready(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dedup_by_message_local_end_lsn() {
+        // Case: all frames end <= threshold are dropped
+        let the = Some(PgLsn::from(200u64));
+        let frames = vec![(100u64, 50usize), (150u64, 50usize)]; // ends: 150, 200
+        let mut kept: Vec<(u64, usize)> = Vec::new();
+        let mut last_end: Option<PgLsn> = None;
+        for (start, len) in frames.iter().copied() {
+            let (should, end) = CdcStream::should_process_xlogdata(the, start, len);
+            last_end = Some(PgLsn::from(end));
+            if should {
+                kept.push((start, len));
+            }
+        }
+        assert!(kept.is_empty());
+        assert_eq!(last_end, Some(PgLsn::from(200u64)));
+
+        // Case: a frame with end > threshold is NOT dropped
+        let the = Some(PgLsn::from(200u64));
+        let frames = vec![(200u64, 1usize)]; // end: 201
+        let mut kept: Vec<(u64, usize)> = Vec::new();
+        let mut last_end: Option<PgLsn> = None;
+        for (start, len) in frames.iter().copied() {
+            let (should, end) = CdcStream::should_process_xlogdata(the, start, len);
+            last_end = Some(PgLsn::from(end));
+            if should {
+                kept.push((start, len));
+            }
+        }
+        assert_eq!(kept, vec![(200u64, 1usize)]);
+        assert_eq!(last_end, Some(PgLsn::from(201u64)));
+
+        // Case: mixed batch: first dropped, second processed
+        let the = Some(PgLsn::from(150u64));
+        let frames = vec![(100u64, 50usize), (150u64, 10usize)]; // ends: 150, 160
+        let mut kept: Vec<(u64, usize)> = Vec::new();
+        let mut last_end: Option<PgLsn> = None;
+        for (start, len) in frames.iter().copied() {
+            let (should, end) = CdcStream::should_process_xlogdata(the, start, len);
+            last_end = Some(PgLsn::from(end));
+            if should {
+                kept.push((start, len));
+            }
+        }
+        assert_eq!(kept, vec![(150u64, 10usize)]);
+        assert_eq!(last_end, Some(PgLsn::from(160u64)));
+
+        // Case: no XLogData in batch
+        let the = Some(PgLsn::from(123u64));
+        let frames: Vec<(u64, usize)> = vec![];
+        let mut kept: Vec<(u64, usize)> = Vec::new();
+        let mut last_end: Option<PgLsn> = None;
+        for (start, len) in frames.iter().copied() {
+            let (should, end) = CdcStream::should_process_xlogdata(the, start, len);
+            last_end = Some(PgLsn::from(end));
+            if should {
+                kept.push((start, len));
+            }
+        }
+        assert!(kept.is_empty());
+        assert_eq!(last_end, None);
+    }
+
+    #[test]
+    fn test_resegmentation_boundary_crossing() {
+        // Threshold equals prior end; first frame end <= the => dropped
+        // Second frame overlaps and extends beyond threshold => must be kept
+        let the = Some(PgLsn::from(200u64));
+        let frames = vec![
+            (180u64, 20usize), // end: 200 (drop)
+            (190u64, 20usize), // end: 210 (keep)
+        ];
+        let mut kept: Vec<(u64, usize)> = Vec::new();
+        let mut last_end: Option<PgLsn> = None;
+        for (start, len) in frames.iter().copied() {
+            let (should, end) = CdcStream::should_process_xlogdata(the, start, len);
+            last_end = Some(PgLsn::from(end));
+            if should {
+                kept.push((start, len));
+            }
+        }
+        assert_eq!(kept, vec![(190u64, 20usize)]);
+        assert_eq!(last_end, Some(PgLsn::from(210u64)));
     }
 }

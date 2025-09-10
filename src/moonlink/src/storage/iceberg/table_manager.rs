@@ -31,6 +31,8 @@ pub struct PersistenceResult {
     pub(crate) remote_file_indices: Vec<FileIndex>,
     /// Maps from remote data files to their deletion vector puffin blob.
     pub(crate) puffin_blob_ref: HashMap<FileId, PuffinBlobRef>,
+    /// Evicted files to delete from object storage cache.
+    pub(crate) evicted_files_to_delete: Vec<String>,
 }
 
 #[async_trait]

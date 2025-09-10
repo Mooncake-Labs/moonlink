@@ -181,6 +181,48 @@ impl JsonToMoonlinkRowConverter {
                     Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
                 }
             }
+            DataType::Struct(child_fields) => {
+                if let Some(obj) = value.as_object() {
+                    let mut values = Vec::with_capacity(child_fields.len());
+                    for child_field in child_fields {
+                        let child_name = child_field.name();
+                        let child_value = match obj.get(child_name) {
+                            Some(v) => v,
+                            None => {
+                                if child_field.is_nullable() {
+                                    values.push(RowValue::Null);
+                                    continue;
+                                }
+                                return Err(JsonToMoonlinkRowError::MissingField(format!(
+                                    "{}.{}",
+                                    field.name(),
+                                    child_name
+                                )));
+                            }
+                        };
+                        let converted =
+                            Self::convert_value(child_field, child_value).map_err(|e| {
+                                match e {
+                                    JsonToMoonlinkRowError::TypeMismatch(existing_path) => {
+                                        // Prepend parent struct name for clarity
+                                        JsonToMoonlinkRowError::TypeMismatch(format!(
+                                            "{}.{}",
+                                            field.name(),
+                                            existing_path
+                                        ))
+                                    }
+                                    other => other,
+                                }
+                            })?;
+                        values.push(converted);
+                    }
+                    Ok(RowValue::Struct(values))
+                } else if value.is_null() && field.is_nullable() {
+                    Ok(RowValue::Null)
+                } else {
+                    Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone()))
+                }
+            }
             _ => Err(JsonToMoonlinkRowError::TypeMismatch(field.name().clone())),
         }
     }
@@ -297,9 +339,33 @@ mod tests {
             DataType::List(Arc::new(Field::new(
                 "item",
                 DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
-                false,
+                true,
             ))),
             false,
+        )]))
+    }
+
+    fn make_struct_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "user",
+            DataType::Struct(arrow_schema::Fields::from(vec![
+                Field::new("id", DataType::Int32, /*nullable=*/ false),
+                Field::new("name", DataType::Utf8, /*nullable=*/ false),
+                Field::new("is_active", DataType::Boolean, /*nullable=*/ true),
+            ])),
+            /*nullable=*/ false,
+        )]))
+    }
+
+    fn make_list_with_nullable_elements_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "int_list_nullable",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Int32,
+                /*nullable=*/ true,
+            ))),
+            /*nullable=*/ false,
         )]))
     }
 
@@ -1069,6 +1135,300 @@ mod tests {
         match err {
             JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "nested_list.item[1].item[1]"),
             _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_struct_parsing_success() {
+        let schema = make_struct_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "user": {
+                "id": 7,
+                "name": "alice",
+                "is_active": true
+            }
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 1);
+        assert_eq!(
+            row.values[0],
+            RowValue::Struct(vec![
+                RowValue::Int32(7),
+                RowValue::ByteArray(b"alice".to_vec()),
+                RowValue::Bool(true),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_struct_missing_required_child() {
+        let schema = make_struct_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "user": {
+                "id": 7,
+                // name is required but missing
+                "is_active": true
+            }
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::MissingField(f) => assert_eq!(f, "user.name"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_struct_missing_optional_child() {
+        let schema = make_struct_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "user": {
+                "id": 7,
+                "name": "alice"
+                // is_active is optional and missing
+            }
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 1);
+        assert_eq!(
+            row.values[0],
+            RowValue::Struct(vec![
+                RowValue::Int32(7),
+                RowValue::ByteArray(b"alice".to_vec()),
+                RowValue::Null,
+            ])
+        );
+    }
+
+    #[test]
+    fn test_struct_mismatched_types() {
+        let schema = make_struct_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "user": {
+                "id": "oops", // should be int
+                "name": "alice",
+                "is_active": true
+            }
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "user.id"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_null_elements_allowed() {
+        let schema = make_list_with_nullable_elements_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "int_list_nullable": [1, null, 3]
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), 1);
+        assert_eq!(
+            row.values[0],
+            RowValue::Array(vec![RowValue::Int32(1), RowValue::Null, RowValue::Int32(3)])
+        );
+    }
+
+    // Tests that combine schema_builder and json_converter in unit tests
+    use crate::rest_ingest::schema_util::{build_arrow_schema_impl, FieldSchema};
+
+    fn make_schema_via_field_schema() -> Arc<Schema> {
+        let fields = vec![
+            FieldSchema {
+                name: "id".into(),
+                data_type: "int32".into(),
+                nullable: false,
+                fields: None,
+                item: None,
+            },
+            FieldSchema {
+                name: "name".into(),
+                data_type: "string".into(),
+                nullable: true,
+                fields: None,
+                item: None,
+            },
+            FieldSchema {
+                name: "score".into(),
+                data_type: "float64".into(),
+                nullable: true,
+                fields: None,
+                item: None,
+            },
+            FieldSchema {
+                name: "created".into(),
+                data_type: "date32".into(),
+                nullable: false,
+                fields: None,
+                item: None,
+            },
+            FieldSchema {
+                name: "tags".into(),
+                data_type: "list".into(),
+                nullable: false,
+                fields: None,
+                item: Some(Box::new(FieldSchema {
+                    name: "tag".into(),
+                    data_type: "string".into(),
+                    nullable: true,
+                    fields: None,
+                    item: None,
+                })),
+            },
+            FieldSchema {
+                name: "price".into(),
+                data_type: "decimal(6,2)".into(),
+                nullable: true,
+                fields: None,
+                item: None,
+            },
+            FieldSchema {
+                name: "profile".into(),
+                data_type: "struct".into(),
+                nullable: true,
+                fields: Some(vec![
+                    FieldSchema {
+                        name: "active".into(),
+                        data_type: "boolean".into(),
+                        nullable: false,
+                        fields: None,
+                        item: None,
+                    },
+                    FieldSchema {
+                        name: "level".into(),
+                        data_type: "int64".into(),
+                        nullable: true,
+                        fields: None,
+                        item: None,
+                    },
+                ]),
+                item: None,
+            },
+        ];
+        Arc::new(build_arrow_schema_impl(&fields).expect("schema should build"))
+    }
+
+    #[test]
+    fn test_schema_builder_integration_success() {
+        let schema = make_schema_via_field_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema.clone());
+        let input = json!({
+            "id": 7,
+            "name": "alice",
+            "score": 88.5,
+            "created": "2024-03-15",
+            "tags": ["a", "b", "c"],
+            "price": "123.45",
+            "profile": { "active": true, "level": 3 }
+        });
+        let row = converter.convert(&input).unwrap();
+        assert_eq!(row.values.len(), schema.fields.len());
+        assert_eq!(row.values[0], RowValue::Int32(7));
+    }
+
+    #[test]
+    fn test_schema_builder_missing_required_field() {
+        let schema = make_schema_via_field_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            // missing id
+            "name": "bob",
+            "score": 10.0,
+            "created": "2024-01-01",
+            "tags": [],
+            "price": null,
+            "profile": {"active": false}
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::MissingField(f) => assert_eq!(f, "id"),
+            _ => panic!("unexpected error"),
+        }
+    }
+
+    #[test]
+    fn test_schema_builder_list_type_mismatch() {
+        let schema = make_schema_via_field_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 1,
+            "name": null,
+            "score": null,
+            "created": "2024-05-05",
+            "tags": "not-an-array",
+            "price": null,
+            "profile": {"active": true}
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "tags"),
+            _ => panic!("unexpected error"),
+        }
+    }
+
+    #[test]
+    fn test_schema_builder_decimal_number_type_mismatch() {
+        let schema = make_schema_via_field_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 2,
+            "name": "x",
+            "score": 1.0,
+            "created": "2024-03-01",
+            "tags": [],
+            "price": 12.34,
+            "profile": {"active": true}
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::TypeMismatch(f) => assert_eq!(f, "price"),
+            _ => panic!("unexpected error"),
+        }
+    }
+
+    #[test]
+    fn test_schema_builder_struct_child_missing_required() {
+        let schema = make_schema_via_field_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 3,
+            "name": null,
+            "score": null,
+            "created": "2024-04-01",
+            "tags": ["t"],
+            "price": null,
+            "profile": {"level": 10}
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::MissingField(f) => assert_eq!(f, "profile.active"),
+            _ => panic!("unexpected error"),
+        }
+    }
+
+    #[test]
+    fn test_schema_builder_decimal_precision_out_of_range() {
+        let schema = make_schema_via_field_schema();
+        let converter = JsonToMoonlinkRowConverter::new(schema);
+        let input = json!({
+            "id": 4,
+            "name": "y",
+            "score": 2.0,
+            "created": "2024-04-02",
+            "tags": [],
+            "price": "12345.67", // 7 digits total, exceeds precision 6
+            "profile": {"active": false}
+        });
+        let err = converter.convert(&input).unwrap_err();
+        match err {
+            JsonToMoonlinkRowError::InvalidValueWithCause(field, _e) => assert_eq!(field, "price"),
+            _ => panic!("unexpected error"),
         }
     }
 }

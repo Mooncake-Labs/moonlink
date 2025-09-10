@@ -5,7 +5,9 @@
     "workspaceFolder": "/workspaces/moonlink",
     "initializeCommand": "bash ./.devcontainer/prebuild.sh",
     "features": {
-        "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "moby": false
+        },
         "ghcr.io/robbert229/devcontainer-features/postgresql-client": {
             "version": "17"
         }

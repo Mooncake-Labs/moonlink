@@ -21,15 +21,18 @@ test-utils = ["moonlink/test-utils"]
 
 [dependencies]
 async-trait = { workspace = true }
-moonlink = { path = "../moonlink" }
-moonlink_error = { path = "../moonlink_error" }
+moonlink = { workspace = true }
+moonlink_error = { workspace = true }
 more-asserts = { workspace = true }
 native-tls = { workspace = true }
 postgres-native-tls = { workspace = true }
 postgres-types = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"], optional = true }
+sqlx = { version = "0.8", features = [
+  "sqlite",
+  "runtime-tokio",
+], optional = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

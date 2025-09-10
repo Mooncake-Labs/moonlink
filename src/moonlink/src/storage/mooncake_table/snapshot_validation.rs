@@ -83,7 +83,7 @@ impl SnapshotTableState {
                     .as_ref()
                     .map_or(0, |cur_puffin_blob| cur_puffin_blob.num_rows),
                 cur_disk_file_entry
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .get_num_rows_deleted()
             );
         }
@@ -144,7 +144,7 @@ impl SnapshotTableState {
         }
     }
 
-    /// Util function to validate one data file is referenced by exactly one file index.
+    /// Util function to validate one data file is referenced by exactly one file index, and all index blocks are unique.
     #[cfg(any(test, debug_assertions))]
     fn assert_file_indices_no_duplicate(&self) {
         // Skip validation for append-only tables since they don't have file indices
@@ -157,9 +157,14 @@ impl SnapshotTableState {
 
         // Get referenced data files by file indices.
         let mut referenced_data_files = HashSet::new();
+        // Get index block file ids.
+        let mut index_block_file_ids = HashSet::new();
         for cur_file_index in self.current_snapshot.indices.file_indices.iter() {
             for cur_data_file in cur_file_index.files.iter() {
                 assert!(referenced_data_files.insert(cur_data_file.file_id()));
+            }
+            for cur_index_block in cur_file_index.index_blocks.iter() {
+                assert!(index_block_file_ids.insert(cur_index_block.index_file.file_id()));
             }
         }
 

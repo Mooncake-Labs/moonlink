@@ -9,7 +9,7 @@ use moonlink_table_metadata::{DeletionVector, MooncakeTableMetadata, PositionDel
 
 use bincode::config;
 use tracing::Instrument;
-use tracing::{error, info_span, warn};
+use tracing::{error, info_span};
 
 const BINCODE_CONFIG: config::Configuration = config::standard();
 
@@ -34,7 +34,7 @@ impl Drop for ReadState {
         let cache_handles = std::mem::take(&mut self.cache_handles);
         tokio::spawn(async move {
             let mut evicted_files_to_delete = vec![];
-            for mut cur_cache_handle in cache_handles.into_iter() {
+            for cur_cache_handle in cache_handles.into_iter() {
                 let cur_evicted_files = cur_cache_handle.unreference().await;
                 evicted_files_to_delete.extend(cur_evicted_files);
             }
@@ -54,10 +54,11 @@ impl Drop for ReadState {
         // Perform best-effort deletion by spawning detached task.
         tokio::spawn(
             async move {
-                for file in associated_files.into_iter() {
-                    if let Err(e) = tokio::fs::remove_file(&file).await {
-                        warn!(%file, error = ?e, "failed to delete associated file");
-                    }
+                if let Err(e) = io_utils::delete_local_files(&associated_files).await {
+                    error!(
+                        "Failed to delete associated files: {:?}: {:?}",
+                        associated_files, e
+                    );
                 }
             }
             .instrument(info_span!("read_state_cleanup")),

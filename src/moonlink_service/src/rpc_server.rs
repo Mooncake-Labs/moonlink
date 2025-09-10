@@ -3,7 +3,6 @@ use arrow_ipc::writer::StreamWriter;
 use moonlink_backend::MoonlinkBackend;
 use moonlink_rpc::{read, write, Request, Table};
 use std::collections::HashMap;
-use std::error::Error as _;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -1,4 +1,5 @@
 use arrow_array::{Int32Array, RecordBatch, StringArray};
+use more_asserts as ma;
 use tempfile::tempdir;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
@@ -685,25 +686,27 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
         .unwrap();
     assert_eq!(next_file_id, 2); // one for data file, one for index block file
     assert_eq!(snapshot.disk_files.len(), 1);
-    let (cur_data_file, cur_deletion_vector) = snapshot.disk_files.into_iter().next().unwrap();
+    let (cur_data_file, cur_disk_file_entry) = snapshot.disk_files.into_iter().next().unwrap();
     // Check data file.
     let actual_arrow_batch = load_one_arrow_batch(cur_data_file.file_path()).await;
     let expected_arrow_batch = arrow_batch_1.clone();
     assert_eq!(actual_arrow_batch, expected_arrow_batch);
     // Check deletion vector.
-    assert!(cur_deletion_vector
-        .batch_deletion_vector
+    assert!(cur_disk_file_entry
+        .committed_deletion_vector
         .collect_deleted_rows()
         .is_empty());
-    check_deletion_vector_consistency(&cur_deletion_vector).await;
-    assert!(cur_deletion_vector.puffin_deletion_blob.is_none());
+    check_deletion_vector_consistency(&cur_disk_file_entry).await;
+    assert!(cur_disk_file_entry.puffin_deletion_blob.is_none());
     let old_data_file = cur_data_file;
 
     // ---- Create snapshot after new records appended and old records deleted ----
@@ -729,7 +732,9 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -745,7 +750,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
             // Check the first deletion vector.
             assert_eq!(
                 cur_deletion_vector
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .collect_deleted_rows(),
                 vec![0]
             );
@@ -759,7 +764,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         assert_eq!(actual_arrow_batch, expected_arrow_batch);
         // Check the second deletion vector.
         let deleted_rows = cur_deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .collect_deleted_rows();
         assert!(
             deleted_rows.is_empty(),
@@ -783,7 +788,9 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -799,7 +806,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
             // Check the first deletion vector.
             assert_eq!(
                 cur_deletion_vector
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .collect_deleted_rows(),
                 vec![0]
             );
@@ -815,7 +822,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
         // Check the first deletion vector.
         assert_eq!(
             cur_deletion_vector
-                .batch_deletion_vector
+                .committed_deletion_vector
                 .collect_deleted_rows(),
             vec![0]
         );
@@ -892,25 +899,27 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
         .unwrap();
     assert_eq!(next_file_id, 2); // one data file, one index block file
     assert_eq!(snapshot.disk_files.len(), 1);
-    let (cur_data_file, cur_deletion_vector) = snapshot.disk_files.into_iter().next().unwrap();
+    let (cur_data_file, cur_disk_file_entry) = snapshot.disk_files.into_iter().next().unwrap();
     // Check data file.
     let actual_arrow_batch = load_one_arrow_batch(cur_data_file.file_path()).await;
     let expected_arrow_batch = arrow_batch_1.clone();
     assert_eq!(actual_arrow_batch, expected_arrow_batch);
     // Check deletion vector.
-    assert!(cur_deletion_vector
-        .batch_deletion_vector
+    assert!(cur_disk_file_entry
+        .committed_deletion_vector
         .collect_deleted_rows()
         .is_empty());
-    check_deletion_vector_consistency(&cur_deletion_vector).await;
-    assert!(cur_deletion_vector.puffin_deletion_blob.is_none());
+    check_deletion_vector_consistency(&cur_disk_file_entry).await;
+    assert!(cur_disk_file_entry.puffin_deletion_blob.is_none());
     let old_data_file = cur_data_file;
 
     // ---- Create snapshot after new records appended and old records deleted ----
@@ -942,7 +951,9 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -958,7 +969,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
             // Check the first deletion vector.
             assert_eq!(
                 cur_deletion_vector
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .collect_deleted_rows(),
                 vec![0]
             );
@@ -972,7 +983,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         assert_eq!(actual_arrow_batch, expected_arrow_batch);
         // Check the second deletion vector.
         let deleted_rows = cur_deletion_vector
-            .batch_deletion_vector
+            .committed_deletion_vector
             .collect_deleted_rows();
         assert!(
             deleted_rows.is_empty(),
@@ -999,7 +1010,9 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         .unwrap();
 
     // Load from iceberg table manager to check snapshot status.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1015,7 +1028,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
             // Check the first deletion vector.
             assert_eq!(
                 cur_deletion_vector
-                    .batch_deletion_vector
+                    .committed_deletion_vector
                     .collect_deleted_rows(),
                 vec![0]
             );
@@ -1031,7 +1044,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
         // Check the first deletion vector.
         assert_eq!(
             cur_deletion_vector
-                .batch_deletion_vector
+                .committed_deletion_vector
                 .collect_deleted_rows(),
             vec![0]
         );
@@ -1148,14 +1161,16 @@ async fn test_multiple_snapshot_requests() {
     }
 
     // Check iceberg snapshot content.
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
         .unwrap();
     assert_eq!(next_file_id, 2); // one data file, one index block file
     assert_eq!(snapshot.disk_files.len(), 1);
-    let (cur_data_file, cur_deletion_vector) = snapshot.disk_files.into_iter().next().unwrap();
+    let (cur_data_file, cur_disk_file_entry) = snapshot.disk_files.into_iter().next().unwrap();
 
     // Check the data file.
     let actual_arrow_batch = load_one_arrow_batch(cur_data_file.file_path()).await;
@@ -1170,11 +1185,11 @@ async fn test_multiple_snapshot_requests() {
     );
 
     // Check the deletion vector.
-    assert!(cur_deletion_vector
-        .batch_deletion_vector
+    assert!(cur_disk_file_entry
+        .committed_deletion_vector
         .collect_deleted_rows()
         .is_empty(),);
-    check_deletion_vector_consistency(&cur_deletion_vector).await;
+    check_deletion_vector_consistency(&cur_disk_file_entry).await;
 }
 
 /// Test that flush_lsn correctly reflects LSN ordering for batch operations
@@ -1255,8 +1270,9 @@ async fn test_flush_lsn_consistency_across_snapshots() {
         assert_eq!(*flush_lsn_rx.borrow(), lsn);
 
         // Verify persistence by loading from iceberg
-        let mut iceberg_table_manager =
-            env.create_iceberg_table_manager(MooncakeTableConfig::default());
+        let mut iceberg_table_manager = env
+            .create_iceberg_table_manager(MooncakeTableConfig::default())
+            .await;
         let (_, snapshot) = iceberg_table_manager
             .load_snapshot_from_table()
             .await
@@ -1369,8 +1385,9 @@ async fn test_periodical_force_snapshot() {
     .unwrap();
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (_, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1412,8 +1429,9 @@ async fn test_index_merge_with_sufficient_file_indices() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1441,8 +1459,9 @@ async fn test_index_merge_with_sufficient_file_indices() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1487,8 +1506,9 @@ async fn test_data_compaction_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1516,8 +1536,9 @@ async fn test_data_compaction_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1580,8 +1601,9 @@ async fn test_full_maintenance_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -1609,8 +1631,9 @@ async fn test_full_maintenance_with_sufficient_data_files() {
         .await;
 
     // Check iceberg snapshot result.
-    let mut iceberg_table_manager =
-        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(MooncakeTableConfig::default())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -2175,7 +2198,9 @@ async fn test_append_only_table_full_pipeline() {
         .unwrap();
 
     // Verify snapshot was created successfully
-    let mut iceberg_table_manager = env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (next_file_id, snapshot) = iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -2186,7 +2211,7 @@ async fn test_append_only_table_full_pipeline() {
         !snapshot.disk_files.is_empty(),
         "Snapshot should contain data files"
     );
-    assert!(next_file_id > 0, "Next file ID should be incremented");
+    ma::assert_gt!(next_file_id, 0);
 
     // Test 4: Streaming transactions work
     println!("Testing streaming transactions...");
@@ -2217,8 +2242,9 @@ async fn test_append_only_table_full_pipeline() {
         .unwrap();
 
     // Verify final snapshot
-    let mut final_iceberg_table_manager =
-        env.create_iceberg_table_manager(mooncake_table_config.clone());
+    let mut final_iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config.clone())
+        .await;
     let (final_next_file_id, final_snapshot) = final_iceberg_table_manager
         .load_snapshot_from_table()
         .await
@@ -2602,4 +2628,86 @@ async fn test_finish_initial_copy_overlaps_with_ongoing_snapshot() {
     env.verify_snapshot(start_lsn, &[1, 2, 3]).await;
 
     env.shutdown().await;
+}
+
+/// Testing scenario:
+/// - A row has been in mooncake and iceberg snapshot
+/// - The row gets updated and sync-ed to mooncake/iceberg snapshot
+#[tokio::test]
+async fn test_row_overwrite_with_snapshot() {
+    let mut env = TestEnvironment::default().await;
+
+    // Append row to the table, commit, flush and persist to snapshot.
+    env.append_row(
+        /*id=*/ 1, /*name=*/ "Alice", /*age=*/ 10, /*lsn=*/ 1,
+        /*xact_id=*/ None,
+    )
+    .await;
+    env.flush_table_and_sync(/*lsn=*/ 2, /*xact_id=*/ None)
+        .await;
+
+    // Overwrite the row and perform the same operation again.
+    env.delete_row(
+        /*id=*/ 1, /*name=*/ "Alice", /*age=*/ 10, /*lsn=*/ 3,
+        /*xact_id=*/ None,
+    )
+    .await;
+    env.append_row(
+        /*id=*/ 1, /*name=*/ "Alice", /*age=*/ 10, /*lsn=*/ 4,
+        /*xact_id=*/ None,
+    )
+    .await;
+    env.flush_table_and_sync(/*lsn=*/ 5, /*xact_id=*/ None)
+        .await;
+
+    // Check mooncake snapshot.
+    env.verify_snapshot(/*target_lsn=*/ 5, /*ids=*/ &[1]).await;
+}
+
+#[tokio::test]
+async fn test_force_snapshot_for_empty_stream_flush() {
+    let mut env = TestEnvironment::default().await;
+
+    env.append_row(
+        /*id=*/ 1,
+        /*name=*/ "Alice",
+        /*age=*/ 10,
+        /*lsn=*/ 1,
+        /*xact_id=*/ Some(1),
+    )
+    .await;
+    env.delete_row(
+        /*id=*/ 1,
+        /*name=*/ "Alice",
+        /*age=*/ 10,
+        /*lsn=*/ 2,
+        /*xact_id=*/ Some(1),
+    )
+    .await;
+    env.stream_commit(/*lsn=*/ 3, /*xact_id=*/ 1).await;
+
+    // Attempt an iceberg snapshot, with requested LSN already committed.
+    let rx = env.table_event_manager.initiate_snapshot(/*lsn=*/ 1).await;
+    TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 3)
+        .await
+        .unwrap();
+    // Verify force snapshot request never gets blocked.
+
+    // Verify mooncake snapshot content.
+    env.set_readable_lsn(3);
+    env.verify_snapshot(/*lsn=*/ 3, &[]).await;
+
+    // Verify iceberg snapshot content.
+    let mooncake_table_config =
+        MooncakeTableConfig::new(env.temp_dir.path().to_str().unwrap().to_string());
+    let mut iceberg_table_manager = env
+        .create_iceberg_table_manager(mooncake_table_config)
+        .await;
+    let (next_file_id, snapshot) = iceberg_table_manager
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.flush_lsn.unwrap(), 3);
+    assert_eq!(next_file_id, 0);
+    assert!(snapshot.disk_files.is_empty());
 }

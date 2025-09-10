@@ -2,13 +2,16 @@ use tracing_subscriber::Layer;
 
 pub fn init_logging() {
     use tracing_subscriber::{
-        fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry,
+        fmt, fmt::time, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry,
     };
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer()
-        .with_test_writer()
+        .with_timer(time::ChronoLocal::new("%Y-%m-%d %H:%M:%S%:z".to_string()))
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true)
         .with_ansi(false)
         .with_filter(env_filter);
 

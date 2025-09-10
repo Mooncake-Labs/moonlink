@@ -102,9 +102,11 @@ impl SnapshotTableState {
                 if data_file_deletion_percentage_threshold == 0 {
                     continue;
                 }
-                let deletion_percentage =
-                    disk_file_entry.batch_deletion_vector.get_num_rows_deleted() * 100
-                        / disk_file_entry.num_rows;
+                let deletion_percentage = disk_file_entry
+                    .committed_deletion_vector
+                    .get_num_rows_deleted()
+                    * 100
+                    / disk_file_entry.num_rows;
                 if deletion_percentage < data_file_deletion_percentage_threshold {
                     continue;
                 }
@@ -121,6 +123,7 @@ impl SnapshotTableState {
                     table_id: TableId(self.mooncake_table_metadata.table_id),
                     file_id: cur_data_file.file_id(),
                 },
+                data_file_cache_handle: disk_file_entry.cache_handle.clone(),
                 filepath: cur_data_file.file_path().to_string(),
                 deletion_vector: disk_file_entry.puffin_deletion_blob.clone(),
             };

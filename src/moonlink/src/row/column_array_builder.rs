@@ -4,7 +4,9 @@ use arrow::array::builder::{
     BinaryBuilder, BooleanBuilder, NullBufferBuilder, PrimitiveBuilder, StringBuilder,
 };
 use arrow::array::types::{Decimal128Type, Float32Type, Float64Type, Int32Type, Int64Type};
-use arrow::array::{ArrayBuilder, ArrayRef, FixedSizeBinaryBuilder, ListArray, StructArray};
+use arrow::array::{
+    ArrayBuilder, ArrayRef, FixedSizeBinaryBuilder, ListArray, MapArray, StructArray,
+};
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, FieldRef};
@@ -58,6 +60,22 @@ impl ListBuilderHelper {
             OffsetBuffer::new(self.offsets.into()),
             values,
             self.nulls.finish(),
+        ))
+    }
+
+    pub fn finish_map(mut self) -> ArrayRef {
+        let values = self.inner.finish(self.field.data_type());
+        self.offsets.push(values.len() as i32); // closing offset
+        Arc::new(MapArray::new(
+            self.field.clone(),
+            OffsetBuffer::new(self.offsets.into()),
+            values
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("Map should be built from StructArray")
+                .clone(),
+            self.nulls.finish(),
+            false,
         ))
     }
 
@@ -133,7 +151,6 @@ impl StructBuilderHelper {
         self.len
     }
 }
-
 /// A column array builder that can handle different types
 pub(crate) enum ColumnArrayBuilder {
     // Primitive leaves
@@ -150,6 +167,7 @@ pub(crate) enum ColumnArrayBuilder {
     // Composite nodes (recursive)
     List(ListBuilderHelper),
     Struct(StructBuilderHelper),
+    Map(ListBuilderHelper),
 }
 
 impl ColumnArrayBuilder {
@@ -187,6 +205,10 @@ impl ColumnArrayBuilder {
             }
             DataType::Struct(fields) => {
                 ColumnArrayBuilder::Struct(StructBuilderHelper::with_capacity(fields, capacity))
+            }
+            DataType::Map(field, _) => {
+                assert!(matches!(field.data_type(), DataType::Struct(fields) if fields.len() == 2));
+                Self::Map(ListBuilderHelper::with_capacity(field.clone(), capacity))
             }
             other => panic!("unsupported type in builder: {other:?}"),
         }
@@ -317,6 +339,14 @@ impl ColumnArrayBuilder {
                 .into())
             }
 
+            (Self::Map(b), RowValue::Array(items)) => {
+                b.append_items(items)?;
+                Ok(())
+            }
+            (Self::Map(b), RowValue::Null) => {
+                b.append_null();
+                Ok(())
+            }
             // Type mismatch
             (b, other) => Err(ArrowError::InvalidArgumentError(format!(
                 "Type mismatch: builder={:?}, value={:?}",
@@ -332,6 +362,7 @@ impl ColumnArrayBuilder {
         match self {
             Self::List(b) => b.len(),
             Self::Struct(b) => b.len(),
+            Self::Map(b) => b.len(),
             Self::Boolean(b) => b.len(),
             Self::Int32(b) => b.len(),
             Self::Int64(b) => b.len(),
@@ -372,6 +403,7 @@ impl ColumnArrayBuilder {
             Self::Binary(mut b) => Arc::new(b.finish()),
             Self::List(h) => h.finish(),
             Self::Struct(h) => h.finish(),
+            Self::Map(h) => h.finish_map(),
         }
     }
 }
@@ -1342,5 +1374,43 @@ mod tests {
         assert!(nested_column.is_null(1));
         assert_eq!(tags_column.value(0).len(), 1);
         assert_eq!(tags_column.value(1).len(), 1);
+    }
+
+    #[test]
+    fn test_map_builder() {
+        use arrow::datatypes::{Field, Fields};
+        let entries_struct = DataType::Struct(Fields::from(vec![
+            Field::new("key", DataType::Utf8, /* nullable = */ false),
+            Field::new("value", DataType::Utf8, /* nullable = */ true),
+        ]));
+
+        // Field must be non-null
+        let entries_field = Field::new("entries", entries_struct, /* nullable = */ false);
+
+        let field_type = DataType::Map(Arc::new(entries_field), true);
+
+        let mut builder = ColumnArrayBuilder::new(&field_type, 2);
+
+        builder
+            .append_value(&RowValue::Array(vec![RowValue::Struct(vec![
+                RowValue::ByteArray(b"key1".to_vec()),
+                RowValue::ByteArray(b"value1".to_vec()),
+            ])]))
+            .unwrap();
+        builder
+            .append_value(&RowValue::Array(vec![
+                RowValue::Struct(vec![RowValue::ByteArray(b"key21".to_vec()), RowValue::Null]),
+                RowValue::Struct(vec![
+                    RowValue::ByteArray(b"key22".to_vec()),
+                    RowValue::ByteArray(b"value22".to_vec()),
+                ]),
+            ]))
+            .unwrap();
+
+        let array = builder.finish(&field_type);
+        let map_array = array.as_any().downcast_ref::<MapArray>().unwrap();
+        assert_eq!(map_array.len(), 2);
+        assert_eq!(map_array.value(0).len(), 1);
+        assert_eq!(map_array.value(1).len(), 2);
     }
 }

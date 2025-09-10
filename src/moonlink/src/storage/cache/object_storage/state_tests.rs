@@ -225,7 +225,7 @@ async fn test_cache_2_new_entry_with_sufficient_space() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle, files_to_evict) = cache
+    let (cache_handle, files_to_evict) = cache
         .import_cache_entry(/*file_id=*/ get_table_unique_file_id(0), cache_entry)
         .await;
     assert_non_evictable_cache_handle_ref_count(
@@ -289,7 +289,7 @@ async fn test_cache_2_new_entry_with_insufficient_space() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle_1, files_to_evict) = cache
+    let (cache_handle_1, files_to_evict) = cache
         .import_cache_entry(/*file_id=*/ get_table_unique_file_id(0), cache_entry)
         .await;
     assert_non_evictable_cache_handle_ref_count(
@@ -460,7 +460,7 @@ async fn test_cache_2_requested_to_delete_4() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle, files_to_evict) = cache
+    let (cache_handle, files_to_evict) = cache
         .import_cache_entry(/*file_id=*/ get_table_unique_file_id(0), cache_entry)
         .await;
     assert_non_evictable_cache_handle_ref_count(
@@ -606,7 +606,7 @@ async fn test_cache_5_usage_finish_and_not_referenced_4() {
             file_size: CONTENT.len() as u64,
         },
     };
-    let (mut cache_handle_1, files_to_evict) = cache
+    let (cache_handle_1, files_to_evict) = cache
         .import_cache_entry(/*file_id=*/ get_table_unique_file_id(0), cache_entry)
         .await;
     assert_non_evictable_cache_handle_ref_count(
