@@ -43,7 +43,6 @@ impl Drop for RestCatalogTestGuard {
                 if let Some(t_idents) = table_idents {
                     for t in t_idents {
                         writer
-                            .catalog
                             .drop_table(&t)
                             .await
                             .expect("error: fail to drop the table on drop method");
@@ -53,7 +52,6 @@ impl Drop for RestCatalogTestGuard {
                 if let Some(ns_idents) = namespace_idents {
                     for ns_ident in ns_idents {
                         writer
-                            .catalog
                             .drop_namespace(&ns_ident)
                             .await
                             .expect("error: fail to drop the namespace on drop method");

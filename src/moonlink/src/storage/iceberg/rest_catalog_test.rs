@@ -91,8 +91,7 @@ async fn test_namespace_operation() {
     let ns_name_1 = get_random_string();
     let ns_name_2 = get_random_string();
     let ns_ident_parent = NamespaceIdent::new(ns_name_1.clone());
-    let ns_ident = NamespaceIdent::from_strs(vec![ns_name_1, ns_name_2.clone()]).unwrap();
-    let ns_ident_child = NamespaceIdent::new(ns_name_2);
+    let ns_ident = NamespaceIdent::from_strs(vec![ns_name_1, ns_name_2]).unwrap();
     let expected_namespace = writer
         .create_namespace(&ns_ident, HashMap::new())
         .await
@@ -119,7 +118,7 @@ async fn test_namespace_operation() {
             .list_namespaces(Some(&ns_ident_parent))
             .await
             .expect("error: fail to list the namespaces"),
-        vec![ns_ident_parent.clone(), ns_ident_child]
+        vec![ns_ident.clone()]
     );
 
     writer
