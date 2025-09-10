@@ -93,6 +93,28 @@ pub struct CreateTableResponse {
 }
 
 /// ====================
+/// Create table from PostgreSQL mirroring
+/// ====================
+///
+/// Request structure for creating table from PostgreSQL source
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateTableFromPostgresRequest {
+    pub database: String,
+    pub table: String,
+    pub src_uri: String,
+    pub src_table_name: String,
+    pub table_config: TableConfig,
+}
+
+/// Response structure for creating table from PostgreSQL source
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateTableFromPostgresResponse {
+    pub database: String,
+    pub table: String,
+    pub lsn: u64,
+}
+
+/// ====================
 /// Drop table
 /// ====================
 ///
@@ -263,6 +285,10 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/health", get(health_check))
         .route("/tables", get(list_tables))
         .route("/tables/{table}", post(create_table))
+        .route(
+            "/tables/{table}/from_postgres",
+            post(create_table_from_postgres),
+        )
         .route("/tables/{table}", delete(drop_table))
         .route("/schema/{database}/{table}", get(fetch_schema))
         .route("/ingest/{table}", post(ingest_data_json))
@@ -363,6 +389,67 @@ async fn create_table(
                 message: format!(
                     "Failed to create table {} with ID {}.{}: {}",
                     table, payload.database, payload.table, e
+                ),
+            }),
+        )),
+    }
+}
+
+/// Table creation from PostgreSQL mirroring endpoint
+async fn create_table_from_postgres(
+    Path(table): Path<String>,
+    State(state): State<ApiState>,
+    Json(payload): Json<CreateTableFromPostgresRequest>,
+) -> Result<Json<CreateTableFromPostgresResponse>, (StatusCode, Json<ErrorResponse>)> {
+    debug!(
+        "Received PostgreSQL table mirroring request for '{}': {:?}",
+        table, payload
+    );
+
+    // Serialization not expected to fail.
+    let serialized_table_config = match serde_json::to_string(&payload.table_config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    message: format!("Serialize table config failed: {e}"),
+                }),
+            ));
+        }
+    };
+
+    // Create table in backend (no schema needed for PostgreSQL sources)
+    match state
+        .backend
+        .create_table(
+            payload.database.clone(),
+            payload.table.clone(),
+            payload.src_table_name.clone(),
+            payload.src_uri.clone(),
+            serialized_table_config,
+            None, // No schema needed for PostgreSQL sources
+        )
+        .await
+    {
+        Ok(()) => {
+            info!(
+                "Successfully created table '{}' with ID {}:{} from PostgreSQL source {}",
+                table, payload.database, payload.table, payload.src_uri
+            );
+            Ok(Json(CreateTableFromPostgresResponse {
+                database: payload.database.clone(),
+                table,
+                // A new table is always with LSN 1.
+                lsn: 1,
+            }))
+        }
+        Err(e) => Err((
+            get_backend_error_status_code(&e),
+            Json(ErrorResponse {
+                message: format!(
+                    "Failed to create table {} with ID {}.{} from PostgreSQL source {}: {}",
+                    table, payload.database, payload.table, payload.src_uri, e
                 ),
             }),
         )),

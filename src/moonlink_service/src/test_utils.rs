@@ -374,6 +374,27 @@ pub(crate) fn get_flush_table_payload(database: &str, table: &str, lsn: u64) -> 
     flush_table_payload
 }
 
+/// Util function to get create table from PostgreSQL payload.
+pub(crate) fn get_create_table_from_postgres_payload(
+    database: &str,
+    table: &str,
+    src_uri: &str,
+    src_table_name: &str,
+) -> serde_json::Value {
+    let create_table_payload = json!({
+        "database": database,
+        "table": table,
+        "src_uri": src_uri,
+        "src_table_name": src_table_name,
+        "table_config": {
+            "mooncake": {
+                "append_only": true
+            }
+        }
+    });
+    create_table_payload
+}
+
 /// Util function to create table via REST API.
 pub(crate) async fn create_table(
     client: &reqwest::Client,
@@ -392,6 +413,33 @@ pub(crate) async fn create_table(
     };
     let response = client
         .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+}
+
+/// Util function to create table from PostgreSQL via REST API.
+pub(crate) async fn create_table_from_postgres(
+    client: &reqwest::Client,
+    database: &str,
+    table: &str,
+    src_uri: &str,
+    src_table_name: &str,
+) {
+    // REST API doesn't allow duplicate source table name.
+    let crafted_src_table_name = format!("{database}.{table}");
+
+    let payload = get_create_table_from_postgres_payload(database, table, src_uri, src_table_name);
+    let response = client
+        .post(format!(
+            "{REST_ADDR}/tables/{crafted_src_table_name}/from_postgres"
+        ))
         .header("content-type", "application/json")
         .json(&payload)
         .send()
