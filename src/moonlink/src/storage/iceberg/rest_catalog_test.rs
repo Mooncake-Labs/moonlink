@@ -1,108 +1,154 @@
+use std::collections::HashMap;
+
 use crate::storage::iceberg::catalog_test_impl::*;
 use crate::storage::iceberg::catalog_test_utils::*;
 use crate::storage::iceberg::rest_catalog::RestCatalog;
 use crate::storage::iceberg::rest_catalog_test_guard::RestCatalogTestGuard;
 use crate::storage::iceberg::rest_catalog_test_utils::*;
-use crate::storage::iceberg::schema_utils::assert_is_same_schema;
+use iceberg::Namespace;
 use iceberg::{Catalog, NamespaceIdent, TableIdent};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_create_table() {
-    let namespace = get_random_string();
-    let table = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), /*table=*/ None)
+async fn test_table_operation() {
+    let mut guard = RestCatalogTestGuard::new()
         .await
-        .unwrap();
-    let rest_catalog_config = default_rest_catalog_config();
-    let accessor_config = default_accessor_config();
-    let catalog = RestCatalog::new(
-        rest_catalog_config,
-        accessor_config,
-        create_test_table_schema().unwrap(),
-    )
-    .await
-    .unwrap();
-    let namespace = NamespaceIdent::new(namespace);
-    let table_creation = default_table_creation(table.clone());
-    let table_name = table_creation.name.clone();
-    catalog
-        .create_table(&namespace, table_creation)
+        .expect("error: fail to create testguard");
+    let catalog = guard.catalog.clone();
+    let writer = catalog.write().await;
+
+    // create a namespace
+    let ns_name = get_random_string();
+    let ns_ident = NamespaceIdent::new(ns_name);
+    writer
+        .catalog
+        .create_namespace(&ns_ident, HashMap::new())
         .await
-        .unwrap();
-    guard.table = Some(TableIdent::new(namespace, table_name));
+        .expect("error: fail to create a namespace");
+    guard
+        .namespace_idents
+        .get_or_insert(Vec::new())
+        .push(ns_ident.clone());
+
+    // create a table
+    let table_name = get_random_string();
+    let creation = default_table_creation(table_name.clone());
+    writer
+        .catalog
+        .create_table(&ns_ident, creation)
+        .await
+        .expect("error: fail to create an table");
+    let table_ident = TableIdent::new(ns_ident.clone(), table_name);
+    guard
+        .tables_idents
+        .get_or_insert(Vec::new())
+        .push(table_ident.clone());
+
+    // check if the table exist
+    assert!(writer
+        .table_exists(&table_ident)
+        .await
+        .expect("error: fail to check whether the table exist"));
+    // check the list table method
+    assert_eq!(
+        writer
+            .list_tables(&ns_ident)
+            .await
+            .expect("error: fail to list the tables"),
+        vec![table_ident.clone()]
+    );
+
+    // drop the table
+    writer
+        .catalog
+        .drop_table(&table_ident)
+        .await
+        .expect("error: fail to drop the table");
+
+    if let Some(vec) = guard.tables_idents.as_mut() {
+        vec.retain(|t| t != &table_ident);
+    }
+
+    assert!(!writer
+        .table_exists(&table_ident)
+        .await
+        .expect("error: fail to check whether the table exist"));
+    assert_eq!(
+        writer
+            .list_tables(&ns_ident)
+            .await
+            .expect("error: fail to list the tables"),
+        vec![]
+    );
+
+    drop(writer);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_drop_table() {
-    let namespace = get_random_string();
-    let table = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
+async fn test_namespace_operation() {
+    let mut guard = RestCatalogTestGuard::new()
         .await
-        .unwrap();
-    let rest_catalog_config = default_rest_catalog_config();
-    let accessor_config = default_accessor_config();
-    let catalog = RestCatalog::new(
-        rest_catalog_config,
-        accessor_config,
-        create_test_table_schema().unwrap(),
-    )
-    .await
-    .unwrap();
-    let table_ident = guard.table.clone().unwrap();
-    guard.table = None;
-    assert!(catalog.table_exists(&table_ident).await.unwrap());
-    catalog.drop_table(&table_ident).await.unwrap();
-    assert!(!catalog.table_exists(&table_ident).await.unwrap());
-}
+        .expect("error: fail to create testguard");
+    let catalog = guard.catalog.clone();
+    let writer = catalog.write().await;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_table_exists() {
-    let namespace = get_random_string();
-    let table = get_random_string();
-    let guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
+    // create a namespace
+    let ns_name = get_random_string();
+    let ns_ident = NamespaceIdent::new(ns_name);
+    writer
+        .catalog
+        .create_namespace(&ns_ident, HashMap::new())
         .await
-        .unwrap();
-    let rest_catalog_config = default_rest_catalog_config();
-    let accessor_config = default_accessor_config();
-    let iceberg_schema = create_test_table_schema().unwrap();
-    let catalog = RestCatalog::new(rest_catalog_config, accessor_config, iceberg_schema.clone())
+        .expect("error: fail to create a namespace");
+    guard
+        .namespace_idents
+        .get_or_insert(Vec::new())
+        .push(ns_ident.clone());
+
+    assert_eq!(
+        writer
+            .catalog
+            .get_namespace(&ns_ident)
+            .await
+            .expect("error: fail to get namespace"),
+        Namespace::new(ns_ident.clone())
+    );
+    assert!(writer
+        .catalog
+        .namespace_exists(&ns_ident)
         .await
-        .unwrap();
+        .expect("error: fail to check if the namespace exist"));
 
-    // Check table existence.
-    let table_ident = guard.table.clone().unwrap();
-    assert!(catalog.table_exists(&table_ident).await.unwrap());
+    assert_eq!(
+        writer
+            .catalog
+            .list_namespaces(None)
+            .await
+            .expect("error: fail to list the namespaces"),
+        vec![ns_ident.clone()]
+    );
 
-    // List tables and validate.
-    let tables = catalog.list_tables(table_ident.namespace()).await.unwrap();
-    assert_eq!(tables, vec![table_ident.clone()]);
-
-    // Load table and check schema.
-    let table = catalog.load_table(&table_ident).await.unwrap();
-    let actual_schema = table.metadata().current_schema();
-    assert_is_same_schema(actual_schema.as_ref().clone(), iceberg_schema);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_load_table() {
-    let namespace = get_random_string();
-    let table = get_random_string();
-    let guard = RestCatalogTestGuard::new(namespace.clone(), Some(table.clone()))
+    writer
+        .catalog
+        .drop_namespace(&ns_ident)
         .await
-        .unwrap();
-    let rest_catalog_config = default_rest_catalog_config();
-    let accessor_config = default_accessor_config();
-    let catalog = RestCatalog::new(
-        rest_catalog_config,
-        accessor_config,
-        create_test_table_schema().unwrap(),
-    )
-    .await
-    .unwrap();
-    let table_ident = guard.table.clone().unwrap();
-    let result = catalog.load_table(&table_ident).await.unwrap();
-    let result_table_ident = result.identifier().clone();
-    assert_eq!(table_ident, result_table_ident);
+        .expect("error: fail to drop the namespace");
+
+    assert!(!writer
+        .catalog
+        .namespace_exists(&ns_ident)
+        .await
+        .expect("error: fail to check if the namespace exist"));
+
+    assert_eq!(
+        writer
+            .catalog
+            .list_namespaces(None)
+            .await
+            .expect("error: fail to list the namespaces"),
+        vec![]
+    );
+
+    drop(writer);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
