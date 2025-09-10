@@ -8,7 +8,7 @@ use crate::Result;
 use arrow_schema::Schema;
 use async_stream::stream;
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::stream::{FuturesUnordered, Stream, StreamExt};
 use moonlink::row::MoonlinkRow;
 use moonlink::{
     AccessorConfig, BaseFileSystemAccess, FileSystemAccessor, FsRetryConfig, FsTimeoutConfig,
@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::task;
 
 pub type SrcTableId = u32;
 
@@ -108,65 +109,125 @@ impl RestSource {
         Ok(())
     }
 
-    /// Create a stream from this RestSource
+    /// Create a stream from this RestSource with proper concurrency control
     pub fn create_stream(
         source: Arc<RwLock<RestSource>>,
         mut request_rx: mpsc::Receiver<EventRequest>,
+        max_concurrent_heavy_ops: usize,
     ) -> impl Stream<Item = (Option<mpsc::Sender<u64>>, Result<Vec<RestEvent>>)> {
         stream! {
-            while let Some(request) = request_rx.recv().await {
-                let request_tx = request.get_request_tx();
+            let sem = Arc::new(Semaphore::new(max_concurrent_heavy_ops));
+            let mut pending: FuturesUnordered<task::JoinHandle<(Option<mpsc::Sender<u64>>, Result<Vec<RestEvent>>)>> =
+                FuturesUnordered::new();
 
-                let result = match request {
-                    EventRequest::RowRequest(row_request) => {
-                        // Process row requests synchronously
-                        let source = source.read().await;
-                        source.process_row_request_sync(row_request)
+            loop {
+                tokio::select! {
+                    // Prefer to flush finished heavy tasks first
+                    biased;
+
+                    Some(joined) = pending.next(), if !pending.is_empty() => {
+                        // Handle completed heavy operations
+                        match joined {
+                            Ok(result) => yield result,
+                            Err(e) => yield (None, Err(crate::Error::rest_api(
+                                format!("Task join error: {e}"),
+                                None,
+                            )))
+                        }
                     }
-                    EventRequest::FileRequest(file_request) => {
-                        match file_request.operation {
-                            FileEventOperation::Insert => {
-                                // Extract needed data from source before async operation
-                                let (src_table_id, lsn_generator) = {
-                                    let source = source.read().await;
-                                    match source.src_table_name_to_src_id.get(&file_request.src_table_name).copied() {
-                                        Some(id) => (id, source.lsn_generator.clone()),
-                                        None => {
-                                            yield (request_tx, Err(crate::Error::rest_api(
-                                                format!("Unknown table: {}", file_request.src_table_name),
-                                                None,
-                                            )));
-                                            continue;
-                                        }
-                                    }
-                                }; // RwLock guard is dropped here
 
-                                // Process file insert asynchronously (no RwLock held)
-                                Self::generate_table_events_for_file_upload(
-                                    src_table_id,
-                                    lsn_generator,
-                                    file_request.storage_config,
-                                    file_request.files,
-                                ).await
+                    maybe_request = request_rx.recv() => {
+                        match maybe_request {
+                            Some(request) => {
+                                let request_tx = request.get_request_tx();
+
+                                match request {
+                                    EventRequest::FileRequest(file_request) if file_request.operation == FileEventOperation::Insert => {
+                                        // Heavy operation: file insertion with parquet reading
+                                        // Extract needed data from source
+                                        let (src_table_id, lsn_generator) = {
+                                            let source = source.read().await;
+                                            match source.src_table_name_to_src_id.get(&file_request.src_table_name).copied() {
+                                                Some(id) => (id, source.lsn_generator.clone()),
+                                                None => {
+                                                    yield (request_tx, Err(crate::Error::rest_api(
+                                                        format!("Unknown table: {}", file_request.src_table_name),
+                                                        None,
+                                                    )));
+                                                    continue;
+                                                }
+                                            }
+                                        };
+
+                                        // Spawn heavy operation with semaphore
+                                        let permit = sem.clone().acquire_owned().await.unwrap();
+                                        pending.push(task::spawn(async move {
+                                            let _permit = permit; // Hold permit for duration
+
+                                            // Use spawn_blocking for the heavy I/O work
+                                            let result = task::spawn_blocking(move || {
+                                                tokio::runtime::Handle::current().block_on(
+                                                    Self::generate_table_events_for_file_upload(
+                                                        src_table_id,
+                                                        lsn_generator,
+                                                        file_request.storage_config,
+                                                        file_request.files,
+                                                    )
+                                                )
+                                            }).await;
+
+                                            let final_result = match result {
+                                                Ok(res) => res,
+                                                Err(e) => Err(crate::Error::rest_api(
+                                                    format!("Spawn blocking error: {e}"),
+                                                    None,
+                                                ))
+                                            };
+
+                                            (request_tx, final_result)
+                                        }));
+                                    }
+
+                                    // Light operations: process inline
+                                    EventRequest::RowRequest(row_request) => {
+                                        let source = source.read().await;
+                                        let result = source.process_row_request_sync(row_request);
+                                        yield (request_tx, result);
+                                    }
+                                    EventRequest::FileRequest(file_request) => {
+                                        // FileEventOperation::Upload
+                                        let source = source.read().await;
+                                        let result = source.process_file_upload_sync(file_request);
+                                        yield (request_tx, result);
+                                    }
+                                    EventRequest::SnapshotRequest(snapshot_request) => {
+                                        let source = source.read().await;
+                                        let result = source.process_snapshot_request(&snapshot_request);
+                                        yield (request_tx, result);
+                                    }
+                                    EventRequest::FlushRequest(flush_request) => {
+                                        let source = source.read().await;
+                                        let result = source.process_flush_request(&flush_request);
+                                        yield (request_tx, result);
+                                    }
+                                }
                             }
-                            FileEventOperation::Upload => {
-                                // Process file upload synchronously
-                                let source = source.read().await;
-                                source.process_file_upload_sync(file_request)
+                            None => {
+                                // Input ended: drain remaining heavy tasks
+                                while let Some(joined) = pending.next().await {
+                                    match joined {
+                                        Ok(result) => yield result,
+                                        Err(e) => yield (None, Err(crate::Error::rest_api(
+                                            format!("Task join error: {e}"),
+                                            None,
+                                        )))
+                                    }
+                                }
+                                break;
                             }
                         }
                     }
-                    EventRequest::SnapshotRequest(snapshot_request) => {
-                        let source = source.read().await;
-                        source.process_snapshot_request(&snapshot_request)
-                    }
-                    EventRequest::FlushRequest(flush_request) => {
-                        let source = source.read().await;
-                        source.process_flush_request(&flush_request)
-                    }
-                };
-
-                yield (request_tx, result);
+                }
             }
         }
     }

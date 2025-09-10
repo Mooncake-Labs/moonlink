@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 pub type SrcTableId = u32;
 
 /// Commands for the REST API event loop (similar to PostgresReplicationCommand)
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum RestCommand {
     AddTable {
         src_table_name: String,
@@ -177,7 +177,7 @@ pub async fn run_rest_event_loop(
     let rest_source = Arc::new(RwLock::new(RestSource::new()));
 
     // Create the processing stream and pin it
-    let processing_stream = RestSource::create_stream(rest_source.clone(), rest_request_rx);
+    let processing_stream = RestSource::create_stream(rest_source.clone(), rest_request_rx, 4); // Allow up to 4 concurrent heavy file operations
     pin!(processing_stream);
 
     loop {
