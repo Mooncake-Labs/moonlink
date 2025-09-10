@@ -7,6 +7,7 @@ use crate::rest_ingest::rest_event::RestEvent;
 use crate::Result;
 use arrow_schema::Schema;
 use bytes::Bytes;
+use futures::stream::Stream;
 use moonlink::row::MoonlinkRow;
 use moonlink::{
     AccessorConfig, BaseFileSystemAccess, FileSystemAccessor, FsRetryConfig, FsTimeoutConfig,
@@ -14,9 +15,12 @@ use moonlink::{
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 pub type SrcTableId = u32;
 
@@ -42,6 +46,30 @@ pub struct RestSource {
     table_schemas: HashMap<String, Arc<Schema>>,
     src_table_name_to_src_id: HashMap<String, SrcTableId>,
     lsn_generator: Arc<AtomicU64>,
+}
+
+pub struct RestSourceStream {
+    source: Arc<RwLock<RestSource>>,
+    request_rx: mpsc::Receiver<EventRequest>,
+}
+
+impl Stream for RestSourceStream {
+    type Item = (Option<mpsc::Sender<u64>>, Result<Vec<RestEvent>>);
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.request_rx.poll_recv(cx) {
+            Poll::Ready(Some(request)) => {
+                let request_tx = request.get_request_tx();
+                let result = {
+                    let source = self.source.read().unwrap();
+                    source.process_request_sync(request)
+                };
+                Poll::Ready(Some((request_tx, result)))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl Default for RestSource {
@@ -342,7 +370,103 @@ impl RestSource {
         });
     }
 
-    /// Process a snapshot request.
+    /// Create a stream from this RestSource
+    pub fn create_stream(
+        source: Arc<RwLock<RestSource>>,
+        request_rx: mpsc::Receiver<EventRequest>,
+    ) -> RestSourceStream {
+        RestSourceStream { source, request_rx }
+    }
+
+    /// Process a request synchronously (used by the Stream implementation)
+    fn process_request_sync(&self, request: EventRequest) -> Result<Vec<RestEvent>> {
+        match request {
+            EventRequest::RowRequest(row_request) => self.process_row_request_sync(row_request),
+            EventRequest::FileRequest(file_request) => {
+                match file_request.operation {
+                    FileEventOperation::Insert => {
+                        // For file insert, we need to do async work, but we're in a sync context
+                        // This is a limitation - we'll return an error for now
+                        Err(crate::Error::rest_api(
+                            "File insert operations require async processing".to_string(),
+                            None,
+                        ))
+                    }
+                    FileEventOperation::Upload => self.process_file_upload_sync(file_request),
+                }
+            }
+            EventRequest::SnapshotRequest(snapshot_request) => {
+                self.process_snapshot_request(&snapshot_request)
+            }
+            EventRequest::FlushRequest(flush_request) => self.process_flush_request(&flush_request),
+        }
+    }
+
+    /// Synchronous row processing
+    fn process_row_request_sync(&self, request: RowEventRequest) -> Result<Vec<RestEvent>> {
+        let schema = self
+            .table_schemas
+            .get(&request.src_table_name)
+            .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
+
+        let src_table_id = self
+            .src_table_name_to_src_id
+            .get(&request.src_table_name)
+            .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
+
+        // Decode based on payload type
+        let row = match &request.payload {
+            IngestRequestPayload::Json(value) => {
+                let converter = JsonToMoonlinkRowConverter::new(schema.clone());
+                converter.convert(value)?
+            }
+            IngestRequestPayload::Protobuf(bytes) => {
+                let p: moonlink_proto::moonlink::MoonlinkRow =
+                    prost::Message::decode(bytes.as_slice())
+                        .map_err(RestSourceError::ProtobufDecoding)?;
+                moonlink::row::proto_to_moonlink_row(p)?
+            }
+        };
+
+        let row_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
+        let commit_lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
+
+        // Generate both a row event and a commit event
+        let events = vec![
+            RestEvent::RowEvent {
+                src_table_id: *src_table_id,
+                operation: request.operation,
+                row,
+                lsn: row_lsn,
+                timestamp: request.timestamp,
+            },
+            RestEvent::Commit {
+                lsn: commit_lsn,
+                timestamp: request.timestamp,
+            },
+        ];
+
+        Ok(events)
+    }
+
+    /// Synchronous file upload processing
+    fn process_file_upload_sync(&self, request: FileEventRequest) -> Result<Vec<RestEvent>> {
+        let src_table_id = self
+            .src_table_name_to_src_id
+            .get(&request.src_table_name)
+            .ok_or_else(|| RestSourceError::UnknownTable(request.src_table_name.clone()))?;
+
+        let lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
+        let file_rest_event = RestEvent::FileUploadEvent {
+            src_table_id: *src_table_id,
+            storage_config: request.storage_config,
+            files: request.files,
+            lsn,
+        };
+        Ok(vec![file_rest_event])
+    }
+
+    /// Process a snapshot request
     fn process_snapshot_request(&self, request: &SnapshotRequest) -> Result<Vec<RestEvent>> {
         let src_table_id = self
             .src_table_name_to_src_id

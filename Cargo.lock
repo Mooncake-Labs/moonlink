@@ -4342,6 +4342,7 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
+ "async-stream",
  "async-trait",
  "bigdecimal",
  "byteorder",

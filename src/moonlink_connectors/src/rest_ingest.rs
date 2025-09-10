@@ -11,14 +11,14 @@ use crate::replication_state::ReplicationState;
 use crate::rest_ingest::event_request::EventRequest;
 use crate::rest_ingest::moonlink_rest_sink::RestSink;
 use crate::rest_ingest::moonlink_rest_sink::TableStatus;
-use crate::rest_ingest::rest_event::RestEvent;
 use crate::rest_ingest::rest_source::RestSource;
 use crate::Result;
 use arrow_schema::Schema;
+use futures::StreamExt;
 use moonlink::TableEvent;
 use more_asserts as ma;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
@@ -172,16 +172,12 @@ impl RestApiConnection {
 pub async fn run_rest_event_loop(
     mut sink: RestSink,
     mut cmd_rx: mpsc::Receiver<RestCommand>,
-    mut rest_request_rx: mpsc::Receiver<EventRequest>,
+    rest_request_rx: mpsc::Receiver<EventRequest>,
 ) -> Result<()> {
-    debug!("REST API event loop started");
+    let rest_source = Arc::new(RwLock::new(RestSource::new()));
 
-    // Create RestSource that we'll use for processing
-    let mut rest_source = RestSource::new();
-
-    // Channel for collecting results from async processing
-    let (results_tx, mut results_rx) =
-        mpsc::unbounded_channel::<(Option<mpsc::Sender<u64>>, Result<Vec<RestEvent>>)>();
+    // Create the processing stream
+    let mut processing_stream = RestSource::create_stream(rest_source.clone(), rest_request_rx);
 
     loop {
         tokio::select! {
@@ -199,7 +195,8 @@ pub async fn run_rest_event_loop(
                     sink.add_table(src_table_id, table_status, persist_lsn)?;
 
                     // Add to source (handles schema and request processing)
-                    rest_source.add_table(src_table_name.clone(), src_table_id, schema, persist_lsn)?;
+                    let mut source = rest_source.write().unwrap();
+                    source.add_table(src_table_name.clone(), src_table_id, schema, persist_lsn)?;
                 }
                 RestCommand::DropTable { src_table_name, src_table_id } => {
                     debug!("Dropping REST table '{}' with src_table_id {}", src_table_name, src_table_id);
@@ -208,20 +205,16 @@ pub async fn run_rest_event_loop(
                     sink.drop_table(src_table_id)?;
 
                     // Remove from source
-                    rest_source.remove_table(&src_table_name)?;
+                    let mut source = rest_source.write().unwrap();
+                    source.remove_table(&src_table_name)?;
                 }
                 RestCommand::Shutdown => {
                     debug!("received shutdown command");
                     break;
                 }
             },
-            // Process REST requests by sending them for async processing
-            Some(request) = rest_request_rx.recv() => {
-                // Send request for processing - consuming it directly
-                rest_source.process_request(request, results_tx.clone());
-            },
-            // Handle results from async processing in separate branch
-            Some((request_tx, result)) = results_rx.recv() => {
+            // Handle results from the processing stream
+            Some((request_tx, result)) = processing_stream.next() => {
                 match result {
                     Ok(rest_events) => {
                         let mut lsn = 0;
