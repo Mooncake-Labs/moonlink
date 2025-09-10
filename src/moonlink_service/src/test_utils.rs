@@ -425,6 +425,7 @@ pub(crate) async fn create_table(
 }
 
 /// Util function to create table from PostgreSQL via REST API.
+#[allow(dead_code)]
 pub(crate) async fn create_table_from_postgres(
     client: &reqwest::Client,
     database: &str,

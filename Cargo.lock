@@ -4580,6 +4580,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.16",
  "tokio",
+ "tokio-postgres",
  "tower 0.5.2",
  "tower-http",
  "tracing",

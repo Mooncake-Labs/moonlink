@@ -11,6 +11,7 @@ default = ["storage-fs"]
 rest_api_demo = []
 standalone-test = []
 otel-integration = []
+postgres-integration = []
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
@@ -60,6 +61,7 @@ reqwest = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tokio-postgres = { workspace = true }
 
 [[example]]
 name = "rest_api_demo"
