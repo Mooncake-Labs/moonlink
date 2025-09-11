@@ -10,13 +10,12 @@ use iceberg::{Catalog, NamespaceIdent, TableIdent};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_table_operation() {
     let mut guard = RestCatalogTestGuard::new().await.unwrap();
-    let catalog = guard.catalog.clone();
-    let writer = catalog.write().await;
 
     // create a namespace
     let ns_name = get_random_string();
     let ns_ident = NamespaceIdent::new(ns_name);
-    writer
+    guard
+        .catalog
         .create_namespace(&ns_ident, HashMap::new())
         .await
         .unwrap();
@@ -26,68 +25,72 @@ async fn test_table_operation() {
     // create a table
     let table_name = get_random_string();
     let creation = default_table_creation(table_name.clone());
-    writer.create_table(&ns_ident, creation).await.unwrap();
+    guard
+        .catalog
+        .create_table(&ns_ident, creation)
+        .await
+        .unwrap();
     let table_ident = TableIdent::new(ns_ident.clone(), table_name);
 
     guard.record_table(table_ident.clone());
 
     // check if the table exist
-    assert!(writer.table_exists(&table_ident).await.unwrap());
+    assert!(guard.catalog.table_exists(&table_ident).await.unwrap());
     // check the list table method
     assert_eq!(
-        writer.list_tables(&ns_ident).await.unwrap(),
+        guard.catalog.list_tables(&ns_ident).await.unwrap(),
         vec![table_ident.clone()]
     );
 
     // drop the table
-    writer.drop_table(&table_ident).await.unwrap();
+    guard.catalog.drop_table(&table_ident).await.unwrap();
 
     guard.remove_table(&table_ident);
 
-    assert!(!writer.table_exists(&table_ident).await.unwrap());
-    assert_eq!(writer.list_tables(&ns_ident).await.unwrap(), vec![]);
+    assert!(!guard.catalog.table_exists(&table_ident).await.unwrap());
+    assert_eq!(guard.catalog.list_tables(&ns_ident).await.unwrap(), vec![]);
 
-    drop(writer);
+    guard.cleanup().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_namespace_operation() {
     let mut guard = RestCatalogTestGuard::new().await.unwrap();
-    let catalog = guard.catalog.clone();
-    let writer = catalog.write().await;
 
     // create a namespace
     let ns_name_1 = get_random_string();
     let ns_name_2 = get_random_string();
     let ns_ident_parent = NamespaceIdent::new(ns_name_1.clone());
     let ns_ident = NamespaceIdent::from_strs(vec![ns_name_1, ns_name_2]).unwrap();
-    let expected_namespace = writer
+    let expected_namespace = guard
+        .catalog
         .create_namespace(&ns_ident, HashMap::new())
         .await
         .unwrap();
     guard.record_namespace(ns_ident.clone());
 
     assert_eq!(
-        writer.get_namespace(&ns_ident).await.unwrap(),
+        guard.catalog.get_namespace(&ns_ident).await.unwrap(),
         expected_namespace
     );
-    assert!(writer.namespace_exists(&ns_ident).await.unwrap());
+    assert!(guard.catalog.namespace_exists(&ns_ident).await.unwrap());
 
     assert_eq!(
-        writer
+        guard
+            .catalog
             .list_namespaces(Some(&ns_ident_parent))
             .await
             .unwrap(),
         vec![ns_ident.clone()]
     );
 
-    writer.drop_namespace(&ns_ident).await.unwrap();
+    guard.catalog.drop_namespace(&ns_ident).await.unwrap();
 
     guard.remove_namespace(&ns_ident);
 
-    assert!(!writer.namespace_exists(&ns_ident).await.unwrap());
+    assert!(!guard.catalog.namespace_exists(&ns_ident).await.unwrap());
 
-    drop(writer);
+    guard.cleanup().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

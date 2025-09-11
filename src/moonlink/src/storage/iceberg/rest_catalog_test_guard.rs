@@ -3,11 +3,9 @@ use crate::storage::iceberg::rest_catalog::RestCatalog;
 /// A RAII-style test guard, which creates namespace ident, table ident at construction, and deletes at destruction.
 use crate::storage::iceberg::rest_catalog_test_utils::*;
 use iceberg::{Catalog, NamespaceIdent, Result, TableIdent};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub(crate) struct RestCatalogTestGuard {
-    pub(crate) catalog: Arc<RwLock<RestCatalog>>,
+    pub(crate) catalog: RestCatalog,
     pub(crate) namespace_idents: Option<Vec<NamespaceIdent>>,
     pub(crate) tables_idents: Option<Vec<TableIdent>>,
 }
@@ -24,7 +22,7 @@ impl RestCatalogTestGuard {
         .await
         .unwrap();
         Ok(Self {
-            catalog: Arc::new(RwLock::new(catalog)),
+            catalog,
             namespace_idents: None,
             tables_idents: None,
         })
@@ -53,31 +51,21 @@ impl RestCatalogTestGuard {
             vec.retain(|ns| ns != ns_ident);
         }
     }
-}
 
-impl Drop for RestCatalogTestGuard {
-    fn drop(&mut self) {
-        if self.tables_idents.is_some() || self.namespace_idents.is_some() {
-            let catalog = self.catalog.clone();
-            let tables = self.tables_idents.take();
-            let namespaces = self.namespace_idents.take();
+    pub(crate) async fn cleanup(&mut self) {
+        let tables = self.tables_idents.take();
+        let namespaces = self.namespace_idents.take();
 
-            tokio::task::block_in_place(move || {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async move {
-                    let writer = catalog.write().await;
-                    if let Some(tables) = tables {
-                        for t in tables {
-                            let _ = writer.drop_table(&t).await;
-                        }
-                    }
-                    if let Some(namespaces) = namespaces {
-                        for ns in namespaces {
-                            let _ = writer.drop_namespace(&ns).await;
-                        }
-                    }
-                });
-            });
+        if let Some(tables) = tables {
+            for t in tables {
+                let _ = self.catalog.drop_table(&t).await;
+            }
+        }
+
+        if let Some(namespaces) = namespaces {
+            for ns in namespaces {
+                let _ = self.catalog.drop_namespace(&ns).await;
+            }
         }
     }
 }
