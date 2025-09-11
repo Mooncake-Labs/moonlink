@@ -51,21 +51,27 @@ impl RestCatalogTestGuard {
             vec.retain(|ns| ns != ns_ident);
         }
     }
+}
 
-    pub(crate) async fn cleanup(&mut self) {
+impl Drop for RestCatalogTestGuard {
+    fn drop(&mut self) {
         let tables = self.tables_idents.take();
         let namespaces = self.namespace_idents.take();
 
-        if let Some(tables) = tables {
-            for t in tables {
-                self.catalog.drop_table(&t).await.unwrap();
-            }
-        }
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                if let Some(tables) = tables {
+                    for t in tables {
+                        self.catalog.drop_table(&t).await.unwrap();
+                    }
+                }
 
-        if let Some(namespaces) = namespaces {
-            for ns in namespaces {
-                self.catalog.drop_namespace(&ns).await.unwrap();
-            }
-        }
+                if let Some(namespaces) = namespaces {
+                    for ns in namespaces {
+                        self.catalog.drop_namespace(&ns).await.unwrap();
+                    }
+                }
+            });
+        })
     }
 }

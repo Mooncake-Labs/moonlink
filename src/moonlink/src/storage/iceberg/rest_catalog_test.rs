@@ -50,8 +50,6 @@ async fn test_table_operation() {
 
     assert!(!guard.catalog.table_exists(&table_ident).await.unwrap());
     assert_eq!(guard.catalog.list_tables(&ns_ident).await.unwrap(), vec![]);
-
-    guard.cleanup().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -95,8 +93,6 @@ async fn test_table_load() {
 
     let actual_schema = table.metadata().current_schema();
     assert_is_same_schema(actual_schema.as_ref().clone(), iceberg_schema);
-
-    guard.cleanup().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -135,8 +131,6 @@ async fn test_namespace_operation() {
     guard.remove_namespace(&ns_ident);
 
     assert!(!guard.catalog.namespace_exists(&ns_ident).await.unwrap());
-
-    guard.cleanup().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
