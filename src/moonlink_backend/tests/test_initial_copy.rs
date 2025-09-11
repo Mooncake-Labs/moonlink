@@ -819,4 +819,105 @@ mod tests {
             .drop_table(DATABASE.to_string(), TABLE.to_string())
             .await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_initial_copy_boundary_reconciliation_no_drop_no_dup() {
+        let uri = get_database_uri();
+        let (initial_client, _) = connect_to_postgres(&uri).await;
+
+        let table_name = "copy_boundary";
+        let baseline_n = 5_000i64;
+        let inserted_m = 1_000i64;
+
+        // Create the PostgreSQL table and pre-populate it with baseline rows 1..N
+        initial_client
+            .simple_query(&format!(
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);
+                 INSERT INTO {table_name}
+                 SELECT gs, 'base'
+                 FROM generate_series(1, {baseline_n}) AS gs;"
+            ))
+            .await
+            .unwrap();
+
+        // LSN capturing the baseline state
+        let lsn_before = current_wal_lsn(&initial_client).await;
+
+        // Create the backend with no tables, then register table to kick off initial copy
+        let (guard, _) = TestGuard::new(None, true).await;
+        let backend = Arc::clone(guard.backend());
+
+        // Start create_table in a separate task so we can mutate while copy is running
+        let backend_clone = Arc::clone(&backend);
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    uri,
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
+
+        // Mutations after initial copy has begun: insert M new rows (baseline_n+1..baseline_n+M)
+        initial_client
+            .simple_query(&format!(
+                "INSERT INTO {table_name}
+                 SELECT gs, 'hot'
+                 FROM generate_series({start}, {end}) AS gs;",
+                start = baseline_n + 1,
+                end = baseline_n + inserted_m
+            ))
+            .await
+            .unwrap();
+
+        // LSN including the post-snapshot inserts
+        let lsn_after = current_wal_lsn(&initial_client).await;
+
+        // Wait for initial copy to complete
+        create_handle.await.unwrap();
+
+        // Scan at lsn_before: expect exactly baseline ids 1..N
+        let ids_before = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn_before))
+                .await
+                .unwrap(),
+        );
+        let expected_before: HashSet<i64> = (1..=baseline_n).collect();
+        assert_eq!(
+            ids_before, expected_before,
+            "baseline view must match at boundary"
+        );
+
+        // Scan at lsn_after: expect baseline plus inserted ids
+        let ids_after = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn_after))
+                .await
+                .unwrap(),
+        );
+        let mut expected_after: HashSet<i64> = (1..=baseline_n).collect();
+        expected_after.extend((baseline_n + 1)..=(baseline_n + inserted_m));
+        assert_eq!(
+            ids_after, expected_after,
+            "final view must include post-snapshot inserts with no dups/drops"
+        );
+
+        // Cleanup
+        initial_client
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
+            .await
+            .unwrap();
+        let _ = backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await;
+    }
 }

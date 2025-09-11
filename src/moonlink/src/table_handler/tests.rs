@@ -2711,3 +2711,69 @@ async fn test_force_snapshot_for_empty_stream_flush() {
     assert_eq!(next_file_id, 0);
     assert!(snapshot.disk_files.is_empty());
 }
+
+#[tokio::test]
+async fn test_initial_copy_with_buffered_cdc_no_dup_no_drop() {
+    use crate::table_handler::tests::generate_parquet_file;
+    use crate::StorageConfig;
+
+    // Setup environment
+    let mut env = TestEnvironment::default().await;
+    let sender = env.handler.get_event_sender();
+
+    // Enter initial copy mode (CDC buffering starts)
+    sender
+        .send(TableEvent::StartInitialCopy)
+        .await
+        .expect("send start initial copy");
+
+    // Simulate initial copy files (baseline ids = [1,2,3]) captured at boundary LSN S
+    let start_lsn: u64 = 100;
+    let file_path = generate_parquet_file(&env.temp_dir, "init_copy_baseline.parquet").await;
+    sender
+        .send(TableEvent::LoadFiles {
+            files: vec![file_path],
+            storage_config: StorageConfig::FileSystem {
+                root_directory: env.temp_dir.path().to_str().unwrap().to_string(),
+                atomic_write_dir: None,
+            },
+            lsn: start_lsn,
+        })
+        .await
+        .expect("send LoadFiles");
+
+    // While initial copy is running, append CDC events that must be buffered and applied exactly once.
+    // Plan: insert 4, update 2->5 (delete 2 then insert 5), delete 1.
+    // All with LSNs strictly greater than start_lsn.
+    let l1 = start_lsn + 1;
+    env.append_row(4, "hot", 40, /*lsn=*/ l1, None).await;
+    env.commit(l1).await;
+
+    let l2 = start_lsn + 2;
+    env.delete_row(2, "base", 30, /*lsn=*/ l2, None).await;
+    env.append_row(5, "updated", 35, /*lsn=*/ l2, None).await;
+    // Commit must be strictly greater than the last deletion LSN
+    let l2_commit = l2 + 1;
+    env.commit(l2_commit).await;
+
+    let l3 = l2_commit + 1;
+    env.delete_row(1, "base", 25, /*lsn=*/ l3, None).await;
+    let l3_commit = l3 + 1;
+    env.commit(l3_commit).await;
+
+    // Finish initial copy to apply buffered CDC events
+    sender
+        .send(TableEvent::FinishInitialCopy { start_lsn })
+        .await
+        .expect("send finish initial copy");
+
+    // Advance readable/commit LSN to include all CDC effects
+    let final_lsn = l3_commit;
+    env.set_table_commit_lsn(final_lsn);
+    env.set_replication_lsn(final_lsn);
+
+    // Expected final state: baseline {1,2,3} -> delete 1, delete 2 + insert 5, keep 3, plus inserted 4 => {3,4,5}
+    env.verify_snapshot(final_lsn, &[3, 4, 5]).await;
+
+    env.shutdown().await;
+}

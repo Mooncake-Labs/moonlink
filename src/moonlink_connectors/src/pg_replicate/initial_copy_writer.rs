@@ -487,7 +487,9 @@ mod tests {
         // Send several batches; distribution across writers is nondeterministic
         let batches_sent = 5;
         for i in 0..batches_sent {
-            tx.send(make_batch(&[i, i + 1])).await.unwrap();
+            tx.send(make_batch(&[i as i32, i as i32 + 1]))
+                .await
+                .unwrap();
         }
         drop(tx);
 
@@ -510,6 +512,53 @@ mod tests {
         assert!(
             files_written.len() as u32 <= batches_sent as u32,
             "cannot exceed number of batches"
+        );
+        for f in &files_written {
+            assert!(Path::new(f).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn ic_backpressure_sanity() {
+        // Tiny channel capacity forces backpressure; ensure writers complete without deadlock
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = tempdir.path().to_path_buf();
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: usize::MAX, // avoid rotation complexity
+            max_rows_per_batch: 5,
+            num_writer_tasks: 2,
+            batch_channel_capacity: 1, // backpressure
+        };
+
+        let (tx, rx) = create_batch_channel(config.batch_channel_capacity);
+        let shared_rx = SharedBatchReceiver::new(rx);
+
+        // Spawn 2 writers
+        let mut handles = Vec::new();
+        for _ in 0..config.num_writer_tasks {
+            let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config.clone());
+            let srx = shared_rx.clone();
+            handles.push(tokio::spawn(
+                async move { writer.write_from_shared(srx).await },
+            ));
+        }
+
+        // Produce many small batches; send will await when channel full (backpressure)
+        for i in 0..200 {
+            tx.send(make_batch(&[i])).await.expect("send batch");
+        }
+        drop(tx); // close to allow writers to finish
+
+        // Collect results; ensure at least one file written and no deadlock
+        let mut files_written = Vec::new();
+        for h in handles {
+            let mut files = h.await.unwrap().unwrap();
+            files_written.append(&mut files);
+        }
+        assert!(
+            !files_written.is_empty(),
+            "writers should have produced at least one file"
         );
         for f in &files_written {
             assert!(Path::new(f).exists());

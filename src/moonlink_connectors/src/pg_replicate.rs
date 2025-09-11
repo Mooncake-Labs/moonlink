@@ -13,6 +13,7 @@ pub mod util;
 use crate::pg_replicate::clients::postgres::{build_tls_connector, ReplicationClient};
 use crate::pg_replicate::conversions::cdc_event::{CdcEvent, CdcEventConversionError};
 use crate::pg_replicate::initial_copy::copy_table_stream;
+use crate::pg_replicate::initial_copy::{InitialCopyConfig, InitialCopyReaderConfig};
 use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
@@ -254,33 +255,24 @@ impl PostgresConnection {
                 .add_table_to_publication(&schema.table_name)
                 .await?;
 
-            let (stream, start_lsn) = copy_source
-                .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
-                .await
-                .expect("failed to get table copy stream");
-            copy_table_stream(
-                schema.clone(),
-                stream,
-                &event_sender,
-                start_lsn.into(),
-                table_base_path,
-                None,
-            )
-            .await
-            .expect(&format!(
-                "failed to copy table for src_table_id: {}",
-                src_table_id
-            ));
-
-            // Commit the transaction
-            copy_source
-                .commit_transaction()
-                .await
-                .expect("failed to commit transaction");
+            let ic_config = InitialCopyConfig {
+                reader: InitialCopyReaderConfig {
+                    uri: self.uri.clone(),
+                    shard_count: 4,
+                },
+                writer: Default::default(),
+            };
+            let progress =
+                copy_table_stream(schema.clone(), &event_sender, table_base_path, ic_config)
+                    .await
+                    .expect(&format!(
+                        "failed to copy table for src_table_id: {}",
+                        src_table_id
+                    ));
 
             if let Err(e) = event_sender
                 .send(TableEvent::FinishInitialCopy {
-                    start_lsn: start_lsn.into(),
+                    start_lsn: progress.boundary_lsn.into(),
                 })
                 .await
             {
@@ -288,11 +280,10 @@ impl PostgresConnection {
             }
 
             // Notify read state manager with the commit LSN for the initial copy boundary.
-            self.replication_state.mark(start_lsn.into());
-            if let Err(e) = commit_lsn_tx.send(start_lsn.into()) {
+            if let Err(e) = commit_lsn_tx.send(progress.boundary_lsn.into()) {
                 warn!(error = ?e, table_id = src_table_id, "failed to send initial copy commit lsn");
             }
-            self.replication_state.mark(start_lsn.into());
+            self.replication_state.mark(progress.boundary_lsn.into());
 
             Ok(true)
         } else {
