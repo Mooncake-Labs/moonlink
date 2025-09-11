@@ -30,8 +30,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ctid_shards_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ctid_shards_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed rows
         sql.simple_query(&format!(
@@ -112,8 +112,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("gscs_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("gscs_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline 1..10
         ddl.simple_query(&format!(
@@ -194,8 +194,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("sscr_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("sscr_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline 1..10
         ddl.simple_query(&format!(
@@ -289,8 +289,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ic_basepath_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ic_basepath_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline 2 rows
         ddl.simple_query(&format!(
@@ -339,18 +339,17 @@ mod tests {
             ..
         }) = rx.recv().await
         {
-            match storage_config {
-                moonlink::StorageConfig::FileSystem { root_directory, .. } => {
-                    let expected_dir = std::path::Path::new(base_path)
-                        .join("initial_copy")
-                        .join(format!("table_{}", schema.src_table_id));
-                    assert_eq!(root_directory, expected_dir.to_str().unwrap());
-                    assert!(!files.is_empty(), "should have at least one parquet file");
-                    // Files exist
-                    for f in files {
-                        assert!(std::path::Path::new(&f).exists());
-                    }
-                }
+            let expected_dir = std::path::Path::new(base_path)
+                .join("initial_copy")
+                .join(format!("table_{}", schema.src_table_id));
+            assert_eq!(
+                storage_config.get_root_path(),
+                expected_dir.to_str().unwrap()
+            );
+            assert!(!files.is_empty(), "should have at least one parquet file");
+            // Files exist
+            for f in files {
+                assert!(std::path::Path::new(&f).exists());
             }
         } else {
             panic!("expected LoadFiles event");
@@ -373,8 +372,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ic_writer_err_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ic_writer_err_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline rows
         ddl.simple_query(&format!(
@@ -454,8 +453,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ic_empty_parallel_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ic_empty_parallel_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create empty table
         ddl.simple_query(&format!(
@@ -518,8 +517,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ic_parallel_non_empty_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ic_parallel_non_empty_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline rows (non-empty)
         let baseline_rows = 1000i64;
@@ -615,8 +614,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("reader_poison_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("reader_poison_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline 1..100
         let baseline_rows = 100i64;
@@ -644,7 +643,7 @@ mod tests {
 
         // Prepare a poison predicate that errors at a specific row id = K
         let k = 50i64;
-        let poison_pred = format!("CASE WHEN id = {k} THEN 1/(id - {k}) ELSE 1 END > 0", k = k);
+        let poison_pred = format!("CASE WHEN id = {k} THEN 1/(id - {k}) ELSE 1 END > 0");
 
         // Prepare channel and drain task
         let (tx, mut rx) = create_batch_channel(8);
@@ -704,8 +703,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ctid_tiny_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ctid_tiny_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create tiny table with 3 rows
         sql.simple_query(&format!(
@@ -850,8 +849,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("ic_no_pk_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("ic_no_pk_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create table WITHOUT primary key; seed rows; set REPLICA IDENTITY FULL
         let rows = 123i64;

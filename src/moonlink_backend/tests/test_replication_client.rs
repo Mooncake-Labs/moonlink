@@ -20,8 +20,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("block_count_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("block_count_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create a small table
         sql_client
@@ -38,7 +38,7 @@ mod tests {
             .expect("connect rc");
         tokio::spawn(async move {
             if let Err(e) = conn.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
 
@@ -69,8 +69,8 @@ mod tests {
             .await
             .expect("re-estimate blocks");
 
-        assert!(b1 >= 0, "initial blocks should be >= 0, got {}", b1);
-        assert!(b2 >= b1, "blocks should be monotonic: b1={}, b2={}", b1, b2);
+        assert!(b1 >= 0, "initial blocks should be >= 0, got {b1}");
+        assert!(b2 >= b1, "blocks should be monotonic: b1={b1}, b2={b2}");
 
         // Cleanup
         sql_client
@@ -90,8 +90,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("snap_test_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("snap_test_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline
         ddl_client
@@ -109,7 +109,7 @@ mod tests {
             .expect("connect coord");
         tokio::spawn(async move {
             if let Err(e) = coord_conn.await {
-                eprintln!("coord connection error: {}", e);
+                eprintln!("coord connection error: {e}");
             }
         });
         let (snapshot_id, lsn_at_export) = coord
@@ -131,7 +131,7 @@ mod tests {
             .await
             .unwrap();
         snap_sql
-            .simple_query(&format!("SET TRANSACTION SNAPSHOT '{}';", snapshot_id))
+            .simple_query(&format!("SET TRANSACTION SNAPSHOT '{snapshot_id}';"))
             .await
             .unwrap();
         let snapshot_count_row = snap_sql
@@ -157,7 +157,7 @@ mod tests {
             .expect("connect lsn sess");
         tokio::spawn(async move {
             if let Err(e) = lsn_conn.await {
-                eprintln!("lsn connection error: {}", e);
+                eprintln!("lsn connection error: {e}");
             }
         });
         let current_lsn = lsn_sess.get_current_wal_lsn().await.expect("current lsn");
@@ -187,8 +187,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let table = format!("copy_pred_{}", suffix);
-        let fqtn = format!("public.{}", table);
+        let table = format!("copy_pred_{suffix}");
+        let fqtn = format!("public.{table}");
 
         // Create and seed baseline rows 1..10
         ddl_client
@@ -213,7 +213,7 @@ mod tests {
             .expect("connect coord");
         tokio::spawn(async move {
             if let Err(e) = coord_conn.await {
-                eprintln!("coord connection error: {}", e);
+                eprintln!("coord connection error: {e}");
             }
         });
         let (snapshot_id, _lsn_at_export) = coord
@@ -245,7 +245,7 @@ mod tests {
             .expect("connect reader");
         tokio::spawn(async move {
             if let Err(e) = reader_conn.await {
-                eprintln!("reader connection error: {}", e);
+                eprintln!("reader connection error: {e}");
             }
         });
         reader
