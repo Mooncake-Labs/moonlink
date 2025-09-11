@@ -1023,3 +1023,200 @@ async fn test_create_table_from_postgres_endpoint() {
     let cardinality = our_table.unwrap()["cardinality"].as_u64().unwrap();
     assert_eq!(cardinality, 2, "Table should have 2 rows from initial data");
 }
+
+#[tokio::test]
+#[serial]
+async fn test_kafka_avro_stress_ingest() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir());
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    test_readiness_probe().await;
+
+    // Create test table.
+    let client = reqwest::Client::new();
+    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
+
+    // Prepare Avro schema matching the table schema (int32 id, string name/email, int32 age)
+    let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
+    let avro_schema_json = r#"{
+        "type": "record",
+        "name": "User",
+        "fields": [
+            {"name": "id", "type": "int"},
+            {"name": "name", "type": "string"},
+            {"name": "email", "type": "string"},
+            {"name": "age", "type": "int"}
+        ]
+    }"#;
+
+    // Set Avro schema for Kafka ingestion
+    let set_schema_payload = serde_json::json!({
+        "database": DATABASE,
+        "table": TABLE,
+        "kafka_schema": avro_schema_json,
+        "schema_id": 1_u64
+    });
+    let resp = client
+        .post(format!("{REST_ADDR}/kafka/{crafted_src_table_name}/schema"))
+        .header("content-type", "application/json")
+        .json(&set_schema_payload)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "failed to set Avro schema: {resp:?}"
+    );
+
+    // Build Avro Schema locally for encoding single-datum payloads
+    let avro_schema = apache_avro::Schema::parse_str(avro_schema_json).unwrap();
+
+    // Stress parameters
+    #[cfg(debug_assertions)]
+    let total_rows: usize = 100_000;
+    #[cfg(not(debug_assertions))]
+    let total_rows: usize = 1_000_000;
+    let workers: usize = 50;
+    let per_worker: usize = total_rows / workers;
+
+    let ingestion_start = std::time::Instant::now();
+    let progress_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Spawn concurrent ingestion tasks
+    // Spawn progress monitor
+    let progress_monitor = progress_counter.clone();
+    let total_rows_clone = total_rows;
+    let monitor_handle = tokio::spawn(async move {
+        let mut last_count = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let current_count = progress_monitor.load(std::sync::atomic::Ordering::SeqCst);
+            if current_count >= total_rows_clone {
+                break;
+            }
+            let rate = (current_count - last_count) as f64 / 5.0;
+            println!(
+                "Progress: {}/{} rows ({:.1}%) - Rate: {:.0} rows/sec",
+                current_count,
+                total_rows_clone,
+                current_count as f64 / total_rows_clone as f64 * 100.0,
+                rate
+            );
+            last_count = current_count;
+        }
+    });
+    let mut handles = Vec::with_capacity(workers);
+    for w in 0..workers {
+        let client_cloned = client.clone();
+        let avro_schema_cloned = avro_schema.clone();
+        let table_path = crafted_src_table_name.clone();
+        let start_id = (w * per_worker) as i32;
+        let progress_counter_clone = progress_counter.clone();
+        handles.push(tokio::spawn(async move {
+            let mut local_max_lsn: u64 = 0;
+            for i in 0..per_worker {
+                if i % 1000 == 0 {
+                    println!("Worker {w}: processed {i}/{per_worker} rows");
+                }
+                let id = start_id + (i as i32);
+                let name = format!("user_{id}");
+                let email = format!("user_{id}@example.com");
+                let age = 20 + (id % 30);
+                let record = apache_avro::types::Value::Record(vec![
+                    ("id".to_string(), apache_avro::types::Value::Int(id)),
+                    ("name".to_string(), apache_avro::types::Value::String(name)),
+                    (
+                        "email".to_string(),
+                        apache_avro::types::Value::String(email),
+                    ),
+                    ("age".to_string(), apache_avro::types::Value::Int(age)),
+                ]);
+                let bytes = apache_avro::to_avro_datum(&avro_schema_cloned, record).unwrap();
+                let resp = client_cloned
+                    .post(format!("{REST_ADDR}/kafka/{table_path}/ingest"))
+                    .header("content-type", "application/octet-stream")
+                    .body(bytes)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(resp.status().is_success(), "ingest failed: {resp:?}");
+                let ingest: IngestResponse = resp.json().await.unwrap();
+                if let Some(lsn) = ingest.lsn {
+                    local_max_lsn = local_max_lsn.max(lsn);
+                }
+                let current_progress =
+                    progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if current_progress % 10000 == 0 {
+                    println!(
+                        "Overall progress: {}/{} rows ({:.1}%)",
+                        current_progress + 1,
+                        total_rows,
+                        (current_progress + 1) as f64 / total_rows as f64 * 100.0
+                    );
+                }
+            }
+            local_max_lsn
+        }));
+    }
+    // Wait for progress monitor to finish
+    monitor_handle.await.unwrap();
+
+    // Collect max LSN from all workers
+    let ingestion_duration = ingestion_start.elapsed();
+    println!(
+        "Ingested {} rows in {:?} ({:.2} rows/sec)",
+        total_rows,
+        ingestion_duration,
+        total_rows as f64 / ingestion_duration.as_secs_f64()
+    );
+    let mut max_lsn: u64 = 0;
+    for h in handles {
+        let worker_max = h.await.unwrap();
+        max_lsn = max_lsn.max(worker_max);
+    }
+    // Ensure data is flushed and visible up to max_lsn
+    flush_table(&client, DATABASE, TABLE, max_lsn).await;
+
+    // Scan table and verify row count
+    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
+    let bytes = scan_table_begin(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+        /*lsn=*/ max_lsn,
+    )
+    .await
+    .unwrap();
+    let (data_file_paths, _puffin_file_paths, puffin_deletion, positional_deletion) =
+        decode_serialized_read_state_for_testing(bytes);
+
+    // Count rows across all data files
+    let verification_start = std::time::Instant::now();
+    let mut total_rows_read = 0usize;
+    for path in data_file_paths {
+        let batches = read_all_batches(&path).await;
+        for b in batches {
+            total_rows_read += b.num_rows();
+        }
+    }
+
+    assert_eq!(total_rows_read, total_rows);
+    let verification_duration = verification_start.elapsed();
+    println!(
+        "Verified {} rows in {:?} ({:.2} rows/sec)",
+        total_rows_read,
+        verification_duration,
+        total_rows_read as f64 / verification_duration.as_secs_f64()
+    );
+    assert!(puffin_deletion.is_empty());
+    assert!(positional_deletion.is_empty());
+
+    scan_table_end(
+        &mut moonlink_stream,
+        DATABASE.to_string(),
+        TABLE.to_string(),
+    )
+    .await
+    .unwrap();
+}

@@ -16,12 +16,12 @@ use moonlink::{
     StorageConfig,
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
-use tracing::debug;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tracing::debug;
 
 pub type SrcTableId = u32;
 
@@ -78,7 +78,10 @@ impl RestSource {
         schema: Arc<Schema>,
         persist_lsn: Option<u64>,
     ) -> Result<()> {
-        debug!("adding table {}, src_table_id {}", src_table_name, src_table_id);
+        debug!(
+            "adding table {}, src_table_id {}",
+            src_table_name, src_table_id
+        );
         // Update LSN at recovery.
         if let Some(persist_lsn) = persist_lsn {
             let old_lsn = self.lsn_generator.load(Ordering::SeqCst);
@@ -259,7 +262,8 @@ impl RestSource {
         {
             let opt_schema = self.table_schemas.get(&request.src_table_name);
             if opt_schema.is_none() {
-                println!("table schema keys = {:?}, request src table name {}", 
+                println!(
+                    "table schema keys = {:?}, request src table name {}",
                     self.table_schemas.keys(),
                     request.src_table_name,
                 );
@@ -267,7 +271,8 @@ impl RestSource {
 
             let opt_src_table_id = self.src_table_name_to_src_id.get(&request.src_table_name);
             if opt_src_table_id.is_none() {
-                println!("src table names to src id = {:?}, request src table name {}",
+                println!(
+                    "src table names to src id = {:?}, request src table name {}",
                     self.src_table_name_to_src_id.keys(),
                     request.src_table_name,
                 );
