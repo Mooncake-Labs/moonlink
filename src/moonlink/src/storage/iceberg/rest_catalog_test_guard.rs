@@ -2,7 +2,7 @@ use crate::storage::iceberg::catalog_test_utils::create_test_table_schema;
 use crate::storage::iceberg::rest_catalog::RestCatalog;
 /// A RAII-style test guard, which creates namespace ident, table ident at construction, and deletes at destruction.
 use crate::storage::iceberg::rest_catalog_test_utils::*;
-use iceberg::{Catalog, NamespaceIdent, Result, TableIdent};
+use iceberg::{Catalog, NamespaceIdent, TableIdent};
 
 pub(crate) struct RestCatalogTestGuard {
     pub(crate) catalog: RestCatalog,
@@ -11,7 +11,7 @@ pub(crate) struct RestCatalogTestGuard {
 }
 
 impl RestCatalogTestGuard {
-    pub(crate) async fn new() -> Result<Self> {
+    pub(crate) async fn new() -> Self {
         let rest_catalog_config = default_rest_catalog_config();
         let accessor_config = default_accessor_config();
         let catalog = RestCatalog::new(
@@ -21,11 +21,11 @@ impl RestCatalogTestGuard {
         )
         .await
         .unwrap();
-        Ok(Self {
+        Self {
             catalog,
             namespace_idents: None,
             tables_idents: None,
-        })
+        }
     }
 
     pub(crate) fn record_table(&mut self, table_ident: TableIdent) {
@@ -58,13 +58,13 @@ impl RestCatalogTestGuard {
 
         if let Some(tables) = tables {
             for t in tables {
-                let _ = self.catalog.drop_table(&t).await;
+                self.catalog.drop_table(&t).await.unwrap();
             }
         }
 
         if let Some(namespaces) = namespaces {
             for ns in namespaces {
-                let _ = self.catalog.drop_namespace(&ns).await;
+                self.catalog.drop_namespace(&ns).await.unwrap();
             }
         }
     }

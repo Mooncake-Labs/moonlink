@@ -5,18 +5,19 @@ use crate::storage::iceberg::catalog_test_utils::*;
 use crate::storage::iceberg::rest_catalog::RestCatalog;
 use crate::storage::iceberg::rest_catalog_test_guard::RestCatalogTestGuard;
 use crate::storage::iceberg::rest_catalog_test_utils::*;
+use crate::storage::iceberg::schema_utils::assert_is_same_schema;
 use iceberg::{Catalog, NamespaceIdent, TableIdent};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_table_operation() {
-    let mut guard = RestCatalogTestGuard::new().await.unwrap();
+    let mut guard = RestCatalogTestGuard::new().await;
 
     // create a namespace
     let ns_name = get_random_string();
     let ns_ident = NamespaceIdent::new(ns_name);
     guard
         .catalog
-        .create_namespace(&ns_ident, HashMap::new())
+        .create_namespace(&ns_ident, /*properties=*/ HashMap::new())
         .await
         .unwrap();
 
@@ -54,8 +55,53 @@ async fn test_table_operation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_table_load() {
+    let mut guard = RestCatalogTestGuard::new().await;
+
+    // create a namespace
+    let ns_name = get_random_string();
+    let ns_ident = NamespaceIdent::new(ns_name);
+    guard
+        .catalog
+        .create_namespace(&ns_ident, /*properties=*/ HashMap::new())
+        .await
+        .unwrap();
+
+    guard.record_namespace(ns_ident.clone());
+
+    // create a table
+    let table_name = get_random_string();
+    let creation = default_table_creation(table_name.clone());
+    let table_ident = TableIdent::new(ns_ident.clone(), table_name);
+    guard
+        .catalog
+        .create_table(&ns_ident, creation)
+        .await
+        .unwrap();
+
+    guard.record_table(table_ident.clone());
+
+    // check if the table exist
+    assert!(guard.catalog.table_exists(&table_ident).await.unwrap());
+    // check the list table method
+    assert_eq!(
+        guard.catalog.list_tables(&ns_ident).await.unwrap(),
+        vec![table_ident.clone()]
+    );
+
+    // Load table and check schema.
+    let iceberg_schema = create_test_table_schema().unwrap();
+    let table = guard.catalog.load_table(&table_ident).await.unwrap();
+
+    let actual_schema = table.metadata().current_schema();
+    assert_is_same_schema(actual_schema.as_ref().clone(), iceberg_schema);
+
+    guard.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_namespace_operation() {
-    let mut guard = RestCatalogTestGuard::new().await.unwrap();
+    let mut guard = RestCatalogTestGuard::new().await;
 
     // create a namespace
     let ns_name_1 = get_random_string();
@@ -64,7 +110,7 @@ async fn test_namespace_operation() {
     let ns_ident = NamespaceIdent::from_strs(vec![ns_name_1, ns_name_2]).unwrap();
     let expected_namespace = guard
         .catalog
-        .create_namespace(&ns_ident, HashMap::new())
+        .create_namespace(&ns_ident, /*properties=*/ HashMap::new())
         .await
         .unwrap();
     guard.record_namespace(ns_ident.clone());
