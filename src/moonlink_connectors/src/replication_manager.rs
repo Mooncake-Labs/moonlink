@@ -229,7 +229,7 @@ impl ReplicationManager {
     /// If the table is not tracked, logs a message and returns successfully.
     /// Return whether the table is tracked by moonlink.
     pub async fn drop_table(&mut self, mooncake_table_id: &MooncakeTableId) -> Result<bool> {
-        let (table_uri, src_table_id) = match self.table_info.remove(mooncake_table_id) {
+        let (table_uri, src_table_id) = match self.table_info.get(mooncake_table_id) {
             Some(info) => info.clone(),
             None => {
                 debug!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
@@ -238,15 +238,19 @@ impl ReplicationManager {
         };
         debug!(src_table_id, %table_uri, "dropping table through manager");
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
-        repl_conn
-            .drop_table(mooncake_table_id, src_table_id)
-            .await?;
-        if repl_conn.table_count() == 0 && table_uri != REST_API_URI {
-            self.shutdown_connection(&table_uri, /*postgres_drop_all=*/ true);
-        }
+        match repl_conn.drop_table(mooncake_table_id, src_table_id).await {
+            Ok(()) => {
+                // Clear manager mapping after successful drop
+                self.table_info.remove(mooncake_table_id);
+                if repl_conn.table_count() == 0 && table_uri != REST_API_URI {
+                    self.shutdown_connection(&table_uri, true);
+                }
 
-        debug!(src_table_id, "table dropped through manager");
-        Ok(true)
+                debug!(src_table_id, "table dropped through manager");
+                Ok(true)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_table_reader(
