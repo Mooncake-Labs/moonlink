@@ -283,7 +283,11 @@ pub(crate) async fn send_test_tables(
         .send()
         .await
         .unwrap();
-    assert!(!response.status().is_success());
+
+    assert!(
+        !response.status().is_success(),
+        "Response status is {response:?}"
+    );
 }
 
 /// Util function to create test arrow batch.
@@ -708,7 +712,8 @@ pub(crate) async fn create_snapshot(
     );
 }
 
-/// Util function to check data file and puffin
+/// Util function to check data file and puffin.
+/// Called after insert/upload of a payload/parquet file.
 pub(crate) async fn assert_data_and_puffin(table: &str, lsn: u64) {
     let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
     let bytes = scan_table_begin(

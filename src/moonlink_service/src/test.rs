@@ -117,60 +117,18 @@ async fn run_optimize_table_test(mode: &str) {
     create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
 
     // Ingest some data.
-    let insert_payload = json!({
-        "operation": "insert",
-        "request_mode": "async",
-        "data": {
-            "id": 1,
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "age": 30
-        }
-    });
+    let insert_payload = create_test_json_payload();
+
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
-    let response = client
-        .post(format!("{REST_ADDR}/ingest/{crafted_src_table_name}"))
-        .header("content-type", "application/json")
-        .json(&insert_payload)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "Response status is {response:?}"
-    );
+    let response: IngestResponse =
+        send_test_ingest(&client, &crafted_src_table_name, &insert_payload).await;
+    let lsn = response.lsn.unwrap();
 
     // test for optimize table on mode 'full'
     optimize_table(&client, DATABASE, TABLE, mode).await;
 
     // Scan table and get data file and puffin files back.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let bytes = scan_table_begin(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-        /*lsn=*/ 1,
-    )
-    .await
-    .unwrap();
-    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
-    assert_eq!(data_file_paths.len(), 1);
-    let record_batches = read_all_batches(&data_file_paths[0]).await;
-    let expected_arrow_batch = create_test_arrow_batch();
-    assert_eq!(record_batches, vec![expected_arrow_batch]);
-
-    assert!(puffin_file_paths.is_empty());
-    assert!(puffin_deletion.is_empty());
-    assert!(positional_deletion.is_empty());
-
-    scan_table_end(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-    )
-    .await
-    .unwrap();
+    assert_data_and_puffin(TABLE, lsn).await;
 }
 
 #[tokio::test]
@@ -343,33 +301,7 @@ async fn test_moonlink_standalone_protobuf_ingestion() {
     let lsn = response.lsn.unwrap();
 
     // Scan table and get data file and puffin files back.
-    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
-    let bytes = scan_table_begin(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-        lsn,
-    )
-    .await
-    .unwrap();
-    let (data_file_paths, puffin_file_paths, puffin_deletion, positional_deletion) =
-        decode_serialized_read_state_for_testing(bytes);
-    assert_eq!(data_file_paths.len(), 1);
-    let record_batches = read_all_batches(&data_file_paths[0]).await;
-    let expected_arrow_batch = create_test_arrow_batch();
-    assert_eq!(record_batches, vec![expected_arrow_batch]);
-
-    assert!(puffin_file_paths.is_empty());
-    assert!(puffin_deletion.is_empty());
-    assert!(positional_deletion.is_empty());
-
-    scan_table_end(
-        &mut moonlink_stream,
-        DATABASE.to_string(),
-        TABLE.to_string(),
-    )
-    .await
-    .unwrap();
+    assert_data_and_puffin(TABLE, lsn).await;
 }
 
 /// Test basic table creation, file insert and query.
