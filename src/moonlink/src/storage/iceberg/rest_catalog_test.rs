@@ -9,9 +9,7 @@ use iceberg::{Catalog, NamespaceIdent, TableIdent};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_table_operation() {
-    let mut guard = RestCatalogTestGuard::new()
-        .await
-        .expect("error: fail to create testguard");
+    let mut guard = RestCatalogTestGuard::new().await.unwrap();
     let catalog = guard.catalog.clone();
     let writer = catalog.write().await;
 
@@ -21,69 +19,40 @@ async fn test_table_operation() {
     writer
         .create_namespace(&ns_ident, HashMap::new())
         .await
-        .expect("error: fail to create a namespace");
-    guard
-        .namespace_idents
-        .get_or_insert(Vec::new())
-        .push(ns_ident.clone());
+        .unwrap();
+
+    guard.record_namespace(ns_ident.clone());
 
     // create a table
     let table_name = get_random_string();
     let creation = default_table_creation(table_name.clone());
-    writer
-        .create_table(&ns_ident, creation)
-        .await
-        .expect("error: fail to create an table");
+    writer.create_table(&ns_ident, creation).await.unwrap();
     let table_ident = TableIdent::new(ns_ident.clone(), table_name);
-    guard
-        .tables_idents
-        .get_or_insert(Vec::new())
-        .push(table_ident.clone());
+
+    guard.record_table(table_ident.clone());
 
     // check if the table exist
-    assert!(writer
-        .table_exists(&table_ident)
-        .await
-        .expect("error: fail to check whether the table exist"));
+    assert!(writer.table_exists(&table_ident).await.unwrap());
     // check the list table method
     assert_eq!(
-        writer
-            .list_tables(&ns_ident)
-            .await
-            .expect("error: fail to list the tables"),
+        writer.list_tables(&ns_ident).await.unwrap(),
         vec![table_ident.clone()]
     );
 
     // drop the table
-    writer
-        .drop_table(&table_ident)
-        .await
-        .expect("error: fail to drop the table");
+    writer.drop_table(&table_ident).await.unwrap();
 
-    if let Some(vec) = guard.tables_idents.as_mut() {
-        vec.retain(|t| t != &table_ident);
-    }
+    guard.remove_table(&table_ident);
 
-    assert!(!writer
-        .table_exists(&table_ident)
-        .await
-        .expect("error: fail to check whether the table exist"));
-    assert_eq!(
-        writer
-            .list_tables(&ns_ident)
-            .await
-            .expect("error: fail to list the tables"),
-        vec![]
-    );
+    assert!(!writer.table_exists(&table_ident).await.unwrap());
+    assert_eq!(writer.list_tables(&ns_ident).await.unwrap(), vec![]);
 
     drop(writer);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_namespace_operation() {
-    let mut guard = RestCatalogTestGuard::new()
-        .await
-        .expect("error: fail to create testguard");
+    let mut guard = RestCatalogTestGuard::new().await.unwrap();
     let catalog = guard.catalog.clone();
     let writer = catalog.write().await;
 
@@ -95,45 +64,28 @@ async fn test_namespace_operation() {
     let expected_namespace = writer
         .create_namespace(&ns_ident, HashMap::new())
         .await
-        .expect("error: fail to create a namespace");
-    guard
-        .namespace_idents
-        .get_or_insert(Vec::new())
-        .push(ns_ident.clone());
+        .unwrap();
+    guard.record_namespace(ns_ident.clone());
 
     assert_eq!(
-        writer
-            .get_namespace(&ns_ident)
-            .await
-            .expect("error: fail to get namespace"),
+        writer.get_namespace(&ns_ident).await.unwrap(),
         expected_namespace
     );
-    assert!(writer
-        .namespace_exists(&ns_ident)
-        .await
-        .expect("error: fail to check if the namespace exist"));
+    assert!(writer.namespace_exists(&ns_ident).await.unwrap());
 
     assert_eq!(
         writer
             .list_namespaces(Some(&ns_ident_parent))
             .await
-            .expect("error: fail to list the namespaces"),
+            .unwrap(),
         vec![ns_ident.clone()]
     );
 
-    writer
-        .drop_namespace(&ns_ident)
-        .await
-        .expect("error: fail to drop the namespace");
+    writer.drop_namespace(&ns_ident).await.unwrap();
 
-    if let Some(vec) = guard.namespace_idents.as_mut() {
-        vec.retain(|t| t != &ns_ident);
-    }
+    guard.remove_namespace(&ns_ident);
 
-    assert!(!writer
-        .namespace_exists(&ns_ident)
-        .await
-        .expect("error: fail to check if the namespace exist"));
+    assert!(!writer.namespace_exists(&ns_ident).await.unwrap());
 
     drop(writer);
 }

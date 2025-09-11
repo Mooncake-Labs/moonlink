@@ -22,42 +22,62 @@ impl RestCatalogTestGuard {
             create_test_table_schema().unwrap(),
         )
         .await
-        .expect("error: fail to create rest catlog");
+        .unwrap();
         Ok(Self {
             catalog: Arc::new(RwLock::new(catalog)),
             namespace_idents: None,
             tables_idents: None,
         })
     }
+
+    pub(crate) fn record_table(&mut self, table_ident: TableIdent) {
+        self.tables_idents
+            .get_or_insert(Vec::new())
+            .push(table_ident);
+    }
+
+    pub(crate) fn remove_table(&mut self, table_ident: &TableIdent) {
+        if let Some(vec) = self.tables_idents.as_mut() {
+            vec.retain(|t| t != table_ident);
+        }
+    }
+
+    pub(crate) fn record_namespace(&mut self, ns_ident: NamespaceIdent) {
+        self.namespace_idents
+            .get_or_insert(Vec::new())
+            .push(ns_ident);
+    }
+
+    pub(crate) fn remove_namespace(&mut self, ns_ident: &NamespaceIdent) {
+        if let Some(vec) = self.namespace_idents.as_mut() {
+            vec.retain(|ns| ns != ns_ident);
+        }
+    }
 }
 
 impl Drop for RestCatalogTestGuard {
     fn drop(&mut self) {
-        let catalog = self.catalog.clone();
-        let table_idents = self.tables_idents.take();
-        let namespace_idents = self.namespace_idents.take();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                let writer = catalog.write().await;
+        if self.tables_idents.is_some() || self.namespace_idents.is_some() {
+            let catalog = self.catalog.clone();
+            let tables = self.tables_idents.take();
+            let namespaces = self.namespace_idents.take();
 
-                if let Some(t_idents) = table_idents {
-                    for t in t_idents {
-                        writer
-                            .drop_table(&t)
-                            .await
-                            .expect("error: fail to drop the table on drop method");
+            tokio::task::block_in_place(move || {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async move {
+                    let writer = catalog.write().await;
+                    if let Some(tables) = tables {
+                        for t in tables {
+                            let _ = writer.drop_table(&t).await;
+                        }
                     }
-                }
-
-                if let Some(ns_idents) = namespace_idents {
-                    for ns_ident in ns_idents {
-                        writer
-                            .drop_namespace(&ns_ident)
-                            .await
-                            .expect("error: fail to drop the namespace on drop method");
+                    if let Some(namespaces) = namespaces {
+                        for ns in namespaces {
+                            let _ = writer.drop_namespace(&ns).await;
+                        }
                     }
-                }
+                });
             });
-        })
+        }
     }
 }
