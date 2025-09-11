@@ -5,6 +5,9 @@ use std::{
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
+use crate::pg_replicate::initial_copy_writer::ArrowBatchBuilder;
+use crate::pg_replicate::initial_copy_writer::BatchSender;
+use futures::StreamExt;
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
 use postgres_native_tls::TlsStream;
@@ -69,6 +72,11 @@ impl PostgresSource {
         ReplicationClient::connect(&self.uri, true)
             .await
             .map_err(PostgresSourceError::from)
+    }
+
+    /// Get the connection URI used by this source
+    pub fn get_uri(&self) -> &str {
+        &self.uri
     }
 }
 
@@ -152,6 +160,17 @@ impl PostgresSource {
         Ok(row_count)
     }
 
+    /// Estimate relation block count for CTID sharding
+    pub async fn estimate_relation_block_count(
+        &mut self,
+        table_name: &TableName,
+    ) -> Result<i64, PostgresSourceError> {
+        self.replication_client
+            .estimate_relation_block_count(table_name)
+            .await
+            .map_err(PostgresSourceError::ReplicationClient)
+    }
+
     pub async fn fetch_table_schema(
         &self,
         src_table_id: Option<SrcTableId>,
@@ -222,6 +241,54 @@ impl PostgresSource {
         Ok(())
     }
 
+    /// Rollback current transaction if active
+    pub async fn rollback_transaction(&mut self) -> Result<(), PostgresSourceError> {
+        self.replication_client
+            .rollback_txn()
+            .await
+            .map_err(PostgresSourceError::ReplicationClient)?;
+        Ok(())
+    }
+
+    /// Export a snapshot and capture current WAL LSN. Keeps the txn open.
+    pub async fn export_snapshot_and_lsn(
+        &mut self,
+    ) -> Result<(String, PgLsn), PostgresSourceError> {
+        self.replication_client
+            .export_snapshot_and_lsn()
+            .await
+            .map_err(PostgresSourceError::ReplicationClient)
+    }
+
+    /// Begin a read-only transaction importing a snapshot.
+    pub async fn begin_with_snapshot(
+        &mut self,
+        snapshot_id: &str,
+    ) -> Result<(), PostgresSourceError> {
+        self.replication_client
+            .begin_with_snapshot(snapshot_id)
+            .await
+            .map_err(PostgresSourceError::ReplicationClient)
+    }
+
+    /// Start a sharded copy stream using a WHERE predicate under the current transaction.
+    pub async fn get_sharded_copy_stream(
+        &mut self,
+        table_name: &TableName,
+        column_schemas: &[ColumnSchema],
+        predicate_sql: &str,
+    ) -> Result<TableCopyStream, PostgresSourceError> {
+        let stream = self
+            .replication_client
+            .copy_out_with_predicate(table_name, column_schemas, predicate_sql)
+            .await
+            .map_err(PostgresSourceError::ReplicationClient)?;
+        Ok(TableCopyStream {
+            stream,
+            column_schemas: column_schemas.to_vec(),
+        })
+    }
+
     /// Extract the configuration needed to create a CDC stream
     pub fn get_cdc_stream_config(&self) -> Result<CdcStreamConfig, PostgresSourceError> {
         let publication = self
@@ -266,6 +333,146 @@ impl PostgresSource {
             message_scratch: Vec::new(),
             skip_before_end_lsn: None,
         })
+    }
+
+    /// Plan CTID-based shard predicates (4 shards by default) for a table.
+    pub async fn plan_ctid_shards(
+        &mut self,
+        table_name: &TableName,
+        shard_count: usize,
+    ) -> Result<Vec<String>, PostgresSourceError> {
+        let blocks = self
+            .estimate_relation_block_count(table_name)
+            .await
+            .unwrap_or(0);
+        if shard_count <= 1 || blocks <= 0 {
+            return Ok(vec![format!("ctid >= '(0,1)'::tid")]);
+        }
+        let shards = shard_count as i64;
+        let step = (blocks + shards - 1) / shards; // ceil_div
+        let mut preds = Vec::new();
+        let mut cur = 0i64;
+        for i in 0..shards {
+            let next = (cur + step).min(blocks);
+            let pred = if i == shards - 1 {
+                format!("ctid >= '({cur},1)'::tid")
+            } else {
+                format!("ctid >= '({cur},1)'::tid AND ctid < '({next},1)'::tid")
+            };
+            if next > cur || i == shards - 1 {
+                preds.push(pred);
+            }
+            cur = next;
+        }
+        Ok(preds)
+    }
+
+    /// Spawn a single sharded COPY reader that imports a snapshot, reads using the predicate,
+    /// converts to Arrow batches, and pushes to the shared BatchSender.
+    /// NOTE: This function opens its own connection; errors are returned as PostgresSourceError.
+    pub async fn spawn_sharded_copy_reader(
+        &self,
+        uri: String,
+        snapshot_id: String,
+        table_schema: TableSchema,
+        predicate_sql: String,
+        batch_tx: BatchSender,
+        max_rows_per_batch: usize,
+    ) -> Result<tokio::task::JoinHandle<Result<u64, crate::Error>>, PostgresSourceError> {
+        // Skeleton: we offload the connection + copy + conversion inside the task.
+        let handle = tokio::spawn(async move {
+            let (mut client, connection) = ReplicationClient::connect(&uri, false)
+                .await
+                .map_err(|e| crate::Error::from(PostgresSourceError::ReplicationClient(e)))?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::warn!("connection error: {}", e);
+                }
+            });
+
+            client
+                .begin_with_snapshot(&snapshot_id)
+                .await
+                .map_err(|e| crate::Error::from(PostgresSourceError::ReplicationClient(e)))?;
+
+            let stream = client
+                .copy_out_with_predicate(
+                    &table_schema.table_name,
+                    &table_schema.column_schemas,
+                    &predicate_sql,
+                )
+                .await
+                .map_err(|e| crate::Error::from(PostgresSourceError::ReplicationClient(e)))?;
+
+            // Reuse conversion via TableCopyStream
+            let mut stream = TableCopyStream {
+                stream,
+                column_schemas: table_schema.column_schemas.clone(),
+            };
+            futures::pin_mut!(stream);
+
+            // Build batches and push to writers
+            let (arrow_schema, _id) =
+                crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema);
+            let arrow_schema = std::sync::Arc::new(arrow_schema);
+            let mut builder = ArrowBatchBuilder::new(arrow_schema, max_rows_per_batch);
+            let mut rows: u64 = 0;
+            while let Some(row_res) = stream.next().await {
+                let row = row_res.map_err(|e| crate::Error::from(e))?; // TableCopyStreamError -> crate::Error via From
+                if let Some(batch) = builder.append_table_row(row)? {
+                    batch_tx.send(batch).await?;
+                }
+                rows += 1;
+            }
+            if let Some(batch) = builder.finish()? {
+                batch_tx.send(batch).await?;
+            }
+
+            client
+                .commit_txn()
+                .await
+                .map_err(|e| crate::Error::from(PostgresSourceError::ReplicationClient(e)))?;
+
+            Ok(rows)
+        });
+        Ok(handle)
+    }
+
+    /// Spawn multiple sharded readers and return their JoinHandles.
+    pub async fn spawn_sharded_copy_readers(
+        &self,
+        uri: String,
+        snapshot_id: String,
+        table_schema: TableSchema,
+        predicates: Vec<String>,
+        batch_tx: crate::pg_replicate::initial_copy_writer::BatchSender,
+        max_rows_per_batch: usize,
+    ) -> Result<Vec<tokio::task::JoinHandle<Result<u64, crate::Error>>>, PostgresSourceError> {
+        let mut handles = Vec::new();
+        for pred in predicates {
+            // Clone simple arguments for each task
+            let handle = self
+                .spawn_sharded_copy_reader(
+                    uri.clone(),
+                    snapshot_id.clone(),
+                    table_schema.clone(),
+                    pred,
+                    batch_tx.clone(),
+                    max_rows_per_batch,
+                )
+                .await?;
+            handles.push(handle);
+        }
+        Ok(handles)
+    }
+
+    /// Finalize the snapshot transaction on success or failure.
+    pub async fn finalize_snapshot(&mut self, success: bool) -> Result<(), PostgresSourceError> {
+        if success {
+            self.commit_transaction().await
+        } else {
+            self.rollback_transaction().await
+        }
     }
 }
 

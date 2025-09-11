@@ -46,6 +46,7 @@ pub fn create_batch_channel(capacity: usize) -> (BatchSender, BatchReceiver) {
 }
 
 /// Sending end of the batch channel.
+#[derive(Clone)]
 pub struct BatchSender(mpsc::Sender<RecordBatch>);
 
 impl BatchSender {
