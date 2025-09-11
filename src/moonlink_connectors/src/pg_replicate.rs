@@ -321,8 +321,14 @@ impl PostgresConnection {
                         match client.simple_query(&drop_query).await {
                             Ok(_) => break Ok(()),
                             Err(e) => {
-                                if e.code() == Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) {
-                                    break Ok(());
+                                match e.code() {
+                                    Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) => {
+                                        break Ok(());
+                                    }
+                                    Some(&SqlState::UNDEFINED_OBJECT) => {
+                                        break Ok(());
+                                    }
+                                    _ => {}
                                 }
                                 if retry_count >= 3 {
                                     break Err(e.into());
@@ -432,6 +438,11 @@ impl PostgresConnection {
                 }
                 Some(&SqlState::UNDEFINED_TABLE) => {
                     warn!("table already dropped, skipping");
+                    Ok(vec![])
+                }
+                Some(&SqlState::UNDEFINED_OBJECT) => {
+                    // Object not present in publication (e.g., relation not part of publication)
+                    warn!("object not present (idempotent), skipping");
                     Ok(vec![])
                 }
                 opt if is_transport_like(opt) => {
