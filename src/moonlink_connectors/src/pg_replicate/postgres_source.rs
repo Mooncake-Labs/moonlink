@@ -379,7 +379,6 @@ impl PostgresSource {
         batch_tx: BatchSender,
         max_rows_per_batch: usize,
     ) -> Result<tokio::task::JoinHandle<Result<u64, crate::Error>>, PostgresSourceError> {
-        // Skeleton: we offload the connection + copy + conversion inside the task.
         let handle = tokio::spawn(async move {
             let (mut client, connection) = ReplicationClient::connect(&uri, false)
                 .await
@@ -418,7 +417,7 @@ impl PostgresSource {
             let mut builder = ArrowBatchBuilder::new(arrow_schema, max_rows_per_batch);
             let mut rows: u64 = 0;
             while let Some(row_res) = stream.next().await {
-                let row = row_res.map_err(|e| crate::Error::from(e))?; // TableCopyStreamError -> crate::Error via From
+                let row = row_res.map_err(|e| crate::Error::from(e))?;
                 if let Some(batch) = builder.append_table_row(row)? {
                     batch_tx.send(batch).await?;
                 }
