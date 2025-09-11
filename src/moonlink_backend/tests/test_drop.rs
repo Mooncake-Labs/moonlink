@@ -66,7 +66,7 @@ mod tests {
         let c_path = format!("{}/{}.{}", base_path, DATABASE, "c");
         assert!(!tokio::fs::try_exists(&c_path).await.unwrap());
 
-        // Optional: calling drop again should be a no-op and succeed.
+        // Calling drop again should be a no-op and succeed.
         backend
             .drop_table(DATABASE.to_string(), "c".to_string())
             .await
