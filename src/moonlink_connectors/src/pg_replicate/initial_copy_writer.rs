@@ -32,8 +32,8 @@ impl Default for InitialCopyWriterConfig {
             target_file_size_bytes: DiskSliceWriterConfig::default_disk_slice_parquet_file_size(),
             // Align batch size with mooncake table default batch size
             max_rows_per_batch: MooncakeTableConfig::default_batch_size(),
-            // Default to no parallelism
-            num_writer_tasks: 1,
+            // Default to 4 parallel writers
+            num_writer_tasks: 4,
             batch_channel_capacity: 16,
         }
     }
@@ -238,7 +238,7 @@ mod tests {
             cfg.max_rows_per_batch,
             MooncakeTableConfig::default_batch_size()
         );
-        assert_eq!(cfg.num_writer_tasks, 1);
+        assert_eq!(cfg.num_writer_tasks, 4);
         assert_eq!(cfg.batch_channel_capacity, 16);
     }
 
