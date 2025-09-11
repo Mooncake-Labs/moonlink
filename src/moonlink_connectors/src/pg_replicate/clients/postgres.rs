@@ -129,7 +129,7 @@ impl ReplicationClient {
         Ok(())
     }
 
-    async fn rollback_txn(&mut self) -> Result<(), ReplicationClientError> {
+    pub async fn rollback_txn(&mut self) -> Result<(), ReplicationClientError> {
         if self.in_txn {
             self.postgres_client.simple_query("rollback;").await?;
             self.in_txn = false;
@@ -160,6 +160,22 @@ impl ReplicationClient {
         let result = self.postgres_client.query_one(&query, &[]).await?;
         let row_count = result.get(0);
         Ok(row_count)
+    }
+
+    /// Estimate number of relation blocks using pg_relation_size and server block_size
+    pub async fn estimate_relation_block_count(
+        &mut self,
+        table_name: &TableName,
+    ) -> Result<i64, ReplicationClientError> {
+        // Use regclass to resolve the qualified name safely
+        let rel = format!("{}", table_name.as_quoted_identifier());
+        let query = format!(
+            "SELECT ((pg_relation_size({rel}::regclass) + current_setting('block_size')::int - 1) / current_setting('block_size')::int) AS blocks;",
+            rel = quote_literal(&rel),
+        );
+        let row = self.postgres_client.query_one(&query, &[]).await?;
+        let blocks: i64 = row.get(0);
+        Ok(blocks)
     }
 
     /// Returns a [CopyOutStream] for a table
@@ -193,6 +209,64 @@ impl ReplicationClient {
         // Once we are done consuming the stream, we will commit the transaction
 
         Ok((stream, current_wal_lsn))
+    }
+
+    /// Export a snapshot and capture the current WAL LSN. Keeps the transaction open.
+    pub async fn export_snapshot_and_lsn(
+        &mut self,
+    ) -> Result<(String, PgLsn), ReplicationClientError> {
+        // Begin a repeatable read, read-only transaction
+        self.postgres_client
+            .simple_query("begin read only isolation level repeatable read;")
+            .await?;
+        self.in_txn = true;
+
+        let lsn = self.get_current_wal_lsn().await?;
+        let row = self
+            .postgres_client
+            .query_one("SELECT pg_export_snapshot();", &[])
+            .await?;
+        let snapshot_id: String = row.get(0);
+        Ok((snapshot_id, lsn))
+    }
+
+    /// Begin a repeatable read, read-only transaction and import a snapshot.
+    pub async fn begin_with_snapshot(
+        &mut self,
+        snapshot_id: &str,
+    ) -> Result<(), ReplicationClientError> {
+        // Begin txn first
+        self.postgres_client
+            .simple_query("begin read only isolation level repeatable read;")
+            .await?;
+        self.in_txn = true;
+        // Import the snapshot exported by coordinator
+        let set_snapshot = format!("SET TRANSACTION SNAPSHOT {};", quote_literal(snapshot_id));
+        self.postgres_client.simple_query(&set_snapshot).await?;
+        Ok(())
+    }
+
+    /// Perform COPY using a SELECT with an additional WHERE predicate. Assumes caller opened a transaction.
+    pub async fn copy_out_with_predicate(
+        &mut self,
+        table_name: &TableName,
+        column_schemas: &[ColumnSchema],
+        predicate_sql: &str,
+    ) -> Result<CopyOutStream, ReplicationClientError> {
+        let column_list = column_schemas
+            .iter()
+            .map(|col| quote_identifier(&col.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // NOTE: We assume transaction is already started and snapshot is set (if desired)
+        let copy_query = format!(
+            r#"COPY (SELECT {column_list} FROM {} WHERE {predicate}) TO STDOUT WITH (FORMAT text);"#,
+            table_name.as_quoted_identifier(),
+            predicate = predicate_sql
+        );
+        let stream = self.postgres_client.copy_out_simple(&copy_query).await?;
+        Ok(stream)
     }
 
     /// Returns a vector of columns of a table, optionally filtered by a publication's column list
