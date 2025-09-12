@@ -330,7 +330,8 @@ impl RestSource {
                 })?;
 
                 let avro_value = {
-                    // Single datum (binary encoding)
+                    // Decode a single datum - assumes single record per message
+                    // On the kafka side we are already stripping any magic bytes and schema headers
                     let mut cursor = std::io::Cursor::new(bytes.as_slice());
                     from_avro_datum(avro_schema, &mut cursor, None)
                         .map_err(|e| RestSourceError::AvroError(Box::new(e)))?
