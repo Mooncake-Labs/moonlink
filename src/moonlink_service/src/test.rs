@@ -1058,8 +1058,6 @@ async fn test_kafka_avro_stress_ingest() {
         ]
     }"#;
 
-    println!("avro_schema_json: {avro_schema_json}");
-
     // Create table with Avro schema
     let create_table_payload = serde_json::json!({
         "database": DATABASE,

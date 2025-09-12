@@ -116,6 +116,23 @@ impl RestSource {
         debug!("setting Avro schema for table {}", src_table_name);
         if let Some((arrow_schema, _)) = self.table_schemas.get(&src_table_name) {
             let arrow_schema = arrow_schema.clone();
+            // TODO: schema evolution
+            // for now, we just assert they are compatible
+            // Assert that the Avro schema is compatible with the existing Arrow schema
+            let avro_derived_arrow_schema =
+                crate::rest_ingest::avro_converter::convert_avro_to_arrow_schema(&avro_schema)
+                    .expect("Failed to convert Avro schema to Arrow schema");
+
+            assert_eq!(
+                arrow_schema.as_ref(), &avro_derived_arrow_schema,
+                "Arrow schema and Avro-derived schema must be exactly equal. Schema evolution not yet supported."
+            );
+
+            debug!(
+                "Avro schema is compatible with existing Arrow schema for table {}",
+                src_table_name
+            );
+
             // Update the table schema with the Avro schema
             self.table_schemas
                 .insert(src_table_name, (arrow_schema, Some(avro_schema)));

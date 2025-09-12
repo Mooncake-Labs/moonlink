@@ -458,6 +458,11 @@ async fn create_table(
                             }),
                         )
                     })?;
+                state
+                    .kafka_schema_id_cache
+                    .write()
+                    .await
+                    .insert(table.clone(), 0);
             }
             Ok(Json(CreateTableResponse {
                 database: payload.database.clone(),
