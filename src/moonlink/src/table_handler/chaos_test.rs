@@ -24,6 +24,7 @@ use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::ReadStateManager;
+use crate::VisibilityLsn;
 use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
 use function_name::named;
@@ -857,7 +858,10 @@ impl TestEnvironment {
         )
         .await;
         let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-        let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
+        let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
+            commit_lsn: 0,
+            replication_lsn: 0,
+        });
         let read_state_filepath_remap =
             std::sync::Arc::new(|local_filepath: String| local_filepath);
         let read_state_manager = ReadStateManager::new(
@@ -987,9 +991,17 @@ async fn validate_persisted_iceberg_table(
 ) {
     let (event_sender, _event_receiver) = mpsc::channel(100);
     let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-    let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
+    let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
+        commit_lsn: 0,
+        replication_lsn: 0,
+    });
     replication_lsn_tx.send(snapshot_lsn).unwrap();
-    last_commit_lsn_tx.send(snapshot_lsn).unwrap();
+    visibility_tx
+        .send(VisibilityLsn {
+            commit_lsn: snapshot_lsn,
+            replication_lsn: snapshot_lsn,
+        })
+        .unwrap();
 
     // Use a fresh new cache for new iceberg table manager.
     let cache_temp_dir = tempdir().unwrap();

@@ -25,7 +25,7 @@ use crate::Result;
 use futures::StreamExt;
 use moonlink::{
     MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent,
-    WalManager,
+    VisibilityLsn, WalManager,
 };
 use native_tls::{Certificate, TlsConnector};
 use postgres_native_tls::{MakeTlsConnector, TlsStream};
@@ -65,7 +65,7 @@ pub enum PostgresReplicationCommand {
         src_table_id: SrcTableId,
         schema: TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
-        commit_lsn_tx: watch::Sender<u64>,
+        visibility_tx: watch::Sender<VisibilityLsn>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
         ready_tx: oneshot::Sender<()>,
@@ -231,7 +231,7 @@ impl PostgresConnection {
         schema: &TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
-        commit_lsn_tx: watch::Sender<u64>,
+        visibility_tx: watch::Sender<VisibilityLsn>,
         table_base_path: &str,
     ) -> Result<(bool)> {
         let src_table_id = schema.src_table_id;
@@ -280,7 +280,11 @@ impl PostgresConnection {
             }
 
             // Notify read state manager with the commit LSN for the initial copy boundary.
-            if let Err(e) = commit_lsn_tx.send(progress.boundary_lsn.into()) {
+            self.replication_state.mark(start_lsn.into());
+            if let Err(e) = visibility_tx.send(VisibilityLsn {
+                commit_lsn: start_lsn.into(),
+                replication_lsn: start_lsn.into(),
+            }) {
                 warn!(error = ?e, table_id = src_table_id, "failed to send initial copy commit lsn");
             }
             self.replication_state.mark(progress.boundary_lsn.into());
@@ -373,7 +377,7 @@ impl PostgresConnection {
         src_table_id: SrcTableId,
         schema: TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
-        commit_lsn_tx: watch::Sender<u64>,
+        visibility_tx: watch::Sender<VisibilityLsn>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
     ) -> Result<oneshot::Receiver<()>> {
@@ -382,7 +386,7 @@ impl PostgresConnection {
             src_table_id,
             schema,
             event_sender,
-            commit_lsn_tx,
+            visibility_tx,
             flush_lsn_rx,
             wal_flush_lsn_rx,
             ready_tx,
@@ -496,17 +500,17 @@ impl PostgresConnection {
         .await?;
 
         // Send command to add table to replication
-        let commit_lsn_tx = table_resources
-            .commit_lsn_tx
+        let visibility_tx = table_resources
+            .visibility_tx
             .take()
             .expect("commit_lsn_tx is None");
-        let commit_lsn_tx_for_copy = commit_lsn_tx.clone();
+        let visibility_tx_for_copy = visibility_tx.clone();
         let ready_rx = self
             .add_table_to_replication(
                 table_schema.src_table_id,
                 table_schema.clone(),
                 table_resources.event_sender.clone(),
-                commit_lsn_tx,
+                visibility_tx,
                 table_resources
                     .flush_lsn_rx
                     .take()
@@ -529,7 +533,7 @@ impl PostgresConnection {
                 &table_schema,
                 table_resources.event_sender.clone(),
                 is_recovery,
-                commit_lsn_tx_for_copy,
+                visibility_tx_for_copy,
                 table_base_path,
             )
             .await?;
@@ -734,8 +738,8 @@ pub async fn run_event_loop(
                     }
                 },
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx, ready_tx } => {
-                        sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
+                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, visibility_tx, flush_lsn_rx, wal_flush_lsn_rx, ready_tx } => {
+                        sink.add_table(src_table_id, event_sender, visibility_tx, &schema);
                         flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                         wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
                         stream.as_mut().add_table_schema(schema);

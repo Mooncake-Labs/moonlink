@@ -17,12 +17,12 @@ use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
-use crate::IcebergCatalogConfig;
 use crate::Result;
 use crate::{
     FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
     WalConfig, WalTransactionState,
 };
+use crate::{IcebergCatalogConfig, VisibilityLsn};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use futures::StreamExt;
@@ -67,7 +67,7 @@ pub struct TestEnvironment {
     event_sender: mpsc::Sender<TableEvent>,
     read_state_manager: Option<Arc<ReadStateManager>>,
     replication_tx: watch::Sender<u64>,
-    last_commit_tx: watch::Sender<u64>,
+    last_visibility_tx: watch::Sender<VisibilityLsn>,
     snapshot_lsn_tx: watch::Sender<u64>,
     pub(crate) wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     pub(crate) wal_config: WalConfig,
@@ -99,12 +99,15 @@ impl TestEnvironment {
     /// Create a new test environment with the given mooncake table.
     pub(crate) async fn new_with_mooncake_table(temp_dir: TempDir, table: MooncakeTable) -> Self {
         let (replication_tx, replication_rx) = watch::channel(0u64);
-        let (last_commit_tx, last_commit_rx) = watch::channel(0u64);
+        let (last_visibility_tx, last_visibility_rx) = watch::channel(VisibilityLsn {
+            commit_lsn: 0,
+            replication_lsn: 0,
+        });
         let snapshot_lsn_tx = table.get_snapshot_watch_sender().clone();
         let read_state_manager = Some(Arc::new(ReadStateManager::new(
             &table,
             replication_rx.clone(),
-            last_commit_rx,
+            last_visibility_rx,
             get_read_state_filepath_remap(),
         )));
         let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
@@ -138,7 +141,7 @@ impl TestEnvironment {
             event_sender,
             read_state_manager,
             replication_tx,
-            last_commit_tx,
+            last_visibility_tx,
             snapshot_lsn_tx,
             wal_filesystem_accessor,
             wal_config,
@@ -381,8 +384,11 @@ impl TestEnvironment {
 
     /// Directly set the table commit LSN watch channel.
     pub fn set_table_commit_lsn(&self, lsn: u64) {
-        self.last_commit_tx
-            .send(lsn)
+        self.last_visibility_tx
+            .send(VisibilityLsn {
+                commit_lsn: lsn,
+                replication_lsn: lsn,
+            })
             .expect("Failed to send last commit LSN");
     }
 

@@ -19,6 +19,7 @@ use crate::table_notify::{TableEvent, TableMaintenanceStatus};
 use crate::IcebergTableConfig;
 use crate::MooncakeTableConfig;
 use crate::ReadStateManager;
+use crate::VisibilityLsn;
 use crate::{Result, StorageConfig};
 
 use std::collections::{HashMap, HashSet};
@@ -252,13 +253,16 @@ pub(crate) async fn replay(replay_filepath: &str) {
     let (event_replay_sender, _event_replay_receiver) = mpsc::unbounded_channel();
     table.register_table_notify(table_event_sender).await;
     table.register_event_replay_tx(Some(event_replay_sender));
-    let (commit_lsn_tx, commit_lsn_rx) = watch::channel(0u64);
+    let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
+        commit_lsn: 0,
+        replication_lsn: 0,
+    });
     let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
     let read_state_filepath_remap = std::sync::Arc::new(|local_filepath: String| local_filepath);
     let read_state_manager = ReadStateManager::new(
         &table,
         replication_lsn_rx,
-        commit_lsn_rx,
+        visibility_rx,
         read_state_filepath_remap,
     );
 

@@ -4,7 +4,6 @@ use crate::{Error, Result};
 use arrow_schema::Schema as ArrowSchema;
 use moonlink::event_sync::create_table_event_syncer;
 use moonlink::table_handler_timer::create_table_handler_timers;
-use moonlink::PersistentWalMetadata;
 use moonlink::ReadStateFilepathRemap;
 use moonlink::{
     row::IdentityProp, AccessorConfig, BaseFileSystemAccess, EventSyncReceiver, EventSyncSender,
@@ -12,6 +11,7 @@ use moonlink::{
     MoonlinkTableConfig, MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig,
     TableEvent, TableEventManager, TableHandler, TableStatusReader, WalConfig, WalManager,
 };
+use moonlink::{PersistentWalMetadata, VisibilityLsn};
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ pub struct TableResources {
     pub read_state_manager: ReadStateManager,
     pub table_event_manager: TableEventManager,
     pub table_status_reader: TableStatusReader,
-    pub commit_lsn_tx: Option<watch::Sender<u64>>,
+    pub visibility_tx: Option<watch::Sender<VisibilityLsn>>,
     pub flush_lsn_rx: Option<watch::Receiver<u64>>,
     pub wal_flush_lsn_rx: Option<watch::Receiver<u64>>,
     pub wal_file_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -156,11 +156,14 @@ pub async fn build_table_components(
 
     let last_iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
 
-    let (commit_lsn_tx, commit_lsn_rx) = watch::channel(0u64);
+    let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
+        commit_lsn: 0,
+        replication_lsn: 0,
+    });
     let read_state_manager = ReadStateManager::new(
         &table,
         replication_state.subscribe(),
-        commit_lsn_rx,
+        visibility_rx,
         table_components.read_state_filepath_remap,
     );
     let table_status_reader = TableStatusReader::new(
@@ -189,7 +192,7 @@ pub async fn build_table_components(
         read_state_manager,
         table_status_reader,
         table_event_manager,
-        commit_lsn_tx: Some(commit_lsn_tx),
+        visibility_tx: Some(visibility_tx),
         flush_lsn_rx: Some(flush_lsn_rx),
         wal_flush_lsn_rx: Some(wal_flush_lsn_rx),
         wal_file_accessor,
