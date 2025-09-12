@@ -213,8 +213,6 @@ impl Sink {
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
-                let pg_lsn = PgLsn::from(commit_body.end_lsn());
-                self.replication_state.mark(pg_lsn.into());
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id);
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
@@ -240,6 +238,10 @@ impl Sink {
                 self.transaction_state.touched_tables.clear();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
+
+                // Update replication lsn
+                let pg_lsn = PgLsn::from(commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
@@ -249,8 +251,6 @@ impl Sink {
                     "stream commit"
                 );
                 ma::assert_ge!(stream_commit_body.end_lsn(), self.max_keepalive_lsn_seen);
-                let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
-                self.replication_state.mark(pg_lsn.into());
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id);
@@ -277,6 +277,10 @@ impl Sink {
                     self.streaming_transactions_state.remove(&xact_id);
                 }
                 self.streaming_last_key = None;
+
+                // Update replication lsn
+                let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
