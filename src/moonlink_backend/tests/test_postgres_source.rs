@@ -916,4 +916,93 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn ic_parallel_reader_failure_fast_fail_no_hang() {
+        let uri = get_database_uri();
+        let (ddl, _conn) = connect_to_postgres(&uri).await;
+
+        // Unique table
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let table = format!("ic_parallel_fail_{suffix}");
+        let fqtn = format!("public.{table}");
+
+        // Create and seed enough rows to ensure readers are active when we drop the table
+        let rows = 20_000i64;
+        ddl.simple_query(&format!(
+            "DROP TABLE IF EXISTS {fqtn};
+             CREATE TABLE {fqtn} (id BIGINT PRIMARY KEY, name TEXT);
+             INSERT INTO {fqtn}
+             SELECT gs, 'base'
+             FROM generate_series(1, {rows}) AS gs;
+             ALTER TABLE {fqtn} REPLICA IDENTITY FULL;"
+        ))
+        .await
+        .unwrap();
+
+        // Fetch schema
+        let ps = PostgresSource::new(&uri, None, None, false)
+            .await
+            .expect("ps new");
+        let schema = ps
+            .fetch_table_schema(None, Some(&fqtn), None)
+            .await
+            .expect("fetch schema");
+
+        // Temp dir for writer output
+        let tmp = tempdir().unwrap();
+        let base_path = tmp.path().to_str().unwrap();
+
+        // Parallel readers configuration
+        let ic_cfg = InitialCopyConfig {
+            reader: InitialCopyReaderConfig {
+                uri: uri.clone(),
+                shard_count: 4,
+            },
+            writer: InitialCopyWriterConfig::default(),
+        };
+
+        // TableEvent channel (we assert no LoadFiles on failure)
+        let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
+
+        // Start copy in a task; we expect it to fail after we drop the table
+        let schema_clone = schema.clone();
+        let tx_clone = tx.clone();
+        let base_path_string = base_path.to_string();
+        let copy_handle = tokio::spawn(async move {
+            copy_table_stream(schema_clone, &tx_clone, &base_path_string, ic_cfg).await
+        });
+
+        // Give readers a moment to start streaming
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Induce failure: drop the source table while copy is in progress
+        ddl.simple_query(&format!("DROP TABLE IF EXISTS {fqtn};"))
+            .await
+            .unwrap();
+
+        // The copy task should fail promptly (no hang)
+        let res = timeout(Duration::from_secs(10), copy_handle).await;
+        assert!(res.is_ok(), "copy task timed out (potential hang)");
+        let join_res = res.unwrap();
+        assert!(join_res.is_ok(), "copy task join failed");
+        let stream_res = join_res.unwrap();
+        assert!(
+            stream_res.is_err(),
+            "expected copy_table_stream to return Err"
+        );
+
+        // Ensure no LoadFiles event was emitted
+        let recv_res = timeout(Duration::from_millis(300), rx.recv()).await;
+        assert!(
+            recv_res.is_err(),
+            "no LoadFiles event should be emitted on failure"
+        );
+
+        // Cleanup: table already dropped; tempdir cleans up automatically
+    }
 }
