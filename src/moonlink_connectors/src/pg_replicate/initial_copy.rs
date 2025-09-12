@@ -106,7 +106,7 @@ pub async fn copy_table_stream(
         .plan_ctid_shards(&table_schema.table_name, config.reader.shard_count)
         .await?;
 
-    let reader_handles = source
+    let mut reader_handles = source
         .spawn_sharded_copy_readers(
             config.reader.uri.clone(),
             snapshot_id,
@@ -117,13 +117,49 @@ pub async fn copy_table_stream(
         )
         .await?;
 
-    // Wait for all readers
+    // Attach indices to reader handles so we can abort/await the rest on failure
+    let mut indexed_reader_handles: Vec<_> = reader_handles.into_iter().enumerate().collect();
+
+    // Wait for all readers; on first failure, abort remaining readers and drain them
     let mut success = true;
-    for h in reader_handles {
-        match h.await {
-            Ok(Ok(n)) => rows_copied += n,
-            _ => {
+    let mut first_failure_msg: Option<String> = None;
+    while let Some((reader_idx, handle)) = indexed_reader_handles.pop() {
+        match handle.await {
+            Ok(Ok(n)) => {
+                rows_copied += n;
+            }
+            Ok(Err(e)) => {
                 success = false;
+                first_failure_msg = Some(format!("reader {} failed: {}", reader_idx, e));
+                let remaining = indexed_reader_handles.len();
+                for (_, h) in &indexed_reader_handles {
+                    h.abort();
+                }
+                for (_, h) in indexed_reader_handles {
+                    let _ = h.await;
+                }
+                tracing::warn!(
+                    reader_index = reader_idx,
+                    remaining_readers_aborted = remaining,
+                    "parallel initial copy: reader failed; aborted remaining readers"
+                );
+                break;
+            }
+            Err(join_err) => {
+                success = false;
+                first_failure_msg = Some(format!("reader {} join error: {}", reader_idx, join_err));
+                let remaining = indexed_reader_handles.len();
+                for (_, h) in &indexed_reader_handles {
+                    h.abort();
+                }
+                for (_, h) in indexed_reader_handles {
+                    let _ = h.await;
+                }
+                tracing::warn!(
+                    reader_index = reader_idx,
+                    remaining_readers_aborted = remaining,
+                    "parallel initial copy: reader join failed; aborted remaining readers"
+                );
                 break;
             }
         }
@@ -137,9 +173,11 @@ pub async fn copy_table_stream(
         for handle in writer_handles {
             let _ = handle.await; // best-effort drain
         }
+        let err_msg = first_failure_msg
+            .unwrap_or_else(|| "parallel initial copy failed in at least one reader".to_string());
         return Err(crate::Error::from(std::io::Error::new(
             std::io::ErrorKind::Other,
-            "parallel initial copy failed in at least one reader",
+            err_msg,
         )));
     }
 
