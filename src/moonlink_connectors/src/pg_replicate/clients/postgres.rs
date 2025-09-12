@@ -167,13 +167,10 @@ impl ReplicationClient {
         &mut self,
         table_name: &TableName,
     ) -> Result<i64, ReplicationClientError> {
-        // Use regclass to resolve the qualified name safely
-        let rel = format!("{}", table_name.as_quoted_identifier());
-        let query = format!(
-            "SELECT ((pg_relation_size({rel}::regclass) + current_setting('block_size')::int - 1) / current_setting('block_size')::int) AS blocks;",
-            rel = quote_literal(&rel),
-        );
-        let row = self.postgres_client.query_one(&query, &[]).await?;
+        // Use parameterized to_regclass to resolve the qualified name safely
+        let rel_ident = format!("{}", table_name.as_quoted_identifier());
+        let query = "SELECT ((pg_relation_size(to_regclass($1)) + current_setting('block_size')::int - 1) / current_setting('block_size')::int) AS blocks;";
+        let row = self.postgres_client.query_one(query, &[&rel_ident]).await?;
         let blocks: i64 = row.get(0);
         Ok(blocks)
     }
