@@ -1044,12 +1044,21 @@ async fn test_kafka_avro_stress_ingest() {
             {"name": "id", "type": "int"},
             {"name": "name", "type": "string"},
             {"name": "email", "type": "string"},
-            {"name": "age", "type": "int"}
+            {"name": "age", "type": "int"},
+            {"name": "metadata", "type": {"type": "map", "values": "string"}},
+            {"name": "tags", "type": {"type": "array", "items": "string"}},
+            {"name": "profile", "type": {
+                "type": "record",
+                "name": "Profile",
+                "fields": [
+                    {"name": "bio", "type": "string"},
+                    {"name": "location", "type": "string"}
+                ]
+            }}
         ]
     }"#;
 
-
-    println!("avro_schema_json: {}", avro_schema_json);
+    println!("avro_schema_json: {avro_schema_json}");
 
     // Create table with Avro schema
     let create_table_payload = serde_json::json!({
@@ -1070,10 +1079,11 @@ async fn test_kafka_avro_stress_ingest() {
         .send()
         .await
         .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "failed to create table with Avro schema: {resp:?}"
-    );
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_body = resp.text().await.unwrap();
+        panic!("failed to create table with Avro schema. Status: {status}, Body: {error_body}");
+    }
 
     // Build Avro Schema locally for encoding single-datum payloads
     let avro_schema = apache_avro::Schema::parse_str(avro_schema_json).unwrap();
@@ -1130,12 +1140,68 @@ async fn test_kafka_avro_stress_ingest() {
                 let age = 20 + (id % 30);
                 let record = apache_avro::types::Value::Record(vec![
                     ("id".to_string(), apache_avro::types::Value::Int(id)),
-                    ("name".to_string(), apache_avro::types::Value::String(name)),
+                    (
+                        "name".to_string(),
+                        apache_avro::types::Value::String(name.clone()),
+                    ),
                     (
                         "email".to_string(),
                         apache_avro::types::Value::String(email),
                     ),
                     ("age".to_string(), apache_avro::types::Value::Int(age)),
+                    (
+                        "metadata".to_string(),
+                        apache_avro::types::Value::Map(
+                            [
+                                (
+                                    "department".to_string(),
+                                    apache_avro::types::Value::String(format!("dept_{}", id % 5)),
+                                ),
+                                (
+                                    "role".to_string(),
+                                    apache_avro::types::Value::String(if id % 3 == 0 {
+                                        "admin".to_string()
+                                    } else {
+                                        "user".to_string()
+                                    }),
+                                ),
+                                (
+                                    "created_at".to_string(),
+                                    apache_avro::types::Value::String(format!(
+                                        "2024-01-{:02}",
+                                        (id % 28) + 1
+                                    )),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    ),
+                    (
+                        "tags".to_string(),
+                        apache_avro::types::Value::Array(vec![
+                            apache_avro::types::Value::String(format!("tag_{}", id % 10)),
+                            apache_avro::types::Value::String("active".to_string()),
+                            apache_avro::types::Value::String(if id % 2 == 0 {
+                                "premium".to_string()
+                            } else {
+                                "basic".to_string()
+                            }),
+                        ]),
+                    ),
+                    (
+                        "profile".to_string(),
+                        apache_avro::types::Value::Record(vec![
+                            (
+                                "bio".to_string(),
+                                apache_avro::types::Value::String(format!("Bio for user {name}")),
+                            ),
+                            (
+                                "location".to_string(),
+                                apache_avro::types::Value::String(format!("City_{}", id % 20)),
+                            ),
+                        ]),
+                    ),
                 ]);
                 let bytes = apache_avro::to_avro_datum(&avro_schema_cloned, record).unwrap();
                 let resp = client_cloned

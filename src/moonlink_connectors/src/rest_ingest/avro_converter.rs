@@ -135,7 +135,7 @@ pub fn convert_avro_to_arrow_schema(
 
 fn convert_field(field: &RecordField, field_id: &mut i32) -> Result<Field, AvroToArrowSchemaError> {
     let name = &field.name;
-    let (data_type, nullable) = convert_schema_type(&field.schema)?;
+    let (data_type, nullable) = convert_schema_type(field_id, &field.schema)?;
 
     let mut metadata = HashMap::new();
     metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
@@ -144,7 +144,10 @@ fn convert_field(field: &RecordField, field_id: &mut i32) -> Result<Field, AvroT
     Ok(Field::new(name, data_type, nullable).with_metadata(metadata))
 }
 
-fn convert_schema_type(schema: &AvroSchema) -> Result<(DataType, bool), AvroToArrowSchemaError> {
+fn convert_schema_type(
+    field_id: &mut i32,
+    schema: &AvroSchema,
+) -> Result<(DataType, bool), AvroToArrowSchemaError> {
     match schema {
         AvroSchema::Null => Ok((DataType::Null, true)),
         AvroSchema::Boolean => Ok((DataType::Boolean, false)),
@@ -155,21 +158,36 @@ fn convert_schema_type(schema: &AvroSchema) -> Result<(DataType, bool), AvroToAr
         AvroSchema::Bytes => Ok((DataType::Binary, false)),
         AvroSchema::String => Ok((DataType::Utf8, false)),
         AvroSchema::Array(item_schema) => {
-            let (item_type, item_nullable) = convert_schema_type(&item_schema.items)?;
-            let list_field = Field::new("item", item_type, item_nullable);
+            let (item_type, item_nullable) = convert_schema_type(field_id, &item_schema.items)?;
+            let mut list_metadata = HashMap::new();
+            list_metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
+            let list_field =
+                Field::new("item", item_type, item_nullable).with_metadata(list_metadata);
             Ok((DataType::List(Arc::new(list_field)), false))
         }
         AvroSchema::Map(value_schema) => {
-            let (value_type, value_nullable) = convert_schema_type(&value_schema.types)?;
+            let (value_type, value_nullable) = convert_schema_type(field_id, &value_schema.types)?;
             // Represent map as array of structs with key and value fields
-            let key_field = Field::new("key", DataType::Utf8, false);
-            let value_field = Field::new("value", value_type, value_nullable);
+            let mut key_metadata = HashMap::new();
+            key_metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
+            let key_field = Field::new("key", DataType::Utf8, false).with_metadata(key_metadata);
+            let mut value_metadata = HashMap::new();
+            value_metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
+            let value_field =
+                Field::new("value", value_type, value_nullable).with_metadata(value_metadata);
+            let mut struct_metadata = HashMap::new();
+            struct_metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+            *field_id += 1;
             let struct_field = Field::new(
                 "entries",
                 DataType::Struct(vec![key_field, value_field].into()),
                 false,
-            );
-            Ok((DataType::Map(Arc::new(struct_field), true), false))
+            )
+            .with_metadata(struct_metadata);
+            Ok((DataType::List(Arc::new(struct_field)), false))
         }
         AvroSchema::Union(union_schema) => {
             // Handle nullable unions (null + another type)
@@ -191,7 +209,7 @@ fn convert_schema_type(schema: &AvroSchema) -> Result<(DataType, bool), AvroToAr
                 }
 
                 if has_null && non_null_schema.is_some() {
-                    let (data_type, _) = convert_schema_type(non_null_schema.unwrap())?;
+                    let (data_type, _) = convert_schema_type(field_id, non_null_schema.unwrap())?;
                     Ok((data_type, true))
                 } else {
                     Err(AvroToArrowSchemaError::UnsupportedSchemaType(
@@ -206,10 +224,9 @@ fn convert_schema_type(schema: &AvroSchema) -> Result<(DataType, bool), AvroToAr
         }
         AvroSchema::Record(record_schema) => {
             let mut struct_fields = Vec::with_capacity(record_schema.fields.len());
-            let mut field_id = 0i32;
 
             for field in &record_schema.fields {
-                let arrow_field = convert_field(field, &mut field_id)?;
+                let arrow_field = convert_field(field, field_id)?;
                 struct_fields.push(arrow_field);
             }
 
@@ -377,5 +394,77 @@ mod tests {
         assert_eq!(row.values.len(), 2);
         assert_eq!(row.values[0], RowValue::Int32(1));
         assert_eq!(row.values[1], RowValue::Null);
+    }
+}
+
+#[test]
+fn test_complex_avro_schema_with_maps() {
+    let avro_schema_str = r#"{
+            "type": "record",
+            "name": "User",
+            "fields": [
+                {"name": "id", "type": "int"},
+                {"name": "name", "type": "string"},
+                {"name": "email", "type": "string"},
+                {"name": "age", "type": "int"},
+                {"name": "metadata", "type": {"type": "map", "values": "string"}},
+                {"name": "tags", "type": {"type": "array", "items": "string"}},
+                {"name": "profile", "type": {
+                    "type": "record",
+                    "name": "Profile",
+                    "fields": [
+                        {"name": "bio", "type": "string"},
+                        {"name": "location", "type": "string"}
+                    ]
+                }}
+            ]
+        }"#;
+
+    let avro_schema = apache_avro::Schema::parse_str(avro_schema_str).unwrap();
+    let arrow_schema = convert_avro_to_arrow_schema(&avro_schema).unwrap();
+
+    assert_eq!(arrow_schema.fields().len(), 7);
+
+    let fields = arrow_schema.fields();
+    assert_eq!(fields[0].name(), "id");
+    assert_eq!(fields[0].data_type(), &DataType::Int32);
+
+    assert_eq!(fields[1].name(), "name");
+    assert_eq!(fields[1].data_type(), &DataType::Utf8);
+
+    assert_eq!(fields[4].name(), "metadata");
+    // Map should be converted to List of Struct type
+    if let DataType::List(list_field) = fields[4].data_type() {
+        assert_eq!(list_field.name(), "entries");
+        if let DataType::Struct(struct_fields) = list_field.data_type() {
+            assert_eq!(struct_fields.len(), 2);
+            assert_eq!(struct_fields[0].name(), "key");
+            assert_eq!(struct_fields[0].data_type(), &DataType::Utf8);
+            assert_eq!(struct_fields[1].name(), "value");
+            assert_eq!(struct_fields[1].data_type(), &DataType::Utf8);
+        } else {
+            panic!("Expected Struct type for map entries");
+        }
+    } else {
+        panic!("Expected List type for metadata field (map converted to list)");
+    }
+
+    assert_eq!(fields[5].name(), "tags");
+    if let DataType::List(list_field) = fields[5].data_type() {
+        assert_eq!(list_field.name(), "item");
+        assert_eq!(list_field.data_type(), &DataType::Utf8);
+    } else {
+        panic!("Expected List type for tags field");
+    }
+
+    assert_eq!(fields[6].name(), "profile");
+    if let DataType::Struct(struct_fields) = fields[6].data_type() {
+        assert_eq!(struct_fields.len(), 2);
+        assert_eq!(struct_fields[0].name(), "bio");
+        assert_eq!(struct_fields[0].data_type(), &DataType::Utf8);
+        assert_eq!(struct_fields[1].name(), "location");
+        assert_eq!(struct_fields[1].data_type(), &DataType::Utf8);
+    } else {
+        panic!("Expected Struct type for profile field");
     }
 }
