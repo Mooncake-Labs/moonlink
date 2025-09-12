@@ -1034,11 +1034,8 @@ async fn test_kafka_avro_stress_ingest() {
     });
     test_readiness_probe().await;
 
-    // Create test table.
+    // Create test table with Avro schema directly
     let client = reqwest::Client::new();
-    create_table(&client, DATABASE, TABLE, /*nested=*/ false).await;
-
-    // Prepare Avro schema matching the table schema (int32 id, string name/email, int32 age)
     let crafted_src_table_name = format!("{DATABASE}.{TABLE}");
     let avro_schema_json = r#"{
         "type": "record",
@@ -1051,23 +1048,31 @@ async fn test_kafka_avro_stress_ingest() {
         ]
     }"#;
 
-    // Set Avro schema for Kafka ingestion
-    let set_schema_payload = serde_json::json!({
+
+    println!("avro_schema_json: {}", avro_schema_json);
+
+    // Create table with Avro schema
+    let create_table_payload = serde_json::json!({
         "database": DATABASE,
         "table": TABLE,
-        "kafka_schema": avro_schema_json,
-        "schema_id": 1_u64
+        "avro_schema": avro_schema_json,
+        "table_config": {
+            "mooncake": {
+                "append_only": true,
+                "row_identity": "None"
+            }
+        }
     });
     let resp = client
-        .post(format!("{REST_ADDR}/kafka/{crafted_src_table_name}/schema"))
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
         .header("content-type", "application/json")
-        .json(&set_schema_payload)
+        .json(&create_table_payload)
         .send()
         .await
         .unwrap();
     assert!(
         resp.status().is_success(),
-        "failed to set Avro schema: {resp:?}"
+        "failed to create table with Avro schema: {resp:?}"
     );
 
     // Build Avro Schema locally for encoding single-datum payloads

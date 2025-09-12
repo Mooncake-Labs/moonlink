@@ -111,124 +111,116 @@ impl AvroToMoonlinkRowConverter {
     }
 }
 
-/// Converter for Avro schemas to Arrow schemas
-pub struct AvroToArrowSchemaConverter;
+/// Convert an Avro schema to an Arrow schema
+pub fn convert_avro_to_arrow_schema(
+    avro_schema: &AvroSchema,
+) -> Result<ArrowSchema, AvroToArrowSchemaError> {
+    match avro_schema {
+        AvroSchema::Record(record_schema) => {
+            let mut arrow_fields = Vec::with_capacity(record_schema.fields.len());
+            let mut field_id = 0i32;
 
-impl AvroToArrowSchemaConverter {
-    /// Convert an Avro schema to an Arrow schema
-    pub fn convert(avro_schema: &AvroSchema) -> Result<ArrowSchema, AvroToArrowSchemaError> {
-        match avro_schema {
-            AvroSchema::Record(record_schema) => {
-                let mut arrow_fields = Vec::with_capacity(record_schema.fields.len());
-                let mut field_id = 0i32;
+            for field in &record_schema.fields {
+                let arrow_field = convert_field(field, &mut field_id)?;
+                arrow_fields.push(arrow_field);
+            }
 
-                for field in &record_schema.fields {
-                    let arrow_field = Self::convert_field(field, &mut field_id)?;
-                    arrow_fields.push(arrow_field);
+            Ok(ArrowSchema::new(arrow_fields))
+        }
+        _ => Err(AvroToArrowSchemaError::UnsupportedSchemaType(
+            "Only record schemas are supported at the top level".to_string(),
+        )),
+    }
+}
+
+fn convert_field(field: &RecordField, field_id: &mut i32) -> Result<Field, AvroToArrowSchemaError> {
+    let name = &field.name;
+    let (data_type, nullable) = convert_schema_type(&field.schema)?;
+
+    let mut metadata = HashMap::new();
+    metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
+    *field_id += 1;
+
+    Ok(Field::new(name, data_type, nullable).with_metadata(metadata))
+}
+
+fn convert_schema_type(schema: &AvroSchema) -> Result<(DataType, bool), AvroToArrowSchemaError> {
+    match schema {
+        AvroSchema::Null => Ok((DataType::Null, true)),
+        AvroSchema::Boolean => Ok((DataType::Boolean, false)),
+        AvroSchema::Int => Ok((DataType::Int32, false)),
+        AvroSchema::Long => Ok((DataType::Int64, false)),
+        AvroSchema::Float => Ok((DataType::Float32, false)),
+        AvroSchema::Double => Ok((DataType::Float64, false)),
+        AvroSchema::Bytes => Ok((DataType::Binary, false)),
+        AvroSchema::String => Ok((DataType::Utf8, false)),
+        AvroSchema::Array(item_schema) => {
+            let (item_type, item_nullable) = convert_schema_type(&item_schema.items)?;
+            let list_field = Field::new("item", item_type, item_nullable);
+            Ok((DataType::List(Arc::new(list_field)), false))
+        }
+        AvroSchema::Map(value_schema) => {
+            let (value_type, value_nullable) = convert_schema_type(&value_schema.types)?;
+            // Represent map as array of structs with key and value fields
+            let key_field = Field::new("key", DataType::Utf8, false);
+            let value_field = Field::new("value", value_type, value_nullable);
+            let struct_field = Field::new(
+                "entries",
+                DataType::Struct(vec![key_field, value_field].into()),
+                false,
+            );
+            Ok((DataType::Map(Arc::new(struct_field), true), false))
+        }
+        AvroSchema::Union(union_schema) => {
+            // Handle nullable unions (null + another type)
+            if union_schema.variants().len() == 2 {
+                let mut non_null_schema = None;
+                let mut has_null = false;
+
+                for variant in union_schema.variants() {
+                    if matches!(variant, AvroSchema::Null) {
+                        has_null = true;
+                    } else if non_null_schema.is_none() {
+                        non_null_schema = Some(variant);
+                    } else {
+                        // Complex union, not supported
+                        return Err(AvroToArrowSchemaError::UnsupportedSchemaType(
+                            "Complex unions are not supported".to_string(),
+                        ));
+                    }
                 }
 
-                Ok(ArrowSchema::new(arrow_fields))
-            }
-            _ => Err(AvroToArrowSchemaError::UnsupportedSchemaType(
-                "Only record schemas are supported at the top level".to_string(),
-            )),
-        }
-    }
-
-    fn convert_field(
-        field: &RecordField,
-        field_id: &mut i32,
-    ) -> Result<Field, AvroToArrowSchemaError> {
-        let name = &field.name;
-        let (data_type, nullable) = Self::convert_schema_type(&field.schema)?;
-
-        let mut metadata = HashMap::new();
-        metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
-        *field_id += 1;
-
-        Ok(Field::new(name, data_type, nullable).with_metadata(metadata))
-    }
-
-    fn convert_schema_type(
-        schema: &AvroSchema,
-    ) -> Result<(DataType, bool), AvroToArrowSchemaError> {
-        match schema {
-            AvroSchema::Null => Ok((DataType::Null, true)),
-            AvroSchema::Boolean => Ok((DataType::Boolean, false)),
-            AvroSchema::Int => Ok((DataType::Int32, false)),
-            AvroSchema::Long => Ok((DataType::Int64, false)),
-            AvroSchema::Float => Ok((DataType::Float32, false)),
-            AvroSchema::Double => Ok((DataType::Float64, false)),
-            AvroSchema::Bytes => Ok((DataType::Binary, false)),
-            AvroSchema::String => Ok((DataType::Utf8, false)),
-            AvroSchema::Array(item_schema) => {
-                let (item_type, item_nullable) = Self::convert_schema_type(&item_schema.items)?;
-                let list_field = Field::new("item", item_type, item_nullable);
-                Ok((DataType::List(Arc::new(list_field)), false))
-            }
-            AvroSchema::Map(value_schema) => {
-                let (value_type, value_nullable) = Self::convert_schema_type(&value_schema.types)?;
-                // Represent map as array of structs with key and value fields
-                let key_field = Field::new("key", DataType::Utf8, false);
-                let value_field = Field::new("value", value_type, value_nullable);
-                let struct_field = Field::new(
-                    "entries",
-                    DataType::Struct(vec![key_field, value_field].into()),
-                    false,
-                );
-                Ok((DataType::Map(Arc::new(struct_field), true), false))
-            }
-            AvroSchema::Union(union_schema) => {
-                // Handle nullable unions (null + another type)
-                if union_schema.variants().len() == 2 {
-                    let mut non_null_schema = None;
-                    let mut has_null = false;
-
-                    for variant in union_schema.variants() {
-                        if matches!(variant, AvroSchema::Null) {
-                            has_null = true;
-                        } else if non_null_schema.is_none() {
-                            non_null_schema = Some(variant);
-                        } else {
-                            // Complex union, not supported
-                            return Err(AvroToArrowSchemaError::UnsupportedSchemaType(
-                                "Complex unions are not supported".to_string(),
-                            ));
-                        }
-                    }
-
-                    if has_null && non_null_schema.is_some() {
-                        let (data_type, _) = Self::convert_schema_type(non_null_schema.unwrap())?;
-                        Ok((data_type, true))
-                    } else {
-                        Err(AvroToArrowSchemaError::UnsupportedSchemaType(
-                            "Unsupported union type".to_string(),
-                        ))
-                    }
+                if has_null && non_null_schema.is_some() {
+                    let (data_type, _) = convert_schema_type(non_null_schema.unwrap())?;
+                    Ok((data_type, true))
                 } else {
                     Err(AvroToArrowSchemaError::UnsupportedSchemaType(
-                        "Complex unions are not supported".to_string(),
+                        "Unsupported union type".to_string(),
                     ))
                 }
+            } else {
+                Err(AvroToArrowSchemaError::UnsupportedSchemaType(
+                    "Complex unions are not supported".to_string(),
+                ))
             }
-            AvroSchema::Record(record_schema) => {
-                let mut struct_fields = Vec::with_capacity(record_schema.fields.len());
-                let mut field_id = 0i32;
-
-                for field in &record_schema.fields {
-                    let arrow_field = Self::convert_field(field, &mut field_id)?;
-                    struct_fields.push(arrow_field);
-                }
-
-                Ok((DataType::Struct(struct_fields.into()), false))
-            }
-            AvroSchema::Fixed(fixed_schema) => {
-                Ok((DataType::FixedSizeBinary(fixed_schema.size as i32), false))
-            }
-            _ => Err(AvroToArrowSchemaError::UnsupportedSchemaType(format!(
-                "Unsupported Avro schema type: {schema:?}"
-            ))),
         }
+        AvroSchema::Record(record_schema) => {
+            let mut struct_fields = Vec::with_capacity(record_schema.fields.len());
+            let mut field_id = 0i32;
+
+            for field in &record_schema.fields {
+                let arrow_field = convert_field(field, &mut field_id)?;
+                struct_fields.push(arrow_field);
+            }
+
+            Ok((DataType::Struct(struct_fields.into()), false))
+        }
+        AvroSchema::Fixed(fixed_schema) => {
+            Ok((DataType::FixedSizeBinary(fixed_schema.size as i32), false))
+        }
+        _ => Err(AvroToArrowSchemaError::UnsupportedSchemaType(format!(
+            "Unsupported Avro schema type: {schema:?}"
+        ))),
     }
 }
 
@@ -321,7 +313,7 @@ mod tests {
         "#;
 
         let avro_schema = apache_avro::Schema::parse_str(avro_schema_str).unwrap();
-        let arrow_schema = AvroToArrowSchemaConverter::convert(&avro_schema).unwrap();
+        let arrow_schema = convert_avro_to_arrow_schema(&avro_schema).unwrap();
 
         assert_eq!(arrow_schema.fields().len(), 4);
 
@@ -357,7 +349,7 @@ mod tests {
         "#;
 
         let avro_schema = apache_avro::Schema::parse_str(avro_schema_str).unwrap();
-        let arrow_schema = AvroToArrowSchemaConverter::convert(&avro_schema).unwrap();
+        let arrow_schema = convert_avro_to_arrow_schema(&avro_schema).unwrap();
 
         assert_eq!(arrow_schema.fields().len(), 2);
 

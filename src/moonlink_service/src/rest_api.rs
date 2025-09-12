@@ -14,6 +14,8 @@ use moonlink_backend::{
     RowEventOperation, RowEventRequest, SnapshotRequest, REST_API_URI,
 };
 use moonlink_connectors::rest_ingest::schema_util::{build_arrow_schema, FieldSchema};
+use moonlink_connectors::rest_ingest::avro_converter::convert_avro_to_arrow_schema;
+use apache_avro::Schema as AvroSchema;
 use moonlink_error::ErrorStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -86,7 +88,8 @@ pub struct GetTableSchemaResponse {
 pub struct CreateTableRequest {
     pub database: String,
     pub table: String,
-    pub schema: Vec<FieldSchema>,
+    pub schema: Option<Vec<FieldSchema>>,
+    pub avro_schema: Option<String>,
     pub table_config: TableConfig,
 }
 
@@ -359,18 +362,60 @@ async fn create_table(
         src_table_name, payload
     );
 
-    let arrow_schema = match build_arrow_schema(&payload.schema) {
-        Ok(s) => s,
-        Err(e) => {
+    let mut parsed_avro_schema: Option<AvroSchema> = None;
+    let arrow_schema = if let Some(ref schema) = payload.schema {
+        match build_arrow_schema(&schema) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        message: format!(
+                            "Invalid schema on table {} creation {:?}: {}",
+                            table, payload.schema, e
+                        ),
+                    }),
+                ));
+            }
+        }
+    } else {
+        if payload.avro_schema.is_none() {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     message: format!(
-                        "Invalid schema on table {} creation {:?}: {}",
-                        src_table_name, payload.schema, e
+                        "No schema or avro schema provided on table {} creation",
+                        table,
                     ),
                 }),
             ));
+        }
+        let avro_schema = payload.avro_schema.clone().unwrap();
+        parsed_avro_schema = Some(AvroSchema::parse_str(&avro_schema)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        message: format!(
+                            "Invalid avro schema JSON on table {} creation: {}",
+                            table, e
+                        ),
+                    }),
+                )
+            })?);
+        match convert_avro_to_arrow_schema(&parsed_avro_schema.as_ref().unwrap()) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        message: format!(
+                            "Invalid avro schema on table {} creation {:?}: {}",
+                            table, payload.avro_schema, e
+                        ),
+                    }),
+                ));
+            }
         }
     };
 
@@ -405,6 +450,16 @@ async fn create_table(
                 "Successfully created table '{}' with ID {}:{}",
                 src_table_name, payload.database, payload.table,
             );
+            if let Some(avro_schema) = parsed_avro_schema {
+                state.backend.set_avro_schema( table.clone(), avro_schema).await.map_err(|e| {
+                    (
+                        get_backend_error_status_code(&e),
+                        Json(ErrorResponse {
+                            message: format!("Failed to set avro schema for table {}: {}", table, e),
+                        }),
+                    )
+                })?;
+            }
             Ok(Json(CreateTableResponse {
                 database: payload.database.clone(),
                 table: payload.table.clone(),
