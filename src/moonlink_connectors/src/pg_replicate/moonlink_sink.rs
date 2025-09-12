@@ -216,8 +216,9 @@ impl Sink {
                 ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id);
-                    if let Some(commit_lsn_tx) = self.visibility_lsn_txs.get(table_id).cloned() {
-                        if let Err(e) = commit_lsn_tx.send(VisibilityLsn {
+                    if let Some(visibility_lsn_tx) = self.visibility_lsn_txs.get(table_id).cloned()
+                    {
+                        if let Err(e) = visibility_lsn_tx.send(VisibilityLsn {
                             commit_lsn: commit_body.end_lsn(),
                             replication_lsn: commit_body.end_lsn(),
                         }) {
@@ -254,9 +255,10 @@ impl Sink {
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id);
-                        if let Some(commit_lsn_tx) = self.visibility_lsn_txs.get(table_id).cloned()
+                        if let Some(visibility_lsn_tx) =
+                            self.visibility_lsn_txs.get(table_id).cloned()
                         {
-                            if let Err(e) = commit_lsn_tx.send(VisibilityLsn {
+                            if let Err(e) = visibility_lsn_tx.send(VisibilityLsn {
                                 commit_lsn: stream_commit_body.end_lsn(),
                                 replication_lsn: stream_commit_body.end_lsn(),
                             }) {

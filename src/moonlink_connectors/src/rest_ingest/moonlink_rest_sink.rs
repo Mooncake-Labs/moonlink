@@ -355,7 +355,7 @@ mod tests {
             _wal_flush_lsn_rx,
             _flush_lsn_rx,
             event_sender: event_tx,
-            visibility_tx: visibility_tx,
+            visibility_tx,
         };
 
         // Add table to sink
@@ -454,7 +454,7 @@ mod tests {
             _wal_flush_lsn_rx,
             _flush_lsn_rx,
             event_sender: event_tx,
-            visibility_tx: visibility_tx,
+            visibility_tx,
         };
 
         let src_table_id = 1;

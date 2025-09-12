@@ -157,9 +157,17 @@ async fn validate_persisted_iceberg_table(
 ) {
     let (event_sender, _event_receiver) = mpsc::channel(100);
     let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-    let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
+    let (last_visibility_lsn_tx, last_visibility_lsn_rx) = watch::channel(VisibilityLsn {
+        commit_lsn: 0,
+        replication_lsn: 0,
+    });
     replication_lsn_tx.send(snapshot_lsn).unwrap();
-    last_commit_lsn_tx.send(snapshot_lsn).unwrap();
+    last_visibility_lsn_tx
+        .send(VisibilityLsn {
+            commit_lsn: snapshot_lsn,
+            replication_lsn: snapshot_lsn,
+        })
+        .unwrap();
 
     // Use a fresh new cache for new iceberg table manager.
     let cache_temp_dir = tempdir().unwrap();
@@ -177,7 +185,7 @@ async fn validate_persisted_iceberg_table(
     let read_state_manager = ReadStateManager::new(
         &table,
         replication_lsn_rx.clone(),
-        last_commit_lsn_rx,
+        last_visibility_lsn_rx,
         read_state_filepath_remap,
     );
     check_read_snapshot(
@@ -487,7 +495,12 @@ pub(crate) async fn replay(replay_filepath: &str) {
                     .is_none());
 
                 // Update LSN.
-                commit_lsn_tx.send(commit_event.lsn).unwrap();
+                visibility_tx
+                    .send(VisibilityLsn {
+                        commit_lsn: commit_event.lsn,
+                        replication_lsn: commit_event.lsn,
+                    })
+                    .unwrap();
                 replication_lsn_tx.send(commit_event.lsn).unwrap();
 
                 // Apply update to mooncake table.

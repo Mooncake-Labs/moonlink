@@ -280,10 +280,10 @@ impl PostgresConnection {
             }
 
             // Notify read state manager with the commit LSN for the initial copy boundary.
-            self.replication_state.mark(start_lsn.into());
+            self.replication_state.mark(progress.boundary_lsn.into());
             if let Err(e) = visibility_tx.send(VisibilityLsn {
-                commit_lsn: start_lsn.into(),
-                replication_lsn: start_lsn.into(),
+                commit_lsn: progress.boundary_lsn.into(),
+                replication_lsn: progress.boundary_lsn.into(),
             }) {
                 warn!(error = ?e, table_id = src_table_id, "failed to send initial copy commit lsn");
             }
@@ -503,7 +503,7 @@ impl PostgresConnection {
         let visibility_tx = table_resources
             .visibility_tx
             .take()
-            .expect("commit_lsn_tx is None");
+            .expect("visibility_lsn_tx is None");
         let visibility_tx_for_copy = visibility_tx.clone();
         let ready_rx = self
             .add_table_to_replication(
