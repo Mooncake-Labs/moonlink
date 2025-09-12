@@ -39,25 +39,6 @@ pub struct MooncakeTableProvider {
 
 impl MooncakeTableProvider {
     pub async fn try_new(uri: &str, schema: String, table: String, lsn: u64) -> Result<Self> {
-        let max_retries = 2;
-
-        for attempt in 0..max_retries {
-            match Self::try_new_once(uri, &schema, &table, lsn).await {
-                Ok(provider) => return Ok(provider),
-                Err(e) if attempt + 1 == max_retries => return Err(e),
-                Err(e) => {
-                    eprintln!(
-                        "MooncakeTableProvider creation failed (attempt {}): {}. Retrying...",
-                        attempt + 1,
-                        e
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        }
-        unreachable!()
-    }
-    async fn try_new_once(uri: &str, schema: &str, table: &str, lsn: u64) -> Result<Self> {
         let mut pooled_stream = get_stream(uri).await?;
         let table_schema = get_table_schema(
             &mut pooled_stream.stream_mut(),
@@ -67,10 +48,7 @@ impl MooncakeTableProvider {
         .await?;
 
         let table_schema = StreamReader::try_new(table_schema.as_slice(), None)?.schema();
-        let scan = Arc::new(
-            MooncakeTableScan::try_new(pooled_stream, schema.clone(), table.clone(), lsn)
-                .await?,
-        );
+        let scan = Arc::new(MooncakeTableScan::try_new(pooled_stream, schema, table, lsn).await?);
 
         Ok(Self {
             schema: table_schema,

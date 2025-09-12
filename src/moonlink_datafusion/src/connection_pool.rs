@@ -3,11 +3,10 @@ use std::{
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
-use tokio::{net::UnixStream, sync::Mutex, time::sleep};
+use tokio::{net::UnixStream, sync::Mutex};
 
 const DEFAULT_MAX_ENTRIES_PER_URI: usize = 30;
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) static POOL: LazyLock<Arc<Pool>> = LazyLock::new(|| {
     Arc::new(Pool::new(
@@ -31,7 +30,6 @@ pub struct Pool {
     pub inner: Mutex<HashMap<String, VecDeque<PooledEntry>>>,
     pub max_entries_per_uri: usize,
     pub idle_timeout_ms: u64,
-    pub maintenance_interval: Duration,
 }
 
 impl Pool {
@@ -40,24 +38,11 @@ impl Pool {
             inner: Mutex::new(HashMap::new()),
             max_entries_per_uri: max_per_uri,
             idle_timeout_ms,
-            maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
         }
     }
 
     pub fn idle_timeout(&self) -> Duration {
         Duration::from_millis(self.idle_timeout_ms)
-    }
-
-    pub async fn start_maintenance_pool_task(self: Arc<Self>) {
-        loop {
-            sleep(self.maintenance_interval).await;
-            let idle_timeout = self.idle_timeout();
-            let mut pool = self.inner.lock().await;
-
-            for vec in pool.values_mut() {
-                vec.retain(|entry| entry.inserted_at.elapsed() <= idle_timeout);
-            }
-        }
     }
 }
 
@@ -142,19 +127,12 @@ pub(crate) async fn get_stream(uri: &str) -> crate::Result<PooledStream> {
     get_stream_with_pool(uri, &POOL).await
 }
 
-pub fn start_global_maintenance_pool_task() {
-    let pool = POOL.clone();
-    tokio::spawn(async move {
-        pool.start_maintenance_pool_task().await;
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use crate::connection_pool::{get_stream_with_pool, Pool};
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::{net::UnixListener, time::sleep};
+    use tokio::net::UnixListener;
 
     fn create_test_pool() -> Arc<Pool> {
         Arc::new(Pool::new(30, 50)) // 50ms idle timeout for testing
@@ -292,96 +270,5 @@ mod tests {
             test_pool.max_entries_per_uri,
             "pool should not exceed MAX_PER_URI"
         );
-    }
-
-    #[tokio::test]
-    async fn test_maintenance_task_cleanup() {
-        let test_pool = Arc::new(Pool {
-            inner: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            max_entries_per_uri: 30,
-            idle_timeout_ms: 50,
-            maintenance_interval: Duration::from_millis(30),
-        });
-
-        let dir = tempdir().unwrap();
-        let uri1 = dir.path().join("test_maintenance1.sock");
-        let uri1_str = uri1.to_str().unwrap().to_string();
-        let uri2 = dir.path().join("test_maintenance2.sock");
-        let uri2_str = uri2.to_str().unwrap().to_string();
-
-        // Set up listeners for both URIs
-        let listener1 = UnixListener::bind(&uri1_str).expect("failed to bind socket1");
-        tokio::spawn(async move {
-            loop {
-                let _ = listener1.accept().await;
-            }
-        });
-
-        let listener2 = UnixListener::bind(&uri2_str).expect("failed to bind socket2");
-        tokio::spawn(async move {
-            loop {
-                let _ = listener2.accept().await;
-            }
-        });
-
-        // Create streams for both URIs
-        let stream1 = get_stream_with_pool(&uri1_str, &test_pool)
-            .await
-            .expect("should connect to uri1");
-        let stream2 = get_stream_with_pool(&uri2_str, &test_pool)
-            .await
-            .expect("should connect to uri2");
-
-        // Return streams to pool
-        drop(stream1);
-        drop(stream2);
-
-        // Give spawned tasks time to complete
-        sleep(Duration::from_millis(20)).await;
-
-        // Verify both streams are in pool
-        {
-            let pool = test_pool.inner.lock().await;
-            assert!(pool.contains_key(&uri1_str), "pool should contain uri1");
-            assert!(pool.contains_key(&uri2_str), "pool should contain uri2");
-
-            let vec1 = pool.get(&uri1_str).unwrap();
-            let vec2 = pool.get(&uri2_str).unwrap();
-            assert_eq!(vec1.len(), 1, "uri1 should have 1 stream");
-            assert_eq!(vec2.len(), 1, "uri2 should have 1 stream");
-        }
-
-        // Wait for streams to expire
-        sleep(test_pool.idle_timeout() + Duration::from_millis(50)).await;
-
-        // Start maintenance task with timeout to prevent infinite loop
-        let maintenance_result = tokio::time::timeout(
-            Duration::from_millis(100), // Let it run for 100ms (should do 3+ cycles)
-            test_pool.clone().start_maintenance_pool_task(),
-        )
-        .await;
-
-        // We expect timeout (because start_maintenance_task runs forever)
-        assert!(
-            maintenance_result.is_err(),
-            "maintenance task should timeout"
-        );
-
-        // Verify expired streams were cleaned up
-        {
-            let pool = test_pool.inner.lock().await;
-
-            assert_eq!(
-                pool.get(&uri1_str).unwrap().len(),
-                0,
-                "expired streams should be cleaned up for uri1"
-            );
-
-            assert_eq!(
-                pool.get(&uri2_str).unwrap().len(),
-                0,
-                "expired streams should be cleaned up for uri2"
-            );
-        }
     }
 }

@@ -1,5 +1,5 @@
 mod catalog_provider;
-pub mod connection_pool;
+mod connection_pool;
 mod error;
 mod schema_provider;
 mod table_provider;
