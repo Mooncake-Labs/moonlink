@@ -201,7 +201,7 @@ pub(crate) async fn create_test_insert_parquet_payload(directory: &str) -> serde
 }
 
 /// Test util function to send ingest request.
-pub(crate) async fn send_test_ingest(
+pub(crate) async fn execute_test_ingest(
     client: &Client,
     table_name: &str,
     payload: &serde_json::Value,
@@ -221,7 +221,7 @@ pub(crate) async fn send_test_ingest(
 }
 
 /// Test util function to send invalid ingest request.
-pub(crate) async fn send_test_invalid_ingest(
+pub(crate) async fn execute_test_invalid_ingest(
     client: &Client,
     table_name: &str,
     payload: &serde_json::Value,
@@ -236,7 +236,7 @@ pub(crate) async fn send_test_invalid_ingest(
 }
 
 /// Test util function to send upload request.
-pub(crate) async fn send_test_upload(
+pub(crate) async fn execute_test_upload(
     client: &Client,
     table_name: &str,
     payload: &serde_json::Value,
@@ -256,7 +256,7 @@ pub(crate) async fn send_test_upload(
 }
 
 /// Test util function to send invalid upload request.
-pub(crate) async fn send_test_invalid_upload(
+pub(crate) async fn execute_test_invalid_upload(
     client: &Client,
     table_name: &str,
     payload: &serde_json::Value,
@@ -271,7 +271,7 @@ pub(crate) async fn send_test_invalid_upload(
 }
 
 // Test util function to send tables request.
-pub(crate) async fn send_test_tables(
+pub(crate) async fn execute_test_tables(
     client: &Client,
     table_name: &str,
     payload: &serde_json::Value,
