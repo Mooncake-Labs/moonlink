@@ -61,14 +61,14 @@ impl MooncakeTableProvider {
         let mut pooled_stream = get_stream(uri).await?;
         let table_schema = get_table_schema(
             &mut pooled_stream.stream_mut(),
-            schema.to_string(),
-            table.to_string(),
+            schema.clone(),
+            table.clone(),
         )
         .await?;
 
         let table_schema = StreamReader::try_new(table_schema.as_slice(), None)?.schema();
         let scan = Arc::new(
-            MooncakeTableScan::try_new(pooled_stream, schema.to_string(), table.to_string(), lsn)
+            MooncakeTableScan::try_new(pooled_stream, schema.clone(), table.clone(), lsn)
                 .await?,
         );
 

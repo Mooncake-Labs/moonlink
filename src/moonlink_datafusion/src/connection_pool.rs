@@ -1,14 +1,20 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, LazyLock,
-    },
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 use tokio::{net::UnixStream, sync::Mutex, time::sleep};
 
-pub static POOL: LazyLock<Arc<Pool>> = LazyLock::new(|| Arc::new(Pool::new(30, 30_000)));
+const DEFAULT_MAX_ENTRIES_PER_URI: usize = 30;
+const DEFAULT_IDLE_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+
+pub(crate) static POOL: LazyLock<Arc<Pool>> = LazyLock::new(|| {
+    Arc::new(Pool::new(
+        DEFAULT_MAX_ENTRIES_PER_URI,
+        DEFAULT_IDLE_TIMEOUT_MS,
+    ))
+});
 
 #[derive(Debug)]
 pub struct PooledEntry {
@@ -17,14 +23,14 @@ pub struct PooledEntry {
 }
 
 #[derive(Debug)]
+/// Global connection pool.
+///
+/// Key: URI (String)
+/// Value: Mutex-protected VecDeque of PooledEntry (the pool for that URI)
 pub struct Pool {
-    /// Global connection pool.
-    ///
-    /// Key: URI (String)
-    /// Value: Mutex-protected VecDeque of PooledEntry (the pool for that URI)
-    pub inner: Mutex<HashMap<String, Arc<Mutex<VecDeque<PooledEntry>>>>>,
-    pub max_per_uri: usize,
-    pub idle_timeout_ms: AtomicU64,
+    pub inner: Mutex<HashMap<String, VecDeque<PooledEntry>>>,
+    pub max_entries_per_uri: usize,
+    pub idle_timeout_ms: u64,
     pub maintenance_interval: Duration,
 }
 
@@ -32,36 +38,24 @@ impl Pool {
     pub fn new(max_per_uri: usize, idle_timeout_ms: u64) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
-            max_per_uri,
-            idle_timeout_ms: AtomicU64::new(idle_timeout_ms),
-            maintenance_interval: Duration::from_secs(5),
+            max_entries_per_uri: max_per_uri,
+            idle_timeout_ms,
+            maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
         }
     }
 
     pub fn idle_timeout(&self) -> Duration {
-        Duration::from_millis(self.idle_timeout_ms.load(Ordering::Relaxed))
+        Duration::from_millis(self.idle_timeout_ms)
     }
 
     pub async fn start_maintenance_pool_task(self: Arc<Self>) {
         loop {
             sleep(self.maintenance_interval).await;
-            let uri_mutexes = {
-                let pool = self.inner.lock().await;
-                pool.iter()
-                    .map(|(uri, mutex)| (uri.clone(), mutex.clone()))
-                    .collect::<Vec<_>>()
-            };
+            let idle_timeout = self.idle_timeout();
+            let mut pool = self.inner.lock().await;
 
-            let cleanup_tasks = uri_mutexes.into_iter().map(|(_, vec_mutex)| {
-                let idle_timeout = self.idle_timeout();
-                tokio::spawn(async move {
-                    let mut vec = vec_mutex.lock().await;
-                    vec.retain(|entry| entry.inserted_at.elapsed() <= idle_timeout);
-                })
-            });
-
-            for task in cleanup_tasks {
-                let _ = task.await;
+            for vec in pool.values_mut() {
+                vec.retain(|entry| entry.inserted_at.elapsed() <= idle_timeout);
             }
         }
     }
@@ -104,14 +98,10 @@ impl Drop for PooledStream {
             let uri = self.uri.clone();
             let pool = self.pool.clone();
             tokio::spawn(async move {
-                let vec_mutex = {
-                    let mut pool_inner = pool.inner.lock().await;
-                    pool_inner.entry(uri).or_default().clone()
-                };
+                let mut pool_inner = pool.inner.lock().await;
+                let pool_vec = pool_inner.entry(uri).or_default();
 
-                let mut pool_vec = vec_mutex.lock().await;
-
-                if pool_vec.len() >= pool.max_per_uri {
+                if pool_vec.len() >= pool.max_entries_per_uri {
                     pool_vec.pop_front();
                 }
 
@@ -129,13 +119,9 @@ pub(crate) async fn get_stream_with_pool(
     pool: &Arc<Pool>,
 ) -> crate::Result<PooledStream> {
     {
-        let mutex_vec = {
-            let pool_inner = pool.inner.lock().await;
-            pool_inner.get(uri).cloned()
-        };
+        let mut pool_inner = pool.inner.lock().await;
 
-        if let Some(mutex_vec) = mutex_vec {
-            let mut vec = mutex_vec.lock().await;
+        if let Some(vec) = pool_inner.get_mut(uri) {
             // Remove expired streams
             vec.retain(|entry| entry.inserted_at.elapsed() <= pool.idle_timeout());
             if !vec.is_empty() {
@@ -282,7 +268,7 @@ mod tests {
 
         // Create MAX_PER_URI + 5 UnixStream connections
         let mut streams: Vec<PooledStream> = Vec::new();
-        for _ in 0..(test_pool.max_per_uri + 5) {
+        for _ in 0..(test_pool.max_entries_per_uri + 5) {
             let stream = UnixStream::connect(uri_str).await.unwrap();
             let ps = PooledStream::new(uri_str.to_string(), stream, test_pool.clone());
             streams.push(ps);
@@ -296,15 +282,14 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         let pool = test_pool.inner.lock().await;
-        let vec_mutex = pool.get(uri_str);
+        let vec = pool.get(uri_str);
         assert!(
-            vec_mutex.is_some(),
+            vec.is_some(),
             "pool should contain an entry for the test URI"
         );
-        let vec = vec_mutex.unwrap().lock().await;
         assert_eq!(
-            vec.len(),
-            test_pool.max_per_uri,
+            vec.unwrap().len(),
+            test_pool.max_entries_per_uri,
             "pool should not exceed MAX_PER_URI"
         );
     }
@@ -313,8 +298,8 @@ mod tests {
     async fn test_maintenance_task_cleanup() {
         let test_pool = Arc::new(Pool {
             inner: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            max_per_uri: 30,
-            idle_timeout_ms: std::sync::atomic::AtomicU64::new(50),
+            max_entries_per_uri: 30,
+            idle_timeout_ms: 50,
             maintenance_interval: Duration::from_millis(30),
         });
 
@@ -360,8 +345,8 @@ mod tests {
             assert!(pool.contains_key(&uri1_str), "pool should contain uri1");
             assert!(pool.contains_key(&uri2_str), "pool should contain uri2");
 
-            let vec1 = pool.get(&uri1_str).unwrap().lock().await;
-            let vec2 = pool.get(&uri2_str).unwrap().lock().await;
+            let vec1 = pool.get(&uri1_str).unwrap();
+            let vec2 = pool.get(&uri2_str).unwrap();
             assert_eq!(vec1.len(), 1, "uri1 should have 1 stream");
             assert_eq!(vec2.len(), 1, "uri2 should have 1 stream");
         }
@@ -385,22 +370,18 @@ mod tests {
         // Verify expired streams were cleaned up
         {
             let pool = test_pool.inner.lock().await;
-            if let Some(vec_mutex) = pool.get(&uri1_str) {
-                let vec1 = vec_mutex.lock().await;
-                assert_eq!(
-                    vec1.len(),
-                    0,
-                    "expired streams should be cleaned up for uri1"
-                );
-            }
-            if let Some(vec_mutex) = pool.get(&uri2_str) {
-                let vec2 = vec_mutex.lock().await;
-                assert_eq!(
-                    vec2.len(),
-                    0,
-                    "expired streams should be cleaned up for uri2"
-                );
-            }
+
+            assert_eq!(
+                pool.get(&uri1_str).unwrap().len(),
+                0,
+                "expired streams should be cleaned up for uri1"
+            );
+
+            assert_eq!(
+                pool.get(&uri2_str).unwrap().len(),
+                0,
+                "expired streams should be cleaned up for uri2"
+            );
         }
     }
 }
