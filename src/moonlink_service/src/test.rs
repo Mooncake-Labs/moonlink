@@ -1032,7 +1032,7 @@ async fn test_kafka_avro_stress_ingest() {
     tokio::spawn(async move {
         start_with_config(config).await.unwrap();
     });
-    test_readiness_probe().await;
+    wait_for_server_ready().await;
 
     // Create test table with Avro schema directly
     let client = reqwest::Client::new();

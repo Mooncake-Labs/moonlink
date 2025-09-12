@@ -372,7 +372,7 @@ async fn create_table(
                     Json(ErrorResponse {
                         message: format!(
                             "Invalid schema on table {} creation {:?}: {}",
-                            table, payload.schema, e
+                            src_table_name, payload.schema, e
                         ),
                     }),
                 ));
@@ -383,7 +383,9 @@ async fn create_table(
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    message: format!("No schema or avro schema provided on table {table} creation",),
+                    message: format!(
+                        "No schema or avro schema provided on table {src_table_name} creation",
+                    ),
                 }),
             ));
         }
@@ -392,7 +394,9 @@ async fn create_table(
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    message: format!("Invalid avro schema JSON on table {table} creation: {e}"),
+                    message: format!(
+                        "Invalid avro schema JSON on table {src_table_name} creation: {e}"
+                    ),
                 }),
             )
         })?);
@@ -404,7 +408,7 @@ async fn create_table(
                     Json(ErrorResponse {
                         message: format!(
                             "Invalid avro schema on table {} creation {:?}: {}",
-                            table, payload.avro_schema, e
+                            src_table_name, payload.avro_schema, e
                         ),
                     }),
                 ));
@@ -446,14 +450,14 @@ async fn create_table(
             if let Some(avro_schema) = parsed_avro_schema {
                 state
                     .backend
-                    .set_avro_schema(table.clone(), avro_schema)
+                    .set_avro_schema(src_table_name.clone(), avro_schema)
                     .await
                     .map_err(|e| {
                         (
                             get_backend_error_status_code(&e),
                             Json(ErrorResponse {
                                 message: format!(
-                                    "Failed to set avro schema for table {table}: {e}"
+                                    "Failed to set avro schema for table {src_table_name}: {e}"
                                 ),
                             }),
                         )
@@ -462,7 +466,7 @@ async fn create_table(
                     .kafka_schema_id_cache
                     .write()
                     .await
-                    .insert(table.clone(), 0);
+                    .insert(src_table_name.clone(), 0);
             }
             Ok(Json(CreateTableResponse {
                 database: payload.database.clone(),
