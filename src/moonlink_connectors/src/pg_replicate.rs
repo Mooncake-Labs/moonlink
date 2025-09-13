@@ -280,7 +280,6 @@ impl PostgresConnection {
             }
 
             // Notify read state manager with the commit LSN for the initial copy boundary.
-            self.replication_state.mark(progress.boundary_lsn.into());
             if let Err(e) = visibility_tx.send(VisibilityLsn {
                 commit_lsn: progress.boundary_lsn.into(),
                 replication_lsn: progress.boundary_lsn.into(),
