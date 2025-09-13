@@ -67,9 +67,7 @@ use mem_slice::MemSlice;
 use more_asserts as ma;
 use opentelemetry::global;
 use opentelemetry::metrics::Histogram;
-use opentelemetry_otlp::MetricExporterBuilder;
-use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 pub(crate) use snapshot::SnapshotTableState;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -216,38 +214,34 @@ impl Snapshot {
     }
 }
 
-fn init_meter_provider() -> Result<SdkMeterProvider> {
-    let exporter = MetricExporterBuilder::default().build()?;
-    let provider = SdkMeterProvider::builder()
-        .with_periodic_exporter(exporter)
-        .with_resource(
-            Resource::builder()
-                .with_service_name("metrics-basic-example")
-                .build(),
-        )
-        .build();
-    global::set_meter_provider(provider.clone());
-    Ok(provider)
-}
-
 struct SnapshotStats {
     creation_latency: Histogram<f64>,
 }
 
 impl SnapshotStats {
-    pub fn new() -> Result<Self> {
-        init_meter_provider()?;
-        let meter = global::meter("mooncake_table");
+    pub fn new() -> Result<Arc<Self>> {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .build()
+            .unwrap();
+        let reader = PeriodicReader::builder(exporter)
+            .with_interval(std::time::Duration::from_secs(2))
+            .build();
+
+        let meter_provider = SdkMeterProvider::builder().with_reader(reader).build();
+        global::set_meter_provider(meter_provider.clone());
+
+        let meter = global::meter("mooncake table");
 
         let creation_latency = meter
             .f64_histogram("creation_latency")
             .with_description("creation_latency histogram")
             .with_boundaries(vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 3.0, 5.0])
             .build();
-        Ok(Self { creation_latency })
+        Ok(Arc::new(Self { creation_latency }))
     }
 
-    fn update_creation_latency(&mut self, time: f64) {
+    fn update_creation_latency(&self, time: f64) {
         self.creation_latency.record(time, &[]);
     }
 }
@@ -527,7 +521,7 @@ pub struct MooncakeTable {
     pub completed_unrecorded_flush_lsns: BTreeSet<u64>,
 
     /// snapshot stats
-    snapshot_stats: SnapshotStats,
+    snapshot_stats: Arc<SnapshotStats>,
 
     /// Table replay sender.
     event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
@@ -1104,16 +1098,18 @@ impl MooncakeTable {
 
         let min_ongoing_flush_lsn = self.get_min_ongoing_flush_lsn();
         next_snapshot_task.min_ongoing_flush_lsn = min_ongoing_flush_lsn;
+
+        let table_notify = self.table_notify.as_ref().unwrap().clone();
+        let snapshot_stats = self.snapshot_stats.clone();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(
-            Self::create_snapshot_async(
-                cur_snapshot,
-                next_snapshot_task,
-                opt,
-                self.table_notify.as_ref().unwrap().clone(),
-            )
-            .instrument(info_span!("create_snapshot_async")),
-        );
+        tokio::task::spawn(async move {
+            let start = Instant::now();
+            Self::create_snapshot_async(cur_snapshot, next_snapshot_task, opt, table_notify)
+                .instrument(info_span!("create_snapshot_async"))
+                .await;
+            let time = start.elapsed().as_secs_f64();
+            snapshot_stats.update_creation_latency(time);
+        });
     }
 
     /// Notify mooncake snapshot as completed.
@@ -1530,10 +1526,7 @@ impl MooncakeTable {
         if !self.next_snapshot_task.should_create_snapshot() && !opt.force_create {
             return false;
         }
-        let start = Instant::now();
         self.create_snapshot_impl(opt);
-        let elapsed = start.elapsed().as_secs_f64();
-        self.snapshot_stats.update_creation_latency(elapsed);
         true
     }
 
