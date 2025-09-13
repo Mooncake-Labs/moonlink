@@ -27,9 +27,6 @@ data:
         server_name _;
         root /usr/share/nginx/html;
 
-        # Serve static files; return 404 when file does not exist
-        location / {
-          try_files $uri $uri/ =404;
-        }
+        location / { }
       }
     }
