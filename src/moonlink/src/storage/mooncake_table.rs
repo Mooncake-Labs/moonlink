@@ -222,8 +222,7 @@ impl SnapshotStats {
     pub fn new() -> Result<Arc<Self>> {
         let exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
-            .build()
-            .unwrap();
+            .build()?;
         let reader = PeriodicReader::builder(exporter)
             .with_interval(std::time::Duration::from_secs(2))
             .build();
