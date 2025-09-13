@@ -3,7 +3,7 @@ use crate::storage::iceberg::rest_catalog::RestCatalog;
 /// A RAII-style test guard, which creates namespace ident, table ident at construction, and deletes at destruction.
 use crate::storage::iceberg::rest_catalog_test_utils::*;
 use iceberg::{Catalog, NamespaceIdent, Result, TableIdent};
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future, pin::Pin};
 
 pub(crate) struct RestCatalogTestGuard {
     pub(crate) namespace: Option<NamespaceIdent>,
@@ -42,6 +42,30 @@ impl RestCatalogTestGuard {
 
 impl Drop for RestCatalogTestGuard {
     fn drop(&mut self) {
+        fn drop_namespace<'a>(
+            catalog: &'a RestCatalog,
+            namespace_ident: &'a NamespaceIdent,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                let ns_idents = catalog
+                    .list_namespaces(Some(namespace_ident))
+                    .await
+                    .unwrap();
+                if ns_idents.is_empty() {
+                    catalog.drop_namespace(namespace_ident).await.unwrap();
+                    return;
+                }
+                for ns_ident in ns_idents {
+                    drop_namespace(catalog, &ns_ident).await;
+                    let table_idents = catalog.list_tables(&ns_ident).await.unwrap();
+                    for table_ident in table_idents {
+                        catalog.drop_table(&table_ident).await.unwrap();
+                    }
+                    catalog.drop_namespace(&ns_ident).await.unwrap();
+                }
+                catalog.drop_namespace(namespace_ident).await.unwrap();
+            })
+        }
         let table = self.table.take();
         let namespace = self.namespace.take();
         let rest_catalog_config = default_rest_catalog_config();
@@ -59,15 +83,7 @@ impl Drop for RestCatalogTestGuard {
                     catalog.drop_table(&t).await.unwrap();
                 }
                 if let Some(ns_ident) = namespace {
-                    let ns_idents = catalog.list_namespaces(Some(&ns_ident)).await.unwrap();
-                    for ns_ident in ns_idents {
-                        let table_idents = catalog.list_tables(&ns_ident).await.unwrap();
-                        for table_ident in table_idents {
-                            catalog.drop_table(&table_ident).await.unwrap();
-                        }
-                        catalog.drop_namespace(&ns_ident).await.unwrap();
-                    }
-                    catalog.drop_namespace(&ns_ident).await.unwrap();
+                    drop_namespace(&catalog, &ns_ident).await;
                 }
             });
         })
