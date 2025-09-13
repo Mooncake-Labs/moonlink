@@ -152,6 +152,36 @@ async fn test_drop_namespace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_get_namespace() {
+    let namespace = get_random_string();
+    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+        .await
+        .unwrap();
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(
+        rest_catalog_config,
+        accessor_config,
+        create_test_table_schema().unwrap(),
+    )
+    .await
+    .unwrap();
+    let namespace_ident = NamespaceIdent::new(namespace);
+    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
+    catalog.drop_namespace(&namespace_ident).await.unwrap();
+    guard.namespace = None;
+    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
+    let ns_name = get_random_string();
+    let ns_ident = NamespaceIdent::new(ns_name);
+    let ns = catalog
+        .create_namespace(&ns_ident, /* properties*/ HashMap::new())
+        .await
+        .unwrap();
+    guard.namespace = Some(ns_ident.clone());
+    assert_eq!(catalog.get_namespace(&ns_ident).await.unwrap(), ns);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_list_namespace() {
     let namespace = get_random_string();
     let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
