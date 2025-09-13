@@ -59,6 +59,14 @@ impl Drop for RestCatalogTestGuard {
                     catalog.drop_table(&t).await.unwrap();
                 }
                 if let Some(ns_ident) = namespace {
+                    let ns_idents = catalog.list_namespaces(Some(&ns_ident)).await.unwrap();
+                    for ns_ident in ns_idents {
+                        let table_idents = catalog.list_tables(&ns_ident).await.unwrap();
+                        for table_ident in table_idents {
+                            catalog.drop_table(&table_ident).await.unwrap();
+                        }
+                        catalog.drop_namespace(&ns_ident).await.unwrap();
+                    }
                     catalog.drop_namespace(&ns_ident).await.unwrap();
                 }
             });

@@ -112,7 +112,7 @@ async fn test_load_table() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_create_namespace() {
     let namespace = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+    let guard = RestCatalogTestGuard::new(namespace.clone(), /*table=*/ None)
         .await
         .unwrap();
     let rest_catalog_config = default_rest_catalog_config();
@@ -124,15 +124,14 @@ async fn test_create_namespace() {
     )
     .await
     .unwrap();
-    let namespace_ident = NamespaceIdent::new(namespace);
-    guard.namespace = Some(namespace_ident.clone());
-    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
+    let ns_ident = guard.namespace.clone().unwrap();
+    assert!(catalog.namespace_exists(&ns_ident).await.unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_drop_namespace() {
     let namespace = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+    let guard = RestCatalogTestGuard::new(namespace.clone(), /*table=*/ None)
         .await
         .unwrap();
     let rest_catalog_config = default_rest_catalog_config();
@@ -144,17 +143,36 @@ async fn test_drop_namespace() {
     )
     .await
     .unwrap();
-    let namespace_ident = NamespaceIdent::new(namespace);
-    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
-    catalog.drop_namespace(&namespace_ident).await.unwrap();
-    guard.namespace = None;
-    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
+    let ns_parent_ident = guard.namespace.clone().unwrap();
+    assert!(catalog.namespace_exists(&ns_parent_ident).await.unwrap());
+    let ns_name = get_random_string();
+    let ns_ident = NamespaceIdent::from_strs(vec![namespace, ns_name]).unwrap();
+    catalog
+        .create_namespace(&ns_ident, /* properties*/ HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        catalog
+            .list_namespaces(Some(&ns_parent_ident))
+            .await
+            .unwrap(),
+        vec![ns_ident.clone()]
+    );
+    catalog.drop_namespace(&ns_ident).await.unwrap();
+    assert_eq!(
+        catalog
+            .list_namespaces(Some(&ns_parent_ident))
+            .await
+            .unwrap(),
+        vec![]
+    );
+    assert!(!catalog.namespace_exists(&ns_ident).await.unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_get_namespace() {
     let namespace = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+    let guard = RestCatalogTestGuard::new(namespace.clone(), /*table=*/ None)
         .await
         .unwrap();
     let rest_catalog_config = default_rest_catalog_config();
@@ -166,25 +184,21 @@ async fn test_get_namespace() {
     )
     .await
     .unwrap();
-    let namespace_ident = NamespaceIdent::new(namespace);
-    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
-    catalog.drop_namespace(&namespace_ident).await.unwrap();
-    guard.namespace = None;
-    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
+    let ns_ident = guard.namespace.clone().unwrap();
+    assert!(catalog.namespace_exists(&ns_ident).await.unwrap());
     let ns_name = get_random_string();
-    let ns_ident = NamespaceIdent::new(ns_name);
+    let ns_ident = NamespaceIdent::from_strs(vec![namespace, ns_name]).unwrap();
     let ns = catalog
         .create_namespace(&ns_ident, /* properties*/ HashMap::new())
         .await
         .unwrap();
-    guard.namespace = Some(ns_ident.clone());
     assert_eq!(catalog.get_namespace(&ns_ident).await.unwrap(), ns);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_list_namespace() {
     let namespace = get_random_string();
-    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+    let guard = RestCatalogTestGuard::new(namespace.clone(), /*table=*/ None)
         .await
         .unwrap();
     let rest_catalog_config = default_rest_catalog_config();
@@ -196,26 +210,25 @@ async fn test_list_namespace() {
     )
     .await
     .unwrap();
-    let namespace_ident = NamespaceIdent::new(namespace);
-    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
-    catalog.drop_namespace(&namespace_ident).await.unwrap();
-    guard.namespace = None;
-    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
     let namespace_1 = get_random_string();
     let namespace_2 = get_random_string();
-    let ns_ident_parent = NamespaceIdent::new(namespace_1.clone());
-    let ns_ident = NamespaceIdent::from_strs(vec![namespace_1, namespace_2]).unwrap();
+    let ns_ident_1 = NamespaceIdent::from_strs(vec![namespace.clone(), namespace_1]).unwrap();
+    let ns_ident_2 = NamespaceIdent::from_strs(vec![namespace.clone(), namespace_2]).unwrap();
     catalog
-        .create_namespace(&ns_ident, /*properties*/ HashMap::new())
+        .create_namespace(&ns_ident_1, /*properties*/ HashMap::new())
         .await
         .unwrap();
-    guard.namespace = Some(ns_ident.clone());
+    catalog
+        .create_namespace(&ns_ident_2, /*properties*/ HashMap::new())
+        .await
+        .unwrap();
+    let ns_parent_ident = guard.namespace.clone().unwrap();
     assert_eq!(
         catalog
-            .list_namespaces(Some(&ns_ident_parent))
+            .list_namespaces(Some(&ns_parent_ident))
             .await
             .unwrap(),
-        vec![ns_ident]
+        vec![ns_ident_1, ns_ident_2]
     )
 }
 
