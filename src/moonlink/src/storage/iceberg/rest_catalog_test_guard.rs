@@ -51,22 +51,19 @@ impl Drop for RestCatalogTestGuard {
                     .list_namespaces(Some(namespace_ident))
                     .await
                     .unwrap();
-                if ns_idents.is_empty() {
-                    catalog.drop_namespace(namespace_ident).await.unwrap();
-                    return;
+                let table_idents = catalog.list_tables(namespace_ident).await.unwrap();
+
+                for child_ns in ns_idents {
+                    drop_namespace(catalog, &child_ns).await;
                 }
-                for ns_ident in ns_idents {
-                    drop_namespace(catalog, &ns_ident).await;
-                    let table_idents = catalog.list_tables(&ns_ident).await.unwrap();
-                    for table_ident in table_idents {
-                        catalog.drop_table(&table_ident).await.unwrap();
-                    }
-                    catalog.drop_namespace(&ns_ident).await.unwrap();
+
+                for table_ident in table_idents {
+                    catalog.drop_table(&table_ident).await.unwrap();
                 }
                 catalog.drop_namespace(namespace_ident).await.unwrap();
             })
         }
-        let table = self.table.take();
+        self.table = None;
         let namespace = self.namespace.take();
         let rest_catalog_config = default_rest_catalog_config();
         let accessor_config = default_accessor_config();
@@ -79,9 +76,6 @@ impl Drop for RestCatalogTestGuard {
                 )
                 .await
                 .unwrap();
-                if let Some(t) = table {
-                    catalog.drop_table(&t).await.unwrap();
-                }
                 if let Some(ns_ident) = namespace {
                     drop_namespace(&catalog, &ns_ident).await;
                 }
