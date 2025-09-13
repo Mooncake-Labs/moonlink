@@ -30,8 +30,7 @@ mod tests {
         });
         let rows = client
             .simple_query(&format!(
-                "SELECT active_pid FROM pg_replication_slots WHERE slot_name = '{}';",
-                slot
+                "SELECT active_pid FROM pg_replication_slots WHERE slot_name = '{slot}';"
             ))
             .await
             .unwrap();
@@ -1044,12 +1043,11 @@ mod tests {
         });
         let _ = admin
             .simple_query(&format!(
-                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
-                slot_name
+                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{slot_name}';"
             ))
             .await;
         let _ = admin
-            .simple_query(&format!("SELECT pg_drop_replication_slot('{}')", slot_name))
+            .simple_query(&format!("SELECT pg_drop_replication_slot('{slot_name}')"))
             .await;
         let _ = admin
             .simple_query(
