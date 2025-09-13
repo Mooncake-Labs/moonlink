@@ -91,9 +91,9 @@ impl RestCatalog {
 impl Catalog for RestCatalog {
     async fn list_namespaces(
         &self,
-        _parent: Option<&NamespaceIdent>,
+        parent: Option<&NamespaceIdent>,
     ) -> IcebergResult<Vec<NamespaceIdent>> {
-        todo!("list namespaces is not supported");
+        self.catalog.list_namespaces(parent).await
     }
     async fn create_namespace(
         &self,
@@ -105,8 +105,8 @@ impl Catalog for RestCatalog {
             .await
     }
 
-    async fn get_namespace(&self, _namespace_ident: &NamespaceIdent) -> IcebergResult<Namespace> {
-        todo!("get namespace is not supported");
+    async fn get_namespace(&self, namespace_ident: &NamespaceIdent) -> IcebergResult<Namespace> {
+        self.catalog.get_namespace(namespace_ident).await
     }
 
     async fn namespace_exists(&self, namespace_ident: &NamespaceIdent) -> IcebergResult<bool> {
@@ -129,7 +129,7 @@ impl Catalog for RestCatalog {
         _namespace_ident: &NamespaceIdent,
         _properties: HashMap<String, String>,
     ) -> IcebergResult<()> {
-        todo!("Update namespace is not supported");
+        todo!("update namespace is not supported");
     }
 
     async fn create_table(
