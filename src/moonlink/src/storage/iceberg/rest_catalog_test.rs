@@ -112,7 +112,7 @@ async fn test_load_table() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_create_namespace() {
     let namespace = get_random_string();
-    RestCatalogTestGuard::new(namespace.clone(), None)
+    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
         .await
         .unwrap();
     let rest_catalog_config = default_rest_catalog_config();
@@ -125,13 +125,14 @@ async fn test_create_namespace() {
     .await
     .unwrap();
     let namespace_ident = NamespaceIdent::new(namespace);
+    guard.namespace = Some(namespace_ident.clone());
     assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_drop_namespace() {
     let namespace = get_random_string();
-    RestCatalogTestGuard::new(namespace.clone(), None)
+    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
         .await
         .unwrap();
     let rest_catalog_config = default_rest_catalog_config();
@@ -146,6 +147,7 @@ async fn test_drop_namespace() {
     let namespace_ident = NamespaceIdent::new(namespace);
     assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
     catalog.drop_namespace(&namespace_ident).await.unwrap();
+    guard.namespace = None;
     assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
 }
 
