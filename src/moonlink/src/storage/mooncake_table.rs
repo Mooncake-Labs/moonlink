@@ -22,7 +22,6 @@ mod table_snapshot;
 pub mod table_status;
 pub mod table_status_reader;
 mod transaction_stream;
-
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
 use super::storage_utils::{MooncakeDataFileRef, RawDeletionRecord, RecordLocation};
@@ -66,10 +65,16 @@ use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
 use more_asserts as ma;
+use opentelemetry::global;
+use opentelemetry::metrics::Histogram;
+use opentelemetry_otlp::MetricExporterBuilder;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::Resource;
 pub(crate) use snapshot::SnapshotTableState;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResult};
 #[cfg(test)]
 use tokio::sync::mpsc::Receiver;
@@ -208,6 +213,42 @@ impl Snapshot {
             self.metadata.name, self.metadata.table_id, self.snapshot_version
         ));
         directory
+    }
+}
+
+fn init_meter_provider() -> Result<SdkMeterProvider> {
+    let exporter = MetricExporterBuilder::default().build()?;
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(
+            Resource::builder()
+                .with_service_name("metrics-basic-example")
+                .build(),
+        )
+        .build();
+    global::set_meter_provider(provider.clone());
+    Ok(provider)
+}
+
+struct SnapshotStats {
+    creation_latency: Histogram<f64>,
+}
+
+impl SnapshotStats {
+    pub fn new() -> Result<Self> {
+        init_meter_provider()?;
+        let meter = global::meter("mooncake_table");
+
+        let creation_latency = meter
+            .f64_histogram("creation_latency")
+            .with_description("creation_latency histogram")
+            .with_boundaries(vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 3.0, 5.0])
+            .build();
+        Ok(Self { creation_latency })
+    }
+
+    fn update_creation_latency(&mut self, time: f64) {
+        self.creation_latency.record(time, &[]);
     }
 }
 
@@ -485,6 +526,9 @@ pub struct MooncakeTable {
     /// To avoid losing LSNs, we need to keep track of early completed unrecorded LSNs as well.
     pub completed_unrecorded_flush_lsns: BTreeSet<u64>,
 
+    /// snapshot stats
+    snapshot_stats: SnapshotStats,
+
     /// Table replay sender.
     event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
 }
@@ -590,6 +634,7 @@ impl MooncakeTable {
             ongoing_flush_lsns: BTreeMap::new(),
             completed_unrecorded_flush_lsns: BTreeSet::new(),
             event_replay_tx: None,
+            snapshot_stats: SnapshotStats::new()?,
         })
     }
 
@@ -1485,7 +1530,10 @@ impl MooncakeTable {
         if !self.next_snapshot_task.should_create_snapshot() && !opt.force_create {
             return false;
         }
+        let start = Instant::now();
         self.create_snapshot_impl(opt);
+        let elapsed = start.elapsed().as_secs_f64();
+        self.snapshot_stats.update_creation_latency(elapsed);
         true
     }
 
