@@ -127,6 +127,18 @@ impl PostgresConnection {
             format!("moonlink_slot_{db_name}")
         };
 
+        // Preemptively terminate any stale backend holding this slot
+        let terminate_query = format!(
+            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
+            slot_name
+        );
+        if let Err(e) = postgres_client.simple_query(&terminate_query).await {
+            warn!(
+                "failed to terminate existing backend for slot {slot_name}: {}",
+                e
+            );
+        }
+
         let postgres_source = PostgresSource::new(
             &uri,
             Some(slot_name.clone()),
