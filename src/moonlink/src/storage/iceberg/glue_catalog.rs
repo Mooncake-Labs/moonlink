@@ -1,9 +1,11 @@
 use super::moonlink_catalog::{CatalogAccess, PuffinBlobType, PuffinWrite, SchemaUpdate};
-use super::puffin_writer_proxy::get_puffin_metadata_and_close;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-use crate::storage::iceberg::catalog_utils::{create_table_impl, update_table_impl};
+use crate::storage::iceberg::catalog_utils::{
+    close_puffin_writer_and_record_metadata, create_table_impl, update_table_impl,
+};
 use crate::storage::iceberg::iceberg_table_config::GlueCatalogConfig;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
+use crate::storage::iceberg::puffin_writer_proxy::PuffinBlobMetadataProxy;
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 use crate::storage::iceberg::table_update_proxy::TableUpdateProxy;
 use crate::StorageConfig;
@@ -231,18 +233,31 @@ impl Catalog for GlueCatalog {
 
 #[async_trait]
 impl PuffinWrite for GlueCatalog {
+    fn record_puffin_metadata(
+        &mut self,
+        puffin_filepath: String,
+        puffin_metadata: Vec<PuffinBlobMetadataProxy>,
+        puffin_blob_type: PuffinBlobType,
+    ) {
+        self.table_update_proxy.record_puffin_metadata(
+            puffin_filepath,
+            puffin_metadata,
+            puffin_blob_type,
+        );
+    }
     async fn record_puffin_metadata_and_close(
         &mut self,
         puffin_filepath: String,
         puffin_writer: PuffinWriter,
         puffin_blob_type: PuffinBlobType,
     ) -> IcebergResult<()> {
-        let puffin_metadata = get_puffin_metadata_and_close(puffin_writer).await?;
-        self.table_update_proxy.record_puffin_metadata(
+        close_puffin_writer_and_record_metadata(
             puffin_filepath,
-            puffin_metadata,
+            puffin_writer,
             puffin_blob_type,
-        );
+            &mut self.table_update_proxy,
+        )
+        .await?;
         Ok(())
     }
 

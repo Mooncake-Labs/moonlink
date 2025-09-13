@@ -7,6 +7,8 @@ use iceberg::{Catalog, Result as IcebergResult, TableIdent};
 
 use std::collections::HashSet;
 
+use crate::storage::iceberg::puffin_writer_proxy::PuffinBlobMetadataProxy;
+
 pub enum PuffinBlobType {
     DeletionVector,
     FileIndex,
@@ -16,6 +18,13 @@ pub enum PuffinBlobType {
 /// we record puffin metadata ourselves and rewrite manifest file before transaction commits.
 #[async_trait]
 pub trait PuffinWrite {
+    /// Record persisted puffin metadata.
+    fn record_puffin_metadata(
+        &mut self,
+        puffin_filepath: String,
+        puffin_metadata: Vec<PuffinBlobMetadataProxy>,
+        puffin_blob_type: PuffinBlobType,
+    );
     /// Add puffin metadata from the writer, and close it.
     async fn record_puffin_metadata_and_close(
         &mut self,

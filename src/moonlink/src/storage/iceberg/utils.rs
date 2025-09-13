@@ -7,6 +7,8 @@ use arrow_schema::Schema as ArrowSchema;
 use iceberg::arrow as IcebergArrow;
 use iceberg::spec::{DataContentType, DataFileFormat, ManifestEntry};
 use iceberg::table::Table as IcebergTable;
+use iceberg::writer::file_writer::location_generator::DefaultLocationGenerator;
+use iceberg::writer::file_writer::location_generator::LocationGenerator;
 use iceberg::{NamespaceIdent, Result as IcebergResult, TableCreation, TableIdent};
 
 /// Return whether the given manifest entry represents data files.
@@ -135,4 +137,14 @@ pub(crate) async fn get_table_if_exists<C: MoonlinkCatalog + ?Sized>(
 
     let table = catalog.load_table(&table_ident).await?;
     Ok(Some(table))
+}
+
+/// Get a unique remote index filepath.
+pub(crate) fn get_unique_hash_index_v1_filepath(iceberg_table: &IcebergTable) -> String {
+    let location_generator =
+        DefaultLocationGenerator::new(iceberg_table.metadata().clone()).unwrap();
+    location_generator.generate_location(
+        /*partition_key=*/ None,
+        &format!("{}-hash-index-v1-puffin.bin", uuid::Uuid::now_v7()),
+    )
 }

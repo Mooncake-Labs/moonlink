@@ -169,44 +169,52 @@ mod tests {
         assert!(re_pattern.is_match(&location_str));
     }
 
-    #[test]
-    fn test_error_struct_with_source_serialization() {
+    /// Test util function to check error serde via roundtrip.
+    fn roundtrip_check<F, T>(serialize: F, deserialize: T)
+    where
+        F: Fn(&ErrorStruct) -> Vec<u8>,
+        T: Fn(&[u8]) -> ErrorStruct,
+    {
         use std::io;
 
-        // Create an ErrorStruct with a source error
+        // Construct the error with a source
         let io_error = io::Error::new(io::ErrorKind::NotFound, "Test file not found");
         let error = ErrorStruct::new("IO operation failed".to_string(), ErrorStatus::Permanent)
             .with_source(io_error);
 
-        // Serialize
-        let serialized = serde_json::to_string(&error).expect("Failed to serialize");
+        // Serialize and deserialize
+        let bytes = serialize(&error);
+        let deserialized = deserialize(&bytes);
 
-        // Check that serialized JSON contains expected fields
-        assert!(serialized.contains("Test file not found"));
-        assert!(serialized.contains("Permanent"));
-        assert!(serialized.contains("error.rs"));
-
-        // Deserialize
-        let deserialized: ErrorStruct =
-            serde_json::from_str(&serialized).expect("Failed to deserialize");
-
+        // Common assertions
         assert_eq!(deserialized.message, error.message);
         assert_eq!(deserialized.status, error.status);
         assert!(deserialized.source.is_some());
-
-        // The source should be recreated as type anyhow::Error
         let source = deserialized.source.unwrap();
         assert!(source.to_string().contains("Test file not found"));
     }
 
     #[test]
-    fn test_error_struct_with_source_serialization_bincode() {
-        let io_error = io::Error::new(io::ErrorKind::NotFound, "Test file not found");
-        let error = ErrorStruct::new("IO operation failed".to_string(), ErrorStatus::Permanent)
-            .with_source(io_error);
-        let config = bincode::config::standard();
-        let bytes = bincode::serde::encode_to_vec(Err::<(), ErrorStruct>(error), config).unwrap();
-        let _: Result<(), ErrorStruct> =
-            bincode::serde::decode_from_slice(&bytes, config).unwrap().0;
+    fn test_error_struct_with_source_json_serde() {
+        roundtrip_check(
+            |err| serde_json::to_vec(err).unwrap(),
+            |bytes| serde_json::from_slice::<ErrorStruct>(bytes).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_error_struct_with_source_bincode_serde() {
+        roundtrip_check(
+            |err| {
+                let config = bincode::config::standard();
+                bincode::serde::encode_to_vec(Err::<(), ErrorStruct>(err.clone()), config).unwrap()
+            },
+            |bytes| {
+                let config = bincode::config::standard();
+                let decoded: Result<(), ErrorStruct> =
+                    bincode::serde::decode_from_slice(bytes, config).unwrap().0;
+                decoded.unwrap_err()
+            },
+        );
     }
 }
