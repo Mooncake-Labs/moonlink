@@ -73,7 +73,9 @@ impl PooledStream {
     }
 
     pub fn stream_mut(&mut self) -> &mut UnixStream {
-        self.stream.as_mut().unwrap()
+        self.stream
+            .as_mut()
+            .expect("stream already taken from PooledStream")
     }
 }
 
@@ -86,7 +88,7 @@ impl Drop for PooledStream {
                 let mut pool_inner = pool.inner.lock().await;
                 let pool_vec = pool_inner.entry(uri).or_default();
 
-                if pool_vec.len() >= pool.max_entries_per_uri {
+                while pool_vec.len() >= pool.max_entries_per_uri {
                     pool_vec.pop_front();
                 }
 
