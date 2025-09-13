@@ -127,6 +127,20 @@ impl PostgresConnection {
             format!("moonlink_slot_{db_name}")
         };
 
+        // Preemptively terminate any stale backend holding this slot
+        if let Err(e) = postgres_client
+            .query(
+                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = $1::name;",
+                &[&slot_name],
+            )
+            .await
+        {
+            warn!(
+                "failed to terminate existing backend for slot {slot_name}: {}",
+                e
+            );
+        }
+
         let postgres_source = PostgresSource::new(
             &uri,
             Some(slot_name.clone()),
@@ -346,15 +360,21 @@ impl PostgresConnection {
 
     pub async fn drop_replication_slot(&mut self) -> Result<()> {
         // First, terminate any active connections using this slot
-        let terminate_query = format!(
-            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
-            self.slot_name
-        );
-        let _ = self.run_control_query(&terminate_query).await;
+        let _ = self
+            .postgres_client
+            .query(
+                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = $1::name;",
+                &[&self.slot_name],
+            )
+            .await;
 
         // Then drop the replication slot
-        let drop_query = format!("SELECT pg_drop_replication_slot('{}');", self.slot_name);
-        self.run_control_query(&drop_query).await?;
+        self.postgres_client
+            .query(
+                "SELECT pg_drop_replication_slot($1::name);",
+                &[&self.slot_name],
+            )
+            .await?;
 
         Ok(())
     }
