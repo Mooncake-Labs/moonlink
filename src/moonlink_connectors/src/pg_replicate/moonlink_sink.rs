@@ -240,6 +240,8 @@ impl Sink {
                         }
                     }
                 }
+                // Also advance global replication watermark to wake waiters
+                self.replication_state.mark(commit_body.end_lsn());
                 self.transaction_state.touched_tables.clear();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
@@ -282,6 +284,8 @@ impl Sink {
                     }
                     self.streaming_transactions_state.remove(&xact_id);
                 }
+                // Advance global watermark to wake waiters
+                self.replication_state.mark(stream_commit_body.end_lsn());
                 self.streaming_last_key = None;
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {

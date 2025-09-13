@@ -100,6 +100,8 @@ impl RestSink {
                 None,
             ));
         }
+        // Continue to mark the replication LSN to wake waiters
+        self.replication_state.mark(lsn);
         Ok(())
     }
 
