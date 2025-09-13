@@ -6,7 +6,7 @@ use iceberg::{Catalog, NamespaceIdent, Result, TableIdent};
 use std::collections::HashMap;
 
 pub(crate) struct RestCatalogTestGuard {
-    pub(crate) namespace: NamespaceIdent,
+    pub(crate) namespace: Option<NamespaceIdent>,
     pub(crate) table: Option<TableIdent>,
 }
 
@@ -34,7 +34,7 @@ impl RestCatalogTestGuard {
             None
         };
         Ok(Self {
-            namespace: ns_ident,
+            namespace: Some(ns_ident),
             table: table_ident,
         })
     }
@@ -43,6 +43,7 @@ impl RestCatalogTestGuard {
 impl Drop for RestCatalogTestGuard {
     fn drop(&mut self) {
         let table = self.table.take();
+        let namespace = self.namespace.take();
         let rest_catalog_config = default_rest_catalog_config();
         let accessor_config = default_accessor_config();
         tokio::task::block_in_place(|| {
@@ -57,7 +58,9 @@ impl Drop for RestCatalogTestGuard {
                 if let Some(t) = table {
                     catalog.drop_table(&t).await.unwrap();
                 }
-                catalog.drop_namespace(&self.namespace).await.unwrap();
+                if let Some(ns_ident) = namespace {
+                    catalog.drop_namespace(&ns_ident).await.unwrap();
+                }
             });
         })
     }

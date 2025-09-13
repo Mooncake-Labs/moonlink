@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::storage::iceberg::catalog_test_impl::*;
 use crate::storage::iceberg::catalog_test_utils::*;
 use crate::storage::iceberg::rest_catalog::RestCatalog;
@@ -29,7 +31,9 @@ async fn test_create_table() {
         .create_table(&namespace, table_creation)
         .await
         .unwrap();
-    guard.table = Some(TableIdent::new(namespace, table_name));
+    let table_ident = TableIdent::new(namespace, table_name);
+    guard.table = Some(table_ident.clone());
+    assert!(catalog.table_exists(&table_ident).await.unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -103,6 +107,84 @@ async fn test_load_table() {
     let result = catalog.load_table(&table_ident).await.unwrap();
     let result_table_ident = result.identifier().clone();
     assert_eq!(table_ident, result_table_ident);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_create_namespace() {
+    let namespace = get_random_string();
+    RestCatalogTestGuard::new(namespace.clone(), None)
+        .await
+        .unwrap();
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(
+        rest_catalog_config,
+        accessor_config,
+        create_test_table_schema().unwrap(),
+    )
+    .await
+    .unwrap();
+    let namespace_ident = NamespaceIdent::new(namespace);
+    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_drop_namespace() {
+    let namespace = get_random_string();
+    RestCatalogTestGuard::new(namespace.clone(), None)
+        .await
+        .unwrap();
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(
+        rest_catalog_config,
+        accessor_config,
+        create_test_table_schema().unwrap(),
+    )
+    .await
+    .unwrap();
+    let namespace_ident = NamespaceIdent::new(namespace);
+    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
+    catalog.drop_namespace(&namespace_ident).await.unwrap();
+    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_list_namespace() {
+    let namespace = get_random_string();
+    let mut guard = RestCatalogTestGuard::new(namespace.clone(), None)
+        .await
+        .unwrap();
+    let rest_catalog_config = default_rest_catalog_config();
+    let accessor_config = default_accessor_config();
+    let catalog = RestCatalog::new(
+        rest_catalog_config,
+        accessor_config,
+        create_test_table_schema().unwrap(),
+    )
+    .await
+    .unwrap();
+    let namespace_ident = NamespaceIdent::new(namespace);
+    assert!(catalog.namespace_exists(&namespace_ident).await.unwrap());
+    catalog.drop_namespace(&namespace_ident).await.unwrap();
+    guard.namespace = None;
+    assert!(!catalog.namespace_exists(&namespace_ident).await.unwrap());
+    let namespace_1 = get_random_string();
+    let namespace_2 = get_random_string();
+    let ns_ident_parent = NamespaceIdent::new(namespace_1.clone());
+    let ns_ident = NamespaceIdent::from_strs(vec![namespace_1, namespace_2]).unwrap();
+    catalog
+        .create_namespace(&ns_ident, /*properties*/ HashMap::new())
+        .await
+        .unwrap();
+    guard.namespace = Some(ns_ident.clone());
+    assert_eq!(
+        catalog
+            .list_namespaces(Some(&ns_ident_parent))
+            .await
+            .unwrap(),
+        vec![ns_ident]
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
