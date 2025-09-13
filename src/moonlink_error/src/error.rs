@@ -1,5 +1,4 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::error;
 use std::fmt;
 use std::panic::Location;
 use std::sync::Arc;
@@ -100,9 +99,7 @@ impl ErrorStruct {
         self.source = Some(Arc::new(src.into()));
         self
     }
-}
 
-impl error::Error for ErrorStruct {
     /// Returns the underlying source error for accessing structured information.
     ///
     /// # Example
@@ -113,7 +110,7 @@ impl error::Error for ErrorStruct {
     ///     }
     /// }
     /// ```
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    pub fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|arc| arc.as_ref().as_ref())
     }
 }
@@ -122,7 +119,6 @@ impl error::Error for ErrorStruct {
 mod tests {
     use super::*;
     use regex::Regex;
-    use std::error::Error;
     use std::io;
 
     #[test]

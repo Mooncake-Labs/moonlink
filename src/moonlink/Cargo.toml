@@ -16,7 +16,6 @@ storage-s3 = [
     "base64",
     "hmac",
     "sha1",
-    "reqwest",
 ]
 
 # iceberg gcs io doesn't support HMAC key, so have to leverage S3 sdk.
@@ -28,7 +27,6 @@ storage-gcs = [
     "base64",
     "hmac",
     "sha1",
-    "reqwest",
 ]
 
 catalog-rest = ["iceberg-catalog-rest"]
@@ -64,16 +62,18 @@ itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"
 moka = { workspace = true }
-moonlink_error = { path = "../moonlink_error" }
-moonlink_table_metadata = { path = "../moonlink_table_metadata" }
+moonlink_error = { workspace = true }
+moonlink_proto = { workspace = true }
+moonlink_table_metadata = { workspace = true }
 more-asserts = { workspace = true }
 multimap = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 opendal = { workspace = true }
 parquet = { workspace = true }
+prost = { workspace = true }
 rand = { workspace = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { workspace = true }
 roaring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -82,7 +82,7 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-bitstream-io = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }
 typed-builder = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
@@ -92,8 +92,8 @@ criterion = "0.5"
 mockall = "0.13"
 pico-args = "0.5"
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
-rand = "0.9"
-rstest = "0.26"
+rand = { workspace = true }
+rstest = { workspace = true }
 rstest_reuse = "0.7"
 tempfile = { workspace = true }
 

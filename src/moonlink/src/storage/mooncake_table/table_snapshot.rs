@@ -384,6 +384,8 @@ pub struct IcebergSnapshotResult {
     pub(crate) index_merge_result: IcebergSnapshotIndexMergeResult,
     /// Iceberg data file compaction result.
     pub(crate) data_compaction_result: IcebergSnapshotDataCompactionResult,
+    /// Evicted files to delete by object storage cache.
+    pub(crate) evicted_files_to_delete: Vec<String>,
 }
 
 impl Clone for IcebergSnapshotResult {
@@ -397,6 +399,7 @@ impl Clone for IcebergSnapshotResult {
             import_result: self.import_result.clone(),
             index_merge_result: self.index_merge_result.clone(),
             data_compaction_result: self.data_compaction_result.clone(),
+            evicted_files_to_delete: self.evicted_files_to_delete.clone(),
         }
     }
 }
@@ -426,6 +429,10 @@ impl std::fmt::Debug for IcebergSnapshotResult {
             .field("import_result", &self.import_result)
             .field("index_merge_result", &self.index_merge_result)
             .field("data_compaction_result", &self.data_compaction_result)
+            .field(
+                "evicted files to delete count",
+                &self.evicted_files_to_delete.len(),
+            )
             .finish()
     }
 }

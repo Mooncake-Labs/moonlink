@@ -149,7 +149,8 @@ impl ObjectStorageCacheInternal {
     /// Unreference the given cache entry.
     pub(super) fn unreference(&mut self, file_id: TableUniqueFileId) -> Vec<String> {
         let cache_entry_wrapper = self.non_evictable_cache.get_mut(&file_id);
-        let cache_entry_wrapper = cache_entry_wrapper.unwrap();
+        let cache_entry_wrapper = cache_entry_wrapper
+            .unwrap_or_else(|| panic!("No reference count for file id {file_id:?}"));
         cache_entry_wrapper.reference_count -= 1;
 
         // Aggregate cache entries to delete.
@@ -356,7 +357,6 @@ impl ObjectStorageCache {
         let config = ObjectStorageCacheConfig::default_for_test(temp_dir);
         Self::new(config)
     }
-
     #[cfg(feature = "bench")]
     pub fn default_for_bench() -> Self {
         let config = ObjectStorageCacheConfig::default_for_bench();
@@ -507,6 +507,20 @@ impl CacheTrait for ObjectStorageCache {
         let mut guard = self.cache.write().await;
         guard.delete_cache_entry(file_id, /*panic_if_non_existent=*/ false)
     }
+
+    async fn increment_reference_count(&self, cache_handle: &NonEvictableHandle) {
+        let mut guard = self.cache.write().await;
+        let value = guard.non_evictable_cache.get_mut(&cache_handle.file_id);
+        if let Some(value) = value {
+            ma::assert_gt!(value.reference_count, 0);
+            value.reference_count += 1;
+            return;
+        }
+        panic!(
+            "Requested to increment reference count for file id {:?} and file path {:?}, but not pinned in cache.",
+            cache_handle.file_id, cache_handle.get_cache_filepath(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -542,6 +556,41 @@ mod tests {
             .unwrap();
         assert!(cache_to_delete.is_empty());
         cache_handle.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_increment_ref_count() {
+        let cache_file_directory = tempdir().unwrap();
+        let test_cache_file =
+            create_test_file(cache_file_directory.path(), TEST_CACHE_FILENAME_1).await;
+
+        let config = ObjectStorageCacheConfig {
+            // Set max bytes larger than one file, but less than two files.
+            max_bytes: CONTENT.len() as u64,
+            cache_directory: cache_file_directory.path().to_str().unwrap().to_string(),
+            optimize_local_filesystem: false,
+        };
+        let cache = ObjectStorageCache::new(config);
+
+        // Import cache entry.
+        let cache_entry = CacheEntry {
+            cache_filepath: test_cache_file.to_str().unwrap().to_string(),
+            file_metadata: FileMetadata {
+                file_size: CONTENT.len() as u64,
+            },
+        };
+        let file_id = get_table_unique_file_id(/*file_id=*/ 0);
+        let (cache_handle, evicted_files_to_delete) =
+            cache.import_cache_entry(file_id, cache_entry.clone()).await;
+        assert_eq!(
+            cache_handle.cache_entry.cache_filepath,
+            test_cache_file.to_str().unwrap().to_string()
+        );
+        assert!(evicted_files_to_delete.is_empty());
+
+        // Increment the reference count.
+        cache.increment_reference_count(&cache_handle).await;
+        assert_eq!(cache.get_non_evictable_entry_ref_count(&file_id).await, 2);
     }
 
     #[tokio::test]

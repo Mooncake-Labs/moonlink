@@ -46,14 +46,14 @@ impl NonEvictableHandle {
 
     /// Unreference the pinned cache file.
     #[must_use]
-    pub(crate) async fn unreference(&mut self) -> Vec<String> {
+    pub(crate) async fn unreference(&self) -> Vec<String> {
         let mut guard = self.cache.write().await;
         guard.unreference(self.file_id)
     }
 
     /// Unreference and pinned cache file and mark it as deleted.
     #[must_use]
-    pub(crate) async fn unreference_and_delete(&mut self) -> InlineEvictedFiles {
+    pub(crate) async fn unreference_and_delete(&self) -> InlineEvictedFiles {
         let mut guard = self.cache.write().await;
 
         // Total bytes within cache doesn't change, so current cache entry not evicted.
@@ -77,7 +77,7 @@ impl NonEvictableHandle {
     /// - Moonlink process restarts and recreates the cache directory.
     #[must_use]
     pub(crate) async fn unreference_and_replace_with_remote(
-        &mut self,
+        &self,
         remote_filepath: &str,
     ) -> Vec<String> {
         let mut guard = self.cache.write().await;

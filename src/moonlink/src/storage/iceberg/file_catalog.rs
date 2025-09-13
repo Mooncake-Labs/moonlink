@@ -2,9 +2,11 @@ use super::puffin_writer_proxy::append_puffin_metadata_and_rewrite;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-use crate::storage::iceberg::catalog_utils::reflect_table_updates;
+use crate::storage::iceberg::catalog_utils::{reflect_table_updates, validate_table_requirements};
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
-use crate::storage::iceberg::moonlink_catalog::{PuffinBlobType, PuffinWrite, SchemaUpdate};
+use crate::storage::iceberg::moonlink_catalog::{
+    CatalogAccess, PuffinBlobType, PuffinWrite, SchemaUpdate,
+};
 use crate::storage::iceberg::puffin_writer_proxy::{
     get_puffin_metadata_and_close, PuffinBlobMetadataProxy,
 };
@@ -51,9 +53,9 @@ use iceberg::spec::{
     Schema as IcebergSchema, TableMetadata, TableMetadataBuildResult, TableMetadataBuilder,
 };
 use iceberg::table::Table;
+use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
 use iceberg::{Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent};
-use iceberg::{Error as IcebergError, TableRequirement};
 
 /// Object storage usually doesn't have "folder" concept, when creating a new namespace, we create an indicator file under certain folder.
 pub(super) const NAMESPACE_INDICATOR_OBJECT_NAME: &str = "indicator.text";
@@ -144,12 +146,6 @@ impl FileCatalog {
         })
     }
 
-    /// Get warehouse uri.
-    #[allow(dead_code)]
-    pub(super) fn get_warehouse_location(&self) -> &str {
-        &self.warehouse_location
-    }
-
     /// Get object name of the indicator object for the given namespace.
     fn get_namespace_indicator_name(namespace: &iceberg::NamespaceIdent) -> String {
         let mut path = PathBuf::new();
@@ -158,50 +154,6 @@ impl FileCatalog {
         }
         path.push(NAMESPACE_INDICATOR_OBJECT_NAME);
         path.to_str().unwrap().to_string()
-    }
-
-    /// Load metadata and its location foe the given table.
-    pub(super) async fn load_metadata(
-        &self,
-        table_ident: &TableIdent,
-    ) -> IcebergResult<(String /*metadata_filepath*/, TableMetadata)> {
-        // Read version hint for the table to get latest version.
-        let version_hint_filepath = format!(
-            "{}/{}/{}/{}",
-            table_ident.namespace().to_url_string(),
-            table_ident.name(),
-            METADATA_DIRECTORY,
-            VERSION_HINT_FILENAME,
-        );
-
-        // Load and assign etag.
-        self.load_version_hint_etag(&version_hint_filepath).await?;
-
-        // Read version hint file.
-        let version = self.load_current_version(&version_hint_filepath).await?;
-
-        // Read and parse table metadata.
-        let metadata_filepath = format!(
-            "{}/{}/{}/v{}.metadata.json",
-            table_ident.namespace().to_url_string(),
-            table_ident.name(),
-            METADATA_DIRECTORY,
-            version,
-        );
-        let metadata = self.load_table_metadata(&metadata_filepath).await?;
-
-        Ok((metadata_filepath, metadata))
-    }
-
-    /// Validate table commit requirements.
-    fn validate_table_requirements(
-        table_requirements: Vec<TableRequirement>,
-        table_metadata: &TableMetadata,
-    ) -> IcebergResult<()> {
-        for cur_requirement in table_requirements.into_iter() {
-            cur_requirement.check(Some(table_metadata))?;
-        }
-        Ok(())
     }
 
     /// This is a hack function to work-around iceberg-rust.
@@ -664,7 +616,7 @@ impl Catalog for FileCatalog {
         );
 
         // Validate existing table metadata with requirements.
-        Self::validate_table_requirements(commit.take_requirements(), &metadata)?;
+        validate_table_requirements(commit.take_requirements(), &metadata)?;
 
         // Construct new metadata with updates.
         let updates = commit.take_updates();
@@ -768,5 +720,47 @@ impl SchemaUpdate for FileCatalog {
         };
         let table_commit = table_commit_proxy.take_as_table_commit();
         self.update_table(table_commit).await
+    }
+}
+
+#[async_trait]
+impl CatalogAccess for FileCatalog {
+    /// Get warehouse uri.
+    #[allow(dead_code)]
+    fn get_warehouse_location(&self) -> &str {
+        &self.warehouse_location
+    }
+
+    /// Load metadata and its location foe the given table.
+    async fn load_metadata(
+        &self,
+        table_ident: &TableIdent,
+    ) -> IcebergResult<(String /*metadata_filepath*/, TableMetadata)> {
+        // Read version hint for the table to get latest version.
+        let version_hint_filepath = format!(
+            "{}/{}/{}/{}",
+            table_ident.namespace().to_url_string(),
+            table_ident.name(),
+            METADATA_DIRECTORY,
+            VERSION_HINT_FILENAME,
+        );
+
+        // Load and assign etag.
+        self.load_version_hint_etag(&version_hint_filepath).await?;
+
+        // Read version hint file.
+        let version = self.load_current_version(&version_hint_filepath).await?;
+
+        // Read and parse table metadata.
+        let metadata_filepath = format!(
+            "{}/{}/{}/v{}.metadata.json",
+            table_ident.namespace().to_url_string(),
+            table_ident.name(),
+            METADATA_DIRECTORY,
+            version,
+        );
+        let metadata = self.load_table_metadata(&metadata_filepath).await?;
+
+        Ok((metadata_filepath, metadata))
     }
 }

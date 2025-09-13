@@ -34,6 +34,7 @@ use std::mem::take;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::pin;
+use tokio::sync::oneshot;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -65,6 +66,7 @@ pub enum PostgresReplicationCommand {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
+        ready_tx: oneshot::Sender<()>,
     },
     DropTable {
         src_table_id: SrcTableId,
@@ -228,6 +230,7 @@ impl PostgresConnection {
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
         commit_lsn_tx: watch::Sender<u64>,
+        table_base_path: &str,
     ) -> Result<(bool)> {
         let src_table_id = schema.src_table_id;
         // Create a dedicated source for the copy
@@ -254,18 +257,19 @@ impl PostgresConnection {
                 .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
                 .await
                 .expect("failed to get table copy stream");
-            let res = copy_table_stream(
+            copy_table_stream(
                 schema.clone(),
                 stream,
                 &event_sender,
                 start_lsn.into(),
+                table_base_path,
                 None,
             )
-            .await;
-
-            if let Err(e) = res {
-                error!(error = ?e, table_id = src_table_id, "failed to copy table");
-            }
+            .await
+            .expect(&format!(
+                "failed to copy table for src_table_id: {}",
+                src_table_id
+            ));
 
             // Commit the transaction
             copy_source
@@ -374,7 +378,8 @@ impl PostgresConnection {
         commit_lsn_tx: watch::Sender<u64>,
         flush_lsn_rx: watch::Receiver<u64>,
         wal_flush_lsn_rx: watch::Receiver<u64>,
-    ) -> Result<()> {
+    ) -> Result<oneshot::Receiver<()>> {
+        let (ready_tx, ready_rx) = oneshot::channel();
         let cmd = PostgresReplicationCommand::AddTable {
             src_table_id,
             schema,
@@ -382,9 +387,10 @@ impl PostgresConnection {
             commit_lsn_tx,
             flush_lsn_rx,
             wal_flush_lsn_rx,
+            ready_tx,
         };
         self.cmd_tx.send(cmd).await?;
-        Ok(())
+        Ok(ready_rx)
     }
 
     /// Drop table from PostgreSQL replication
@@ -492,21 +498,27 @@ impl PostgresConnection {
             .take()
             .expect("commit_lsn_tx is None");
         let commit_lsn_tx_for_copy = commit_lsn_tx.clone();
-        self.add_table_to_replication(
-            table_schema.src_table_id,
-            table_schema.clone(),
-            table_resources.event_sender.clone(),
-            commit_lsn_tx,
-            table_resources
-                .flush_lsn_rx
-                .take()
-                .expect("flush_lsn_rx is None"),
-            table_resources
-                .wal_flush_lsn_rx
-                .take()
-                .expect("wal_flush_lsn_rx is None"),
-        )
-        .await?;
+        let ready_rx = self
+            .add_table_to_replication(
+                table_schema.src_table_id,
+                table_schema.clone(),
+                table_resources.event_sender.clone(),
+                commit_lsn_tx,
+                table_resources
+                    .flush_lsn_rx
+                    .take()
+                    .expect("flush_lsn_rx is None"),
+                table_resources
+                    .wal_flush_lsn_rx
+                    .take()
+                    .expect("wal_flush_lsn_rx is None"),
+            )
+            .await?;
+
+        // Wait until the event loop has registered sink and schema
+        if let Err(e) = ready_rx.await {
+            error!(error = ?e, "failed to add table to replication");
+        }
 
         // Perform initial copy
         let initial_copy_performed = self
@@ -515,6 +527,7 @@ impl PostgresConnection {
                 table_resources.event_sender.clone(),
                 is_recovery,
                 commit_lsn_tx_for_copy,
+                table_base_path,
             )
             .await?;
 
@@ -598,131 +611,211 @@ impl PostgresConnection {
         let cfg = self.source.get_cdc_stream_config().unwrap();
         let source = self.source.clone();
 
-        tokio::spawn(async move {
-            let (client, connection) =
-                crate::pg_replicate::clients::postgres::ReplicationClient::connect(&uri, true)
-                    .await
-                    .map_err(PostgresSourceError::from)?;
-
-            run_event_loop(client, cfg, connection, sink, receiver, source).await
-        })
+        tokio::spawn(async move { run_event_loop(cfg, sink, receiver, source).await })
     }
+}
+
+/// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
+/// In the event that the WAL has not been written yet, we return the iceberg flush lsn.
+fn compute_confirmed_wal_flush_lsn(
+    wal_flush_lsn_rxs: &HashMap<SrcTableId, watch::Receiver<u64>>,
+    flush_lsn_rxs: &HashMap<SrcTableId, watch::Receiver<u64>>,
+) -> Option<PgLsn> {
+    let mut confirmed_lsn: Option<u64> = None;
+    for (table_id, wal_rx) in wal_flush_lsn_rxs.iter() {
+        let wal_lsn = *wal_rx.borrow();
+        let iceberg_lsn = flush_lsn_rxs
+            .get(table_id)
+            .map(|rx| *rx.borrow())
+            .unwrap_or(0);
+        let effective_lsn = if wal_lsn > 0 { wal_lsn } else { iceberg_lsn };
+        confirmed_lsn = Some(match confirmed_lsn {
+            Some(v) => v.min(effective_lsn),
+            None => effective_lsn,
+        });
+    }
+    confirmed_lsn.map(PgLsn::from)
 }
 
 #[tracing::instrument(name = "replication_event_loop", skip_all)]
 pub async fn run_event_loop(
-    client: ReplicationClient,
     cfg: CdcStreamConfig,
-    connection: Connection<Socket, TlsStream<Socket>>,
     mut sink: Sink,
     mut cmd_rx: mpsc::Receiver<PostgresReplicationCommand>,
     postgres_source: Arc<PostgresSource>,
 ) -> Result<()> {
-    pin!(connection);
-
-    // Create stream while driving connection
-    let stream = tokio::select! {
-        s = PostgresSource::create_cdc_stream(client, cfg) => s?,
-        _ = &mut connection => {
-            return Err(PostgresSourceError::Io(Error::new(ErrorKind::ConnectionAborted, "connection closed during setup")).into());
-        }
-    };
-
-    // Now run the main event loop
-    pin!(stream);
-
-    const MAX_EVENTS_PER_WAKE: usize = 512;
-    let mut batch: Vec<std::result::Result<CdcEvent, CdcStreamError>> =
-        Vec::with_capacity(MAX_EVENTS_PER_WAKE);
-
-    debug!("replication event loop started");
-
-    /// We use the same status interval as Postgres wal_receiver default.
-    /// https://github.com/postgres/postgres/blob/c13070a27b63d9ce4850d88a63bf889a6fde26f0/src/backend/utils/misc/guc_tables.c#L2306
-    const DEFAULT_STATUS_INTERVAL: Duration = Duration::from_secs(10);
-
-    let mut status_interval = tokio::time::interval(DEFAULT_STATUS_INTERVAL);
+    // Persist across reconnects
+    let mut saved_schemas: Vec<TableSchema> = Vec::new();
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
     let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
+    let mut last_seen_end_lsn: Option<PgLsn> = None;
 
-    loop {
-        tokio::select! {
-            _ = status_interval.tick() => {
-                let mut confirmed_lsn: Option<u64> = None;
-                for (table_id, wal_rx) in wal_flush_lsn_rxs.iter() {
-                    let wal_lsn = *wal_rx.borrow();
-                    let iceberg_lsn = flush_lsn_rxs
-                        .get(table_id)
-                        .map(|rx| *rx.borrow())
-                        .unwrap_or(0);
-                    let effective_lsn = if wal_lsn > 0 { wal_lsn } else { iceberg_lsn };
-                    confirmed_lsn = Some(match confirmed_lsn {
-                        Some(v) => v.min(effective_lsn),
-                        None => effective_lsn,
-                    });
-                }
-                let lsn_to_send = confirmed_lsn.map(PgLsn::from).unwrap_or(PgLsn::from(0));
-                if let Err(e) = stream
-                    .as_mut()
-                    .send_status_update(lsn_to_send)
-                    .await
-                {
-                    error!(error = ?e, "failed to send status update");
-                }
-            },
-            Some(cmd) = cmd_rx.recv() => match cmd {
-                PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx } => {
-                    sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
-                    flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
-                    wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
-                    stream.as_mut().add_table_schema(schema);
-                }
-                PostgresReplicationCommand::DropTable { src_table_id } => {
-                    sink.drop_table(src_table_id);
-                    flush_lsn_rxs.remove(&src_table_id);
-                    wal_flush_lsn_rxs.remove(&src_table_id);
-                    stream.as_mut().remove_table_schema(src_table_id);
-                }
-                PostgresReplicationCommand::Shutdown => {
-                    debug!("received shutdown command");
-                    break;
-                }
-            },
-            n = stream.as_mut().next_batch_msgs(&mut batch, MAX_EVENTS_PER_WAKE) => {
-                if n == 0 {
-                    error!("replication stream ended unexpectedly");
-                    break;
-                }
+    // Linear backoff parameters
+    let backoff_step = Duration::from_secs(1);
+    let backoff_cap = Duration::from_secs(60);
+    let mut current_backoff = Duration::from_secs(0);
 
-                for event in batch.drain(..n) {
-                    match event {
-                        Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
+    'outer: loop {
+        // Prepare connection and stream
+        let confirmed_flush_lsn =
+            compute_confirmed_wal_flush_lsn(&wal_flush_lsn_rxs, &flush_lsn_rxs)
+                .unwrap_or(PgLsn::from(0));
+
+        let (client, mut connection) = postgres_source.connect_replication().await?;
+
+        // We should explicitly set the confirmed flush lsn here, because we may not have completed `send_status_update` before reconnecting.
+        let mut cfg = cfg.clone();
+        // Always start from persisted confirmed_flush_lsn; never advertise in-memory watermark as this will drop unpersisted records on PG.
+        cfg.confirmed_flush_lsn = confirmed_flush_lsn;
+        let mut connection_pin = Box::pin(connection);
+
+        // Create stream while driving connection
+        let stream = tokio::select! {
+            s = PostgresSource::create_cdc_stream(client, cfg) => s?,
+            _ = &mut connection_pin => {
+                return Err(PostgresSourceError::Io(Error::new(ErrorKind::ConnectionAborted, "connection closed during setup")).into());
+            }
+        };
+
+        // Reset keepalive floor for this connection
+        sink.reset_keepalive_floor();
+
+        // Reset backoff after a successful stream creation
+        current_backoff = Duration::from_secs(0);
+
+        // Now run the main event loop for this connection
+        let mut stream = Box::pin(stream);
+
+        stream.as_mut().set_skip_before_end_lsn(None);
+
+        // Rehydrate any previously known schemas into the stream
+        if !saved_schemas.is_empty() {
+            for schema in &saved_schemas {
+                stream.as_mut().add_table_schema(schema.clone());
+            }
+            debug!(
+                count = saved_schemas.len(),
+                "rehydrated table schemas into stream"
+            );
+        }
+
+        const MAX_EVENTS_PER_WAKE: usize = 512;
+        let mut batch: Vec<std::result::Result<CdcEvent, CdcStreamError>> =
+            Vec::with_capacity(MAX_EVENTS_PER_WAKE);
+
+        debug!("replication event loop started");
+
+        /// We use the same status interval as Postgres wal_receiver default.
+        /// https://github.com/postgres/postgres/blob/c13070a27b63d9ce4850d88a63bf889a6fde26f0/src/backend/utils/misc/guc_tables.c#L2306
+        const DEFAULT_STATUS_INTERVAL: Duration = Duration::from_secs(10);
+
+        let mut status_interval = tokio::time::interval(DEFAULT_STATUS_INTERVAL);
+
+        loop {
+            tokio::select! {
+                _ = status_interval.tick() => {
+                    let lsn_to_send = compute_confirmed_wal_flush_lsn(&wal_flush_lsn_rxs, &flush_lsn_rxs).unwrap_or(PgLsn::from(0));
+                    if let Err(e) = stream
+                        .as_mut()
+                        .send_status_update(lsn_to_send)
+                        .await
+                    {
+                        error!(error = ?e, "failed to send status update");
+                    }
+                },
+                Some(cmd) = cmd_rx.recv() => match cmd {
+                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx, wal_flush_lsn_rx, ready_tx } => {
+                        sink.add_table(src_table_id, event_sender, commit_lsn_tx, &schema);
+                        flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+                        wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
+                        stream.as_mut().add_table_schema(schema);
+                        if let Err(e) = ready_tx.send(()) {
+                            error!(error = ?e, "failed to send ready signal");
+                        }
+                    }
+                    PostgresReplicationCommand::DropTable { src_table_id } => {
+                        sink.drop_table(src_table_id);
+                        flush_lsn_rxs.remove(&src_table_id);
+                        wal_flush_lsn_rxs.remove(&src_table_id);
+                        stream.as_mut().remove_table_schema(src_table_id);
+                    }
+                    PostgresReplicationCommand::Shutdown => {
+                        debug!("received shutdown command");
+                        // Break outer to skip the reconnection attempt
+                        break 'outer;
+                    }
+                },
+                (n, last_end_lsn) = stream.as_mut().next_batch_msgs(&mut batch, MAX_EVENTS_PER_WAKE) => {
+                    if n == 0 {
+                        // If we produced no events but did observe frames (skipped), just continue.
+                        if last_end_lsn.is_some() {
                             continue;
                         }
-                        Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
-                            // TODO: Add support for Truncate and Origin messages and remove this.
-                            warn!("message not supported");
-                            continue;
-                        }
-                        Err(e) => {
-                            error!(error = ?e, "cdc stream error");
-                            break;
-                        }
-                        Ok(event) => {
-                            if let Some(SchemaChangeRequest(src_table_id)) = sink.process_cdc_event(event).await.unwrap() {
-                                let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
-                                sink.alter_table(src_table_id, &table_schema).await;
-                                stream.as_mut().update_table_schema(table_schema);
+
+                        error!("replication stream ended unexpectedly");
+                        // Snapshot schemas before reconnecting
+                        let snapshot = stream.as_mut().schemas_snapshot();
+                        debug!(count = snapshot.len(), "snapshotting schemas before reconnect (stream ended)");
+                        saved_schemas = snapshot;
+                        break; // break inner loop to reconnect
+                    }
+
+                    for event in batch.drain(..n) {
+                        match event {
+                            Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
+                                continue;
+                            }
+                            Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
+                                // TODO: Add support for Truncate and Origin messages and remove this.
+                                warn!("message not supported");
+                                continue;
+                            }
+                            Err(e) => {
+                                error!(error = ?e, "cdc stream error");
+                                // Snapshot schemas before reconnecting (once)
+                                let snapshot = stream.as_mut().schemas_snapshot();
+                                debug!(count = snapshot.len(), "snapshotting schemas before reconnect (cdc error)");
+                                saved_schemas = snapshot;
+                                break;
+                            }
+                            Ok(event) => {
+                                if let Some(SchemaChangeRequest(src_table_id)) = sink.process_cdc_event(event).await.unwrap() {
+                                    let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
+                                    sink.alter_table(src_table_id, &table_schema).await;
+                                    stream.as_mut().update_table_schema(table_schema);
+                                }
                             }
                         }
                     }
+                    // Advance watermark to last end LSN after finishing the batch without errors
+                    if let Some(end) = last_end_lsn {
+                        last_seen_end_lsn = Some(end);
+                    }
+                },
+                _ = &mut connection_pin => {
+                    error!("replication connection closed");
+                    // Snapshot schemas before reconnecting
+                    let snapshot = stream.as_mut().schemas_snapshot();
+                    debug!(count = snapshot.len(), "snapshotting schemas before reconnect (connection closed)");
+                    saved_schemas = snapshot;
+                    break; // break inner loop to reconnect
                 }
-            },
-            _ = &mut connection => {
-                error!("replication connection closed");
-                break;
             }
         }
+
+        // If we reached here without shutdown, apply linear backoff before reconnect
+        if current_backoff < backoff_cap {
+            current_backoff = (current_backoff + backoff_step).min(backoff_cap);
+        }
+        if current_backoff > Duration::from_secs(0) {
+            debug!(
+                backoff_ms = current_backoff.as_millis(),
+                "backing off before reconnect"
+            );
+            tokio::time::sleep(current_backoff).await;
+        }
+
+        // Loop continues to reconnect
     }
 
     debug!("replication event loop stopped");

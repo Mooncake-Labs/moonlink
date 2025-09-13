@@ -44,6 +44,10 @@ services:
 
   iceberg-rest:
     image: apache/iceberg-rest-fixture:latest
+    networks:
+      shared_network:
+        aliases:
+          - iceberg-rest.local
     ports:
       - "8181:8181"
 

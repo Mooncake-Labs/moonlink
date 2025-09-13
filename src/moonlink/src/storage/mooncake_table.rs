@@ -16,6 +16,7 @@ mod snapshot_read;
 pub mod snapshot_read_output;
 mod snapshot_validation;
 pub mod table_config;
+pub mod table_event_manager;
 pub mod table_secret;
 mod table_snapshot;
 pub mod table_status;
@@ -143,8 +144,8 @@ pub(crate) struct DiskFileEntry {
     pub(crate) num_rows: usize,
     /// File size.
     pub(crate) file_size: usize,
-    /// In-memory deletion vector, used for new deletion records in-memory processing.
-    pub(crate) batch_deletion_vector: BatchDeletionVector,
+    /// Committed deletion vector, used for new deletion records in-memory processing.
+    pub(crate) committed_deletion_vector: BatchDeletionVector,
     /// Persisted iceberg deletion vector puffin blob.
     pub(crate) puffin_deletion_blob: Option<PuffinBlobRef>,
 }
@@ -174,6 +175,8 @@ pub struct Snapshot {
     /// At iceberg snapshot creation, we should only dump consistent data files and deletion logs.
     /// Data file flush LSN is recorded here, to get corresponding deletion logs from "committed deletion logs".
     pub(crate) flush_lsn: Option<u64>,
+    /// LSN of largest completed flush operations.
+    pub(crate) largest_flush_lsn: Option<u64>,
     /// indices
     pub(crate) indices: MooncakeIndex,
 }
@@ -185,6 +188,7 @@ impl Snapshot {
             disk_files: HashMap::new(),
             snapshot_version: 0,
             flush_lsn: None,
+            largest_flush_lsn: None,
             indices: MooncakeIndex::new(),
         }
     }
@@ -248,14 +252,17 @@ pub struct SnapshotTask {
     /// Commit LSN baseline of the previous snapshot task.
     /// We use this to determine if commit_lsn_baseline has been updated.
     prev_commit_lsn_baseline: u64,
-    /// Assigned at a flush operation.
+    /// Assigned at a flush operation completion, which means all flushes with LSN <= [`new_flush_lsn`] have finished.
     new_flush_lsn: Option<u64>,
+    /// Assigned at a flush operation completion, which records the largest flush LSN completed.
+    new_largest_flush_lsn: Option<u64>,
+
     new_commit_point: Option<RecordLocation>,
 
     /// streaming xact
     new_streaming_xact: Vec<TransactionStreamOutput>,
 
-    /// Schema change.
+    /// Schema change, or force snapshot.
     force_empty_iceberg_payload: bool,
 
     /// Committed deletion records, which have been persisted into iceberg, and should be pruned from mooncake snapshot.
@@ -266,6 +273,8 @@ pub struct SnapshotTask {
     index_merge_result: FileIndiceMergeResult,
 
     /// --- States related to data compaction operation ---
+    /// Disk file ids which take part in the compaction.
+    compacting_data_files: HashSet<FileId>,
     /// These persisted items will be reflected to mooncake snapshot in the next invocation of periodic mooncake snapshot operation.
     data_compaction_result: DataCompactionResult,
 
@@ -291,6 +300,7 @@ impl SnapshotTask {
             commit_lsn_baseline: 0,
             prev_commit_lsn_baseline: 0,
             new_flush_lsn: None,
+            new_largest_flush_lsn: None,
             new_commit_point: None,
             new_streaming_xact: Vec::new(),
             force_empty_iceberg_payload: false,
@@ -299,6 +309,7 @@ impl SnapshotTask {
             // Index merge related fields.
             index_merge_result: FileIndiceMergeResult::default(),
             // Data compaction related fields.
+            compacting_data_files: HashSet::new(),
             data_compaction_result: DataCompactionResult::default(),
             // Iceberg persistence result.
             iceberg_persisted_records: IcebergPersistedRecords::default(),
@@ -398,6 +409,15 @@ impl SnapshotTask {
     }
 }
 
+/// Background task (i.e., mooncake snapshot) status, which is used for validation.
+#[derive(Clone, Debug, Default)]
+struct BackgroundTaskStatus {
+    mooncake_snapshot_ongoing: bool,
+    iceberg_snapshot_ongoing: bool,
+    index_merge_ongoing: bool,
+    data_compaction_ongoing: bool,
+}
+
 /// MooncakeTable is a disk table + mem slice.
 /// Transactions will append data to the mem slice.
 ///
@@ -422,8 +442,9 @@ pub struct MooncakeTable {
 
     /// Current snapshot of the table
     snapshot: Arc<RwLock<SnapshotTableState>>,
-    /// Whether there's ongoing mooncake snapshot.
-    mooncake_snapshot_ongoing: bool,
+
+    /// Background task status, which is ONLY used for invariant validation.
+    background_task_status_for_validation: BackgroundTaskStatus,
 
     table_snapshot_watch_sender: watch::Sender<u64>,
     table_snapshot_watch_receiver: watch::Receiver<u64>,
@@ -493,12 +514,15 @@ impl MooncakeTable {
             config: table_config.clone(),
             path: base_path,
         });
-        let iceberg_table_manager = Box::new(IcebergTableManager::new(
-            metadata.clone(),
-            object_storage_cache.clone(),
-            table_filesystem_accessor.clone(),
-            iceberg_table_config,
-        )?);
+        let iceberg_table_manager = Box::new(
+            IcebergTableManager::new(
+                metadata.clone(),
+                object_storage_cache.clone(),
+                table_filesystem_accessor.clone(),
+                iceberg_table_config,
+            )
+            .await?,
+        );
 
         Self::new_with_table_manager(
             metadata,
@@ -551,7 +575,7 @@ impl MooncakeTable {
                 )
                 .await?,
             )),
-            mooncake_snapshot_ongoing: false,
+            background_task_status_for_validation: BackgroundTaskStatus::default(),
             next_snapshot_task: SnapshotTask::new(table_metadata.as_ref().config.clone()),
             transaction_stream_states: HashMap::new(),
             table_snapshot_watch_sender,
@@ -647,6 +671,13 @@ impl MooncakeTable {
 
     /// Set iceberg snapshot flush LSN, called after a snapshot operation.
     pub(crate) fn set_iceberg_snapshot_res(&mut self, iceberg_snapshot_res: IcebergSnapshotResult) {
+        assert!(
+            self.background_task_status_for_validation
+                .iceberg_snapshot_ongoing
+        );
+        self.background_task_status_for_validation
+            .iceberg_snapshot_ongoing = false;
+
         // ---- Update mooncake table fields ----
         let flush_lsn = iceberg_snapshot_res.flush_lsn;
         Self::assert_flush_lsn_on_iceberg_snapshot_res(
@@ -704,6 +735,13 @@ impl MooncakeTable {
 
     /// Set file indices merge result, which will be sync-ed to mooncake and iceberg snapshot in the next periodic snapshot iteration.
     pub(crate) fn set_file_indices_merge_res(&mut self, file_indices_res: FileIndiceMergeResult) {
+        assert!(
+            self.background_task_status_for_validation
+                .index_merge_ongoing
+        );
+        self.background_task_status_for_validation
+            .index_merge_ongoing = false;
+
         // TODO(hjiang): Should be able to use HashSet at beginning so no need to convert.
         assert!(self.next_snapshot_task.index_merge_result.is_empty());
         self.next_snapshot_task.index_merge_result = file_indices_res;
@@ -711,6 +749,13 @@ impl MooncakeTable {
 
     /// Set data compaction result, which will be sync-ed to mooncake and iceberg snapshot in the next periodic snapshot iteration.
     pub(crate) fn set_data_compaction_res(&mut self, data_compaction_res: DataCompactionResult) {
+        assert!(
+            self.background_task_status_for_validation
+                .data_compaction_ongoing
+        );
+        self.background_task_status_for_validation
+            .data_compaction_ongoing = false;
+
         assert!(self.next_snapshot_task.data_compaction_result.is_empty());
         self.next_snapshot_task.data_compaction_result = data_compaction_res;
     }
@@ -917,8 +962,12 @@ impl MooncakeTable {
 
     // Attempts to set the flush LSN for the next iceberg snapshot. Note that we can only set the flush LSN if it's less than the current min pending flush LSN. Otherwise, LSNs will be persisted to iceberg in the wrong order.
     fn try_set_next_flush_lsn(&mut self, lsn: u64) {
+        if self.next_snapshot_task.new_largest_flush_lsn.is_none()
+            || self.next_snapshot_task.new_largest_flush_lsn.unwrap() < lsn
+        {
+            self.next_snapshot_task.new_largest_flush_lsn = Some(lsn);
+        }
         let min_pending_lsn = self.get_min_ongoing_flush_lsn();
-
         if lsn < min_pending_lsn {
             if let Some(old_flush_lsn) = self.next_snapshot_task.new_flush_lsn {
                 ma::assert_le!(old_flush_lsn, lsn);
@@ -987,8 +1036,13 @@ impl MooncakeTable {
         }
 
         // Check invariant: there should be at most one ongoing mooncake snapshot.
-        assert!(!self.mooncake_snapshot_ongoing);
-        self.mooncake_snapshot_ongoing = true;
+        assert!(
+            !self
+                .background_task_status_for_validation
+                .mooncake_snapshot_ongoing
+        );
+        self.background_task_status_for_validation
+            .mooncake_snapshot_ongoing = true;
 
         self.next_snapshot_task.new_rows = Some(self.mem_slice.get_latest_rows());
         let mut next_snapshot_task = std::mem::take(&mut self.next_snapshot_task);
@@ -1019,14 +1073,16 @@ impl MooncakeTable {
 
     /// Notify mooncake snapshot as completed.
     pub fn mark_mooncake_snapshot_completed(&mut self) {
-        assert!(self.mooncake_snapshot_ongoing);
-        self.mooncake_snapshot_ongoing = false;
+        assert!(
+            self.background_task_status_for_validation
+                .mooncake_snapshot_ongoing
+        );
+        self.background_task_status_for_validation
+            .mooncake_snapshot_ongoing = false;
     }
 
-    /// Update table schema to the provided [`updated_table_metadata`].
-    /// To synchronize on its completion, caller should trigger a force snapshot and block wait iceberg snapshot complete
+    /// Mark next iceberg snapshot as force, even if the payload is empty.
     pub(crate) fn force_empty_iceberg_payload(&mut self) {
-        assert!(!self.next_snapshot_task.force_empty_iceberg_payload);
         self.next_snapshot_task.force_empty_iceberg_payload = true;
     }
 
@@ -1220,12 +1276,7 @@ impl MooncakeTable {
         }
 
         // Perform commit operation.
-        assert!(
-            lsn >= self.next_snapshot_task.commit_lsn_baseline,
-            "Commit LSN {} is less than the current commit LSN baseline {}",
-            lsn,
-            self.next_snapshot_task.commit_lsn_baseline
-        );
+        ma::assert_ge!(lsn, self.next_snapshot_task.commit_lsn_baseline);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(
@@ -1297,6 +1348,14 @@ impl MooncakeTable {
         &mut self,
         file_indice_merge_payload: FileIndiceMergePayload,
     ) {
+        assert!(
+            !self
+                .background_task_status_for_validation
+                .index_merge_ongoing
+        );
+        self.background_task_status_for_validation
+            .index_merge_ongoing = true;
+
         // Record index merge event initiation.
         let table_event_id = file_indice_merge_payload.uuid;
         if let Some(event_replay_tx) = &self.event_replay_tx {
@@ -1361,6 +1420,14 @@ impl MooncakeTable {
 
     /// Perform data compaction, whose completion will be notified separately in async style.
     pub(crate) fn perform_data_compaction(&mut self, compaction_payload: DataCompactionPayload) {
+        assert!(
+            !self
+                .background_task_status_for_validation
+                .data_compaction_ongoing
+        );
+        self.background_task_status_for_validation
+            .data_compaction_ongoing = true;
+
         // Record index merge event initiation.
         let table_event_id = compaction_payload.uuid;
         if let Some(event_replay_tx) = &self.event_replay_tx {
@@ -1390,6 +1457,10 @@ impl MooncakeTable {
         };
         let schema_ref = self.metadata.schema.clone();
         let table_notify_tx_copy = self.table_notify.as_ref().unwrap().clone();
+
+        // Record data files being compacted.
+        assert!(self.next_snapshot_task.compacting_data_files.is_empty());
+        self.next_snapshot_task.compacting_data_files = compaction_payload.get_data_files();
 
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(
@@ -1573,6 +1644,7 @@ impl MooncakeTable {
                 old_file_indices_removed: old_file_indices_to_remove_by_compaction,
                 data_file_records_remap: data_file_record_remap_by_compaction,
             },
+            evicted_files_to_delete: iceberg_persistence_res.evicted_files_to_delete,
         };
 
         // Send back completion notification to table handler.
@@ -1588,6 +1660,13 @@ impl MooncakeTable {
     pub(crate) fn persist_iceberg_snapshot(&mut self, snapshot_payload: IcebergSnapshotPayload) {
         // Check invariant: there's at most one ongoing iceberg snapshot.
         let iceberg_table_manager = self.iceberg_table_manager.take().unwrap();
+        assert!(
+            !self
+                .background_task_status_for_validation
+                .iceberg_snapshot_ongoing
+        );
+        self.background_task_status_for_validation
+            .iceberg_snapshot_ongoing = true;
 
         // Create a detached task, whose completion will be notified separately.
         let new_file_ids_to_create = snapshot_payload.get_new_file_ids_num();
@@ -1632,6 +1711,7 @@ mod mooncake_tests {
             },
             index_merge_result: IcebergSnapshotIndexMergeResult::default(),
             data_compaction_result: IcebergSnapshotDataCompactionResult::default(),
+            evicted_files_to_delete: Vec::new(),
         };
         // Valid snapshot result.
         MooncakeTable::assert_flush_lsn_on_iceberg_snapshot_res(

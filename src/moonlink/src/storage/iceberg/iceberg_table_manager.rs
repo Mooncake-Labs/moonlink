@@ -73,7 +73,7 @@ pub struct IcebergTableManager {
 }
 
 impl IcebergTableManager {
-    pub fn new(
+    pub async fn new(
         mooncake_table_metadata: Arc<MooncakeTableMetadata>,
         object_storage_cache: Arc<dyn CacheTrait>,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
@@ -81,8 +81,7 @@ impl IcebergTableManager {
     ) -> IcebergResult<IcebergTableManager> {
         let iceberg_schema =
             iceberg::arrow::arrow_schema_to_schema(mooncake_table_metadata.schema.as_ref())?;
-        let catalog =
-            catalog_utils::create_catalog(config.metadata_accessor_config.clone(), iceberg_schema)?;
+        let catalog = catalog_utils::create_catalog(config.clone(), iceberg_schema).await?;
         Ok(Self {
             snapshot_loaded: false,
             config,
@@ -137,15 +136,19 @@ impl IcebergTableManager {
         let location_generator =
             DefaultLocationGenerator::new(self.iceberg_table.as_ref().unwrap().metadata().clone())
                 .unwrap();
-        location_generator
-            .generate_location(&format!("{}-deletion-vector-v1-puffin.bin", Uuid::now_v7()))
+        location_generator.generate_location(
+            /*partition_key=*/ None,
+            &format!("{}-deletion-vector-v1-puffin.bin", Uuid::now_v7()),
+        )
     }
     pub(super) fn get_unique_hash_index_v1_filepath(&self) -> String {
         let location_generator =
             DefaultLocationGenerator::new(self.iceberg_table.as_ref().unwrap().metadata().clone())
                 .unwrap();
-        location_generator
-            .generate_location(&format!("{}-hash-index-v1-puffin.bin", Uuid::now_v7()))
+        location_generator.generate_location(
+            /*partition_key=*/ None,
+            &format!("{}-hash-index-v1-puffin.bin", Uuid::now_v7()),
+        )
     }
 
     /// Get or create an iceberg table based on the iceberg manager config.

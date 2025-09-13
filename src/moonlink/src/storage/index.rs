@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MooncakeIndex {
     pub(crate) in_memory_index: HashSet<IndexPtr>,
     pub(crate) file_indices: Vec<FileIndex>,
@@ -44,7 +44,7 @@ pub enum MemIndex {
 pub type FileIndex = GlobalIndex; // key -> (file, row_offset)
 
 // Wrapper that uses Arc pointer identity
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct IndexPtr(Arc<MemIndex>);
 
 impl IndexPtr {

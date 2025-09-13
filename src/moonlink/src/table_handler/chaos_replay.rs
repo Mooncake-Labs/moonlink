@@ -2,6 +2,7 @@ use crate::row::MoonlinkRow;
 use crate::row::RowValue;
 use crate::storage::cache::object_storage::cache_config::ObjectStorageCacheConfig;
 use crate::storage::cache::object_storage::object_storage_cache::ObjectStorageCache;
+use crate::storage::io_utils;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::snapshot::MooncakeSnapshotOutput;
 use crate::storage::mooncake_table::DataCompactionResult;
@@ -239,6 +240,7 @@ pub(crate) async fn replay(replay_filepath: &str) {
     let pending_iceberg_snapshot_payloads_clone = pending_iceberg_snapshot_payloads.clone();
     let pending_index_merge_payloads_clone = pending_index_merge_payloads.clone();
     let pending_data_compaction_payloads_clone = pending_data_compaction_payloads.clone();
+    // TODO(hjiang): For data compaction payloads, if compaction is not taken for this particular payload, we need to decrement reference counts for all pinned files.
 
     // Maps from file id to data filepath.
     let data_files = Arc::new(Mutex::new(HashMap::new()));
@@ -265,6 +267,11 @@ pub(crate) async fn replay(replay_filepath: &str) {
         while let Some(table_event) = table_event_receiver.recv().await {
             #[allow(clippy::single_match)]
             match table_event {
+                TableEvent::EvictedFilesToDelete { evicted_files } => {
+                    io_utils::delete_local_files(&evicted_files.files)
+                        .await
+                        .unwrap();
+                }
                 TableEvent::FlushResult {
                     event_id,
                     xact_id,
@@ -556,15 +563,16 @@ pub(crate) async fn replay(replay_filepath: &str) {
                         guard.remove(&snapshot_completion_event.uuid)
                     };
                     if let Some(completed_mooncake_snapshot) = completed_mooncake_snapshot {
+                        let mooncake_snapshot_result =
+                            completed_mooncake_snapshot.mooncake_snapshot_result;
+                        io_utils::delete_local_files(
+                            &mooncake_snapshot_result.evicted_data_files_to_delete,
+                        )
+                        .await
+                        .unwrap();
                         table.mark_mooncake_snapshot_completed();
-                        table.record_mooncake_snapshot_completion(
-                            &completed_mooncake_snapshot.mooncake_snapshot_result,
-                        );
-                        table.notify_snapshot_reader(
-                            completed_mooncake_snapshot
-                                .mooncake_snapshot_result
-                                .commit_lsn,
-                        );
+                        table.record_mooncake_snapshot_completion(&mooncake_snapshot_result);
+                        table.notify_snapshot_reader(mooncake_snapshot_result.commit_lsn);
                         break;
                     }
                     // Otherwise block until the corresponding flush event completes.
@@ -595,7 +603,6 @@ pub(crate) async fn replay(replay_filepath: &str) {
                 assert!(ongoing_iceberg_snapshot_id.insert(snapshot_initiation_event.uuid));
                 let payload = {
                     let mut guard = pending_iceberg_snapshot_payloads_clone.lock().await;
-
                     guard.remove(&snapshot_initiation_event.uuid).unwrap()
                 };
                 table.persist_iceberg_snapshot(payload);
@@ -608,9 +615,14 @@ pub(crate) async fn replay(replay_filepath: &str) {
                         guard.remove(&snapshot_completion_event.uuid)
                     };
                     if let Some(completed_iceberg_snapshot) = completed_iceberg_snapshot_event {
-                        table.set_iceberg_snapshot_res(
-                            completed_iceberg_snapshot.iceberg_snapshot_result,
-                        );
+                        let iceberg_snapshot_result =
+                            completed_iceberg_snapshot.iceberg_snapshot_result;
+                        io_utils::delete_local_files(
+                            &iceberg_snapshot_result.evicted_files_to_delete,
+                        )
+                        .await
+                        .unwrap();
+                        table.set_iceberg_snapshot_res(iceberg_snapshot_result);
                         break;
                     }
                     // Otherwise block until the corresponding flush event completes.
@@ -686,6 +698,11 @@ pub(crate) async fn replay(replay_filepath: &str) {
                     if let Some(completed_data_compaction) = completed_data_compaction_event {
                         let data_compaction_result =
                             completed_data_compaction.data_compaction_result;
+                        io_utils::delete_local_files(
+                            &data_compaction_result.evicted_files_to_delete,
+                        )
+                        .await
+                        .unwrap();
                         table.set_data_compaction_res(data_compaction_result);
                         break;
                     }

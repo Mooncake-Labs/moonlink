@@ -87,14 +87,21 @@ impl SnapshotTableState {
         Vec<DeletionVector>,     /*deletion vector puffin*/
         Vec<PositionDelete>,
     ) {
-        // Get puffin blobs for deletion vector.
+        // Deletion records consist of two parts:
+        // - persisted ones represented in puffin blob format
+        // - committed but unpersisted deletion records, which could be deduced from committed batch deletion records and persisted ones corresponding to each data file
         let mut puffin_cache_handles = vec![];
         let mut deletion_vector_blob_at_read = vec![];
-        for (idx, (_, disk_deletion_vector)) in self.current_snapshot.disk_files.iter().enumerate()
+        let mut committed_unpersisted_committed_records = vec![];
+
+        for (file_idx, (_, disk_deletion_vector)) in
+            self.current_snapshot.disk_files.iter().enumerate()
         {
             if disk_deletion_vector.puffin_deletion_blob.is_none() {
                 continue;
             }
+
+            // Get persisted deletion vector, in iceberg puffin blob format.
             let puffin_deletion_blob = disk_deletion_vector.puffin_deletion_blob.as_ref().unwrap();
 
             // Add one more reference for puffin cache handle.
@@ -113,7 +120,7 @@ impl SnapshotTableState {
 
             let puffin_file_index = puffin_cache_handles.len() - 1;
             deletion_vector_blob_at_read.push(DeletionVector {
-                data_file_number: idx as u32,
+                data_file_number: file_idx as u32,
                 puffin_file_number: puffin_file_index as u32,
                 offset: puffin_deletion_blob.start_offset,
                 size: puffin_deletion_blob.blob_size,
@@ -121,12 +128,11 @@ impl SnapshotTableState {
         }
 
         // Get committed but un-persisted deletion vector.
-        let mut ret = Vec::new();
         for deletion in self.committed_deletion_log.iter() {
             if let RecordLocation::DiskFile(file_id, row_id) = &deletion.pos {
                 for (id, (file, _)) in self.current_snapshot.disk_files.iter().enumerate() {
                     if file.file_id() == *file_id {
-                        ret.push(PositionDelete {
+                        committed_unpersisted_committed_records.push(PositionDelete {
                             data_file_number: id as u32,
                             data_file_row_number: *row_id as u32,
                         });
@@ -135,7 +141,12 @@ impl SnapshotTableState {
                 }
             }
         }
-        (puffin_cache_handles, deletion_vector_blob_at_read, ret)
+
+        (
+            puffin_cache_handles,
+            deletion_vector_blob_at_read,
+            committed_unpersisted_committed_records,
+        )
     }
 
     pub(crate) async fn request_read(&mut self) -> Result<SnapshotReadOutput> {

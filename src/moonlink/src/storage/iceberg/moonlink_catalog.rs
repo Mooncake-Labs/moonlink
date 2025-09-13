@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 /// A trait which defines deletion vector write related interfaces.
 use iceberg::puffin::PuffinWriter;
-use iceberg::spec::Schema as IcebergSchema;
+use iceberg::spec::{Schema as IcebergSchema, TableMetadata};
 use iceberg::table::Table;
 use iceberg::{Catalog, Result as IcebergResult, TableIdent};
 
@@ -46,5 +46,18 @@ pub trait SchemaUpdate {
     ) -> IcebergResult<Table>;
 }
 
-pub trait MoonlinkCatalog: PuffinWrite + SchemaUpdate + Catalog {}
-impl<T: PuffinWrite + SchemaUpdate + Catalog> MoonlinkCatalog for T {}
+#[async_trait]
+pub trait CatalogAccess {
+    /// Get warehouse location.
+    #[allow(unused)]
+    fn get_warehouse_location(&self) -> &str;
+
+    /// Load metadata and its location foe the given table.
+    async fn load_metadata(
+        &self,
+        table_ident: &TableIdent,
+    ) -> IcebergResult<(String /*metadata_filepath*/, TableMetadata)>;
+}
+
+pub trait MoonlinkCatalog: PuffinWrite + SchemaUpdate + CatalogAccess + Catalog {}
+impl<T: PuffinWrite + SchemaUpdate + CatalogAccess + Catalog> MoonlinkCatalog for T {}

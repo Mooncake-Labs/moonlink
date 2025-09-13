@@ -124,7 +124,7 @@ impl IcebergTableManager {
         let num_rows = data_file.record_count();
 
         let batch_deletion_vector = deletion_vector.take_as_batch_delete_vector();
-        data_file_entry.deletion_vector = batch_deletion_vector;
+        data_file_entry.deletion_vector = batch_deletion_vector.clone();
 
         // Load remote puffin file to local cache and pin.
         let cur_file_id = *next_file_id;
@@ -205,7 +205,7 @@ impl IcebergTableManager {
                     file_size: data_file_entry.data_file.file_size_in_bytes() as usize,
                     cache_handle: None,
                     puffin_deletion_blob,
-                    batch_deletion_vector: data_file_entry.deletion_vector.clone(),
+                    committed_deletion_vector: data_file_entry.deletion_vector.clone(),
                 },
             );
         }
