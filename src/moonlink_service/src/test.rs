@@ -103,6 +103,29 @@ async fn test_schema() {
     assert_eq!(response.lsn, 1);
 }
 
+#[tokio::test]
+#[serial]
+async fn test_rpc_error_propagation_nonexistent_table() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir());
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    wait_for_server_ready().await;
+    let mut moonlink_stream = TcpStream::connect(MOONLINK_ADDR).await.unwrap();
+
+    let db = "nonexistent-db";
+    let tbl = "nonexistent-table";
+
+    let res =
+        moonlink_rpc::create_snapshot(&mut moonlink_stream, db.to_string(), tbl.to_string(), 123)
+            .await;
+    assert!(
+        res.is_err() && format!("{:?}", res.as_ref().unwrap_err()).contains("Rpc"),
+        "Expected Rpc error, but got: {res:?}"
+    );
+}
+
 /// Util function to test optimize table
 async fn run_optimize_table_test(mode: &str) {
     let _guard = TestGuard::new(&get_moonlink_backend_dir());

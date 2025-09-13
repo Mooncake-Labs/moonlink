@@ -678,6 +678,7 @@ pub(crate) async fn drop_table(client: &reqwest::Client, database: &str, table: 
 }
 
 /// Util function to optimize table via REST API.
+#[allow(dead_code)]
 pub(crate) async fn optimize_table(
     client: &reqwest::Client,
     database: &str,
