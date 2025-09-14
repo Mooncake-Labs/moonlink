@@ -16,12 +16,14 @@ use crate::rest_ingest::rest_source::RestSource;
 use crate::Result;
 use apache_avro::schema::Schema as AvroSchema;
 use arrow_schema::Schema;
+use futures::StreamExt;
 use moonlink::TableEvent;
 use moonlink::VisibilityLsn;
 use more_asserts as ma;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::pin;
+use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, error, warn};
 
 pub type SrcTableId = u32;
@@ -199,12 +201,13 @@ impl RestApiConnection {
 pub async fn run_rest_event_loop(
     mut sink: RestSink,
     mut cmd_rx: mpsc::Receiver<RestCommand>,
-    mut rest_request_rx: mpsc::Receiver<EventRequest>,
+    rest_request_rx: mpsc::Receiver<EventRequest>,
 ) -> Result<()> {
-    debug!("REST API event loop started");
+    let rest_source = Arc::new(RwLock::new(RestSource::new()));
 
-    // Create RestSource that we'll use for processing
-    let mut rest_source = RestSource::new();
+    // Create the processing stream and pin it
+    let processing_stream = RestSource::create_stream(rest_source.clone(), rest_request_rx, 4); // Allow up to 4 concurrent heavy file operations
+    pin!(processing_stream);
 
     // For processing errors happen inside of the eventloop, we simply log and proceed.
     // TODO(hjiang): implement exception safety guarantee.
@@ -227,14 +230,16 @@ pub async fn run_rest_event_loop(
                     }
 
                     // Add to source (handles schema and request processing)
-                    if let Err(e) = rest_source.add_table(src_table_name.clone(), src_table_id, schema, persist_lsn) {
+                    let mut source = rest_source.write().await;
+                    if let Err(e) = source.add_table(src_table_name.clone(), src_table_id, schema, persist_lsn) {
                         error!("Add table {src_table_name} with {src_table_id} to rest source failed: {e}");
                         continue;
                     }
                 }
                 RestCommand::SetAvroSchema { src_table_name, avro_schema } => {
                     debug!("Setting Avro schema for table '{}'", src_table_name);
-                    if let Err(e) = rest_source.set_avro_schema(src_table_name.clone(), avro_schema) {
+                    let mut source = rest_source.write().await;
+                    if let Err(e) = source.set_avro_schema(src_table_name.clone(), avro_schema) {
                         error!("Set avro schema failed for {src_table_name} failed: {e}");
                         continue;
                     }
@@ -242,14 +247,15 @@ pub async fn run_rest_event_loop(
                 RestCommand::DropTable { src_table_name, src_table_id } => {
                     debug!("Dropping REST table '{}' with src_table_id {}", src_table_name, src_table_id);
 
-                    // Remove from sink
+                    // Remove from sink first
                     if let Err(e) = sink.drop_table(src_table_id) {
                         error!("Drop table {src_table_name} with id {src_table_id} failed: {e}");
                         continue;
                     }
 
                     // Remove from source
-                    if let Err(e) = rest_source.remove_table(&src_table_name) {
+                    let mut source = rest_source.write().await;
+                    if let Err(e) = source.remove_table(&src_table_name) {
                         error!("Remove table {src_table_name} failed: {e}");
                         continue;
                     }
@@ -259,15 +265,11 @@ pub async fn run_rest_event_loop(
                     break;
                 }
             },
-            // Process REST requests directly (similar to how PostgreSQL processes CDC events)
-            Some(request) = rest_request_rx.recv() => {
-                // TODO(hjiang): Handle recursive request like file insertion.
-                let mut lsn = 0;
-
-                // Process the request and generate events
-                match rest_source.process_request(&request) {
+            // Handle results from the processing stream
+            Some((request_tx, result)) = processing_stream.next() => {
+                match result {
                     Ok(rest_events) => {
-                        // Send all events to be processed by the sink
+                        let mut lsn = 0;
                         for rest_event in rest_events {
                             if let Some(rest_lsn) = rest_event.lsn() {
                                 ma::assert_gt!(rest_lsn, lsn);
@@ -283,16 +285,16 @@ pub async fn run_rest_event_loop(
                         }
 
                         // Send back event response if applicable.
-                        if let Some(rx) = request.get_request_tx() {
+                        if let Some(tx) = request_tx {
                             // Client connection could be cut down during request handling, so no guarantee send success.
-                            let _ = rx.send(lsn).await;
+                            let _ = tx.send(lsn).await;
                         }
                     }
                     Err(e) => {
-                        warn!(error = ?e, "failed to process REST request {:?}", request);
+                        warn!(error = ?e, "failed to process REST request");
                     }
                 }
-            }
+            },
             // All channels are closed.
             else => break,
         }
