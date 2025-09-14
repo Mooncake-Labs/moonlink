@@ -6,9 +6,9 @@ use std::{
 use tokio::{net::UnixStream, sync::Mutex};
 
 const DEFAULT_MAX_ENTRIES_PER_URI: usize = 30;
-const DEFAULT_IDLE_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_IDLE_TIMEOUT_MS: Duration = Duration::from_millis(30_000);
 
-pub(crate) static POOL: LazyLock<Arc<Pool>> = LazyLock::new(|| {
+static POOL: LazyLock<Arc<Pool>> = LazyLock::new(|| {
     Arc::new(Pool::new(
         DEFAULT_MAX_ENTRIES_PER_URI,
         DEFAULT_IDLE_TIMEOUT_MS,
@@ -16,33 +16,33 @@ pub(crate) static POOL: LazyLock<Arc<Pool>> = LazyLock::new(|| {
 });
 
 #[derive(Debug)]
-pub struct PooledEntry {
+struct PooledEntry {
     stream: UnixStream,
     inserted_at: Instant,
 }
 
 #[derive(Debug)]
-/// Global connection pool.
+/// ### Global connection pool.
 ///
-/// Key: URI (String)
-/// Value: Mutex-protected VecDeque of PooledEntry (the pool for that URI)
-pub struct Pool {
-    pub inner: Mutex<HashMap<String, VecDeque<PooledEntry>>>,
-    pub max_entries_per_uri: usize,
-    pub idle_timeout_ms: u64,
+/// - Key: URI (String)
+/// - Value: Mutex-protected VecDeque of PooledEntry (the pool for that URI)
+pub(crate) struct Pool {
+    inner: Mutex<HashMap<String, VecDeque<PooledEntry>>>,
+    max_entries_per_uri: usize,
+    idle_timeout_ms: Duration,
 }
 
 impl Pool {
-    pub fn new(max_per_uri: usize, idle_timeout_ms: u64) -> Self {
+    pub fn new(max_per_uri: usize, idle_timeout: Duration) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             max_entries_per_uri: max_per_uri,
-            idle_timeout_ms,
+            idle_timeout_ms: idle_timeout,
         }
     }
 
-    pub fn idle_timeout(&self) -> Duration {
-        Duration::from_millis(self.idle_timeout_ms)
+    pub(crate) fn idle_timeout(&self) -> Duration {
+        self.idle_timeout_ms
     }
 }
 
@@ -57,14 +57,14 @@ impl Pool {
 ///
 /// ## Note
 /// The use of `Option` for `stream` is intentional to facilitate ownership transfer at drop.
-pub struct PooledStream {
+pub(crate) struct PooledStream {
     pub uri: String,
     pub stream: Option<UnixStream>,
     pub pool: Arc<Pool>,
 }
 
 impl PooledStream {
-    pub fn new(uri: String, stream: UnixStream, pool: Arc<Pool>) -> Self {
+    pub(crate) fn new(uri: String, stream: UnixStream, pool: Arc<Pool>) -> Self {
         Self {
             uri,
             stream: Some(stream),
@@ -72,7 +72,7 @@ impl PooledStream {
         }
     }
 
-    pub fn stream_mut(&mut self) -> &mut UnixStream {
+    pub(crate) fn stream_mut(&mut self) -> &mut UnixStream {
         self.stream
             .as_mut()
             .expect("stream already taken from PooledStream")
@@ -110,7 +110,14 @@ pub(crate) async fn get_stream_with_pool(
 
         if let Some(vec) = pool_inner.get_mut(uri) {
             // Remove expired streams
-            vec.retain(|entry| entry.inserted_at.elapsed() <= pool.idle_timeout());
+            while let Some(entry) = vec.front() {
+                if entry.inserted_at.elapsed() > pool.idle_timeout() {
+                    vec.pop_front();
+                } else {
+                    break;
+                }
+            }
+
             if !vec.is_empty() {
                 return Ok(PooledStream::new(
                     uri.to_string(),
@@ -132,12 +139,12 @@ pub(crate) async fn get_stream(uri: &str) -> crate::Result<PooledStream> {
 #[cfg(test)]
 mod tests {
     use crate::connection_pool::{get_stream_with_pool, Pool};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tempfile::tempdir;
     use tokio::net::UnixListener;
 
     fn create_test_pool() -> Arc<Pool> {
-        Arc::new(Pool::new(30, 50)) // 50ms idle timeout for testing
+        Arc::new(Pool::new(30, Duration::from_millis(50)))
     }
 
     #[tokio::test]
