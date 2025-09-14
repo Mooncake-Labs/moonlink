@@ -44,6 +44,37 @@ impl Pool {
     pub(crate) fn idle_timeout(&self) -> Duration {
         self.idle_timeout_ms
     }
+    pub(crate) async fn get_stream_with_pool(&self, uri: &str) -> crate::Result<PooledStream> {
+        {
+            let mut pool_inner = self.inner.lock().await;
+
+            if let Some(vec) = pool_inner.get_mut(uri) {
+                // Remove expired streams
+                while let Some(entry) = vec.front() {
+                    if entry.inserted_at.elapsed() > self.idle_timeout() {
+                        vec.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
+                if !vec.is_empty() {
+                    return Ok(PooledStream::new(
+                        uri.to_string(),
+                        vec.pop_front().unwrap().stream,
+                        POOL.clone(),
+                    ));
+                }
+            }
+        }
+        // If there are no available streams, create a new one
+        let stream = UnixStream::connect(uri).await?;
+        Ok(PooledStream::new(uri.to_string(), stream, POOL.clone()))
+    }
+
+    pub(crate) async fn get_stream(uri: &str) -> crate::Result<PooledStream> {
+        POOL.get_stream_with_pool(uri).await
+    }
 }
 
 #[derive(Debug)]
@@ -101,44 +132,9 @@ impl Drop for PooledStream {
     }
 }
 
-pub(crate) async fn get_stream_with_pool(
-    uri: &str,
-    pool: &Arc<Pool>,
-) -> crate::Result<PooledStream> {
-    {
-        let mut pool_inner = pool.inner.lock().await;
-
-        if let Some(vec) = pool_inner.get_mut(uri) {
-            // Remove expired streams
-            while let Some(entry) = vec.front() {
-                if entry.inserted_at.elapsed() > pool.idle_timeout() {
-                    vec.pop_front();
-                } else {
-                    break;
-                }
-            }
-
-            if !vec.is_empty() {
-                return Ok(PooledStream::new(
-                    uri.to_string(),
-                    vec.pop_front().unwrap().stream,
-                    pool.clone(),
-                ));
-            }
-        }
-    }
-    // If there are no available streams, create a new one
-    let stream = UnixStream::connect(uri).await?;
-    Ok(PooledStream::new(uri.to_string(), stream, pool.clone()))
-}
-
-pub(crate) async fn get_stream(uri: &str) -> crate::Result<PooledStream> {
-    get_stream_with_pool(uri, &POOL).await
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::connection_pool::{get_stream_with_pool, Pool};
+    use crate::connection_pool::Pool;
     use std::{sync::Arc, time::Duration};
     use tempfile::tempdir;
     use tokio::net::UnixListener;
@@ -146,7 +142,6 @@ mod tests {
     fn create_test_pool() -> Arc<Pool> {
         Arc::new(Pool::new(30, Duration::from_millis(50)))
     }
-
     #[tokio::test]
     async fn test_connection_pool_basic() {
         let test_pool = create_test_pool();
@@ -161,12 +156,14 @@ mod tests {
             }
         });
 
-        let stream1 = get_stream_with_pool(&uri_str, &test_pool)
+        let stream1 = test_pool
+            .get_stream_with_pool(&uri_str)
             .await
             .expect("should connect");
         drop(stream1);
 
-        let mut stream2 = get_stream_with_pool(&uri_str, &test_pool)
+        let mut stream2 = test_pool
+            .get_stream_with_pool(&uri_str)
             .await
             .expect("should reuse from pool");
         let unix_stream = stream2.stream.take().unwrap();
@@ -200,8 +197,8 @@ mod tests {
 
         // Retrieve streams for URI1 and URI2 concurrently
         let (stream1, stream2) = tokio::join!(
-            get_stream_with_pool(uri1, &test_pool),
-            get_stream_with_pool(uri2, &test_pool)
+            test_pool.get_stream_with_pool(uri1),
+            test_pool.get_stream_with_pool(uri2)
         );
 
         let mut stream1 = stream1.expect("connect URI1");
@@ -215,8 +212,8 @@ mod tests {
 
         // Retrieve streams for both URIs again; should reuse connections from the pool
         let (stream1b, stream2b) = tokio::join!(
-            get_stream_with_pool(uri1, &test_pool),
-            get_stream_with_pool(uri2, &test_pool)
+            test_pool.get_stream_with_pool(uri1),
+            test_pool.get_stream_with_pool(uri2)
         );
 
         let addr1b = stream1b.unwrap().stream_mut().peer_addr().unwrap();

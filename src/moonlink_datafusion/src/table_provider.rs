@@ -1,4 +1,4 @@
-use crate::connection_pool::{get_stream, PooledStream};
+use crate::connection_pool::{Pool, PooledStream};
 use crate::error::Result;
 use arrow::datatypes::SchemaRef;
 use arrow_ipc::reader::StreamReader;
@@ -39,7 +39,7 @@ pub struct MooncakeTableProvider {
 
 impl MooncakeTableProvider {
     pub async fn try_new(uri: &str, schema: String, table: String, lsn: u64) -> Result<Self> {
-        let mut pooled_stream = get_stream(uri).await?;
+        let mut pooled_stream = Pool::get_stream(uri).await?;
         let table_schema = get_table_schema(
             &mut pooled_stream.stream_mut(),
             schema.clone(),
