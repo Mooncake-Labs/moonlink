@@ -19,7 +19,7 @@ storage-gcs = ["moonlink/storage-gcs"]
 storage-fs = ["moonlink/storage-fs"]
 
 [dependencies]
-apache-avro = "0.17"
+apache-avro = "0.20"
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.8"

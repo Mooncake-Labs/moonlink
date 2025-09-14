@@ -4578,7 +4578,7 @@ dependencies = [
 name = "moonlink_backend"
 version = "0.0.1"
 dependencies = [
- "apache-avro 0.17.0",
+ "apache-avro 0.20.0",
  "arrow",
  "arrow-array",
  "arrow-schema",
@@ -4612,7 +4612,7 @@ name = "moonlink_connectors"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "apache-avro 0.17.0",
+ "apache-avro 0.20.0",
  "arrow",
  "arrow-array",
  "arrow-schema",
@@ -4728,7 +4728,7 @@ dependencies = [
 name = "moonlink_service"
 version = "0.0.1"
 dependencies = [
- "apache-avro 0.17.0",
+ "apache-avro 0.20.0",
  "arrow",
  "arrow-array",
  "arrow-buffer",
