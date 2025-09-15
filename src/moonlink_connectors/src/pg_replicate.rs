@@ -18,7 +18,7 @@ use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
-use crate::pg_replicate::table::{SrcTableId, TableSchema};
+use crate::pg_replicate::table::{SrcTableId, TableName, TableSchema};
 use crate::pg_replicate::table_init::{build_table_components, TableComponents};
 use crate::replication_state::ReplicationState;
 use crate::Result;
@@ -28,6 +28,7 @@ use moonlink::{
     VisibilityLsn, WalManager,
 };
 use native_tls::{Certificate, TlsConnector};
+use pg_escape::{quote_identifier, quote_literal};
 use postgres_native_tls::{MakeTlsConnector, TlsStream};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -129,14 +130,11 @@ impl PostgresConnection {
 
         // Preemptively terminate any stale backend holding this slot
         let terminate_query = format!(
-            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
-            slot_name
+            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = {};",
+            quote_literal(&slot_name)
         );
         if let Err(e) = postgres_client.simple_query(&terminate_query).await {
-            warn!(
-                "failed to terminate existing backend for slot {slot_name}: {}",
-                e
-            );
+            warn!(slot_name = %slot_name, error = %e, "failed to terminate existing backend for slot");
         }
 
         let postgres_source = PostgresSource::new(
@@ -230,8 +228,14 @@ impl PostgresConnection {
 
     /// Include full row in cdc stream (not just primary keys).
     pub async fn alter_table_replica_identity(&mut self, table_name: &str) -> Result<()> {
-        let sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;");
-        let _ = self.run_control_query(&sql).await?;
+        let ident = match TableName::parse_schema_name(table_name) {
+            Ok((schema, name)) => {
+                format!("{}.{}", quote_identifier(&schema), quote_identifier(&name))
+            }
+            Err(_) => quote_identifier(table_name).into_owned(),
+        };
+        let sql = format!("ALTER TABLE {} REPLICA IDENTITY FULL;", ident);
+        self.run_control_query(&sql).await?;
         Ok(())
     }
 
@@ -359,20 +363,29 @@ impl PostgresConnection {
     pub async fn drop_replication_slot(&mut self) -> Result<()> {
         // First, terminate any active connections using this slot
         let terminate_query = format!(
-            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
-            self.slot_name
+            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = {};",
+            quote_literal(&self.slot_name)
         );
-        let _ = self.run_control_query(&terminate_query).await;
+        self.run_control_query(&terminate_query).await?;
 
         // Then drop the replication slot
-        let drop_query = format!("SELECT pg_drop_replication_slot('{}');", self.slot_name);
+        let drop_query = format!(
+            "SELECT pg_drop_replication_slot({});",
+            quote_literal(&self.slot_name)
+        );
         self.run_control_query(&drop_query).await?;
 
         Ok(())
     }
 
     pub async fn remove_table_from_publication(&mut self, table_name: &str) -> Result<()> {
-        let drop_query = format!("ALTER PUBLICATION moonlink_pub DROP TABLE {table_name};");
+        let ident = match TableName::parse_schema_name(table_name) {
+            Ok((schema, name)) => {
+                format!("{}.{}", quote_identifier(&schema), quote_identifier(&name))
+            }
+            Err(_) => quote_identifier(table_name).into_owned(),
+        };
+        let drop_query = format!("ALTER PUBLICATION moonlink_pub DROP TABLE {};", ident);
         self.attempt_drop_else_retry(&drop_query).await?;
         Ok(())
     }
