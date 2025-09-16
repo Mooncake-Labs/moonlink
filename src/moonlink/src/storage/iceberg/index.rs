@@ -24,9 +24,13 @@ pub(crate) const MOONCAKE_HASH_INDEX_V1_CARDINALITY: &str = "cardinality";
 /// Corresponds to [storage::index::IndexBlock], which records the metadata for each index block.
 #[derive(Deserialize, PartialEq, Serialize)]
 pub(crate) struct IndexBlock {
+    #[serde(default, rename = "bucket_start_idx")] 
     bucket_start_idx: u32,
+    #[serde(default, rename = "bucket_end_idx")] 
     bucket_end_idx: u32,
+    #[serde(default, rename = "bucket_start_offset")] 
     bucket_start_offset: u64,
+    #[serde(default, rename = "filepath")] 
     pub(crate) filepath: String,
 }
 
@@ -34,16 +38,25 @@ pub(crate) struct IndexBlock {
 #[derive(Default, Deserialize, Serialize)]
 pub(crate) struct FileIndex {
     /// Data file paths at iceberg table.
+    #[serde(default, rename = "data_files")] 
     data_files: Vec<String>,
     /// Corresponds to [storage::index::IndexBlock].
+    #[serde(default, rename = "index_block_files")] 
     pub index_block_files: Vec<IndexBlock>, // TODO
     /// Hash related fields.
+    #[serde(default, rename = "num_rows")] 
     num_rows: u32,
+    #[serde(default, rename = "hash_bits")] 
     hash_bits: u32,
+    #[serde(default, rename = "hash_upper_bits")] 
     hash_upper_bits: u32,
+    #[serde(default, rename = "hash_lower_bits")] 
     hash_lower_bits: u32,
+    #[serde(default, rename = "seg_id_bits")] 
     seg_id_bits: u32,
+    #[serde(default, rename = "row_id_bits")] 
     row_id_bits: u32,
+    #[serde(default, rename = "bucket_bits")] 
     bucket_bits: u32,
 }
 
