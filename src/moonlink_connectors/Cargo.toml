@@ -13,10 +13,11 @@ test-tls = []
 
 [dependencies]
 anyhow = { workspace = true }
-apache-avro = "0.17"
+apache-avro = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+async-stream = "0.3"
 async-trait = { workspace = true }
 bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
 byteorder = "1.5"

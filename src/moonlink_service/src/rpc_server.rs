@@ -1,7 +1,8 @@
 use crate::{error::Error, Result};
 use arrow_ipc::writer::StreamWriter;
 use moonlink_backend::MoonlinkBackend;
-use moonlink_rpc::{read, write, Request, Table};
+use moonlink_error::{ErrorStatus, ErrorStruct};
+use moonlink_rpc::{read, write, Request, RpcResult, Table};
 use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
 use std::net::SocketAddr;
@@ -89,6 +90,10 @@ pub async fn start_tcp_server(backend: Arc<MoonlinkBackend>, addr: SocketAddr) -
     }
 }
 
+fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
+    ErrorStruct::new("backend error".to_string(), ErrorStatus::Permanent).with_source(e)
+}
+
 async fn handle_stream<S>(backend: Arc<MoonlinkBackend>, mut stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -102,8 +107,11 @@ where
                 table,
                 lsn,
             } => {
-                backend.create_snapshot(database, table, lsn).await?;
-                write(&mut stream, &()).await?;
+                let res: RpcResult<()> = backend
+                    .create_snapshot(database, table, lsn)
+                    .await
+                    .map_err(into_error_struct);
+                write(&mut stream, &res).await?;
             }
             Request::CreateTable {
                 database,
@@ -113,7 +121,7 @@ where
                 table_config,
             } => {
                 // Use default mooncake config, and local filesystem for storage layer.
-                backend
+                let res: RpcResult<()> = backend
                     .create_table(
                         database,
                         table,
@@ -122,68 +130,100 @@ where
                         table_config,
                         None, /* input_database */
                     )
-                    .await?;
-                write(&mut stream, &()).await?;
+                    .await
+                    .map_err(into_error_struct);
+                write(&mut stream, &res).await?;
             }
             Request::DropTable { database, table } => {
-                backend.drop_table(database, table).await?;
-                write(&mut stream, &()).await?;
+                let res: RpcResult<()> = backend
+                    .drop_table(database, table)
+                    .await
+                    .map_err(into_error_struct);
+
+                write(&mut stream, &res).await?;
             }
             Request::GetParquetMetadatas { data_files } => {
-                let metadata = backend.get_parquet_metadatas(data_files).await?;
-                write(&mut stream, &metadata).await?;
+                let metadata_res: RpcResult<Vec<Vec<u8>>> = backend
+                    .get_parquet_metadatas(data_files)
+                    .await
+                    .map_err(into_error_struct);
+                write(&mut stream, &metadata_res).await?;
             }
             Request::GetTableSchema { database, table } => {
-                let database = backend.get_table_schema(database, table).await?;
-                let writer = StreamWriter::try_new(vec![], &database)?;
-                let data = writer.into_inner()?;
-                write(&mut stream, &data).await?;
+                let result: anyhow::Result<Vec<u8>> = async {
+                    let schema = backend.get_table_schema(database, table).await?;
+                    let writer = StreamWriter::try_new(Vec::new(), &schema)?;
+                    Ok(writer.into_inner()?)
+                }
+                .await;
+                let res: RpcResult<Vec<u8>> = result.map_err(into_error_struct);
+                write(&mut stream, &res).await?;
             }
             Request::ListTables {} => {
-                let tables = backend.list_tables().await?;
-                let tables: Vec<Table> = tables
-                    .into_iter()
-                    .map(|table| Table {
-                        database: table.database,
-                        table: table.table,
-                        cardinality: table.cardinality,
-                        commit_lsn: table.commit_lsn,
-                        flush_lsn: table.flush_lsn,
-                        iceberg_warehouse_location: table.iceberg_warehouse_location,
+                let tables_res = backend.list_tables().await;
+                let tables_res: RpcResult<Vec<Table>> = tables_res
+                    .map(|tables| {
+                        tables
+                            .into_iter()
+                            .map(|table| Table {
+                                database: table.database,
+                                table: table.table,
+                                cardinality: table.cardinality,
+                                commit_lsn: table.commit_lsn,
+                                flush_lsn: table.flush_lsn,
+                                iceberg_warehouse_location: table.iceberg_warehouse_location,
+                            })
+                            .collect()
                     })
-                    .collect();
-                write(&mut stream, &tables).await?;
+                    .map_err(into_error_struct);
+                write(&mut stream, &tables_res).await?;
             }
             Request::OptimizeTable {
                 database,
                 table,
                 mode,
             } => {
-                backend.optimize_table(database, table, &mode).await?;
-                write(&mut stream, &()).await?;
+                let res: RpcResult<()> = backend
+                    .optimize_table(database, table, &mode)
+                    .await
+                    .map_err(into_error_struct);
+                write(&mut stream, &res).await?;
             }
             Request::ScanTableBegin {
                 database,
                 table,
                 lsn,
             } => {
-                let state = backend
+                match backend
                     .scan_table(database.to_string(), table.to_string(), Some(lsn))
-                    .await?;
-                write(&mut stream, &state.data).await?;
-                assert!(map.insert((database, table), state).is_none());
+                    .await
+                    .map_err(into_error_struct)
+                {
+                    Ok(state) => {
+                        let res: RpcResult<Vec<u8>> = Ok(state.data.clone());
+                        write(&mut stream, &res).await?;
+                        assert!(map.insert((database, table), state).is_none());
+                    }
+                    Err(err) => {
+                        let res: RpcResult<Vec<u8>> = Err(err);
+                        write(&mut stream, &res).await?;
+                    }
+                }
             }
             Request::ScanTableEnd { database, table } => {
                 assert!(map.remove(&(database, table)).is_some());
-                write(&mut stream, &()).await?;
+                write(&mut stream, &RpcResult::<()>::Ok(())).await?;
             }
             Request::LoadFiles {
                 database,
                 table,
                 files,
             } => {
-                backend.load_files(database, table, files).await?;
-                write(&mut stream, &()).await?;
+                let res: RpcResult<()> = backend
+                    .load_files(database, table, files)
+                    .await
+                    .map_err(into_error_struct);
+                write(&mut stream, &res).await?;
             }
         }
     }

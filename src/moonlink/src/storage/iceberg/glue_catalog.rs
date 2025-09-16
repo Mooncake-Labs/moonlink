@@ -1,9 +1,11 @@
 use super::moonlink_catalog::{CatalogAccess, PuffinBlobType, PuffinWrite, SchemaUpdate};
-use super::puffin_writer_proxy::get_puffin_metadata_and_close;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-use crate::storage::iceberg::catalog_utils::{create_table_impl, update_table_impl};
+use crate::storage::iceberg::catalog_utils::{
+    close_puffin_writer_and_record_metadata, create_table_impl, update_table_impl,
+};
 use crate::storage::iceberg::iceberg_table_config::GlueCatalogConfig;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
+use crate::storage::iceberg::puffin_writer_proxy::PuffinBlobMetadataProxy;
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 use crate::storage::iceberg::table_update_proxy::TableUpdateProxy;
 use crate::StorageConfig;
@@ -13,6 +15,7 @@ use iceberg::puffin::PuffinWriter;
 use iceberg::spec::{Schema as IcebergSchema, TableMetadata};
 use iceberg::table::Table;
 use iceberg::CatalogBuilder;
+use iceberg::Error as IcebergError;
 use iceberg::Result as IcebergResult;
 use iceberg::{Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent};
 use iceberg_catalog_glue::{
@@ -36,25 +39,37 @@ pub struct GlueCatalog {
 }
 
 /// Util function to get config properties from iceberg table config.
+/// If not S3 storage config, return error.
 fn extract_glue_config_properties(
     glue_config: &GlueCatalogConfig,
     storage_config: &StorageConfig,
-) -> HashMap<String, String> {
+) -> IcebergResult<HashMap<String, String>> {
+    if !matches!(storage_config, StorageConfig::S3 { .. }) {
+        return Err(IcebergError::new(
+            iceberg::ErrorKind::Unexpected,
+            format!("Glue catalog expects S3 storage config, but gets {storage_config:?}"),
+        ));
+    }
+
     let s3_region = storage_config.get_region().unwrap();
+    let aws_security_config = glue_config
+        .cloud_secret_config
+        .get_aws_security_config()
+        .unwrap();
 
     let mut config_props = HashMap::from([
         // AWS configs.
         (
             AWS_ACCESS_KEY_ID.to_string(),
-            glue_config.aws_security_config.access_key_id.clone(),
+            aws_security_config.access_key_id.clone(),
         ),
         (
             AWS_SECRET_ACCESS_KEY.to_string(),
-            glue_config.aws_security_config.security_access_key.clone(),
+            aws_security_config.security_access_key.clone(),
         ),
         (
             AWS_REGION_NAME.to_string(),
-            glue_config.aws_security_config.region.clone(),
+            aws_security_config.region.clone(),
         ),
         // Glue configs.
         (GLUE_CATALOG_PROP_URI.to_string(), glue_config.uri.clone()),
@@ -86,7 +101,7 @@ fn extract_glue_config_properties(
     };
     config_props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
 
-    config_props
+    Ok(config_props)
 }
 
 impl GlueCatalog {
@@ -97,7 +112,7 @@ impl GlueCatalog {
         iceberg_schema: IcebergSchema,
     ) -> IcebergResult<Self> {
         let config_props =
-            extract_glue_config_properties(&glue_config, &accessor_config.storage_config);
+            extract_glue_config_properties(&glue_config, &accessor_config.storage_config)?;
         let warehouse_location = accessor_config.get_root_path();
         let builder = IcebergGlueCatalogBuilder::default();
         let catalog = builder.load(glue_config.name, config_props).await?;
@@ -118,7 +133,7 @@ impl GlueCatalog {
         accessor_config: AccessorConfig,
     ) -> IcebergResult<Self> {
         let config_props =
-            extract_glue_config_properties(&glue_config, &accessor_config.storage_config);
+            extract_glue_config_properties(&glue_config, &accessor_config.storage_config)?;
         let warehouse_location = accessor_config.get_root_path();
         let builder = IcebergGlueCatalogBuilder::default();
         let catalog = builder.load(glue_config.name, config_props).await?;
@@ -227,18 +242,31 @@ impl Catalog for GlueCatalog {
 
 #[async_trait]
 impl PuffinWrite for GlueCatalog {
+    fn record_puffin_metadata(
+        &mut self,
+        puffin_filepath: String,
+        puffin_metadata: Vec<PuffinBlobMetadataProxy>,
+        puffin_blob_type: PuffinBlobType,
+    ) {
+        self.table_update_proxy.record_puffin_metadata(
+            puffin_filepath,
+            puffin_metadata,
+            puffin_blob_type,
+        );
+    }
     async fn record_puffin_metadata_and_close(
         &mut self,
         puffin_filepath: String,
         puffin_writer: PuffinWriter,
         puffin_blob_type: PuffinBlobType,
     ) -> IcebergResult<()> {
-        let puffin_metadata = get_puffin_metadata_and_close(puffin_writer).await?;
-        self.table_update_proxy.record_puffin_metadata(
+        close_puffin_writer_and_record_metadata(
             puffin_filepath,
-            puffin_metadata,
+            puffin_writer,
             puffin_blob_type,
-        );
+            &mut self.table_update_proxy,
+        )
+        .await?;
         Ok(())
     }
 

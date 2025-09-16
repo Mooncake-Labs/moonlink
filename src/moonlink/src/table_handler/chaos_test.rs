@@ -1684,7 +1684,59 @@ async fn test_replay_chaos_with_no_background_maintenance() {
         special_table_option: SpecialTableOption::None,
         maintenance_option: TableMaintenanceOption::NoTableMaintenance,
         error_injection_enabled: false,
-        event_count: 3000,
+        event_count: 4000,
+        storage_config: StorageConfig::FileSystem {
+            root_directory,
+            atomic_write_dir: None,
+        },
+    };
+    let env = TestEnvironment::new(test_env_config).await;
+    let chaos_dump_filepath = env.chaos_dump_filepath.clone();
+    chaos_test_impl(env).await;
+
+    // Replay mooncake table events.
+    replay(&chaos_dump_filepath).await;
+}
+
+#[named]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_replay_chaos_with_data_compaction() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let root_directory = iceberg_temp_dir.path().to_str().unwrap().to_string();
+    let test_env_config = TestEnvConfig {
+        test_name: function_name!(),
+        local_filesystem_optimization_enabled: true,
+        disk_slice_write_chaos_enabled: false,
+        special_table_option: SpecialTableOption::None,
+        maintenance_option: TableMaintenanceOption::DataCompaction,
+        error_injection_enabled: false,
+        event_count: 4000,
+        storage_config: StorageConfig::FileSystem {
+            root_directory,
+            atomic_write_dir: None,
+        },
+    };
+    let env = TestEnvironment::new(test_env_config).await;
+    let chaos_dump_filepath = env.chaos_dump_filepath.clone();
+    chaos_test_impl(env).await;
+
+    // Replay mooncake table events.
+    replay(&chaos_dump_filepath).await;
+}
+
+#[named]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_replay_chaos_with_index_merge() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let root_directory = iceberg_temp_dir.path().to_str().unwrap().to_string();
+    let test_env_config = TestEnvConfig {
+        test_name: function_name!(),
+        local_filesystem_optimization_enabled: true,
+        disk_slice_write_chaos_enabled: false,
+        special_table_option: SpecialTableOption::None,
+        maintenance_option: TableMaintenanceOption::IndexMerge,
+        error_injection_enabled: false,
+        event_count: 4000,
         storage_config: StorageConfig::FileSystem {
             root_directory,
             atomic_write_dir: None,

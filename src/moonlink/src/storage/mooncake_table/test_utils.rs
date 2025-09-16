@@ -74,7 +74,6 @@ pub async fn test_table(
     table_name: &str,
     identity: IdentityProp,
 ) -> MooncakeTable {
-    // TODO(hjiang): Hard-code iceberg table namespace and table name.
     let iceberg_table_config = test_iceberg_table_config(context, table_name);
     let mut table_config = test_mooncake_table_config(context);
     table_config.batch_size = 2;

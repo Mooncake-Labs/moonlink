@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: moonlink-nginx-config
+data:
+  nginx.conf: |
+    # Minimal NGINX config providing:
+    # 1) A custom access log format that includes Range header and User-Agent
+    # 2) A simple static file server on port 80 serving /usr/share/nginx/html
+
+    events {}
+
+    http {
+      # Custom access log format capturing IP, user, timestamp, request,
+      # status, response bytes, raw Range header, and user agent.
+      log_format with_range '$remote_addr - $remote_user [$time_local] '
+                            '"$request" $status '
+                            'resp_size=$body_bytes_sent '
+                            'range="$http_range" '
+                            'ua="$http_user_agent"';
+
+      # Send access logs to stdout so they are visible via `kubectl logs`
+      access_log /dev/stdout with_range;
+
+      server {
+        listen 80;
+        server_name _;
+        root /usr/share/nginx/html;
+
+        location / { }
+      }
+    }

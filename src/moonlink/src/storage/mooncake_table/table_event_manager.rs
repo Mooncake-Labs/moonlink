@@ -89,7 +89,6 @@ impl TableEventManager {
     }
 
     /// Initiate an index merge event, return the channel for synchronization.
-    /// TODO(hjiang): Error status propagation.
     pub async fn initiate_index_merge(&mut self) -> broadcast::Receiver<Result<()>> {
         let subscriber = self.table_maintenance_completion_tx.subscribe();
         self.table_event_tx

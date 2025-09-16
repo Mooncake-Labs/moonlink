@@ -1,3 +1,5 @@
+/// Cloud vendor security config.
+///
 /// AWS security config.
 use serde::{Deserialize, Serialize};
 
@@ -23,5 +25,19 @@ impl std::fmt::Debug for AwsSecurityConfig {
             .field("security_access_key", &"xxxx")
             .field("region", &self.region)
             .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum CloudSecurityConfig {
+    Aws(AwsSecurityConfig),
+}
+
+impl CloudSecurityConfig {
+    /// Get AWS security config.
+    pub fn get_aws_security_config(&self) -> Option<&AwsSecurityConfig> {
+        match self {
+            CloudSecurityConfig::Aws(config) => Some(config),
+        }
     }
 }

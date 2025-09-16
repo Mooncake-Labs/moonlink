@@ -17,9 +17,12 @@ use tokio::sync::mpsc::Sender;
 
 pub const DEFAULT_WAL_FOLDER: &str = "_wal";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalConfig {
+    #[serde(rename = "accessor_config")]
     accessor_config: AccessorConfig,
+
+    #[serde(rename = "mooncake_table_id")]
     mooncake_table_id: String,
 }
 

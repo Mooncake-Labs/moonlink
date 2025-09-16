@@ -19,6 +19,30 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{timeout, Duration};
 
+    use moonlink_connectors::pg_replicate::clients::postgres::ReplicationClient;
+    use tokio_postgres::types::PgLsn;
+
+    async fn active_pid_for_slot(slot: &str) -> Option<i32> {
+        let uri = get_database_uri();
+        let (client, connection) = connect_to_postgres(&uri).await;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let rows = client
+            .simple_query(&format!(
+                "SELECT active_pid FROM pg_replication_slots WHERE slot_name = '{slot}';"
+            ))
+            .await
+            .unwrap();
+        for msg in rows {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                let v: Option<&str> = row.get(0);
+                return v.and_then(|s| s.parse::<i32>().ok());
+            }
+        }
+        None
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_plan_ctid_shards_coverage_and_disjointness() {
@@ -1004,5 +1028,68 @@ mod tests {
         );
 
         // Cleanup: table already dropped; tempdir cleans up automatically
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_startup_terminates_stale_slot_backend() {
+        let uri = get_database_uri();
+        let slot_name = "moonlink_slot_postgres";
+
+        // Clean slate for slot/publication
+        let (admin, admin_conn) = connect_to_postgres(&uri).await;
+        tokio::spawn(async move {
+            let _ = admin_conn.await;
+        });
+        let _ = admin
+            .simple_query(&format!(
+                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{slot_name}';"
+            ))
+            .await;
+        let _ = admin
+            .simple_query(&format!("SELECT pg_drop_replication_slot('{slot_name}')"))
+            .await;
+        let _ = admin
+            .simple_query(
+                "DROP PUBLICATION IF EXISTS moonlink_pub; CREATE PUBLICATION moonlink_pub WITH (publish_via_partition_root = true);",
+            )
+            .await
+            .unwrap();
+
+        // Hold the slot active via a raw replication client
+        let (mut repl, repl_conn) = ReplicationClient::connect(&uri, true).await.unwrap();
+        tokio::spawn(async move {
+            let _ = repl_conn.await;
+        });
+        repl.begin_readonly_transaction().await.unwrap();
+        let slot_info = repl.get_or_create_slot(slot_name).await.unwrap();
+        let start_lsn: PgLsn = slot_info.confirmed_flush_lsn;
+        repl.rollback_txn().await.unwrap();
+        let _stream = repl
+            .get_logical_replication_stream("moonlink_pub", slot_name, start_lsn)
+            .await
+            .unwrap();
+
+        // Verify active pid present
+        let pid_before = active_pid_for_slot(slot_name).await;
+        assert!(pid_before.is_some() && pid_before.unwrap() > 0);
+
+        // Construct PostgresConnection::new which should terminate the active backend
+        let _conn = moonlink_connectors::pg_replicate::PostgresConnection::new(uri.clone())
+            .await
+            .unwrap();
+
+        // Poll until pid clears
+        let mut pid_after = active_pid_for_slot(slot_name).await;
+        let mut attempts = 0;
+        while pid_after.is_some() && attempts < 20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            pid_after = active_pid_for_slot(slot_name).await;
+            attempts += 1;
+        }
+        assert!(
+            pid_after.is_none(),
+            "expected no active pid after startup takeover"
+        );
     }
 }

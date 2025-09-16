@@ -407,6 +407,15 @@ impl SnapshotTask {
 
         new_file_indices
     }
+
+    /// Attempt to set largest flush LSN.
+    pub(crate) fn try_set_largest_flush_lsn(&mut self, flush_lsn: u64) {
+        if self.new_largest_flush_lsn.is_some() && self.new_largest_flush_lsn.unwrap() >= flush_lsn
+        {
+            return;
+        }
+        self.new_largest_flush_lsn = Some(flush_lsn);
+    }
 }
 
 /// Background task (i.e., mooncake snapshot) status, which is used for validation.
@@ -962,11 +971,7 @@ impl MooncakeTable {
 
     // Attempts to set the flush LSN for the next iceberg snapshot. Note that we can only set the flush LSN if it's less than the current min pending flush LSN. Otherwise, LSNs will be persisted to iceberg in the wrong order.
     fn try_set_next_flush_lsn(&mut self, lsn: u64) {
-        if self.next_snapshot_task.new_largest_flush_lsn.is_none()
-            || self.next_snapshot_task.new_largest_flush_lsn.unwrap() < lsn
-        {
-            self.next_snapshot_task.new_largest_flush_lsn = Some(lsn);
-        }
+        self.next_snapshot_task.try_set_largest_flush_lsn(lsn);
         let min_pending_lsn = self.get_min_ongoing_flush_lsn();
         if lsn < min_pending_lsn {
             if let Some(old_flush_lsn) = self.next_snapshot_task.new_flush_lsn {

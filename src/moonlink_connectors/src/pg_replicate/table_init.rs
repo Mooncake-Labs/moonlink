@@ -187,7 +187,7 @@ pub async fn build_table_components(
         TableEventManager::new(table_handler.get_event_sender(), event_sync_receiver);
     let event_sender = table_handler.get_event_sender();
 
-    let table_resource = TableResources {
+    let table_resource: TableResources = TableResources {
         event_sender,
         read_state_manager,
         table_status_reader,

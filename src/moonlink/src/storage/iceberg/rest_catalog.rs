@@ -1,9 +1,11 @@
 use super::moonlink_catalog::{CatalogAccess, PuffinBlobType, PuffinWrite, SchemaUpdate};
-use super::puffin_writer_proxy::get_puffin_metadata_and_close;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-use crate::storage::iceberg::catalog_utils::{create_table_impl, update_table_impl};
+use crate::storage::iceberg::catalog_utils::{
+    close_puffin_writer_and_record_metadata, create_table_impl, update_table_impl,
+};
 use crate::storage::iceberg::iceberg_table_config::RestCatalogConfig;
 use crate::storage::iceberg::io_utils as iceberg_io_utils;
+use crate::storage::iceberg::puffin_writer_proxy::PuffinBlobMetadataProxy;
 use crate::storage::iceberg::table_commit_proxy::TableCommitProxy;
 use crate::storage::iceberg::table_update_proxy::TableUpdateProxy;
 use async_trait::async_trait;
@@ -89,9 +91,9 @@ impl RestCatalog {
 impl Catalog for RestCatalog {
     async fn list_namespaces(
         &self,
-        _parent: Option<&NamespaceIdent>,
+        parent: Option<&NamespaceIdent>,
     ) -> IcebergResult<Vec<NamespaceIdent>> {
-        todo!("list namespaces is not supported");
+        self.catalog.list_namespaces(parent).await
     }
     async fn create_namespace(
         &self,
@@ -103,8 +105,8 @@ impl Catalog for RestCatalog {
             .await
     }
 
-    async fn get_namespace(&self, _namespace_ident: &NamespaceIdent) -> IcebergResult<Namespace> {
-        todo!("get namespace is not supported");
+    async fn get_namespace(&self, namespace_ident: &NamespaceIdent) -> IcebergResult<Namespace> {
+        self.catalog.get_namespace(namespace_ident).await
     }
 
     async fn namespace_exists(&self, namespace_ident: &NamespaceIdent) -> IcebergResult<bool> {
@@ -127,7 +129,7 @@ impl Catalog for RestCatalog {
         _namespace_ident: &NamespaceIdent,
         _properties: HashMap<String, String>,
     ) -> IcebergResult<()> {
-        todo!("Update namespace is not supported");
+        todo!("update namespace is not supported");
     }
 
     async fn create_table(
@@ -179,18 +181,31 @@ impl Catalog for RestCatalog {
 
 #[async_trait]
 impl PuffinWrite for RestCatalog {
+    fn record_puffin_metadata(
+        &mut self,
+        puffin_filepath: String,
+        puffin_metadata: Vec<PuffinBlobMetadataProxy>,
+        puffin_blob_type: PuffinBlobType,
+    ) {
+        self.table_update_proxy.record_puffin_metadata(
+            puffin_filepath,
+            puffin_metadata,
+            puffin_blob_type,
+        );
+    }
     async fn record_puffin_metadata_and_close(
         &mut self,
         puffin_filepath: String,
         puffin_writer: PuffinWriter,
         puffin_blob_type: PuffinBlobType,
     ) -> IcebergResult<()> {
-        let puffin_metadata = get_puffin_metadata_and_close(puffin_writer).await?;
-        self.table_update_proxy.record_puffin_metadata(
+        close_puffin_writer_and_record_metadata(
             puffin_filepath,
-            puffin_metadata,
+            puffin_writer,
             puffin_blob_type,
-        );
+            &mut self.table_update_proxy,
+        )
+        .await?;
         Ok(())
     }
 

@@ -57,7 +57,7 @@ services:
     image: motoserver/moto:5.0.3
     command: ["-H", "0.0.0.0", "-p", "5000"]
     ports:
-      - "5000:5000"
+      - "5001:5000"
     networks:
       shared_network:
         aliases:

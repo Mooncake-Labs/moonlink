@@ -212,6 +212,7 @@ async fn create_new_manifest_list_writer(
     cur_snapshot: &Snapshot,
     file_io: &FileIO,
 ) -> IcebergResult<ManifestListWriter> {
+    // Overwrite the old manifest list file.
     let manifest_list_outfile = file_io.new_output(cur_snapshot.manifest_list())?;
 
     let latest_seq_no = table_metadata.last_sequence_number();
@@ -327,7 +328,8 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
         match manifest_entry_type {
             ManifestEntryType::DataFile => {
                 data_file_manifest_manager
-                    .add_manifest_entries(manifest_entries, manifest_metadata)?;
+                    .add_manifest_entries(manifest_entries, manifest_metadata)
+                    .await?;
             }
             ManifestEntryType::DeletionVector => {
                 deletion_vector_manifest_manager

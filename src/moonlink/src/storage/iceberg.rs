@@ -1,5 +1,6 @@
 pub mod base_iceberg_snapshot_fetcher;
 pub(super) mod catalog_utils;
+pub mod cloud_security_config;
 mod data_file_manifest_manager;
 pub(super) mod deletion_vector;
 mod deletion_vector_manifest_manager;
@@ -43,9 +44,6 @@ mod s3_test_utils;
 #[cfg(feature = "storage-gcs")]
 #[cfg(test)]
 mod gcs_test_utils;
-
-#[cfg(feature = "catalog-glue")]
-mod aws_security_config;
 
 #[cfg(test)]
 mod tests;

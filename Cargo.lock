@@ -1174,9 +1174,9 @@ dependencies = [
 
 [[package]]
 name = "bitstream-io"
-version = "4.5.0"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b348c85aeb6d0bb7dee47de5506b587d9c6c17856d1314eb4695ad751edc7231"
+checksum = "4dd3ca0e6861b2a2d785a7f0c267193e8d423d8ae3475aad1842f725d6a380c9"
 dependencies = [
  "core2",
 ]
@@ -2752,7 +2752,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2885,7 +2885,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3677,7 +3677,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3712,7 +3712,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.6.0"
-source = "git+https://github.com/apache/iceberg-rust?rev=fb94b8170ba57ea01fab666dd995bd6adec7ef41#fb94b8170ba57ea01fab666dd995bd6adec7ef41"
+source = "git+https://github.com/apache/iceberg-rust?rev=6876b8acad74841bd586d5b1821ae31d60761246#6876b8acad74841bd586d5b1821ae31d60761246"
 dependencies = [
  "anyhow",
  "apache-avro 0.20.0",
@@ -3767,7 +3767,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-glue"
 version = "0.6.0"
-source = "git+https://github.com/apache/iceberg-rust?rev=fb94b8170ba57ea01fab666dd995bd6adec7ef41#fb94b8170ba57ea01fab666dd995bd6adec7ef41"
+source = "git+https://github.com/apache/iceberg-rust?rev=6876b8acad74841bd586d5b1821ae31d60761246#6876b8acad74841bd586d5b1821ae31d60761246"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3782,7 +3782,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.6.0"
-source = "git+https://github.com/apache/iceberg-rust?rev=fb94b8170ba57ea01fab666dd995bd6adec7ef41#fb94b8170ba57ea01fab666dd995bd6adec7ef41"
+source = "git+https://github.com/apache/iceberg-rust?rev=6876b8acad74841bd586d5b1821ae31d60761246#6876b8acad74841bd586d5b1821ae31d60761246"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4266,7 +4266,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.53.3",
 ]
 
 [[package]]
@@ -4601,7 +4601,7 @@ dependencies = [
 name = "moonlink_backend"
 version = "0.0.1"
 dependencies = [
- "apache-avro 0.17.0",
+ "apache-avro 0.20.0",
  "arrow",
  "arrow-array",
  "arrow-schema",
@@ -4635,10 +4635,11 @@ name = "moonlink_connectors"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "apache-avro 0.17.0",
+ "apache-avro 0.20.0",
  "arrow",
  "arrow-array",
  "arrow-schema",
+ "async-stream",
  "async-trait",
  "bigdecimal",
  "byteorder",
@@ -4696,6 +4697,7 @@ name = "moonlink_error"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bincode",
  "regex",
  "serde",
  "serde_json",
@@ -4750,7 +4752,8 @@ dependencies = [
 name = "moonlink_service"
 version = "0.0.1"
 dependencies = [
- "apache-avro 0.17.0",
+ "anyhow",
+ "apache-avro 0.20.0",
  "arrow",
  "arrow-array",
  "arrow-buffer",
@@ -6012,7 +6015,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls 0.23.31",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "thiserror 2.0.16",
  "tokio",
  "tracing",
@@ -6049,9 +6052,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6568,7 +6571,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.9.4",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7561,15 +7564,15 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tempfile"
-version = "3.21.0"
+version = "3.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15b61f8f20e3a6f7e0649d825294eaf317edce30f82cf6026e7e4cb9222a7d1e"
+checksum = "84fa4d11fadde498443cca10fd3ac23c951f0dc59e080e9f4b93d4df4e4eea53"
 dependencies = [
  "fastrand",
  "getrandom 0.3.3",
  "once_cell",
  "rustix 1.0.8",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8459,7 +8462,7 @@ version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0978bf7171b3d90bac376700cb56d606feb40f251a475a5d6634613564460b22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

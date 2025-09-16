@@ -1,5 +1,5 @@
 #[cfg(feature = "catalog-glue")]
-use crate::storage::iceberg::aws_security_config::AwsSecurityConfig;
+use crate::storage::iceberg::cloud_security_config::CloudSecurityConfig;
 use crate::{storage::filesystem::accessor_config::AccessorConfig, StorageConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,15 +33,15 @@ pub struct RestCatalogConfig {
     pub props: HashMap<String, String>,
 }
 
+#[cfg(feature = "catalog-glue")]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GlueCatalogConfig {
     /// ========================
     /// AWS security configs.
     /// ========================
     ///
-    #[cfg(feature = "catalog-glue")]
-    #[serde(rename = "aws_security_config")]
-    pub aws_security_config: AwsSecurityConfig,
+    #[serde(rename = "cloud_secret_config")]
+    pub cloud_secret_config: CloudSecurityConfig,
 
     /// ========================
     /// Glue properties

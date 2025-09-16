@@ -480,9 +480,10 @@ impl MooncakeTable {
                 puffin_deletion_blob: None,
             };
             // Add now flushed files to stream state
-            stream_state
+            assert!(stream_state
                 .flushed_files
-                .insert(file.clone(), disk_file_entry);
+                .insert(file.clone(), disk_file_entry)
+                .is_none());
         }
 
         // Add flushed file index to stream state
@@ -492,7 +493,7 @@ impl MooncakeTable {
         }
         // Remove now flushed in mem batches
         for batch in disk_slice.input_batches().iter() {
-            stream_state.new_record_batches.remove(&batch.id);
+            assert!(stream_state.new_record_batches.remove(&batch.id).is_some());
         }
         // Remove now flushed in mem indices
         let old_index = disk_slice.old_index();
@@ -646,6 +647,11 @@ impl MooncakeTable {
 
         for deletion in stream_state.local_deletions.iter_mut() {
             deletion.lsn = lsn - 1;
+        }
+
+        // Set largest flush LSN.
+        if !stream_state.flushed_files.is_empty() {
+            self.next_snapshot_task.try_set_largest_flush_lsn(lsn);
         }
 
         let commit = TransactionStreamCommit {

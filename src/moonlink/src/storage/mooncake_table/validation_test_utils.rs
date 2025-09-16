@@ -3,17 +3,25 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 /// This module contains testing utils for validation.
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::puffin_utils;
+use crate::storage::mooncake_table::table_creation_test_utils::create_test_filesystem_accessor;
+use crate::storage::mooncake_table::table_creation_test_utils::create_test_object_storage_cache;
 use crate::storage::mooncake_table::test_utils::*;
 use crate::storage::mooncake_table::test_utils_commons::*;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::mooncake_table::Snapshot;
+use crate::storage::mooncake_table::TableMetadata;
 use crate::storage::storage_utils::FileId;
 use crate::storage::storage_utils::RawDeletionRecord;
 use crate::storage::storage_utils::RecordLocation;
+use crate::IcebergTableConfig;
+use crate::IcebergTableManager;
 use crate::ObjectStorageCache;
+use crate::TableManager;
 use iceberg::io::FileIOBuilder;
 use moonlink_table_metadata::PositionDelete;
 use std::collections::HashSet;
+use std::sync::Arc;
+use tempfile::TempDir;
 
 /// Test util function to check consistency for snapshot batch deletion vector and deletion puffin blob.
 pub(crate) async fn check_deletion_vector_consistency(disk_file_entry: &DiskFileEntry) {
@@ -218,4 +226,27 @@ pub(crate) async fn verify_recovered_mooncake_snapshot(snapshot: &Snapshot, expe
         expected_ids,
     )
     .await;
+}
+
+/// Test util function to validate iceberg content.
+pub(crate) async fn verify_iceberg_content(
+    iceberg_table_config: IcebergTableConfig,
+    mooncake_table_metadata: Arc<TableMetadata>,
+    cache_temp_dir: &TempDir,
+    expected_ids: &[i32],
+) {
+    let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+    let mut iceberg_table_manager_for_recovery = IcebergTableManager::new(
+        mooncake_table_metadata.clone(),
+        create_test_object_storage_cache(cache_temp_dir), // Use separate cache for each table.
+        filesystem_accessor.clone(),
+        iceberg_table_config.clone(),
+    )
+    .await
+    .unwrap();
+    let (_, snapshot) = iceberg_table_manager_for_recovery
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    verify_recovered_mooncake_snapshot(&snapshot, expected_ids).await;
 }

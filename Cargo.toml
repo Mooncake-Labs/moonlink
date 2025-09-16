@@ -20,6 +20,7 @@ license = "LicenseRef-BSL-1.1"
 
 [workspace.dependencies]
 anyhow = "1.0"
+apache-avro = "0.20"
 arrow = { version = "55", default-features = false, features = [
   "canonical_extension_types",
 ] }
@@ -31,7 +32,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 backon = "1.5"
 bincode = { version = "2", features = ["serde"] }
-bitstream-io = "4.5"
+bitstream-io = "4.6"
 bytes = "1.0"
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
@@ -42,11 +43,11 @@ datafusion-cli = "49"
 fastbloom = "0.12"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.15"
-iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "fb94b8170ba57ea01fab666dd995bd6adec7ef41", default-features = false, features = [
+iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "6876b8acad74841bd586d5b1821ae31d60761246", default-features = false, features = [
   "storage-fs",
 ] }
-iceberg-catalog-glue = { git = "https://github.com/apache/iceberg-rust", rev = "fb94b8170ba57ea01fab666dd995bd6adec7ef41" }
-iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust", rev = "fb94b8170ba57ea01fab666dd995bd6adec7ef41" }
+iceberg-catalog-glue = { git = "https://github.com/apache/iceberg-rust", rev = "6876b8acad74841bd586d5b1821ae31d60761246" }
+iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust", rev = "6876b8acad74841bd586d5b1821ae31d60761246" }
 itertools = "0.14"
 lru = "0.14"
 moka = { version = "0.12", features = ["future"] }

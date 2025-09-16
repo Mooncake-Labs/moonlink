@@ -10,8 +10,6 @@ use moonlink::MoonlinkTableConfig;
 pub const MOONLINK_SCHEMA: &str = "mooncake";
 /// Metadata table name for moonlink.
 pub const MOONLINK_METADATA_TABLE: &str = "tables";
-/// Secret table name for moonlink.
-pub const MOONLINK_SECRET_TABLE: &str = "secrets";
 
 /// Metadata entry for each table.
 #[derive(Clone, Debug)]

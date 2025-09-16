@@ -15,16 +15,21 @@ pub use storage::mooncake_table::batch_id_counter::BatchIdCounter;
 pub use storage::mooncake_table::data_batches::ColumnStoreBuffer;
 pub use storage::parquet_utils::get_default_parquet_properties;
 pub use storage::storage_utils::create_data_file;
+#[cfg(feature = "catalog-glue")]
+pub use storage::IcebergGlueCatalogConfig;
+#[cfg(feature = "catalog-rest")]
+pub use storage::IcebergRestCatalogConfig;
 pub(crate) use storage::NonEvictableHandle;
 pub use storage::{
-    AccessorConfig, BaseFileSystemAccess, BaseIcebergSnapshotFetcher, CacheTrait,
-    DataCompactionConfig, DiskSliceWriterConfig, EventSyncReceiver, FileIndexMergeConfig,
-    FileSystemAccessor, FsChaosConfig, FsRetryConfig, FsThrottleConfig, FsTimeoutConfig,
-    IcebergCatalogConfig, IcebergPersistenceConfig, IcebergSnapshotFetcher, IcebergTableConfig,
-    IcebergTableManager, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
-    MoonlinkTableConfig, MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig,
-    PersistentWalMetadata, SnapshotReadOutput, StorageConfig, TableEventManager, TableManager,
-    TableSnapshotStatus, TableStatusReader, WalConfig, WalManager, WalTransactionState,
+    AccessorConfig, AwsSecurityConfig, BaseFileSystemAccess, BaseIcebergSnapshotFetcher,
+    CacheTrait, CloudSecurityConfig, DataCompactionConfig, DiskSliceWriterConfig,
+    EventSyncReceiver, FileIndexMergeConfig, FileSystemAccessor, FsChaosConfig, FsRetryConfig,
+    FsThrottleConfig, FsTimeoutConfig, IcebergCatalogConfig, IcebergFileCatalogConfig,
+    IcebergPersistenceConfig, IcebergSnapshotFetcher, IcebergTableConfig, IcebergTableManager,
+    MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
+    MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig, PersistentWalMetadata,
+    SnapshotReadOutput, StorageConfig, TableEventManager, TableManager, TableSnapshotStatus,
+    TableStatusReader, WalConfig, WalManager, WalTransactionState,
 };
 pub use table_handler::TableHandler;
 pub use table_handler_timer::TableHandlerTimer;

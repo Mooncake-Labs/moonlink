@@ -11,11 +11,17 @@ use iceberg::Result as IcebergResult;
 use crate::storage::iceberg::manifest_utils;
 use crate::storage::iceberg::manifest_utils::ManifestEntryType;
 
+/// Max number of manifest entries in a manifest file, which is expected be cap manifest file's max size ~50MiB.
+pub(crate) const DEFAULT_MAX_MANIFEST_ENTRY_COUNT: usize = 25000;
+
 pub(crate) struct DataFileManifestManager<'a> {
     table_metadata: &'a TableMetadata,
     file_io: &'a FileIO,
     data_files_to_remove: &'a HashSet<String>,
     writer: Option<ManifestWriter>,
+    /// Number of manifest entries for the active manifest writer.
+    cur_manifest_entries_num: usize,
+    finalized_manifest_files: Vec<ManifestFile>,
 }
 
 impl<'a> DataFileManifestManager<'a> {
@@ -29,6 +35,8 @@ impl<'a> DataFileManifestManager<'a> {
             file_io,
             data_files_to_remove,
             writer: None,
+            cur_manifest_entries_num: 0,
+            finalized_manifest_files: Vec::new(),
         }
     }
 
@@ -43,7 +51,7 @@ impl<'a> DataFileManifestManager<'a> {
         Ok(())
     }
 
-    pub(crate) fn add_manifest_entries(
+    pub(crate) async fn add_manifest_entries(
         &mut self,
         manifest_entries: Vec<Arc<ManifestEntry>>,
         manifest_metadata: ManifestMetadata,
@@ -66,6 +74,17 @@ impl<'a> DataFileManifestManager<'a> {
                 cur_manifest_entry.data_file().clone(),
                 cur_manifest_entry.sequence_number().unwrap(),
             )?;
+            self.cur_manifest_entries_num += 1;
+
+            // Check whether we need to rollover to a new manifest file.
+            if self.cur_manifest_entries_num >= DEFAULT_MAX_MANIFEST_ENTRY_COUNT {
+                if let Some(writer) = self.writer.take() {
+                    let manifest_file = writer.write_manifest_file().await?;
+                    self.finalized_manifest_files.push(manifest_file);
+                }
+                self.writer = None;
+                self.cur_manifest_entries_num = 0;
+            }
         }
         Ok(())
     }

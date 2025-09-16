@@ -1,5 +1,5 @@
 use crate::storage::filesystem::s3::s3_test_utils::*;
-use crate::storage::iceberg::aws_security_config::AwsSecurityConfig;
+use crate::storage::iceberg::cloud_security_config::{AwsSecurityConfig, CloudSecurityConfig};
 use crate::storage::iceberg::file_catalog_test_utils::get_test_schema;
 use crate::storage::iceberg::glue_catalog::GlueCatalog;
 use crate::storage::iceberg::iceberg_table_config::GlueCatalogConfig;
@@ -42,19 +42,20 @@ pub(crate) fn get_random_table() -> String {
 }
 
 /// Test util function to create aws security config.
-pub(crate) fn create_aws_security_config() -> AwsSecurityConfig {
-    AwsSecurityConfig {
+pub(crate) fn create_aws_cloud_security_config() -> CloudSecurityConfig {
+    let aws_security_config = AwsSecurityConfig {
         access_key_id: TEST_AWS_ACCESS_ID.to_string(),
         security_access_key: TEST_AWS_ACCESS_SECRET.to_string(),
         region: TEST_AWS_RETION.to_string(),
-    }
+    };
+    CloudSecurityConfig::Aws(aws_security_config)
 }
 
 /// Test util function to create a glue catalog.
 pub(crate) async fn create_glue_catalog(warehouse_uri: String) -> GlueCatalog {
     let glue_config = GlueCatalogConfig {
         // AWS security config.
-        aws_security_config: create_aws_security_config(),
+        cloud_secret_config: create_aws_cloud_security_config(),
         // Glue configs.
         name: get_random_glue_catalog_name(),
         uri: TEST_GLUE_ENDPOINT.to_string(),

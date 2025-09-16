@@ -2,23 +2,19 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::base_metadata_store::TableMetadataEntry;
-use crate::base_metadata_store::{
-    MetadataStoreTrait, MOONLINK_METADATA_TABLE, MOONLINK_SCHEMA, MOONLINK_SECRET_TABLE,
-};
+use crate::base_metadata_store::{MetadataStoreTrait, MOONLINK_METADATA_TABLE, MOONLINK_SCHEMA};
 use crate::config_utils;
 use crate::error::Error;
 use crate::error::Result;
 use crate::sqlite::sqlite_conn_wrapper::SqliteConnWrapper;
 use crate::sqlite::utils;
-use moonlink::{MoonlinkTableConfig, MoonlinkTableSecret};
+use moonlink::MoonlinkTableConfig;
 use moonlink_error::{ErrorStatus, ErrorStruct};
 
 /// Default sqlite database filename.
 const METADATA_DATABASE_FILENAME: &str = "moonlink_metadata_store.sqlite";
 /// SQL statements for moonlink metadata table database.
 const CREATE_TABLE_SCHEMA_SQL: &str = include_str!("sql/create_tables.sql");
-/// SQL statements for moonlink secret table database.
-const CREATE_SECRET_SCHEMA_SQL: &str = include_str!("sql/create_secrets.sql");
 
 pub struct SqliteMetadataStore {
     /// Database uri.
@@ -41,18 +37,8 @@ impl MetadataStoreTrait for SqliteMetadataStore {
                 t."table",
                 t.src_table_name,
                 t.src_table_uri,
-                t.config,
-                s_wal.storage_provider  AS wal_storage_provider,
-                s_wal.key_id            AS wal_key_id,
-                s_wal.secret            AS wal_secret,
-                s_wal.endpoint          AS wal_endpoint,
-                s_wal.region            AS wal_region,
-                s_wal.project           AS wal_project
+                t.config
             FROM tables t
-            LEFT JOIN secrets s_wal
-                ON t."database" = s_wal."database"
-                AND t."table" = s_wal."table"
-                AND s_wal.usage_type = 'wal'
             "#,
         )
         .fetch_all(&sqlite_conn.pool)
@@ -67,24 +53,8 @@ impl MetadataStoreTrait for SqliteMetadataStore {
             let serialized_config: String = row.get("config");
             let json_value: serde_json::Value = serde_json::from_str(&serialized_config)?;
 
-            let wal_storage_provider: Option<String> = row.get("wal_storage_provider");
-            let wal_secret_entry: Option<MoonlinkTableSecret> =
-                wal_storage_provider.map(|t| MoonlinkTableSecret {
-                    secret_type: MoonlinkTableSecret::convert_secret_type(&t),
-                    key_id: row.get("wal_key_id"),
-                    secret: row.get("wal_secret"),
-                    endpoint: row.get("wal_endpoint"),
-                    region: row.get("wal_region"),
-                    project: row.get("wal_project"),
-                });
-
-            let moonlink_table_config = config_utils::deserialize_moonlink_table_config(
-                json_value,
-                wal_secret_entry,
-                &database,
-                &table,
-            )?;
-
+            let moonlink_table_config =
+                config_utils::deserialize_moonlink_table_config(json_value)?;
             metadata_entries.push(TableMetadataEntry {
                 database,
                 table,
@@ -105,8 +75,7 @@ impl MetadataStoreTrait for SqliteMetadataStore {
         src_table_uri: &str,
         moonlink_table_config: MoonlinkTableConfig,
     ) -> Result<()> {
-        let (serialized_config, wal_secret) =
-            config_utils::parse_moonlink_table_config(moonlink_table_config)?;
+        let serialized_config = config_utils::parse_moonlink_table_config(moonlink_table_config)?;
         let serialized_config = serde_json::to_string(&serialized_config)?;
 
         // Create metadata tables if it doesn't exist.
@@ -116,15 +85,6 @@ impl MetadataStoreTrait for SqliteMetadataStore {
             MOONLINK_SCHEMA,
             MOONLINK_METADATA_TABLE,
             CREATE_TABLE_SCHEMA_SQL,
-        )
-        .await?;
-
-        // Create secrets table if it doesn't exist.
-        utils::create_table_if_non_existent(
-            &sqlite_conn.pool,
-            MOONLINK_SCHEMA,
-            MOONLINK_SECRET_TABLE,
-            CREATE_SECRET_SCHEMA_SQL,
         )
         .await?;
 
@@ -152,33 +112,6 @@ impl MetadataStoreTrait for SqliteMetadataStore {
             )));
         }
 
-        // Insert wal secret if present
-        if let Some(secret) = wal_secret {
-            let rows_affected = sqlx::query(
-                r#"
-                INSERT INTO secrets ("database", "table", usage_type, storage_provider, key_id, secret, endpoint, region, project)
-                VALUES (?, ?, 'wal', ?, ?, ?, ?, ?, ?);
-                "#,
-            )
-            .bind(database)
-            .bind(table)
-            .bind(secret.get_secret_type())
-            .bind(secret.key_id)
-            .bind(secret.secret)
-            .bind(secret.endpoint)
-            .bind(secret.region)
-            .bind(secret.project)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if rows_affected != 1 {
-                return Err(Error::SqliteRowCountError(ErrorStruct::new(
-                    format!("expected 1 row affected, but got {rows_affected}"),
-                    ErrorStatus::Permanent,
-                )));
-            }
-        }
-
         tx.commit().await?;
 
         Ok(())
@@ -202,13 +135,6 @@ impl MetadataStoreTrait for SqliteMetadataStore {
                 ErrorStatus::Permanent,
             )));
         }
-
-        // Delete from secret table.
-        sqlx::query(r#"DELETE FROM secrets WHERE "database" = ? AND "table" = ?"#)
-            .bind(database)
-            .bind(table)
-            .execute(&mut *tx)
-            .await?;
 
         tx.commit().await?;
 

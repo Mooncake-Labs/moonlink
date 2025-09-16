@@ -41,7 +41,7 @@ fn test_row_with_updated_schema() -> MoonlinkRow {
 /// Test util function to create iceberg table config.
 fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTableConfig {
     let glue_catalog_config = GlueCatalogConfig {
-        aws_security_config: create_aws_security_config(),
+        cloud_secret_config: create_aws_cloud_security_config(),
         name: get_random_glue_catalog_name(),
         uri: TEST_GLUE_ENDPOINT.to_string(),
         catalog_id: None,

@@ -1,6 +1,6 @@
 mod error;
 
-pub use error::{Error, Result};
+pub use error::{Error, Result, RpcResult};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -18,7 +18,8 @@ macro_rules! rpcs {
 
             $(pub async fn $func<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, $($name: $type),*) -> Result<$res> {
                 write(stream, &Request::[<$func:camel>] { $($name),* }).await?;
-                read(stream).await
+                let result: RpcResult<$res> = read(stream).await?;
+                result.map_err(|e| Error::Rpc(e))
             })*
         }
     };
