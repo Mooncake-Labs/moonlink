@@ -16,11 +16,10 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Create accessor with throttle configuration
 fn create_throttle_accessor(
+    temp_dir: &tempfile::TempDir,
     bandwidth_mbps: f64,
     burst_mb: f64,
 ) -> std::sync::Arc<dyn BaseFileSystemAccess> {
-    let temp_dir = tempdir().unwrap();
-
     let throttle_config = Some(ThrottleConfig {
         bandwidth: (bandwidth_mbps * 1024.0 * 1024.0) as u32,
         burst: (burst_mb * 1024.0 * 1024.0) as u32,
@@ -42,13 +41,14 @@ fn create_throttle_accessor(
 
 #[tokio::test]
 async fn test_throttle_sequential_writes() {
+    let temp_dir = tempdir().unwrap();
     let test_future = async {
         let file_size = 1024 * 1024; // 1 MB per file
         let num_files = 6;
         let test_data = vec![b'x'; file_size];
 
         // Test with throttle configuration
-        let throttled_accessor = create_throttle_accessor(1.0, 2.0); // 1 MB/s, 2 MB burst
+        let throttled_accessor = create_throttle_accessor(&temp_dir, 1.0, 2.0); // 1 MB/s, 2 MB burst
         let start_time = Instant::now();
         for i in 0..num_files {
             throttled_accessor
@@ -59,7 +59,7 @@ async fn test_throttle_sequential_writes() {
         let throttled_duration = start_time.elapsed();
 
         // Test without throttle (high limits)
-        let baseline_accessor = create_throttle_accessor(1000.0, 1000.0);
+        let baseline_accessor = create_throttle_accessor(&temp_dir, 1000.0, 1000.0);
         let start_time = Instant::now();
         for i in 0..num_files {
             baseline_accessor
@@ -96,6 +96,7 @@ async fn test_throttle_sequential_writes() {
 
 #[tokio::test]
 async fn test_throttle_parallel_writes() {
+    let temp_dir = tempdir().unwrap();
     let test_future = async {
         let file_size = 1024 * 1024; // 1 MB per file
         let num_parallel = 4;
@@ -103,7 +104,7 @@ async fn test_throttle_parallel_writes() {
         let test_data = vec![b'x'; file_size];
 
         // Test with throttle configuration - parallel writes
-        let throttled_accessor = create_throttle_accessor(1.0, 2.0); // 1.0 MB/s, 2 MB burst
+        let throttled_accessor = create_throttle_accessor(&temp_dir, 1.0, 2.0); // 1.0 MB/s, 2 MB burst
         let start_time = Instant::now();
 
         let mut handles = Vec::new();
@@ -130,7 +131,7 @@ async fn test_throttle_parallel_writes() {
         let throttled_duration = start_time.elapsed();
 
         // Test without throttle - parallel writes
-        let baseline_accessor = create_throttle_accessor(1000.0, 1000.0);
+        let baseline_accessor = create_throttle_accessor(&temp_dir, 1000.0, 1000.0);
         let start_time = Instant::now();
 
         let mut handles = Vec::new();
@@ -184,9 +185,10 @@ async fn test_throttle_parallel_writes() {
 
 #[tokio::test]
 async fn test_throttle_insufficient_capacity() {
+    let temp_dir = tempdir().unwrap();
     let test_future = async {
         let oversized_data = vec![b'y'; 2 * 1024 * 1024]; // 2 MB > 1 MB burst
-        let throttled_accessor = create_throttle_accessor(1.0, 1.0); // 1 MB/s, 1 MB burst
+        let throttled_accessor = create_throttle_accessor(&temp_dir, 1.0, 1.0); // 1 MB/s, 1 MB burst
 
         // Single write larger than burst capacity should fail
         let result = throttled_accessor
