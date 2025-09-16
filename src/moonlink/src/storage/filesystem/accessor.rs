@@ -10,3 +10,6 @@ pub(crate) mod unbuffered_stream_writer;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
+
+#[cfg(test)]
+mod throttle_test;

@@ -186,6 +186,7 @@ mod tests {
             },
             retry_config: FsRetryConfig::default(),
             timeout_config: FsTimeoutConfig::default(),
+            throttle_config: None,
             chaos_config: None,
         };
         let file_catalog = FileCatalog::new(accessor_config, iceberg_schema.clone()).unwrap();

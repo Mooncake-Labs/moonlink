@@ -169,6 +169,7 @@ mod tests {
             storage_config,
             chaos_config: Some(chaos_config),
             retry_config: RetryConfig::default(),
+            throttle_config: None,
             timeout_config,
         };
         FileSystemAccessor::new(accessor_config)

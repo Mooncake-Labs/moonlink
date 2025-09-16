@@ -109,7 +109,42 @@ impl Default for TimeoutConfig {
         }
     }
 }
+/// ========================
+/// Throttle config
+/// ========================
+///
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ThrottleConfig {
+    /// Bandwidth in bytes per second
+    #[serde(default = "ThrottleConfig::default_bandwidth")]
+    pub bandwidth: u32,
 
+    /// Burst size in bytes
+    #[serde(default = "ThrottleConfig::default_burst")]
+    pub burst: u32,
+}
+
+impl ThrottleConfig {
+    const DEFAULT_BANDWIDTH: u32 = 10 * 1024 * 1024; // 10MB/s
+    const DEFAULT_BURST: u32 = 100 * 1024 * 1024; // 100MB
+
+    fn default_bandwidth() -> u32 {
+        Self::DEFAULT_BANDWIDTH
+    }
+
+    fn default_burst() -> u32 {
+        Self::DEFAULT_BURST
+    }
+}
+
+impl Default for ThrottleConfig {
+    fn default() -> Self {
+        Self {
+            bandwidth: Self::DEFAULT_BANDWIDTH,
+            burst: Self::DEFAULT_BURST,
+        }
+    }
+}
 /// ========================
 /// Accessor config
 /// ========================
@@ -124,6 +159,9 @@ pub struct AccessorConfig {
     /// Timeout config.
     #[serde(default)]
     pub timeout_config: TimeoutConfig,
+    /// Throttle config.
+    #[serde(default)]
+    pub throttle_config: Option<ThrottleConfig>,
     /// Chaos config.
     #[serde(default)]
     pub chaos_config: Option<ChaosConfig>,
@@ -135,6 +173,7 @@ impl AccessorConfig {
             storage_config,
             retry_config: RetryConfig::default(),
             timeout_config: TimeoutConfig::default(),
+            throttle_config: None,
             chaos_config: None,
         }
     }
@@ -176,6 +215,7 @@ mod tests {
                 },
                 retry_config: RetryConfig::default(),
                 timeout_config: TimeoutConfig::default(),
+                throttle_config: None,
                 chaos_config: None,
             }
         );
@@ -210,8 +250,66 @@ mod tests {
                     max_delay: RetryConfig::default_max_delay(),
                 },
                 timeout_config: TimeoutConfig::default(),
+                throttle_config: None,
                 chaos_config: None,
             }
         );
+    }
+
+    /// Testing scenario: deserialize throttle config with custom values.
+    #[test]
+    fn test_deserialize_throttle_config() {
+        let input = json!({
+            "storage_config": {
+                "fs": {
+                    "root_directory": "/tmp"
+                }
+            },
+            "throttle_config": {
+                "bandwidth": 5242880,  // 5MB/s
+                "burst": 52428800      // 50MB
+            }
+        });
+
+        let config: AccessorConfig = serde_json::from_value(input).unwrap();
+        assert_eq!(
+            config,
+            AccessorConfig {
+                storage_config: StorageConfig::FileSystem {
+                    root_directory: "/tmp".to_string(),
+                    atomic_write_dir: None,
+                },
+                retry_config: RetryConfig::default(),
+                timeout_config: TimeoutConfig::default(),
+                throttle_config: Some(ThrottleConfig {
+                    bandwidth: 5242880, // 5MB/s
+                    burst: 52428800,    // 50MB
+                }),
+                chaos_config: None,
+            }
+        );
+    }
+    /// Testing scenario: throttle config with default values.
+    #[test]
+    fn test_throttle_config_defaults() {
+        let config = ThrottleConfig::default();
+        assert_eq!(config.bandwidth, 10 * 1024 * 1024); // 10MB/s
+        assert_eq!(config.burst, 100 * 1024 * 1024); // 100MB
+    }
+
+    /// Testing scenario: deserialize accessor config with throttle_config as null.
+    #[test]
+    fn test_deserialize_accessor_config_throttle_none() {
+        let input = json!({
+            "storage_config": {
+                "fs": {
+                    "root_directory": "/tmp"
+                }
+            },
+            "throttle_config": null
+        });
+
+        let config: AccessorConfig = serde_json::from_value(input).unwrap();
+        assert_eq!(config.throttle_config, None);
     }
 }

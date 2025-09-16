@@ -1,9 +1,11 @@
 use crate::storage::filesystem::accessor::filesystem_accessor_chaos_wrapper::ChaosLayer;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::filesystem::accessor_config::RetryConfig;
+use crate::storage::filesystem::accessor_config::ThrottleConfig;
 use crate::storage::filesystem::accessor_config::TimeoutConfig;
 use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::Result;
+use opendal::layers::ThrottleLayer;
 
 use opendal::layers::RetryLayer;
 use opendal::layers::TimeoutLayer;
@@ -94,6 +96,10 @@ fn create_timeout_layer(timeout_config: &TimeoutConfig) -> TimeoutLayer {
         .with_timeout(timeout_config.timeout)
 }
 
+fn create_throttle_layer(throttle_config: &ThrottleConfig) -> ThrottleLayer {
+    ThrottleLayer::new(throttle_config.bandwidth, throttle_config.burst)
+}
+
 /// Util function to create opendal operator from filesystem config.
 pub(crate) async fn create_opendal_operator(accessor_config: &AccessorConfig) -> Result<Operator> {
     let storage_config = accessor_config.storage_config.clone();
@@ -105,6 +111,11 @@ pub(crate) async fn create_opendal_operator(accessor_config: &AccessorConfig) ->
     if let Some(chaos_config) = &accessor_config.chaos_config {
         let chaos_layer = ChaosLayer::new(chaos_config.clone());
         op = op.layer(chaos_layer);
+    }
+    // Apply throttle layer.
+    if let Some(throttle_config) = &accessor_config.throttle_config {
+        let throttle_layer = create_throttle_layer(throttle_config);
+        op = op.layer(throttle_layer);
     }
     // Apply retry layer.
     let retry_layer = create_retry_layer(&accessor_config.retry_config);

@@ -98,6 +98,7 @@ pub(crate) fn get_iceberg_table_config_with_chaos_injection(
         storage_config,
         retry_config: RetryConfig::default(),
         timeout_config: TimeoutConfig::default(),
+        throttle_config: None,
         chaos_config: Some(chaos_config),
     };
     IcebergTableConfig {

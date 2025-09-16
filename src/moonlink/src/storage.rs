@@ -23,7 +23,7 @@ pub use compaction::compaction_config::DataCompactionConfig;
 pub use filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 pub use filesystem::accessor_config::{
     AccessorConfig, ChaosConfig as FsChaosConfig, RetryConfig as FsRetryConfig,
-    TimeoutConfig as FsTimeoutConfig,
+    ThrottleConfig as FsThrottleConfig, TimeoutConfig as FsTimeoutConfig,
 };
 pub use filesystem::storage_config::StorageConfig;
 pub use iceberg::base_iceberg_snapshot_fetcher::BaseIcebergSnapshotFetcher;

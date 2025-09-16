@@ -188,6 +188,7 @@ impl RestSource {
             storage_config,
             timeout_config: FsTimeoutConfig::default(),
             retry_config: FsRetryConfig::default(),
+            throttle_config: None,
             chaos_config: None,
         };
         let filesystem_accessor: Arc<dyn BaseFileSystemAccess> =
