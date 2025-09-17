@@ -125,8 +125,8 @@ pub struct ThrottleConfig {
 }
 
 impl ThrottleConfig {
-    const DEFAULT_BANDWIDTH: u32 = 10 * 1024 * 1024; // 10MB/s
-    const DEFAULT_BURST: u32 = 100 * 1024 * 1024; // 100MB
+    const DEFAULT_BANDWIDTH: u32 = 100 * 1024 * 1024; // 100MB/s
+    const DEFAULT_BURST: u32 = 1000 * 1024 * 1024; // 1000MB
 
     fn default_bandwidth() -> u32 {
         Self::DEFAULT_BANDWIDTH
@@ -293,8 +293,8 @@ mod tests {
     #[test]
     fn test_throttle_config_defaults() {
         let config = ThrottleConfig::default();
-        assert_eq!(config.bandwidth, 10 * 1024 * 1024); // 10MB/s
-        assert_eq!(config.burst, 100 * 1024 * 1024); // 100MB
+        assert_eq!(config.bandwidth, 100 * 1024 * 1024); // 100MB/s
+        assert_eq!(config.burst, 1000 * 1024 * 1024); // 1000MB
     }
 
     /// Testing scenario: deserialize accessor config with throttle_config as null.

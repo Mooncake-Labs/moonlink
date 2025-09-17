@@ -11,6 +11,7 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
 use crate::storage::filesystem::accessor_config::{AccessorConfig, ThrottleConfig};
 use crate::StorageConfig;
+use more_asserts as ma;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -48,7 +49,9 @@ async fn test_throttle_sequential_writes() {
         let test_data = vec![b'x'; file_size];
 
         // Test with throttle configuration
-        let throttled_accessor = create_throttle_accessor(&temp_dir, 1.0, 2.0); // 1 MB/s, 2 MB burst
+        let throttled_accessor = create_throttle_accessor(
+            &temp_dir, /*bandwidth_mbps=*/ 1.0, /*burst_mb=*/ 2.0,
+        ); // 1 MB/s, 2 MB burst
         let start_time = Instant::now();
         for i in 0..num_files {
             throttled_accessor
@@ -59,7 +62,9 @@ async fn test_throttle_sequential_writes() {
         let throttled_duration = start_time.elapsed();
 
         // Test without throttle (high limits)
-        let baseline_accessor = create_throttle_accessor(&temp_dir, 1000.0, 1000.0);
+        let baseline_accessor = create_throttle_accessor(
+            &temp_dir, /*bandwidth_mbps=*/ 1000.0, /*burst_mb=*/ 1000.0,
+        );
         let start_time = Instant::now();
         for i in 0..num_files {
             baseline_accessor
@@ -68,26 +73,11 @@ async fn test_throttle_sequential_writes() {
                 .unwrap();
         }
         let baseline_duration = start_time.elapsed();
-        println!("Sequential writes test:");
-        println!(
-            "  Throttled (1MB/s, 2MB burst): {:.3}s for {}MB",
-            throttled_duration.as_secs_f64(),
-            (num_files * file_size) as f64 / (1024.0 * 1024.0)
-        );
-        println!(
-            "  Baseline (1000MB/s): {:.3}s",
-            baseline_duration.as_secs_f64()
-        );
-        println!(
-            "  Slowdown ratio: {:.2}x",
-            throttled_duration.as_secs_f64() / baseline_duration.as_secs_f64()
-        );
         // Throttled operations should take longer than baseline
-        assert!(
-            throttled_duration > baseline_duration,
-            "Throttled operations should be slower than baseline: throttled={:.3}s, baseline={:.3}s",
-            throttled_duration.as_secs_f64(),
-            baseline_duration.as_secs_f64()
+        ma::assert_gt!(
+            throttled_duration,
+            baseline_duration,
+            "Throttled operations should be slower than baseline",
         );
     };
 
@@ -104,7 +94,9 @@ async fn test_throttle_parallel_writes() {
         let test_data = vec![b'x'; file_size];
 
         // Test with throttle configuration - parallel writes
-        let throttled_accessor = create_throttle_accessor(&temp_dir, 1.0, 2.0); // 1.0 MB/s, 2 MB burst
+        let throttled_accessor = create_throttle_accessor(
+            &temp_dir, /*bandwidth_mbps=*/ 1.0, /*burst_mb=*/ 2.0,
+        ); // 1.0 MB/s, 2 MB burst
         let start_time = Instant::now();
 
         let mut handles = Vec::new();
@@ -131,7 +123,9 @@ async fn test_throttle_parallel_writes() {
         let throttled_duration = start_time.elapsed();
 
         // Test without throttle - parallel writes
-        let baseline_accessor = create_throttle_accessor(&temp_dir, 1000.0, 1000.0);
+        let baseline_accessor = create_throttle_accessor(
+            &temp_dir, /*bandwidth_mbps=*/ 1000.0, /*burst_mb=*/ 1000.0,
+        );
         let start_time = Instant::now();
 
         let mut handles = Vec::new();
@@ -156,27 +150,11 @@ async fn test_throttle_parallel_writes() {
             handle.await.unwrap();
         }
         let baseline_duration = start_time.elapsed();
-        println!("Parallel writes test:");
-        println!(
-            "  Throttled (1.0MB/s, 2MB burst): {:.3}s for {}MB across {} tasks",
-            throttled_duration.as_secs_f64(),
-            (num_parallel * files_per_task * file_size) as f64 / (1024.0 * 1024.0),
-            num_parallel
-        );
-        println!(
-            "  Baseline (1000MB/s): {:.3}s",
-            baseline_duration.as_secs_f64()
-        );
-        println!(
-            "  Slowdown ratio: {:.2}x",
-            throttled_duration.as_secs_f64() / baseline_duration.as_secs_f64()
-        );
         // Parallel throttled operations should take longer than baseline
-        assert!(
-            throttled_duration > baseline_duration,
-            "Parallel throttled operations should be slower than baseline: throttled={:.3}s, baseline={:.3}s",
-            throttled_duration.as_secs_f64(),
-            baseline_duration.as_secs_f64()
+        ma::assert_gt!(
+            throttled_duration,
+            baseline_duration,
+            "Parallel throttled operations should be slower than baseline",
         );
     };
 
@@ -188,14 +166,14 @@ async fn test_throttle_insufficient_capacity() {
     let temp_dir = tempdir().unwrap();
     let test_future = async {
         let oversized_data = vec![b'y'; 2 * 1024 * 1024]; // 2 MB > 1 MB burst
-        let throttled_accessor = create_throttle_accessor(&temp_dir, 1.0, 1.0); // 1 MB/s, 1 MB burst
+        let throttled_accessor = create_throttle_accessor(
+            &temp_dir, /*bandwidth_mbps=*/ 1.0, /*burst_mb=*/ 1.0,
+        ); // 1 MB/s, 1 MB burst
 
         // Single write larger than burst capacity should fail
         let result = throttled_accessor
             .write_object("oversized.dat", oversized_data)
             .await;
-        println!("Insufficient capacity test:");
-        println!("  Attempted 2MB write with 1MB burst capacity");
         // Should get an error when write size exceeds burst capacity
         assert!(result.is_err(), "Expected error for oversized write");
     };
