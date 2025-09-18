@@ -804,4 +804,4 @@ jobs:
           MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
           NGINX_ADDR: http://nginx.local:80
         run: |
-          RUST_BACKTRACE=1 cargo test --release --package moonlink_service --lib --features standalone-test,stress-test -- --nocapture
+          RUST_BACKTRACE=1 cargo test stress_test --release --package moonlink_service --lib --features standalone-test,stress-test -- --nocapture

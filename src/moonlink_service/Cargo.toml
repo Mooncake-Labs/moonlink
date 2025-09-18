@@ -13,6 +13,7 @@ standalone-test = []
 otel-integration = []
 postgres-integration = []
 log-rotation-test = []
+# make sure the tests are also named with stress_test prefix
 stress-test = []
 
 storage-s3 = ["moonlink/storage-s3"]

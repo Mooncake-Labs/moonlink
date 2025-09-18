@@ -856,7 +856,7 @@ async fn test_create_table_from_postgres_endpoint() {
 #[cfg(feature = "stress-test")]
 #[tokio::test]
 #[serial]
-async fn test_kafka_avro_stress_ingest() {
+async fn stress_test_kafka_avro_stress_ingest() {
     let _guard = TestGuard::new(&get_moonlink_backend_dir());
     let config = get_service_config();
     tokio::spawn(async move {
@@ -1123,7 +1123,7 @@ async fn test_kafka_avro_stress_ingest() {
 #[cfg(feature = "stress-test")]
 #[tokio::test]
 #[serial]
-async fn test_kafka_stress_10min_long_running() {
+async fn stress_test_kafka_stress_10min_long_running() {
     let _guard = TestGuard::new(&get_moonlink_backend_dir());
     let config = get_service_config();
     tokio::spawn(async move {
