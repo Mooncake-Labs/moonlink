@@ -475,6 +475,7 @@ pub struct MooncakeTable {
     /// Iceberg table manager, used to sync snapshot to the corresponding iceberg table.
     iceberg_table_manager: Option<Box<dyn TableManager>>,
 
+    last_flush_lsn: Option<u64>,
     /// LSN of the latest iceberg snapshot.
     last_iceberg_snapshot_lsn: Option<u64>,
 
@@ -593,6 +594,7 @@ impl MooncakeTable {
             non_streaming_batch_id_counter,
             streaming_batch_id_counter,
             iceberg_table_manager: Some(table_manager),
+            last_flush_lsn: None,
             last_iceberg_snapshot_lsn,
             table_notify: None,
             wal_manager,
@@ -879,6 +881,14 @@ impl MooncakeTable {
         let next_file_id = self.next_file_id;
         self.next_file_id += 1;
 
+        println!(
+            "write disk slice :flush lsn: {} record count: {}",
+            lsn,
+            batches
+                .iter()
+                .map(|batch| batch.batch.data.as_ref().unwrap().num_rows())
+                .sum::<usize>()
+        );
         let disk_slice = DiskSliceWriter::new(
             self.metadata.schema.clone(),
             path,
@@ -1002,9 +1012,14 @@ impl MooncakeTable {
         }
         u64::MAX
     }
+    pub fn get_last_flush_lsn(&self) -> u64 {
+        self.last_flush_lsn.unwrap_or(0)
+    }
 
     pub fn insert_ongoing_flush_lsn(&mut self, lsn: u64, count: u32) {
         *self.ongoing_flush_lsns.entry(lsn).or_insert(0) += count;
+        assert!(lsn >= self.get_last_flush_lsn());
+        self.last_flush_lsn = Some(lsn);
     }
 
     pub fn remove_ongoing_flush_lsn(&mut self, lsn: u64) {

@@ -302,30 +302,19 @@ impl TableHandlerState {
         }
     }
 
-    /// Return whether should force to create a mooncake and iceberg snapshot, based on the new coming commit LSN.
-    pub(crate) fn should_force_snapshot_by_commit_lsn(
+    /// Return whether should force a flush to satisfy force snapshot requirement, based on the new coming commit LSN.
+    pub(crate) fn should_force_flush_at_commit_lsn(
         commit_lsn: u64,
         min_ongoing_flush_lsn: u64,
-        table_maintenance_process_status: &MaintenanceProcessStatus,
+        _table_maintenance_process_status: &MaintenanceProcessStatus,
         largest_force_snapshot_lsn: Option<u64>,
         mooncake_snapshot_ongoing: bool,
     ) -> bool {
-        // No force snasphot if already mooncake snapshot ongoing.
-        if mooncake_snapshot_ongoing {
-            return false;
-        }
-
         // No force snapshot if pending flush LSNs < commit LSN.
         if min_ongoing_flush_lsn < commit_lsn {
             return false;
         }
-
-        // Case-1: there're completed but not persisted table maintenance changes.
-        if *table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
-            return true;
-        }
-
-        // Case-2: there're pending force snapshot requests.
+        // there're pending force snapshot requests.
         if let Some(largest_requested_lsn) = largest_force_snapshot_lsn {
             return largest_requested_lsn <= commit_lsn && !mooncake_snapshot_ongoing;
         }

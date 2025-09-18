@@ -1118,3 +1118,356 @@ async fn test_kafka_avro_stress_ingest() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+#[serial]
+async fn test_kafka_stress_10min_long_running() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir());
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    wait_for_server_ready().await;
+
+    let client = reqwest::Client::new();
+    let table_name = "kafka_stress_10min_long_running";
+    let crafted_src_table_name = format!("{DATABASE}.{table_name}");
+    let avro_schema_json = r#"{
+        "type": "record",
+        "name": "LongRunningStressRecord",
+        "fields": [
+            {"name": "id", "type": "long"},
+            {"name": "timestamp", "type": "long"},
+            {"name": "data", "type": "string"},
+            {"name": "metadata", "type": {"type": "map", "values": "string"}}
+        ]
+    }"#;
+
+    // Create table
+    let create_table_payload = json!({
+        "database": DATABASE,
+        "table": table_name,
+        "avro_schema": avro_schema_json,
+        "table_config": {
+            "mooncake": {
+                "append_only": true,
+                "row_identity": "None"
+            }
+        }
+    });
+
+    let resp = client
+        .post(format!("{REST_ADDR}/tables/{crafted_src_table_name}"))
+        .header("content-type", "application/json")
+        .json(&create_table_payload)
+        .send()
+        .await
+        .unwrap();
+    let _create_table_resp: CreateTableResponse = resp.json().await.unwrap();
+
+    // Parse Avro schema for binary encoding
+    let avro_schema = apache_avro::Schema::parse_str(avro_schema_json).unwrap();
+
+    // Setup workers for parallel ingestion at 1000 records/second
+    let num_workers = 4;
+    let records_per_second = 1000;
+    let duration_seconds = 600; // 10 minutes
+    let records_per_worker_per_second = records_per_second / num_workers;
+    let total_records = records_per_second * duration_seconds;
+
+    println!("Starting 10-minute Kafka stress test:");
+    println!("- {num_workers} workers");
+    println!("- {records_per_second} records/second total");
+    println!("- {records_per_worker_per_second} records/worker/second");
+    println!("- {duration_seconds} seconds duration");
+    println!("- {total_records} total records expected");
+
+    let start_time = std::time::Instant::now();
+    let mut handles = vec![];
+
+    // Helper function to count files (defined here for reuse)
+    let count_files_in_dir = |dir_path: &str| -> (usize, usize, usize, usize) {
+        let mut parquet_files = 0;
+        let mut metadata_files = 0;
+        let mut snapshot_files = 0;
+        let mut manifest_files = 0;
+
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    let subdir_name = entry.file_name().to_string_lossy().to_string();
+
+                    if subdir_name == "data" {
+                        let data_path = format!("{dir_path}/data");
+                        if let Ok(data_entries) = std::fs::read_dir(&data_path) {
+                            for data_entry in data_entries.flatten() {
+                                if data_entry
+                                    .file_type()
+                                    .map(|ft| ft.is_file())
+                                    .unwrap_or(false)
+                                {
+                                    let filename =
+                                        data_entry.file_name().to_string_lossy().to_string();
+                                    if filename.ends_with(".parquet") {
+                                        parquet_files += 1;
+                                    }
+                                }
+                            }
+                        }
+                    } else if subdir_name == "metadata" {
+                        let metadata_path = format!("{dir_path}/metadata");
+                        if let Ok(metadata_entries) = std::fs::read_dir(&metadata_path) {
+                            for meta_entry in metadata_entries.flatten() {
+                                if meta_entry
+                                    .file_type()
+                                    .map(|ft| ft.is_file())
+                                    .unwrap_or(false)
+                                {
+                                    let filename =
+                                        meta_entry.file_name().to_string_lossy().to_string();
+                                    if filename.starts_with("v")
+                                        && filename.ends_with(".metadata.json")
+                                    {
+                                        metadata_files += 1;
+                                    } else if filename.starts_with("snap-")
+                                        && filename.ends_with(".avro")
+                                    {
+                                        snapshot_files += 1;
+                                    } else if filename.contains("manifest")
+                                        && filename.ends_with(".avro")
+                                    {
+                                        manifest_files += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (
+            parquet_files,
+            metadata_files,
+            snapshot_files,
+            manifest_files,
+        )
+    };
+
+    // Start file monitoring task
+    let table_dir_monitor =
+        format!("/workspaces/moonlink/.shared-nginx/test-database/{table_name}");
+    let monitor_handle = tokio::spawn(async move {
+        let monitor_start = std::time::Instant::now();
+
+        while monitor_start.elapsed().as_secs() < duration_seconds as u64 + 10 {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await; // Check every minute
+
+            let (parquet, metadata, snapshots, manifests) = count_files_in_dir(&table_dir_monitor);
+            let total_files = parquet + metadata + snapshots + manifests;
+            let elapsed_mins = monitor_start.elapsed().as_secs() / 60;
+
+            println!("📊 File count at {elapsed_mins}min: {parquet} parquet, {metadata} metadata, {snapshots} snapshots, {manifests} manifests (total: {total_files})");
+
+            // Early warning if file count is getting excessive
+            if parquet > 100 {
+                println!("⚠️  WARNING: Parquet file count ({parquet}) is getting high!");
+            }
+            if total_files > 200 {
+                println!("⚠️  WARNING: Total file count ({total_files}) is getting excessive!");
+            }
+        }
+    });
+
+    for worker_id in 0..num_workers {
+        let client = client.clone();
+        let crafted_src_table_name = crafted_src_table_name.clone();
+        let avro_schema = avro_schema.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut records_sent = 0;
+            let worker_start = std::time::Instant::now();
+
+            while worker_start.elapsed().as_secs() < duration_seconds as u64 {
+                let batch_start = std::time::Instant::now();
+
+                // Send records for this second
+                for i in 0..records_per_worker_per_second {
+                    let record_id = (worker_id * 1_000_000)
+                        + (records_sent * records_per_worker_per_second)
+                        + i;
+                    let current_timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64;
+
+                    // Create Avro record directly
+                    let avro_record = apache_avro::types::Value::Record(vec![
+                        (
+                            "id".to_string(),
+                            apache_avro::types::Value::Long(record_id as i64),
+                        ),
+                        (
+                            "timestamp".to_string(),
+                            apache_avro::types::Value::Long(current_timestamp),
+                        ),
+                        (
+                            "data".to_string(),
+                            apache_avro::types::Value::String(format!(
+                                "test_data_worker_{worker_id}_record_{record_id}"
+                            )),
+                        ),
+                        (
+                            "metadata".to_string(),
+                            apache_avro::types::Value::Map(
+                                [
+                                    (
+                                        "worker".to_string(),
+                                        apache_avro::types::Value::String(worker_id.to_string()),
+                                    ),
+                                    (
+                                        "batch".to_string(),
+                                        apache_avro::types::Value::String(records_sent.to_string()),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ),
+                        ),
+                    ]);
+
+                    let bytes = apache_avro::to_avro_datum(&avro_schema, avro_record).unwrap();
+                    let resp = client
+                        .post(format!("{REST_ADDR}/kafka/{crafted_src_table_name}/ingest"))
+                        .header("content-type", "application/octet-stream")
+                        .body(bytes)
+                        .send()
+                        .await
+                        .unwrap();
+
+                    if !resp.status().is_success() {
+                        eprintln!(
+                            "Worker {} failed to ingest record {}: {:?}",
+                            worker_id,
+                            record_id,
+                            resp.status()
+                        );
+                    }
+                }
+
+                records_sent += 1;
+
+                // Rate limiting: ensure we don't send faster than 1 batch per second
+                let elapsed = batch_start.elapsed();
+                if elapsed.as_millis() < 1000 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        1000 - elapsed.as_millis() as u64,
+                    ))
+                    .await;
+                }
+
+                // Progress update every 30 seconds
+                if records_sent % 30 == 0 {
+                    let total_elapsed = worker_start.elapsed().as_secs();
+                    let total_records_sent = records_sent * records_per_worker_per_second;
+                    println!(
+                        "Worker {worker_id} progress: {total_records_sent} records sent in {total_elapsed} seconds"
+                    );
+                }
+            }
+
+            let final_records = records_sent * records_per_worker_per_second;
+            println!("Worker {worker_id} completed: {final_records} records sent");
+            final_records
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all workers to complete
+    let mut total_sent = 0;
+    for handle in handles {
+        total_sent += handle.await.unwrap();
+    }
+
+    // Stop the monitor
+    monitor_handle.abort();
+
+    let elapsed = start_time.elapsed();
+    println!("10-minute Kafka stress test completed:");
+    println!("- Total time: {elapsed:?}");
+    println!("- Total records sent: {total_sent}");
+    println!(
+        "- Average rate: {:.2} records/second",
+        total_sent as f64 / elapsed.as_secs_f64()
+    );
+
+    // Verify some data was ingested
+    assert!(total_sent > 0, "No records were sent");
+
+    // Check Iceberg directory structure and file counts
+    let table_dir = format!("/workspaces/moonlink/.shared-nginx/test-database/{table_name}");
+
+    println!("\n📊 Final Iceberg file structure check...");
+    let (parquet_count, metadata_count, snapshot_count, manifest_count) =
+        count_files_in_dir(&table_dir);
+
+    println!("📁 File counts in Iceberg table:");
+    println!("  - Parquet files: {parquet_count}");
+    println!("  - Metadata files: {metadata_count}");
+    println!("  - Snapshot files: {snapshot_count}");
+    println!("  - Manifest files: {manifest_count}");
+
+    // Assert reasonable file counts to prevent excessive file creation
+    // For 600k records at 1000/sec over 10 minutes, we expect:
+    // - Parquet files: Should be reasonable (not thousands)
+    // - Metadata files: Should be small number
+    // - Snapshots: Should be reasonable based on snapshot frequency
+
+    // In release mode with mem_slice_size=131,072, we expect ~5 parquet files for 600k records
+    // Allow some buffer but prevent excessive file creation
+    assert!(
+        parquet_count <= 50,
+        "Too many parquet files created: {parquet_count}. Expected <= 50 for 600k records"
+    );
+
+    assert!(
+        metadata_count <= 20,
+        "Too many metadata files created: {metadata_count}. Expected <= 20"
+    );
+
+    assert!(
+        snapshot_count <= 20,
+        "Too many snapshot files created: {snapshot_count}. Expected <= 20"
+    );
+
+    assert!(
+        manifest_count <= 50,
+        "Too many manifest files created: {manifest_count}. Expected <= 50"
+    );
+
+    // Log success with file efficiency
+    let total_files = parquet_count + metadata_count + snapshot_count + manifest_count;
+    let records_per_file = if total_files > 0 {
+        total_sent / total_files
+    } else {
+        0
+    };
+
+    println!("📈 File efficiency:");
+    println!("  - Total files: {total_files}");
+    println!("  - Records per file: {records_per_file}");
+    println!(
+        "  - File creation rate: {:.2} files/minute",
+        total_files as f64 / (elapsed.as_secs_f64() / 60.0)
+    );
+
+    if parquet_count > 0 {
+        println!(
+            "  - Records per parquet file: {}",
+            total_sent / parquet_count
+        );
+    }
+
+    println!("✅ Kafka stress test completed successfully with reasonable file counts");
+}

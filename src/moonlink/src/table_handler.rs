@@ -391,6 +391,7 @@ impl TableHandler {
                         {
                             if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn
                             {
+                                println!("flush and force snapshot from iceberg: {commit_lsn}");
                                 let event_id = uuid::Uuid::new_v4();
                                 table.flush(commit_lsn, event_id).unwrap();
                                 table_handler_state.last_unflushed_commit_lsn = None;
@@ -942,20 +943,19 @@ impl TableHandler {
         table: &mut MooncakeTable,
         force_flush_requested: bool,
     ) {
-        // Force create snapshot if
+        // Force create a flush if
         // 1. force snapshot is requested
-        // and 2. LSN which meets force snapshot requirement has appeared, before that we still allow buffering
-        // and 3. there's no snapshot creation operation ongoing
-        // and 4. there's no pending flush LSNs < lsn
+        // 2. previous flush LSN is not enough to satisfy force snapshot request
+        // 3. current commit LSN is enough to satisfy force snapshot request
 
-        let min_pending_flush_lsn = table.get_min_ongoing_flush_lsn();
-        let should_force_snapshot = TableHandlerState::should_force_snapshot_by_commit_lsn(
-            lsn,
-            min_pending_flush_lsn,
-            &table_handler_state.table_maintenance_process_status,
-            table_handler_state.largest_force_snapshot_lsn,
-            table_handler_state.mooncake_snapshot_ongoing,
-        );
+        let last_flush_lsn = table.get_last_flush_lsn();
+        let should_force_flush = if let Some(largest_force_snapshot_lsn) =
+            table_handler_state.largest_force_snapshot_lsn
+        {
+            largest_force_snapshot_lsn <= lsn && lsn > last_flush_lsn
+        } else {
+            false
+        };
 
         match xact_id {
             Some(xact_id) => {
@@ -985,7 +985,10 @@ impl TableHandler {
             }
             None => {
                 table.commit(lsn);
-                if table.should_flush() || should_force_snapshot || force_flush_requested {
+                if table.should_flush() || should_force_flush || force_flush_requested {
+                    println!(
+                        "flush lsn: {lsn} should_force_flush: {should_force_flush} force_flush_requested: {force_flush_requested}"
+                    );
                     table_handler_state.last_unflushed_commit_lsn = None;
                     let event_id = uuid::Uuid::new_v4();
                     if let Err(e) = table.flush(lsn, event_id) {
@@ -993,17 +996,6 @@ impl TableHandler {
                     }
                 }
             }
-        }
-
-        if should_force_snapshot {
-            table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
-            assert!(table.try_create_mooncake_snapshot(
-                table_handler_state.get_mooncake_snapshot_option(
-                    /*request_force=*/ true,
-                    uuid::Uuid::new_v4()
-                )
-            ));
-            table_handler_state.mooncake_snapshot_ongoing = true;
         }
     }
 }

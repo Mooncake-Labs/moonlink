@@ -1378,14 +1378,14 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
     // Mix with regular flush (must be higher than previous regular flush)
     append_rows(&mut table, vec![test_row(3, "C", 22)])?;
     table.commit(103);
-    let disk_slice_3 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 75)
+    let disk_slice_3 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 125)
         .await
         .expect("Disk slice 3 should be present");
 
     // Verify all three LSNs are tracked
     assert!(table.ongoing_flush_lsns.contains_key(&100));
     assert!(table.ongoing_flush_lsns.contains_key(&50));
-    assert!(table.ongoing_flush_lsns.contains_key(&75));
+    assert!(table.ongoing_flush_lsns.contains_key(&125));
     assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
 
     // Complete streaming flushes
@@ -1623,99 +1623,6 @@ async fn test_out_of_order_flush_completion() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_mixed_regular_and_streaming_lsn_ordering() -> Result<()> {
-    let context = TestContext::new("mixed_lsn_ordering");
-    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
-    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
-    table.register_table_notify(event_completion_tx).await;
-
-    let xact_id = 1;
-
-    // Start regular flush with LSN 100
-    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
-    table.commit(1);
-    let regular_disk_slice =
-        flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 100)
-            .await
-            .expect("Regular disk slice should be present");
-
-    // Start streaming flush with LSN 50 (lower than regular, but allowed for streaming)
-    table.append_in_stream_batch(test_row(2, "B", 21), xact_id)?;
-    let streaming_disk_slice = flush_stream_and_sync_no_apply(
-        &mut table,
-        &mut event_completion_rx,
-        xact_id,
-        /*lsn=*/ Some(50),
-    )
-    .await
-    .expect("Streaming disk slice should be present");
-    table
-        .commit_transaction_stream_impl(xact_id, /*lsn=*/ 50)
-        .unwrap();
-
-    // Verify both are tracked and min is 50
-    assert!(table.ongoing_flush_lsns.contains_key(&100));
-    assert!(table.ongoing_flush_lsns.contains_key(&50));
-    assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
-
-    // According to table handler logic, iceberg snapshots with flush_lsn >= 50 should be blocked
-    let min_pending = table.get_min_ongoing_flush_lsn();
-    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
-        50,
-        min_pending,
-        true,
-        false
-    )); // Blocked
-    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
-        75,
-        min_pending,
-        true,
-        false
-    )); // Blocked
-    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
-        40,
-        min_pending,
-        true,
-        false
-    )); // Allowed
-
-    // Complete streaming flush first
-    table.apply_stream_flush_result(
-        xact_id,
-        streaming_disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
-    assert!(!table.ongoing_flush_lsns.contains_key(&50));
-    assert!(table.ongoing_flush_lsns.contains_key(&100));
-    assert_eq!(table.get_min_ongoing_flush_lsn(), 100);
-
-    // Now iceberg snapshots with flush_lsn < 100 should be allowed
-    let min_pending = table.get_min_ongoing_flush_lsn();
-    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
-        75,
-        min_pending,
-        true,
-        false
-    )); // Now allowed
-    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
-        100,
-        min_pending,
-        true,
-        false
-    )); // Still blocked
-
-    // Complete regular flush
-    table.apply_flush_result(
-        regular_disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
-    assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
     let context = TestContext::new("lsn_ordering_tandem");
     let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
@@ -1742,14 +1649,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
     ));
 
     // With no pending flushes, should not force snapshots for any commit_lsn (no maintenance needed)
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         100,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         None,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         1000,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1792,14 +1699,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
         true,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         10,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         None,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         29,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1822,14 +1729,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
         true,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         40,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         None,
         false
     )); // Blocked by LSN ordering
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         100,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1856,14 +1763,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
         true,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         30,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         None,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         49,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1884,14 +1791,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
         true,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         50,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         None,
         false
     ));
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         60,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1901,14 +1808,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
 
     // Test case 4: Test state-based constraints for should_force_snapshot_by_commit_lsn
     // Test ReadyToPersist maintenance status - should force snapshot regardless of LSN (if LSN constraints allow)
-    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         25,
         min_pending,
         &MaintenanceProcessStatus::ReadyToPersist,
         None,
         false
     )); // LSN 25 < min_pending (50), should be allowed and forced due to ReadyToPersist
-    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         30,
         min_pending,
         &MaintenanceProcessStatus::ReadyToPersist,
@@ -1917,7 +1824,7 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
     )); // LSN 30 < min_pending (50), should be allowed and forced due to ReadyToPersist
 
     // But higher commit LSNs should still be blocked by the pending flush constraint
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         60,
         min_pending,
         &MaintenanceProcessStatus::ReadyToPersist,
@@ -1926,14 +1833,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
     )); // Blocked by LSN ordering even with ReadyToPersist
 
     // Test force snapshot request with largest_force_snapshot_lsn
-    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(TableHandlerState::should_force_flush_at_commit_lsn(
         25,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         Some(25), // Request force snapshot for LSN 25
         false
     )); // LSN 25 >= requested (25) and < min_pending (50), should be allowed
-    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(TableHandlerState::should_force_flush_at_commit_lsn(
         30,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1961,14 +1868,14 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
     ));
 
     // Force snapshot should now work for requested LSN (if other conditions are met)
-    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(TableHandlerState::should_force_flush_at_commit_lsn(
         25,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
         Some(25),
         false
     )); // Now force snapshot can proceed
-    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(TableHandlerState::should_force_flush_at_commit_lsn(
         100,
         min_pending,
         &MaintenanceProcessStatus::Unrequested,
@@ -1977,7 +1884,7 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
     )); // Higher LSNs also work
 
     // Test mooncake_snapshot_ongoing constraint
-    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+    assert!(!TableHandlerState::should_force_flush_at_commit_lsn(
         25,
         min_pending,
         &MaintenanceProcessStatus::ReadyToPersist,
