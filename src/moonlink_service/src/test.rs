@@ -1257,8 +1257,7 @@ async fn test_kafka_stress_10min_long_running() {
     };
 
     // Start file monitoring task
-    let table_dir_monitor =
-        format!("{}/test-database/{table_name}", get_moonlink_backend_dir());
+    let table_dir_monitor = format!("{}/test-database/{table_name}", get_moonlink_backend_dir());
     let monitor_handle = tokio::spawn(async move {
         let monitor_start = std::time::Instant::now();
 
