@@ -853,6 +853,7 @@ async fn test_create_table_from_postgres_endpoint() {
     assert_eq!(cardinality, 2, "Table should have 2 rows from initial data");
 }
 
+#[cfg(feature = "stress-test")]
 #[tokio::test]
 #[serial]
 async fn test_kafka_avro_stress_ingest() {
@@ -1119,6 +1120,7 @@ async fn test_kafka_avro_stress_ingest() {
     .unwrap();
 }
 
+#[cfg(feature = "stress-test")]
 #[tokio::test]
 #[serial]
 async fn test_kafka_stress_10min_long_running() {

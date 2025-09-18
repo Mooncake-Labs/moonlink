@@ -797,3 +797,11 @@ jobs:
           NGINX_ADDR: http://nginx.local:80
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features standalone-test -- --nocapture
+
+      - name: Run moonlink_service stress test
+        timeout-minutes: 15
+        env:
+          MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
+          NGINX_ADDR: http://nginx.local:80
+        run: |
+          RUST_BACKTRACE=1 cargo test --release --package moonlink_service --lib --features standalone-test,stress-test -- --nocapture
