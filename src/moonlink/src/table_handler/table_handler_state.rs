@@ -302,26 +302,6 @@ impl TableHandlerState {
         }
     }
 
-    /// Return whether should force a flush to satisfy force snapshot requirement, based on the new coming commit LSN.
-    pub(crate) fn should_force_flush_at_commit_lsn(
-        commit_lsn: u64,
-        min_ongoing_flush_lsn: u64,
-        _table_maintenance_process_status: &MaintenanceProcessStatus,
-        largest_force_snapshot_lsn: Option<u64>,
-        mooncake_snapshot_ongoing: bool,
-    ) -> bool {
-        // No force snapshot if pending flush LSNs < commit LSN.
-        if min_ongoing_flush_lsn < commit_lsn {
-            return false;
-        }
-        // there're pending force snapshot requests.
-        if let Some(largest_requested_lsn) = largest_force_snapshot_lsn {
-            return largest_requested_lsn <= commit_lsn && !mooncake_snapshot_ongoing;
-        }
-
-        false
-    }
-
     /// Return whether there're pending force snapshot requests.
     pub(crate) fn has_pending_force_snapshot_request(&self) -> bool {
         self.largest_force_snapshot_lsn.is_some()

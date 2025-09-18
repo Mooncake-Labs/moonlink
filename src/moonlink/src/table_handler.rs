@@ -391,7 +391,6 @@ impl TableHandler {
                         {
                             if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn
                             {
-                                println!("flush and force snapshot from iceberg: {commit_lsn}");
                                 let event_id = uuid::Uuid::new_v4();
                                 table.flush(commit_lsn, event_id).unwrap();
                                 table_handler_state.last_unflushed_commit_lsn = None;
@@ -952,7 +951,7 @@ impl TableHandler {
         let should_force_flush = if let Some(largest_force_snapshot_lsn) =
             table_handler_state.largest_force_snapshot_lsn
         {
-            largest_force_snapshot_lsn <= lsn && lsn > last_flush_lsn
+            largest_force_snapshot_lsn <= lsn && largest_force_snapshot_lsn > last_flush_lsn
         } else {
             false
         };
@@ -986,9 +985,6 @@ impl TableHandler {
             None => {
                 table.commit(lsn);
                 if table.should_flush() || should_force_flush || force_flush_requested {
-                    println!(
-                        "flush lsn: {lsn} should_force_flush: {should_force_flush} force_flush_requested: {force_flush_requested}"
-                    );
                     table_handler_state.last_unflushed_commit_lsn = None;
                     let event_id = uuid::Uuid::new_v4();
                     if let Err(e) = table.flush(lsn, event_id) {
