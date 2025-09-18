@@ -385,15 +385,27 @@ impl TableHandler {
                             continue;
                         }
 
-                        // Check whether a flush and force snapshot is needed.
                         if table_handler_state.has_pending_force_snapshot_request()
                             && !table_handler_state.iceberg_snapshot_ongoing
                         {
+                            // flush if needed
                             if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn
                             {
-                                let event_id = uuid::Uuid::new_v4();
-                                table.flush(commit_lsn, event_id).unwrap();
-                                table_handler_state.last_unflushed_commit_lsn = None;
+                                if table_handler_state
+                                    .should_force_flush(commit_lsn, table.get_last_flush_lsn())
+                                {
+                                    let event_id = uuid::Uuid::new_v4();
+                                    table.flush(commit_lsn, event_id).unwrap();
+                                    table_handler_state.last_unflushed_commit_lsn = None;
+                                }
+                            }
+
+                            // force snapshot if lsn is satisfied
+                            if table_handler_state
+                                .largest_force_snapshot_lsn
+                                .expect("has_pending_force_snapshot_request")
+                                < table.get_min_ongoing_flush_lsn()
+                            {
                                 table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
                                 if let SpecialTableState::AlterTable { .. } =
                                     table_handler_state.special_table_state
@@ -948,13 +960,7 @@ impl TableHandler {
         // 3. current commit LSN is enough to satisfy force snapshot request
 
         let last_flush_lsn = table.get_last_flush_lsn();
-        let should_force_flush = if let Some(largest_force_snapshot_lsn) =
-            table_handler_state.largest_force_snapshot_lsn
-        {
-            largest_force_snapshot_lsn <= lsn && largest_force_snapshot_lsn > last_flush_lsn
-        } else {
-            false
-        };
+        let should_force_flush = table_handler_state.should_force_flush(lsn, last_flush_lsn);
 
         match xact_id {
             Some(xact_id) => {

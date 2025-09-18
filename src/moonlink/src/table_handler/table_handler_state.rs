@@ -307,6 +307,15 @@ impl TableHandlerState {
         self.largest_force_snapshot_lsn.is_some()
     }
 
+    pub(crate) fn should_force_flush(&self, commit_lsn: u64, existing_flush_lsn: u64) -> bool {
+        if let Some(largest_force_snapshot_lsn) = self.largest_force_snapshot_lsn {
+            commit_lsn >= largest_force_snapshot_lsn
+                && existing_flush_lsn < largest_force_snapshot_lsn
+        } else {
+            false
+        }
+    }
+
     /// Return whether there's background tasks ongoing.
     fn has_background_task_ongoing(&mut self, has_ongoing_flush: bool) -> bool {
         if self.mooncake_snapshot_ongoing {
