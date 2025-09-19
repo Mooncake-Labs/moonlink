@@ -90,7 +90,7 @@ pub struct CreateTableRequest {
     pub database: String,
     pub table: String,
     pub schema: Option<Vec<FieldSchema>>,
-    pub avro_schema: Option<String>,
+    pub avro_schema: Option<serde_json::Value>,
     pub table_config: TableConfig,
 }
 
@@ -111,7 +111,8 @@ pub struct CreateTableResponse {
 pub struct SetAvroSchemaRequest {
     pub database: String,
     pub table: String,
-    pub kafka_schema: String,
+    /// Avro schema JSON object
+    pub kafka_schema: serde_json::Value,
     pub schema_id: u64,
 }
 
@@ -390,8 +391,18 @@ async fn create_table(
                 }),
             ));
         }
-        let avro_schema = payload.avro_schema.clone().unwrap();
-        parsed_avro_schema = Some(AvroSchema::parse_str(&avro_schema).map_err(|e| {
+        let avro_schema_value = payload.avro_schema.clone().unwrap();
+        let avro_schema_str = serde_json::to_string(&avro_schema_value).map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    message: format!(
+                        "Avro schema must be valid JSON object on table {src_table_name} creation: {e}"
+                    ),
+                }),
+            )
+        })?;
+        parsed_avro_schema = Some(AvroSchema::parse_str(&avro_schema_str).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -861,7 +872,20 @@ async fn set_avro_schema(
         }));
     }
     // Parse the Avro schema
-    let avro_schema = match apache_avro::Schema::parse_str(&payload.kafka_schema) {
+    let schema_json_string = match serde_json::to_string(&payload.kafka_schema) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    message: format!(
+                        "Avro schema must be valid JSON object for table {src_table_name}: {e}"
+                    ),
+                }),
+            ));
+        }
+    };
+    let avro_schema = match apache_avro::Schema::parse_str(&schema_json_string) {
         Ok(schema) => schema,
         Err(e) => {
             return Err((
