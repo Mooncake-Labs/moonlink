@@ -44,6 +44,7 @@ pub(crate) fn get_accessor_config(tmp_dir: &TempDir) -> AccessorConfig {
         storage_config,
         retry_config: FsRetryConfig::default(),
         timeout_config: FsTimeoutConfig::default(),
+        throttle_config: None,
         chaos_config: None,
     }
 }

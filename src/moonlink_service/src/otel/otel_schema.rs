@@ -312,6 +312,7 @@ mod tests {
             storage_config,
             timeout_config: FsTimeoutConfig::default(),
             retry_config: FsRetryConfig::default(),
+            throttle_config: None,
             chaos_config: None,
         };
         let table_filesystem_accessor = Arc::new(FileSystemAccessor::new(accessor_config));
