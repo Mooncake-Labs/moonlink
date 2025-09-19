@@ -4,7 +4,9 @@ use serde_json::json;
 use serial_test::serial;
 use tokio::net::TcpStream;
 
-use crate::rest_api::{CreateTableResponse, FileUploadResponse, HealthResponse, IngestResponse};
+use crate::rest_api::{
+    CreateTableResponse, DropTableRequest, FileUploadResponse, HealthResponse, IngestResponse,
+};
 use crate::start_with_config;
 use crate::test_guard::TestGuard;
 use crate::test_utils::*;
@@ -495,6 +497,24 @@ async fn test_drop_and_recreate_table() {
     // List table after recreation.
     let list_results = list_tables(&client).await;
     assert_eq!(list_results.len(), 1);
+}
+
+#[tokio::test]
+async fn test_drop_uses_defaults() {
+    let s = r#"{}"#;
+    let req: DropTableRequest = serde_json::from_str(s).unwrap();
+    assert_eq!(req.database, "");
+    assert_eq!(req.table, "");
+}
+
+#[tokio::test]
+async fn test_drop_serialize_uses_renamed_fields() {
+    let req = DropTableRequest {
+        database: "database".into(),
+        table: "users".into(),
+    };
+    let out = serde_json::to_string(&req).unwrap();
+    assert!(out.contains("\"table\":\"users\""));
 }
 
 /// Testing scenario: create multiple tables, and check list table result.
