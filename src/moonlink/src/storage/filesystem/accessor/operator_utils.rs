@@ -5,9 +5,9 @@ use crate::storage::filesystem::accessor_config::ThrottleConfig;
 use crate::storage::filesystem::accessor_config::TimeoutConfig;
 use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::Result;
-use opendal::layers::ThrottleLayer;
 
 use opendal::layers::RetryLayer;
+use opendal::layers::ThrottleLayer;
 use opendal::layers::TimeoutLayer;
 use opendal::services;
 use opendal::Operator;

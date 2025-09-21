@@ -116,17 +116,20 @@ impl Default for TimeoutConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ThrottleConfig {
     /// Bandwidth in bytes per second
+    /// Maximum 4GiB.
     #[serde(default = "ThrottleConfig::default_bandwidth")]
     pub bandwidth: u32,
 
-    /// Burst size in bytes
+    /// Burst size in bytes. Requests larger than this size will be rejected.
+    /// The value should be no smaller than the largest operation size that is expected to occur.
+    /// Maximum 4GiB.
     #[serde(default = "ThrottleConfig::default_burst")]
     pub burst: u32,
 }
 
 impl ThrottleConfig {
-    const DEFAULT_BANDWIDTH: u32 = 100 * 1024 * 1024; // 100MB/s
-    const DEFAULT_BURST: u32 = 1000 * 1024 * 1024; // 1000MB
+    const DEFAULT_BANDWIDTH: u32 = 100 * 1024 * 1024; // 100MiB/s
+    const DEFAULT_BURST: u32 = 1000 * 1024 * 1024; // 1000MiB
 
     fn default_bandwidth() -> u32 {
         Self::DEFAULT_BANDWIDTH
@@ -266,8 +269,8 @@ mod tests {
                 }
             },
             "throttle_config": {
-                "bandwidth": 5242880,  // 5MB/s
-                "burst": 52428800      // 50MB
+                "bandwidth": 5242880,  // 5MiB/s
+                "burst": 52428800      // 50MiB
             }
         });
 
@@ -282,8 +285,8 @@ mod tests {
                 retry_config: RetryConfig::default(),
                 timeout_config: TimeoutConfig::default(),
                 throttle_config: Some(ThrottleConfig {
-                    bandwidth: 5242880, // 5MB/s
-                    burst: 52428800,    // 50MB
+                    bandwidth: 5242880, // 5MiB/s
+                    burst: 52428800,    // 50MiB
                 }),
                 chaos_config: None,
             }
@@ -293,8 +296,8 @@ mod tests {
     #[test]
     fn test_throttle_config_defaults() {
         let config = ThrottleConfig::default();
-        assert_eq!(config.bandwidth, 100 * 1024 * 1024); // 100MB/s
-        assert_eq!(config.burst, 1000 * 1024 * 1024); // 1000MB
+        assert_eq!(config.bandwidth, 100 * 1024 * 1024); // 100MiB/s
+        assert_eq!(config.burst, 1000 * 1024 * 1024); // 1000MiB
     }
 
     /// Testing scenario: deserialize accessor config with throttle_config as null.
