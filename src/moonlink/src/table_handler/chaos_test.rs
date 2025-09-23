@@ -24,7 +24,6 @@ use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::ReadStateManager;
-use crate::VisibilityLsn;
 use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
 use function_name::named;
@@ -788,7 +787,7 @@ struct TestEnvironment {
     event_sender: mpsc::Sender<TableEvent>,
     handler_event_replay_rx: mpsc::UnboundedReceiver<TableEvent>,
     wal_flush_lsn_rx: watch::Receiver<u64>,
-    last_visibility_lsn_tx: watch::Sender<VisibilityLsn>,
+    last_commit_lsn_tx: watch::Sender<u64>,
     replication_lsn_tx: watch::Sender<u64>,
     mooncake_table_metadata: Arc<TableMetadata>,
     iceberg_table_config: IcebergTableConfig,
@@ -858,16 +857,13 @@ impl TestEnvironment {
         )
         .await;
         let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-        let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
+        let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
         let read_state_filepath_remap =
             std::sync::Arc::new(|local_filepath: String| local_filepath);
         let read_state_manager = ReadStateManager::new(
             &table,
             replication_lsn_rx.clone(),
-            visibility_rx,
+            last_commit_lsn_rx,
             read_state_filepath_remap,
         );
         let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
@@ -926,7 +922,7 @@ impl TestEnvironment {
             handler_event_replay_rx,
             wal_flush_lsn_rx,
             replication_lsn_tx,
-            last_visibility_lsn_tx: visibility_tx,
+            last_commit_lsn_tx,
             mooncake_table_metadata,
             iceberg_table_config,
         }
@@ -991,17 +987,9 @@ async fn validate_persisted_iceberg_table(
 ) {
     let (event_sender, _event_receiver) = mpsc::channel(100);
     let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-    let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
-        commit_lsn: 0,
-        replication_lsn: 0,
-    });
+    let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
     replication_lsn_tx.send(snapshot_lsn).unwrap();
-    visibility_tx
-        .send(VisibilityLsn {
-            commit_lsn: snapshot_lsn,
-            replication_lsn: snapshot_lsn,
-        })
-        .unwrap();
+    last_commit_lsn_tx.send(snapshot_lsn).unwrap();
 
     // Use a fresh new cache for new iceberg table manager.
     let cache_temp_dir = tempdir().unwrap();
@@ -1019,7 +1007,7 @@ async fn validate_persisted_iceberg_table(
     let read_state_manager = ReadStateManager::new(
         &table,
         replication_lsn_rx.clone(),
-        visibility_rx,
+        last_commit_lsn_rx,
         read_state_filepath_remap,
     );
     check_read_snapshot(
@@ -1035,7 +1023,7 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
     let event_sender = env.event_sender.clone();
     let read_state_manager = env.read_state_manager;
     let mut table_event_manager = env.table_event_manager;
-    let last_visibility_lsn_tx = env.last_visibility_lsn_tx;
+    let last_commit_lsn_tx = env.last_commit_lsn_tx;
     let replication_lsn_tx = env.replication_lsn_tx.clone();
 
     // Fields used to recreate a new mooncake table.
@@ -1084,20 +1072,10 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
                 // For commit events, need to set up corresponding replication and commit LSN.
                 if let TableEvent::Commit { lsn, .. } = cur_event {
                     replication_lsn_tx.send(lsn).unwrap();
-                    last_visibility_lsn_tx
-                        .send(VisibilityLsn {
-                            commit_lsn: lsn,
-                            replication_lsn: lsn,
-                        })
-                        .unwrap();
+                    last_commit_lsn_tx.send(lsn).unwrap();
                 } else if let TableEvent::CommitFlush { lsn, .. } = cur_event {
                     replication_lsn_tx.send(lsn).unwrap();
-                    last_visibility_lsn_tx
-                        .send(VisibilityLsn {
-                            commit_lsn: lsn,
-                            replication_lsn: lsn,
-                        })
-                        .unwrap();
+                    last_commit_lsn_tx.send(lsn).unwrap();
                 }
                 event_sender.send(cur_event).await.unwrap();
             }

@@ -9,8 +9,7 @@ use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::ReadStateManager;
 use crate::{
     BaseFileSystemAccess, CacheTrait, DataCompactionConfig, DiskSliceWriterConfig,
-    FileIndexMergeConfig, FileSystemAccessor, IcebergPersistenceConfig, VisibilityLsn, WalConfig,
-    WalManager,
+    FileIndexMergeConfig, FileSystemAccessor, IcebergPersistenceConfig, WalConfig, WalManager,
 };
 use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
@@ -309,7 +308,7 @@ struct TestEnvironment {
     table_handler: TableHandler,
     event_sender: mpsc::Sender<TableEvent>,
     wal_flush_lsn_rx: watch::Receiver<u64>,
-    last_visibility_lsn_tx: watch::Sender<VisibilityLsn>,
+    last_commit_lsn_tx: watch::Sender<u64>,
     replication_lsn_tx: watch::Sender<u64>,
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
     iceberg_table_config: IcebergTableConfig,
@@ -355,16 +354,13 @@ impl TestEnvironment {
         )
         .await;
         let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-        let (visibility_tx, visibility_rx) = watch::channel(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
+        let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
         let read_state_filepath_remap =
             std::sync::Arc::new(|local_filepath: String| local_filepath);
         let read_state_manager = ReadStateManager::new(
             &table,
             replication_lsn_rx.clone(),
-            visibility_rx,
+            last_commit_lsn_rx,
             read_state_filepath_remap,
         );
         let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
@@ -394,7 +390,7 @@ impl TestEnvironment {
             event_sender,
             wal_flush_lsn_rx,
             replication_lsn_tx,
-            last_visibility_lsn_tx: visibility_tx,
+            last_commit_lsn_tx,
             mooncake_table_metadata,
             iceberg_table_config,
         }
@@ -517,7 +513,7 @@ async fn profile_test_impl(env: TestEnvironment) {
     let test_env_config = env.test_env_config.clone();
     let event_sender = env.event_sender.clone();
     let mut table_event_manager = env.table_event_manager;
-    let last_visibility_lsn_tx = env.last_visibility_lsn_tx;
+    let last_commit_lsn_tx = env.last_commit_lsn_tx;
     let replication_lsn_tx = env.replication_lsn_tx.clone();
 
     let mut state = ProfileState::new(
@@ -552,12 +548,7 @@ async fn profile_test_impl(env: TestEnvironment) {
             // For commit events, need to set up corresponding replication and commit LSN.
             if let TableEvent::Commit { lsn, .. } = cur_event {
                 replication_lsn_tx.send(lsn).unwrap();
-                last_visibility_lsn_tx
-                    .send(VisibilityLsn {
-                        commit_lsn: lsn,
-                        replication_lsn: lsn,
-                    })
-                    .unwrap();
+                last_commit_lsn_tx.send(lsn).unwrap();
                 event_sender.send(cur_event).await.unwrap();
 
                 ingested_event_count += 1;

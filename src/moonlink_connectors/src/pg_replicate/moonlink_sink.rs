@@ -4,7 +4,7 @@ use crate::pg_replicate::{
     table::{SrcTableId, TableSchema},
 };
 use crate::replication_state::ReplicationState;
-use moonlink::{TableEvent, VisibilityLsn};
+use moonlink::TableEvent;
 use more_asserts as ma;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ struct ColumnInfo {
 }
 pub struct Sink {
     event_senders: HashMap<SrcTableId, Sender<TableEvent>>,
-    visibility_lsn_txs: HashMap<SrcTableId, watch::Sender<VisibilityLsn>>,
+    commit_lsn_txs: HashMap<SrcTableId, watch::Sender<u64>>,
     streaming_transactions_state: HashMap<u32, TransactionState>,
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
@@ -70,7 +70,7 @@ impl Sink {
     pub fn new(replication_state: Arc<ReplicationState>) -> Self {
         Self {
             event_senders: HashMap::new(),
-            visibility_lsn_txs: HashMap::new(),
+            commit_lsn_txs: HashMap::new(),
             streaming_transactions_state: HashMap::new(),
             transaction_state: TransactionState {
                 final_lsn: 0,
@@ -98,12 +98,11 @@ impl Sink {
         &mut self,
         src_table_id: SrcTableId,
         event_sender: Sender<TableEvent>,
-        visibility_lsn_tx: watch::Sender<VisibilityLsn>,
+        commit_lsn_tx: watch::Sender<u64>,
         table_schema: &TableSchema,
     ) {
         self.event_senders.insert(src_table_id, event_sender);
-        self.visibility_lsn_txs
-            .insert(src_table_id, visibility_lsn_tx);
+        self.commit_lsn_txs.insert(src_table_id, commit_lsn_tx);
         let columns = table_schema
             .column_schemas
             .iter()
@@ -117,7 +116,7 @@ impl Sink {
     }
     pub fn drop_table(&mut self, src_table_id: SrcTableId) {
         self.event_senders.remove(&src_table_id).unwrap();
-        self.visibility_lsn_txs.remove(&src_table_id).unwrap();
+        self.commit_lsn_txs.remove(&src_table_id).unwrap();
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;
@@ -214,14 +213,12 @@ impl Sink {
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
+                let pg_lsn = PgLsn::from(commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id);
-                    if let Some(visibility_lsn_tx) = self.visibility_lsn_txs.get(table_id).cloned()
-                    {
-                        if let Err(e) = visibility_lsn_tx.send(VisibilityLsn {
-                            commit_lsn: commit_body.end_lsn(),
-                            replication_lsn: commit_body.end_lsn(),
-                        }) {
+                    if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
+                        if let Err(e) = commit_lsn_tx.send(commit_body.end_lsn()) {
                             warn!(error = ?e, "failed to send commit lsn");
                         }
                     }
@@ -240,8 +237,6 @@ impl Sink {
                         }
                     }
                 }
-                // Also advance global replication watermark to wake waiters
-                self.replication_state.mark(commit_body.end_lsn());
                 self.transaction_state.touched_tables.clear();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
@@ -254,16 +249,13 @@ impl Sink {
                     "stream commit"
                 );
                 ma::assert_ge!(stream_commit_body.end_lsn(), self.max_keepalive_lsn_seen);
+                let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
+                self.replication_state.mark(pg_lsn.into());
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id);
-                        if let Some(visibility_lsn_tx) =
-                            self.visibility_lsn_txs.get(table_id).cloned()
-                        {
-                            if let Err(e) = visibility_lsn_tx.send(VisibilityLsn {
-                                commit_lsn: stream_commit_body.end_lsn(),
-                                replication_lsn: stream_commit_body.end_lsn(),
-                            }) {
+                        if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
+                            if let Err(e) = commit_lsn_tx.send(stream_commit_body.end_lsn()) {
                                 warn!(error = ?e, "failed to send stream commit lsn");
                             }
                         }
@@ -284,8 +276,6 @@ impl Sink {
                     }
                     self.streaming_transactions_state.remove(&xact_id);
                 }
-                // Advance global watermark to wake waiters
-                self.replication_state.mark(stream_commit_body.end_lsn());
                 self.streaming_last_key = None;
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
@@ -453,12 +443,9 @@ mod tests {
         // Setup one table with event sender and commit lsn channel
         let table_id: SrcTableId = 1;
         let (tx, mut rx) = mpsc::channel::<TableEvent>(64);
-        let (visibility_tx, _visibility_rx) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
         let schema = make_table_schema(table_id);
-        sink.add_table(table_id, tx, visibility_tx, &schema);
+        sink.add_table(table_id, tx, commit_tx, &schema);
 
         // Many inserts for the same (xid, table) pair
         let xid = Some(42u32);
@@ -506,16 +493,10 @@ mod tests {
         let b: SrcTableId = 12;
         let (tx_a, mut rx_a) = mpsc::channel::<TableEvent>(8);
         let (tx_b, mut rx_b) = mpsc::channel::<TableEvent>(8);
-        let (visibility_tx_a, _rx_a) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        let (visibility_tx_b, _rx_b) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        sink.add_table(a, tx_a, visibility_tx_a, &make_table_schema(a));
-        sink.add_table(b, tx_b, visibility_tx_b, &make_table_schema(b));
+        let (commit_tx_a, _rx_a) = watch::channel::<u64>(0);
+        let (commit_tx_b, _rx_b) = watch::channel::<u64>(0);
+        sink.add_table(a, tx_a, commit_tx_a, &make_table_schema(a));
+        sink.add_table(b, tx_b, commit_tx_b, &make_table_schema(b));
 
         // Many inserts into A then into B within the same non-streaming transaction
         for _ in 0..5 {
@@ -551,11 +532,8 @@ mod tests {
 
         let table_id: SrcTableId = 21;
         let (tx, _rx) = mpsc::channel::<TableEvent>(4);
-        let (visibility_tx, _visibility_rx) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        sink.add_table(table_id, tx, visibility_tx, &make_table_schema(table_id));
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
 
         // Populate sender cache
         let _ = sink.get_event_sender_for(table_id);
@@ -573,11 +551,8 @@ mod tests {
 
         let table_id: SrcTableId = 31;
         let (tx, mut rx) = mpsc::channel::<TableEvent>(16);
-        let (visibility_tx, _visibility_rx) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        sink.add_table(table_id, tx, visibility_tx, &make_table_schema(table_id));
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
 
         let xid1 = Some(100u32);
         let xid2 = Some(200u32);
@@ -642,16 +617,10 @@ mod tests {
         let b: SrcTableId = 42;
         let (tx_a, mut rx_a) = mpsc::channel::<TableEvent>(8);
         let (tx_b, mut rx_b) = mpsc::channel::<TableEvent>(8);
-        let (visibility_tx_a, _rx_a) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        let (visibility_tx_b, _rx_b) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        sink.add_table(a, tx_a, visibility_tx_a, &make_table_schema(a));
-        sink.add_table(b, tx_b, visibility_tx_b, &make_table_schema(b));
+        let (commit_tx_a, _rx_a) = watch::channel::<u64>(0);
+        let (commit_tx_b, _rx_b) = watch::channel::<u64>(0);
+        sink.add_table(a, tx_a, commit_tx_a, &make_table_schema(a));
+        sink.add_table(b, tx_b, commit_tx_b, &make_table_schema(b));
 
         let xid = Some(777u32);
         // A then B under same xid
@@ -686,11 +655,8 @@ mod tests {
 
         let table_id: SrcTableId = 51;
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
-        let (visibility_tx, _visibility_rx) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        sink.add_table(table_id, tx, visibility_tx, &make_table_schema(table_id));
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
 
         let xid1 = Some(1u32);
         let xid2 = Some(2u32);
@@ -730,11 +696,8 @@ mod tests {
 
         let table_id: SrcTableId = 61;
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
-        let (visibility_tx, _visibility_rx) = watch::channel::<VisibilityLsn>(VisibilityLsn {
-            commit_lsn: 0,
-            replication_lsn: 0,
-        });
-        sink.add_table(table_id, tx, visibility_tx, &make_table_schema(table_id));
+        let (commit_tx, _commit_rx) = watch::channel::<u64>(0);
+        sink.add_table(table_id, tx, commit_tx, &make_table_schema(table_id));
 
         // First transaction: several inserts (non-streaming)
         for _ in 0..3 {

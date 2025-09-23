@@ -17,19 +17,13 @@ const NO_SNAPSHOT_LSN: u64 = u64::MAX;
 /// Commit LSN, which indicates there's no commit.
 const NO_COMMIT_LSN: u64 = 0;
 
-#[derive(Copy, Clone, Debug)]
-pub struct VisibilityLsn {
-    pub commit_lsn: u64,
-    pub replication_lsn: u64,
-}
-
 pub struct ReadStateManager {
     last_read_lsn: AtomicU64,
     last_read_state: RwLock<Arc<ReadState>>,
     table_snapshot: Arc<RwLock<SnapshotTableState>>,
     table_snapshot_watch_receiver: watch::Receiver<u64>,
     replication_lsn_rx: watch::Receiver<u64>,
-    last_visibility_lsn_rx: watch::Receiver<VisibilityLsn>,
+    last_commit_lsn_rx: watch::Receiver<u64>,
     /// Functor which maps local filepath to remote URI if possible, should be applied on all files within [`ReadState`].
     read_state_filepath_remap: ReadStateFilepathRemap,
 }
@@ -38,7 +32,7 @@ impl ReadStateManager {
     pub fn new(
         table: &MooncakeTable,
         replication_lsn_rx: watch::Receiver<u64>,
-        last_visibility_lsn_rx: watch::Receiver<VisibilityLsn>,
+        last_commit_lsn_rx: watch::Receiver<u64>,
         read_state_filepath_remap: ReadStateFilepathRemap,
     ) -> Self {
         let (table_snapshot, table_snapshot_watch_receiver) = table.get_state_for_reader();
@@ -56,7 +50,7 @@ impl ReadStateManager {
             table_snapshot,
             table_snapshot_watch_receiver,
             replication_lsn_rx,
-            last_visibility_lsn_rx,
+            last_commit_lsn_rx,
             read_state_filepath_remap,
         }
     }
@@ -97,8 +91,7 @@ impl ReadStateManager {
         // fast-path: reuse cached snapshot only when its still the tables latest and not newer than the callers LSN
         let cached_lsn = self.last_read_lsn.load(Ordering::Relaxed);
         let snapshot_lsn_now = *self.table_snapshot_watch_receiver.borrow();
-        let visibility_lsn_now = *self.last_visibility_lsn_rx.borrow();
-        let commit_lsn_now = visibility_lsn_now.commit_lsn;
+        let commit_lsn_now = *self.last_commit_lsn_rx.borrow();
 
         let use_cache =
             Self::should_use_cache(requested_lsn, cached_lsn, snapshot_lsn_now, commit_lsn_now);
@@ -109,26 +102,24 @@ impl ReadStateManager {
 
         let mut table_snapshot_rx = self.table_snapshot_watch_receiver.clone();
         let mut replication_lsn_rx = self.replication_lsn_rx.clone();
-        let last_visibility_lsn = self.last_visibility_lsn_rx.clone();
+        let last_commit_lsn = self.last_commit_lsn_rx.clone();
 
         loop {
             let current_snapshot_lsn = *table_snapshot_rx.borrow();
             let current_replication_lsn = *replication_lsn_rx.borrow();
 
-            let current_visibility_lsn = *last_visibility_lsn.borrow();
+            let last_commit_lsn_val = *last_commit_lsn.borrow();
             if self.can_satisfy_read_from_snapshot(
                 requested_lsn,
                 current_snapshot_lsn,
                 current_replication_lsn,
-                current_visibility_lsn.commit_lsn,
-                current_visibility_lsn.replication_lsn,
+                last_commit_lsn_val,
             ) {
                 return self
                     .read_from_snapshot_and_update_cache(
                         current_snapshot_lsn,
                         current_replication_lsn,
-                        current_visibility_lsn.commit_lsn,
-                        current_visibility_lsn.replication_lsn,
+                        last_commit_lsn_val,
                     )
                     .await;
             }
@@ -148,14 +139,12 @@ impl ReadStateManager {
         snapshot_lsn: u64,
         replication_lsn: u64,
         commit_lsn: u64,
-        commit_replication_lsn: u64,
     ) -> bool {
         // Sanity check on read side: iceberg snapshot LSN <= mooncake snapshot LSN <= commit LSN <= replication LSN
         if snapshot_lsn != NO_SNAPSHOT_LSN && commit_lsn != NO_COMMIT_LSN {
             ma::assert_le!(snapshot_lsn, commit_lsn);
         }
-        let effective_replication_lsn = replication_lsn.max(commit_replication_lsn);
-        ma::assert_le!(commit_lsn, effective_replication_lsn);
+        ma::assert_le!(commit_lsn, replication_lsn);
 
         // Check snapshot readability.
         let is_snapshot_clean = Self::snapshot_is_clean(snapshot_lsn, commit_lsn);
@@ -167,9 +156,9 @@ impl ReadStateManager {
                 // Request can be satisfied if:
                 // 1. The requested LSN is already covered by the table snapshot.
                 // OR
-                // 2. The requested LSN is covered by replication (keepalive or composite), AND the snapshot is clean
+                // 2. The requested LSN is covered by replication, AND the snapshot is clean
                 is_snapshot_initialized && req_lsn_val <= snapshot_lsn
-                    || (req_lsn_val <= effective_replication_lsn && is_snapshot_clean)
+                    || (req_lsn_val <= replication_lsn && is_snapshot_clean)
             }
         }
     }
@@ -180,7 +169,6 @@ impl ReadStateManager {
         current_snapshot_lsn: u64,
         current_replication_lsn: u64,
         current_commit_lsn: u64,
-        current_commit_replication_lsn: u64,
     ) -> Result<Arc<ReadState>> {
         let mut table_state_snapshot = self.table_snapshot.write().await;
         let mut last_read_state_guard = self.last_read_state.write().await;
@@ -194,11 +182,9 @@ impl ReadStateManager {
                 current_snapshot_lsn
             } else {
                 // If the snapshot is fully committed and replication has progressed further,
-                // we can consider the state valid up to the effective replication LSN (keepalive or composite commit).
-                let effective_replication_lsn =
-                    current_replication_lsn.max(current_commit_replication_lsn);
-                if is_snapshot_clean && current_snapshot_lsn < effective_replication_lsn {
-                    effective_replication_lsn
+                // we can consider the state valid up to the replication LSN.
+                if is_snapshot_clean && current_snapshot_lsn < current_replication_lsn {
+                    current_replication_lsn
                 } else {
                     current_snapshot_lsn
                 }
