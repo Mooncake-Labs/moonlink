@@ -106,9 +106,9 @@ impl ReadStateManager {
 
         loop {
             let current_snapshot_lsn = *table_snapshot_rx.borrow();
+            let last_commit_lsn_val = *last_commit_lsn.borrow();
             let current_replication_lsn = *replication_lsn_rx.borrow();
 
-            let last_commit_lsn_val = *last_commit_lsn.borrow();
             if self.can_satisfy_read_from_snapshot(
                 requested_lsn,
                 current_snapshot_lsn,
