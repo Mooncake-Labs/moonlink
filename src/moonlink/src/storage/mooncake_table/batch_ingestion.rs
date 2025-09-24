@@ -187,7 +187,7 @@ impl MooncakeTable {
                 while let Some(batch) = batch_stream.next().transpose()? {
                     let rows = MoonlinkRow::from_record_batch(&batch);
                     for row in rows {
-                        let hash = identity.get_lookup_key(&row);
+                        let hash = identity.get_lookup_key_from_identity_row(&row);
                         entries.push((hash, seg_idx, row_idx_within_file));
                         row_idx_within_file += 1;
                     }
@@ -586,5 +586,39 @@ mod tests {
             }
             _ => panic!("unexpected"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_batch_ingest_index_pkey_not_first_column() {
+        // Identity points to column index 2 ("age"), not the first column.
+        // The index builder projects only the identity columns
+        let context = TestContext::new("batch_ingest_key_not_first");
+        let temp_dir = tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let mut table = crate::storage::mooncake_table::test_utils::test_table(
+            &context,
+            "t_key_not_first",
+            IdentityProp::SinglePrimitiveKey(2), // "age" column in test schema
+        )
+        .await;
+
+        // Prepare a parquet file with some rows
+        let file1 = data_dir.join("file1.parquet");
+        let b1 = batch_with_rows(&[1, 2, 3]);
+        write_parquet_file(&file1, &[b1]).await;
+
+        // Trigger batch_ingest which will attempt to build the index
+        let storage_config = crate::StorageConfig::FileSystem {
+            root_directory: context.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        table
+            .batch_ingest(
+                vec![file1.to_string_lossy().to_string()],
+                storage_config,
+                900,
+            )
+            .await;
     }
 }
