@@ -18,13 +18,9 @@ pub enum Error {
 
     #[error("{0}")]
     PacketTooLong(ErrorStruct),
-
-    #[error("{0}")]
-    Rpc(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
-pub type RpcResult<T> = result::Result<T, ErrorStruct>;
 
 impl From<bincode::error::DecodeError> for Error {
     #[track_caller]
@@ -70,8 +66,7 @@ impl Error {
             Error::Decode(err)
             | Error::Encode(err)
             | Error::Io(err)
-            | Error::PacketTooLong(err)
-            | Error::Rpc(err) => err.status,
+            | Error::PacketTooLong(err) => err.status,
         }
     }
 }

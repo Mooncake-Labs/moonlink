@@ -21,7 +21,6 @@ storage-gcs = ["moonlink/storage-gcs"]
 storage-fs = ["moonlink/storage-fs"]
 
 [dependencies]
-anyhow = { workspace = true }
 apache-avro = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
