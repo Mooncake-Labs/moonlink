@@ -143,6 +143,9 @@ impl MoonlinkBackend {
     /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
     /// If the requested database or table doesn't exist, return [`TableNotFound`] error.
     pub async fn create_snapshot(&self, database: String, table: String, lsn: u64) -> Result<()> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let rx = {
             let mut manager = self.replication_manager.write().await;
             let mooncake_table_id = MooncakeTableId { database, table };
@@ -171,6 +174,9 @@ impl MoonlinkBackend {
         table_config: String,
         input_schema: Option<Schema>,
     ) -> Result<()> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let mooncake_table_id = MooncakeTableId {
             database: database.clone(),
             table: table.clone(),
@@ -245,6 +251,8 @@ impl MoonlinkBackend {
         src_table_name: String,
         avro_schema: AvroSchema,
     ) -> Result<()> {
+        validate_not_empty(&src_table_name, "src_table_name")?;
+
         let mut manager = self.replication_manager.write().await;
         // Set Avro schema on the existing REST table
         manager.set_avro_schema(src_table_name, avro_schema).await?;
@@ -253,6 +261,9 @@ impl MoonlinkBackend {
     }
 
     pub async fn drop_table(&self, database: String, table: String) -> Result<()> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let mooncake_table_id = MooncakeTableId { database, table };
 
         let table_exists = {
@@ -297,6 +308,9 @@ impl MoonlinkBackend {
     /// Get the current mooncake table schema.
     /// If the requested database or table doesn't exist, return [`TableNotFound`] error.
     pub async fn get_table_schema(&self, database: String, table: String) -> Result<Arc<Schema>> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let table_schema = {
             let manager = self.replication_manager.read().await;
             let mooncake_table_id = MooncakeTableId { database, table };
@@ -344,6 +358,9 @@ impl MoonlinkBackend {
     /// - "index": perform an index merge operation, only index files smaller than a threshold, or with too many deleted rows will be merged.    
     /// - "full": perform a full compaction, which merges all data files and all index files, whatever file size they are of.
     pub async fn optimize_table(&self, database: String, table: String, mode: &str) -> Result<()> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let mut rx = {
             let mut manager = self.replication_manager.write().await;
             let mooncake_table_id = MooncakeTableId { database, table };
@@ -372,6 +389,9 @@ impl MoonlinkBackend {
         table: String,
         lsn: Option<u64>,
     ) -> Result<Arc<ReadState>> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let read_state = {
             let manager = self.replication_manager.read().await;
             let mooncake_table_id = MooncakeTableId { database, table };
@@ -390,6 +410,9 @@ impl MoonlinkBackend {
         table: String,
         lsn: u64,
     ) -> Result<()> {
+        validate_not_empty(&database, "database")?;
+        validate_not_empty(&table, "table")?;
+
         let mut manager = self.replication_manager.write().await;
         let mooncake_table_id = MooncakeTableId { database, table };
         let writer = manager.get_table_event_manager(&mooncake_table_id)?;
@@ -432,6 +455,13 @@ impl MoonlinkBackend {
             .await?;
         Ok(())
     }
+}
+
+fn validate_not_empty(field: &str, name: &str) -> Result<()> {
+    if field.trim().is_empty() {
+        return Err(Error::invalid_argument(format!("{name} cannot be empty")));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -500,5 +530,24 @@ mod tests {
         assert_eq!(metadata_1.num_rows, 5);
         let metadata_2 = deserialize_parquet_metadata(&parquet_metadatas[1][..]);
         assert_eq!(metadata_2.num_rows, 2);
+    }
+
+    #[tokio::test]
+    async fn test_validate_not_empty() {
+        // test non-empty input
+        let ok_result = validate_not_empty("non_empty_value", "field_name");
+        assert!(ok_result.is_ok(), "Expected Ok(()), got {ok_result:?}");
+
+        // test empty input
+        let err_result = validate_not_empty("   ", "field_name");
+        assert!(err_result.is_err(), "Expected Err, got {err_result:?}");
+
+        // verify error message
+        let err = err_result.err().unwrap();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("field_name cannot be empty"),
+            "Error message does not contain expected string, got: {msg}"
+        );
     }
 }
