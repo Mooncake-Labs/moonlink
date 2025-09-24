@@ -337,7 +337,7 @@ impl IcebergTableManager {
         }
         let file_indices_deletion_vector_latency = time.elapsed().as_millis() as u64;
         let mooncake_table_id = self.mooncake_table_metadata.mooncake_table_id.clone();
-        self.stats.update(
+        self.iceberg_recovery_stats.update(
             data_files_latency,
             file_indices_deletion_vector_latency,
             mooncake_table_id,

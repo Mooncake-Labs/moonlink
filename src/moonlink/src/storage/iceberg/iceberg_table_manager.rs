@@ -88,7 +88,7 @@ pub struct IcebergTableManager {
     pub(crate) persistence_stats_transaction_commit: Arc<IcebergPersistenceStats>,
 
     /// Iceberg table recovery stats.
-    pub(crate) stats: Arc<IcebergTableRecoveryStats>,
+    pub(crate) iceberg_recovery_stats: Arc<IcebergTableRecoveryStats>,
 }
 
 impl IcebergTableManager {
@@ -133,7 +133,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            stats: IcebergTableRecoveryStats::new(),
+            iceberg_recovery_stats: IcebergTableRecoveryStats::new(),
         })
     }
 
@@ -182,7 +182,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            stats: IcebergTableRecoveryStats::new(),
+            iceberg_recovery_stats: IcebergTableRecoveryStats::new(),
         })
     }
 
