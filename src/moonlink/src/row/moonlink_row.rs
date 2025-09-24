@@ -351,6 +351,29 @@ impl IdentityProp {
         }
     }
 
+    /// Compute lookup key assuming `row` contains only identity columns in identity order.
+    /// This is used when a Parquet projection mask has reduced the row to identity columns.
+    pub fn get_lookup_key_from_identity_row(&self, row: &MoonlinkRow) -> u64 {
+        match self {
+            IdentityProp::SinglePrimitiveKey(_) => row.values[0].to_u64_key(),
+            IdentityProp::Keys(keys) => {
+                let mut hasher = AHasher::default();
+                for i in 0..keys.len() {
+                    row.values[i].hash(&mut hasher);
+                }
+                hasher.finish()
+            }
+            IdentityProp::FullRow => {
+                let mut hasher = AHasher::default();
+                for value in row.values.iter() {
+                    value.hash(&mut hasher);
+                }
+                hasher.finish()
+            }
+            IdentityProp::None => 0,
+        }
+    }
+
     pub fn requires_identity_check_in_mem_slice(&self) -> bool {
         match self {
             IdentityProp::SinglePrimitiveKey(_) => false,
