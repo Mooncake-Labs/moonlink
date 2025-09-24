@@ -1,4 +1,4 @@
-use crate::observability::iceberg_persistence::{IcebergPersistenceStage, IcebergPersistenceStats};
+use crate::observability::iceberg_persistence::{IcebergPersistenceStage, IcebergPersistenceStats, IcebergTableRecoveryStats};
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
@@ -86,6 +86,9 @@ pub struct IcebergTableManager {
 
     /// Iceberg persistence stats for transaction commit.
     pub(crate) persistence_stats_transaction_commit: Arc<IcebergPersistenceStats>,
+
+    /// Iceberg table recovery stats.
+    pub(crate) stats: Arc<IcebergTableRecoveryStats>,
 }
 
 impl IcebergTableManager {
@@ -130,6 +133,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
+            stats: IcebergTableRecoveryStats::new(),
         })
     }
 
@@ -178,6 +182,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
+            stats: IcebergTableRecoveryStats::new(),
         })
     }
 
