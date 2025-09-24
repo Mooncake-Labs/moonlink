@@ -357,6 +357,7 @@ impl IdentityProp {
         match self {
             IdentityProp::SinglePrimitiveKey(_) => row.values[0].to_u64_key(),
             IdentityProp::Keys(keys) => {
+                assert_eq!(row.values.len(), keys.len());
                 let mut hasher = AHasher::default();
                 for i in 0..keys.len() {
                     row.values[i].hash(&mut hasher);
