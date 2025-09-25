@@ -44,7 +44,11 @@ impl Pool {
     pub(crate) fn idle_timeout(&self) -> Duration {
         self.idle_timeout_ms
     }
-    pub(crate) async fn get_stream_with_pool(&self, uri: &str) -> crate::Result<PooledStream> {
+
+    pub(crate) async fn get_stream_with_pool(
+        self: &Arc<Self>,
+        uri: &str,
+    ) -> crate::Result<PooledStream> {
         {
             let mut pool_inner = self.inner.lock().await;
 
@@ -62,14 +66,14 @@ impl Pool {
                     return Ok(PooledStream::new(
                         uri.to_string(),
                         vec.pop_front().unwrap().stream,
-                        POOL.clone(),
+                        self.clone(),
                     ));
                 }
             }
         }
         // If there are no available streams, create a new one
         let stream = UnixStream::connect(uri).await?;
-        Ok(PooledStream::new(uri.to_string(), stream, POOL.clone()))
+        Ok(PooledStream::new(uri.to_string(), stream, self.clone()))
     }
 
     pub(crate) async fn get_stream(uri: &str) -> crate::Result<PooledStream> {
@@ -172,6 +176,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_concurrent_multiple_uris() {
+        use std::os::unix::io::AsRawFd;
+
         let test_pool = create_test_pool();
         let dir = tempdir().unwrap();
 
@@ -204,11 +210,13 @@ mod tests {
         let mut stream1 = stream1.expect("connect URI1");
         let mut stream2 = stream2.expect("connect URI2");
 
-        let addr1 = stream1.stream_mut().peer_addr().unwrap();
-        let addr2 = stream2.stream_mut().peer_addr().unwrap();
+        let fd1 = stream1.stream_mut().as_raw_fd();
+        let fd2 = stream2.stream_mut().as_raw_fd();
 
         drop(stream1);
         drop(stream2);
+        // Give some time for the connections to be returned to the pool
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         // Retrieve streams for both URIs again; should reuse connections from the pool
         let (stream1b, stream2b) = tokio::join!(
@@ -216,17 +224,17 @@ mod tests {
             test_pool.get_stream_with_pool(uri2)
         );
 
-        let addr1b = stream1b.unwrap().stream_mut().peer_addr().unwrap();
-        let addr2b = stream2b.unwrap().stream_mut().peer_addr().unwrap();
+        let mut stream1b = stream1b.expect("reuse uri1");
+        let mut stream2b = stream2b.expect("reuse uri2");
 
         assert_eq!(
-            addr1.as_pathname(),
-            addr1b.as_pathname(),
+            fd1,
+            stream1b.stream_mut().as_raw_fd(),
             "URI1 should reuse its connection"
         );
         assert_eq!(
-            addr2.as_pathname(),
-            addr2b.as_pathname(),
+            fd2,
+            stream2b.stream_mut().as_raw_fd(),
             "URI2 should reuse its connection"
         );
     }
