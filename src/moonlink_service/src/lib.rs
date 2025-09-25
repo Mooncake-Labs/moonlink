@@ -113,14 +113,21 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
 
     let backend = Arc::new(backend);
 
+    tonic::transport::Server::builder()
+        .add_service(moonlink_rpc::moonlink::rpc_server::RpcServer::new(
+            rpc_server::RpcService::new(backend.clone()),
+        ))
+        .serve("[::1]:10000".parse().unwrap())
+        .await
+        .unwrap();
     // Start RPC server on Unix socket
-    let socket_path = std::path::PathBuf::from(&config.base_path).join("moonlink.sock");
-    let rpc_backend = backend.clone();
-    let rpc_handle = tokio::spawn(async move {
-        if let Err(e) = rpc_server::start_unix_server(rpc_backend, socket_path).await {
-            error!("RPC server failed: {}", e);
-        }
-    });
+    // let socket_path = std::path::PathBuf::from(&config.base_path).join("moonlink.sock");
+    // let rpc_backend = backend.clone();
+    // let rpc_handle = tokio::spawn(async move {
+    //     if let Err(e) = rpc_server::start_unix_server(rpc_backend, socket_path).await {
+    //         error!("RPC server failed: {}", e);
+    //     }
+    // });
 
     // Optionally start REST API
     let (rest_api_handle, rest_api_shutdown_signal) = if let Some(port) = config.rest_api_port {
@@ -164,20 +171,20 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
         };
 
     // Optionally start TCP server.
-    let tcp_api_handle = if let Some(port) = config.tcp_port {
-        let backend_clone = backend.clone();
-        let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-        // TODO(hjiang): Implement graceful shutdown for TCP server.
-        let handle = tokio::spawn(async move {
-            if let Err(e) = rpc_server::start_tcp_server(backend_clone, addr).await {
-                error!("TCP rpc server failed: {}", e);
-            }
-            println!("TCP rpc server starts at port {port}");
-        });
-        Some(handle)
-    } else {
-        None
-    };
+    // let tcp_api_handle = if let Some(port) = config.tcp_port {
+    //     let backend_clone = backend.clone();
+    //     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+    //     // TODO(hjiang): Implement graceful shutdown for TCP server.
+    //     let handle = tokio::spawn(async move {
+    //         if let Err(e) = rpc_server::start_tcp_server(backend_clone, addr).await {
+    //             error!("TCP rpc server failed: {}", e);
+    //         }
+    //         println!("TCP rpc server starts at port {port}");
+    //     });
+    //     Some(handle)
+    // } else {
+    //     None
+    // };
 
     // Moonlink and backend services have started.
     if let Some(service_status) = service_status {
@@ -206,11 +213,11 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
         handle.await?;
     }
 
-    if let Some(handle) = tcp_api_handle {
-        handle.abort();
-    }
+    // if let Some(handle) = tcp_api_handle {
+    //     handle.abort();
+    // }
 
-    rpc_handle.abort();
+    // rpc_handle.abort();
 
     info!("Moonlink service shut down complete");
     Ok(())

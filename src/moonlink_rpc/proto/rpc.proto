@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package rpc;
+
+service Rpc {
+    rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse) {}
+    rpc CreateTable(CreateTableRequest) returns (CreateTableResponse) {}
+    rpc DropTable(DropTableRequest) returns (DropTableResponse) {}
+    rpc GetTableSchema(GetTableSchemaRequest) returns (GetTableSchemaResponse) {}
+    rpc ListTables(ListTablesRequest) returns (ListTablesResponse) {}
+    rpc OptimizeTable(OptimizeTableRequest) returns (OptimizeTableResponse) {}
+    rpc ScanTableBegin(ScanTableBeginRequest) returns (ScanTableBeginResponse) {}
+    rpc ScanTableEnd(ScanTableEndRequest) returns (ScanTableEndResponse) {}
+}
+
+message CreateSnapshotRequest {
+    string database = 1;
+    string table = 2;
+    uint64 lsn = 3;
+}
+
+message CreateSnapshotResponse {
+}
+
+message CreateTableRequest {
+    string database = 1;
+    string table = 2;
+    string src = 3;
+    string src_uri = 4;
+    string table_config = 5;
+}
+
+message CreateTableResponse {
+}
+
+message DropTableRequest {
+    string database = 1;
+    string table = 2;
+}
+
+message DropTableResponse {
+}
+
+message GetTableSchemaRequest {
+    string database = 1;
+    string table = 2;
+}
+
+message GetTableSchemaResponse {
+    bytes schema = 1;
+}
+
+message ListTablesRequest {
+}
+
+message ListTablesResponse {
+    repeated string tables = 1;
+}
+
+message OptimizeTableRequest {
+    string database = 1;
+    string table = 2;
+    string mode = 3;
+}
+
+message OptimizeTableResponse {
+}
+
+message ScanTableBeginRequest {
+    string database = 1;
+    string table = 2;
+    uint64 lsn = 3;
+}
+
+message ScanTableBeginResponse {
+    bytes metadata = 1;
+}
+
+message ScanTableEndRequest {
+    string database = 1;
+    string table = 2;
+}
+
+message ScanTableEndResponse {
+}

@@ -28,6 +28,7 @@ arrow-schema = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
+dashmap = "6"
 flexi_logger = { version = "0.31", features = ["trc"] }
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
@@ -50,6 +51,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = "0.14"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = { workspace = true }

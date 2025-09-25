@@ -20,9 +20,6 @@ pub enum Error {
     Io(ErrorStruct),
 
     #[error("{0}")]
-    Rpc(ErrorStruct),
-
-    #[error("{0}")]
     TaskJoin(ErrorStruct),
 
     #[error("{0}")]
@@ -98,15 +95,6 @@ impl From<io::Error> for Error {
     fn from(source: io::Error) -> Self {
         let status = get_io_error_status(&source);
         Error::Io(ErrorStruct::new("IO error".to_string(), status).with_source(source))
-    }
-}
-
-impl From<moonlink_rpc::Error> for Error {
-    #[track_caller]
-    fn from(source: moonlink_rpc::Error) -> Self {
-        Error::Rpc(
-            ErrorStruct::new("RPC error".to_string(), source.get_status()).with_source(source),
-        )
     }
 }
 
