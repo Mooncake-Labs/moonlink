@@ -167,7 +167,7 @@ mod tests {
             .await
             .expect("should reuse from pool");
         let unix_stream = stream2.stream.take().unwrap();
-        assert!(unix_stream.into_std().is_ok());
+        let _ = unix_stream.into_std().unwrap();
     }
 
     #[tokio::test]
