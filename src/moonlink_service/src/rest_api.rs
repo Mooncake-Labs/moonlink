@@ -364,6 +364,9 @@ async fn create_table(
         src_table_name, payload
     );
 
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
+
     let mut parsed_avro_schema: Option<AvroSchema> = None;
     let arrow_schema = if let Some(ref schema) = payload.schema {
         match build_arrow_schema(schema) {
@@ -510,6 +513,9 @@ async fn create_table_from_postgres(
         table, payload
     );
 
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
+
     // Serialization not expected to fail.
     let serialized_table_config = match serde_json::to_string(&payload.table_config) {
         Ok(cfg) => cfg,
@@ -570,6 +576,9 @@ async fn drop_table(
         "Received table drop request for '{}': {:?}",
         src_table_name, payload
     );
+
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
 
     // Drop table in backend
     state
@@ -676,6 +685,10 @@ async fn optimize_table(
         "Received table optimize request for '{}': {:?}",
         src_table_name, payload
     );
+
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
+
     match state
         .backend
         .optimize_table(
@@ -747,6 +760,9 @@ async fn create_snapshot(
         src_table_name, &payload.database, &payload.table,
     );
 
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
+
     let (tx, mut rx) = mpsc::channel(1);
     let snapshot_request = SnapshotRequest {
         src_table_name: src_table_name.clone(),
@@ -803,6 +819,9 @@ async fn flush_table(
         src_table_name, &payload.database, &payload.table,
     );
 
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
+
     let (tx, mut rx) = mpsc::channel(1);
     let flush_request = FlushRequest {
         src_table_name: src_table_name.clone(),
@@ -857,6 +876,9 @@ async fn set_avro_schema(
         "Received Kafka schema creation request for '{}': {:?}",
         src_table_name, payload
     );
+
+    validate_not_empty(&payload.database, "Database name")?;
+    validate_not_empty(&payload.table, "Table name")?;
 
     if state
         .kafka_schema_id_cache
@@ -1081,5 +1103,17 @@ pub async fn start_server(
         })
         .await?;
 
+    Ok(())
+}
+
+fn validate_not_empty(field: &str, name: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if field.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                message: format!("{name} cannot be empty"),
+            }),
+        ));
+    }
     Ok(())
 }

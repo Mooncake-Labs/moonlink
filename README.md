@@ -150,7 +150,7 @@ curl -X POST http://localhost:3030/tables/users \
       {"name": "age", "data_type": "int32", "nullable": true},
       {"name": "created_at", "data_type": "date32", "nullable": true}
     ],
-    "table_config": {}
+    "table_config": {"mooncake": {"append_only": true}}
   }'
 ```
 
