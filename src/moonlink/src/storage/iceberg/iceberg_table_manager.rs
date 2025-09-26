@@ -133,7 +133,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            iceberg_recovery_stats: IcebergTableRecoveryStats::new(),
+            iceberg_recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
@@ -182,7 +182,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            iceberg_recovery_stats: IcebergTableRecoveryStats::new(),
+            iceberg_recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 

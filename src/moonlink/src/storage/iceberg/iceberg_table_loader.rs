@@ -1,3 +1,4 @@
+use crate::observability::latency_exporter::BaseLatencyExporter;
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::iceberg_table_manager::*;
 use crate::storage::iceberg::index::FileIndexBlob;
@@ -16,7 +17,6 @@ use crate::storage::storage_utils::{create_data_file, FileId, TableId, TableUniq
 use crate::Result;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 use std::vec;
 
 use iceberg::io::FileIO;
@@ -274,7 +274,8 @@ impl IcebergTableManager {
         let mut manifest_file_cache = HashMap::new();
 
         // Attempt to load data files first.
-        let time = Instant::now();
+        let iceberg_recovery_stats = self.iceberg_recovery_stats.clone();
+        let _guard = iceberg_recovery_stats.start();
         for manifest_file in manifest_list.entries().iter() {
             let manifest = manifest_file.load_manifest(&file_io).await?;
             assert!(manifest_file_cache
@@ -292,9 +293,7 @@ impl IcebergTableManager {
                     .await?;
             }
         }
-        let data_files_latency = time.elapsed().as_millis() as u64;
 
-        let time = Instant::now();
         // Attempt to load file indices and deletion vector.
         let mut loaded_deletion_vector = HashMap::new();
         for manifest_file in manifest_list.entries().iter() {
@@ -335,13 +334,6 @@ impl IcebergTableManager {
                 }
             }
         }
-        let file_indices_deletion_vector_latency = time.elapsed().as_millis() as u64;
-        let mooncake_table_id = self.mooncake_table_metadata.mooncake_table_id.clone();
-        self.iceberg_recovery_stats.update(
-            data_files_latency,
-            file_indices_deletion_vector_latency,
-            mooncake_table_id,
-        );
 
         let mooncake_snapshot = self.transform_to_mooncake_snapshot(
             loaded_deletion_vector,
