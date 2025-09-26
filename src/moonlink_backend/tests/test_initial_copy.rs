@@ -819,4 +819,59 @@ mod tests {
             .drop_table(DATABASE.to_string(), TABLE.to_string())
             .await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_initial_copy_special_key_and_type() {
+        let uri = get_database_uri();
+        let (initial_client, _) = connect_to_postgres(&uri).await;
+
+        let table_name = "special_key_and_type";
+        // Create and seed a table so row_count > 0, ensuring the initial copy path is taken
+        initial_client
+            .simple_query(&format!(
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (a BIGINT, b TEXT, c decimal(10,2), e int,  d timestamp, primary key(d,b,c));
+                 INSERT INTO {table_name} VALUES (1,'a',1.1,1,'2025-01-01 00:00:00'),(2,'b',2.2,2,'2025-01-01 00:00:00');"
+            ))
+            .await
+            .unwrap();
+
+        let (guard, new_client) = TestGuard::new(None, true).await;
+        let backend = guard.backend();
+
+        let backend_clone = Arc::clone(backend);
+        let table_config = guard.get_serialized_table_config();
+        let handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    uri,
+                    table_config,
+                    None,
+                )
+                .await
+                .unwrap();
+        });
+
+        let _ = handle.await;
+
+        new_client
+            .simple_query(&format!("DELETE FROM {table_name} WHERE a = 1;"))
+            .await
+            .unwrap();
+
+        let lsn = current_wal_lsn(&new_client).await;
+
+        let ids = ids_from_state_with_deletes(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(ids, HashSet::from([2]));
+    }
 }

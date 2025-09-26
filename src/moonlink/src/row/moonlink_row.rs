@@ -277,7 +277,8 @@ pub enum IdentityProp {
 }
 
 impl IdentityProp {
-    pub fn new_key(columns: Vec<usize>, fields: &[Field]) -> Self {
+    pub fn new_key(mut columns: Vec<usize>, fields: &[Field]) -> Self {
+        columns.sort_unstable();
         if columns.len() == 1 {
             let width = fields[columns[0]].data_type().primitive_width();
             if width == Some(1) || width == Some(2) || width == Some(4) || width == Some(8) {
