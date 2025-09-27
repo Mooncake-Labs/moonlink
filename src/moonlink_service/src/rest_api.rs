@@ -67,6 +67,7 @@ pub enum RequestMode {
 /// Error response structure
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
+    #[serde(rename = "message")]
     pub message: String,
 }
 
@@ -87,18 +88,32 @@ pub struct GetTableSchemaResponse {
 /// Request structure for table creation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableRequest {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "schema")]
     pub schema: Option<Vec<FieldSchema>>,
+
+    #[serde(rename = "avro_schema")]
     pub avro_schema: Option<serde_json::Value>,
+
+    #[serde(rename = "table_config")]
     pub table_config: TableConfig,
 }
 
 /// Response structure for table creation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableResponse {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "lsn")]
     pub lsn: u64,
 }
 
@@ -109,18 +124,29 @@ pub struct CreateTableResponse {
 /// Request structure for kafka schema creation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SetAvroSchemaRequest {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
     /// Avro schema JSON object
+    #[serde(rename = "kafka_schema")]
     pub kafka_schema: serde_json::Value,
+
+    #[serde(rename = "schema_id")]
     pub schema_id: u64,
 }
 
 /// Response structure for kafka schema creation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SetAvroSchemaResponse {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "schema_id")]
     pub schema_id: u64,
 }
 
@@ -131,18 +157,32 @@ pub struct SetAvroSchemaResponse {
 /// Request structure for creating table from PostgreSQL source
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableFromPostgresRequest {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "src_uri")]
     pub src_uri: String,
+
+    #[serde(rename = "src_table_name")]
     pub src_table_name: String,
+
+    #[serde(rename = "table_config")]
     pub table_config: TableConfig,
 }
 
 /// Response structure for creating table from PostgreSQL source
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTableFromPostgresResponse {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "lsn")]
     pub lsn: u64,
 }
 
@@ -153,7 +193,12 @@ pub struct CreateTableFromPostgresResponse {
 /// Request structure for table drop.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DropTableRequest {
+    #[serde(rename = "database")]
+    #[serde(default)]
     pub database: String,
+
+    #[serde(rename = "table")]
+    #[serde(default)]
     pub table: String,
 }
 
@@ -168,6 +213,7 @@ pub struct DropTableResponse {}
 /// Response structure for table list.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListTablesResponse {
+    #[serde(rename = "tables")]
     pub tables: Vec<TableStatus>,
 }
 
@@ -178,8 +224,13 @@ pub struct ListTablesResponse {
 /// Request structure for table optimization.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OptimizeTableRequest {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "mode")]
     pub mode: String,
 }
 
@@ -194,8 +245,13 @@ pub struct OptimizeTableResponse {}
 /// Request structure for snapshot creation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSnapShotRequest {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "lsn")]
     pub lsn: u64,
 }
 
@@ -210,27 +266,40 @@ pub struct CreateSnapShotResponse {}
 /// Request structure for data ingestion
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestRequest {
+    #[serde(rename = "operation")]
     pub operation: String,
+
+    #[serde(rename = "data")]
     pub data: serde_json::Value,
     /// Whether to enable synchronous mode.
+    #[serde(rename = "request_mode")]
     pub request_mode: RequestMode,
 }
 
 /// Request structure for data ingestion with protobuf
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestProtobufRequest {
+    #[serde(rename = "operation")]
     pub operation: String,
+
+    #[serde(rename = "data")]
     pub data: Vec<u8>,
     /// Whether to enable synchronous mode.
+    #[serde(rename = "request_mode")]
     pub request_mode: RequestMode,
 }
 
 /// Response structure for data ingestion
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestResponse {
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "operation")]
     pub operation: String,
+
     /// Assigned for synchronous mode.
+    #[serde(rename = "lsn")]
     pub lsn: Option<u64>,
 }
 
@@ -241,18 +310,25 @@ pub struct IngestResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileUploadRequest {
     /// Ingestion operation.
+    #[serde(rename = "operation")]
     pub operation: String,
+
     /// Files to ingest into mooncake table.
+    #[serde(rename = "files")]
     pub files: Vec<String>,
+
     /// Storage configuration to access files.
+    #[serde(rename = "storage_config")]
     pub storage_config: StorageConfig,
     /// Whether to enable synchronous mode.
+    #[serde(rename = "request_mode")]
     pub request_mode: RequestMode,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileUploadResponse {
     /// Assigned for synchronous mode.
+    #[serde(rename = "lsn")]
     pub lsn: Option<u64>,
 }
 
@@ -262,8 +338,13 @@ pub struct FileUploadResponse {
 ///
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncFlushRequest {
+    #[serde(rename = "database")]
     pub database: String,
+
+    #[serde(rename = "table")]
     pub table: String,
+
+    #[serde(rename = "lsn")]
     pub lsn: u64,
 }
 
@@ -277,8 +358,13 @@ pub struct SyncFlushResponse {}
 /// Health check response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
+    #[serde(rename = "service")]
     pub service: String,
+
+    #[serde(rename = "status")]
     pub status: String,
+
+    #[serde(rename = "timestamp")]
     pub timestamp: u64,
 }
 
