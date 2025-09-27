@@ -253,6 +253,10 @@ impl IcebergTableManager {
             return Ok((next_file_id as u32, empty_mooncake_snapshot));
         }
 
+        // Start recording iceverg recovery latency
+        let iceberg_recovery_stats = self.iceberg_recovery_stats.clone();
+        let _guard = iceberg_recovery_stats.start();
+
         // Load table state into iceberg table manager.
         let snapshot_meta = table_metadata.current_snapshot().unwrap();
         let snapshot_property = snapshot_utils::get_snapshot_properties(table_metadata)?;
@@ -274,8 +278,6 @@ impl IcebergTableManager {
         let mut manifest_file_cache = HashMap::new();
 
         // Attempt to load data files first.
-        let iceberg_recovery_stats = self.iceberg_recovery_stats.clone();
-        let _guard = iceberg_recovery_stats.start();
         for manifest_file in manifest_list.entries().iter() {
             let manifest = manifest_file.load_manifest(&file_io).await?;
             assert!(manifest_file_cache
