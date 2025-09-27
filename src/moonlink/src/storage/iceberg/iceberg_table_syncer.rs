@@ -1,3 +1,4 @@
+use crate::observability::latency_exporter::BaseLatencyExporter;
 use crate::storage::cache::object_storage::base_cache::InlineEvictedFiles;
 use crate::storage::compaction::table_compaction::RemappedRecordLocation;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
@@ -47,7 +48,7 @@ use iceberg::{Error as IcebergError, Result as IcebergResult};
 const DEFAULT_DATA_FILE_UPLOAD_CONCURRENCY: usize = 128;
 /// Default concurrency for iceberg file indices import.
 const DEFAULT_FILE_INDEX_IMPORT_CONCURRENCY: usize = 128;
-/// Default concurrency for iceberg deletion vector synchronize.
+/// Default concurrency for iceberg deletion vectors synchronization.
 const DEFAULT_SYNC_DELETION_VECTOR_CONCURRENCY: usize = 128;
 
 /// Results for importing data files into iceberg table.
@@ -232,6 +233,12 @@ impl IcebergTableManager {
         old_data_files: Vec<MooncakeDataFileRef>,
         data_file_records_remap: &HashMap<RecordLocation, RemappedRecordLocation>,
     ) -> IcebergResult<DataFileImportResult> {
+        // Record data files synchronization latency.
+        let _guard = if new_data_files.is_empty() {
+            None
+        } else {
+            Some(self.iceberg_persistency_stats_sync_data_files.start())
+        };
         let mut local_data_files_to_remote = HashMap::with_capacity(new_data_files.len());
         let mut new_remote_data_files = Vec::with_capacity(new_data_files.len());
         let mut new_iceberg_data_files = Vec::with_capacity(new_data_files.len());
@@ -479,6 +486,11 @@ impl IcebergTableManager {
         new_deletion_logs: HashMap<MooncakeDataFileRef, BatchDeletionVector>,
         file_params: &PersistenceFileParams,
     ) -> IcebergResult<DeletionVectorsSyncResult> {
+        let _guard = if new_deletion_logs.is_empty() {
+            None
+        } else {
+            Some(self.iceberg_persistency_stats_sync_deletion_vectors.start())
+        };
         let mut puffin_deletion_blobs = HashMap::with_capacity(new_deletion_logs.len());
         let mut evicted_files_to_delete = vec![];
         let prepared: Vec<IcebergResult<PreparedDeletionVectorBlob>>;
@@ -595,6 +607,13 @@ impl IcebergTableManager {
         // After sync, file index still stores local index file location.
         // After cache design, we should be able to provide a "handle" abstraction, which could be either local or remote.
         // The hash map here is merely a workaround to pass remote path to iceberg file index structure.
+
+        // Record file indices synchronization latency.
+        let _guard = if file_indices_to_import.is_empty() && local_data_file_to_remote.is_empty() {
+            None
+        } else {
+            Some(self.iceberg_persistency_stats_sync_file_indices.start())
+        };
         let mut local_index_file_to_remote = HashMap::new();
 
         let iceberg_table = self.iceberg_table.as_ref().unwrap();
