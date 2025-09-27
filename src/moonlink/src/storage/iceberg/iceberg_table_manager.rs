@@ -1,3 +1,4 @@
+use crate::observability::iceberg_table_recovery::IcebergTableRecoveryStats;
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
@@ -70,6 +71,9 @@ pub struct IcebergTableManager {
 
     /// Maps from remote data file path to its file id.
     pub(crate) remote_data_file_to_file_id: HashMap<String, FileId>,
+
+    /// Iceberg table recovery stats.
+    pub(crate) iceberg_recovery_stats: Arc<IcebergTableRecoveryStats>,
 }
 
 impl IcebergTableManager {
@@ -82,6 +86,7 @@ impl IcebergTableManager {
         let iceberg_schema =
             iceberg::arrow::arrow_schema_to_schema(mooncake_table_metadata.schema.as_ref())?;
         let catalog = catalog_utils::create_catalog(config.clone(), iceberg_schema).await?;
+        let mooncake_table_id = mooncake_table_metadata.mooncake_table_id.clone();
         Ok(Self {
             snapshot_loaded: false,
             config,
@@ -93,6 +98,7 @@ impl IcebergTableManager {
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
+            iceberg_recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
@@ -109,6 +115,7 @@ impl IcebergTableManager {
             filesystem_accessor.clone(),
             iceberg_schema,
         )?;
+        let mooncake_table_id = mooncake_table_metadata.mooncake_table_id.clone();
         Ok(Self {
             snapshot_loaded: false,
             config,
@@ -120,6 +127,7 @@ impl IcebergTableManager {
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
+            iceberg_recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
