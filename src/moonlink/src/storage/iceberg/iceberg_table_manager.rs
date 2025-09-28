@@ -1,4 +1,4 @@
-use crate::observability::iceberg_persistency::{IcebergPersistenceStage, IcebergPersistenceStats};
+use crate::observability::iceberg_persistence::{IcebergPersistenceStage, IcebergPersistenceStats};
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
@@ -72,14 +72,14 @@ pub struct IcebergTableManager {
     /// Maps from remote data file path to its file id.
     pub(crate) remote_data_file_to_file_id: HashMap<String, FileId>,
 
-    /// Iceberg persistency stats for data files synchronization.
-    pub(crate) iceberg_persistency_stats_sync_data_files: Arc<IcebergPersistenceStats>,
+    /// Iceberg persistence stats for data files synchronization.
+    pub(crate) iceberg_persistence_stats_sync_data_files: Arc<IcebergPersistenceStats>,
 
-    /// Iceberg persistency stats for deletion vectors synchronization.
-    pub(crate) iceberg_persistency_stats_sync_deletion_vectors: Arc<IcebergPersistenceStats>,
+    /// Iceberg persistence stats for deletion vectors synchronization.
+    pub(crate) iceberg_persistence_stats_sync_deletion_vectors: Arc<IcebergPersistenceStats>,
 
-    /// Iceberg persistency stats for file indices synchronization.
-    pub(crate) iceberg_persistency_stats_sync_file_indices: Arc<IcebergPersistenceStats>,
+    /// Iceberg persistence stats for file indices synchronization.
+    pub(crate) iceberg_persistence_stats_sync_file_indices: Arc<IcebergPersistenceStats>,
 }
 
 impl IcebergTableManager {
@@ -104,15 +104,15 @@ impl IcebergTableManager {
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
-            iceberg_persistency_stats_sync_data_files: Arc::new(IcebergPersistenceStats::new(
+            iceberg_persistence_stats_sync_data_files: Arc::new(IcebergPersistenceStats::new(
                 mooncake_table_id.clone(),
                 IcebergPersistenceStage::DataFiles,
             )),
-            iceberg_persistency_stats_sync_file_indices: Arc::new(IcebergPersistenceStats::new(
+            iceberg_persistence_stats_sync_file_indices: Arc::new(IcebergPersistenceStats::new(
                 mooncake_table_id.clone(),
                 IcebergPersistenceStage::FileIndices,
             )),
-            iceberg_persistency_stats_sync_deletion_vectors: Arc::new(
+            iceberg_persistence_stats_sync_deletion_vectors: Arc::new(
                 IcebergPersistenceStats::new(
                     mooncake_table_id,
                     IcebergPersistenceStage::DeletionVectors,
@@ -146,15 +146,15 @@ impl IcebergTableManager {
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
-            iceberg_persistency_stats_sync_data_files: Arc::new(IcebergPersistenceStats::new(
+            iceberg_persistence_stats_sync_data_files: Arc::new(IcebergPersistenceStats::new(
                 mooncake_table_id.clone(),
                 IcebergPersistenceStage::DataFiles,
             )),
-            iceberg_persistency_stats_sync_file_indices: Arc::new(IcebergPersistenceStats::new(
+            iceberg_persistence_stats_sync_file_indices: Arc::new(IcebergPersistenceStats::new(
                 mooncake_table_id.clone(),
                 IcebergPersistenceStage::FileIndices,
             )),
-            iceberg_persistency_stats_sync_deletion_vectors: Arc::new(
+            iceberg_persistence_stats_sync_deletion_vectors: Arc::new(
                 IcebergPersistenceStats::new(
                     mooncake_table_id,
                     IcebergPersistenceStage::DeletionVectors,

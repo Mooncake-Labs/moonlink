@@ -18,7 +18,7 @@ pub(crate) struct IcebergPersistenceStats {
 
 impl IcebergPersistenceStats {
     pub(crate) fn new(mooncake_table_id: String, stats_type: IcebergPersistenceStage) -> Self {
-        let meter = global::meter("iceberg_persistency");
+        let meter = global::meter("iceberg_persistence");
         let latency = match stats_type {
             IcebergPersistenceStage::DataFiles => meter
                 .u64_histogram("sync_data_files_latency")

@@ -237,7 +237,7 @@ impl IcebergTableManager {
         let _guard = if new_data_files.is_empty() {
             None
         } else {
-            Some(self.iceberg_persistency_stats_sync_data_files.start())
+            Some(self.iceberg_persistence_stats_sync_data_files.start())
         };
         let mut local_data_files_to_remote = HashMap::with_capacity(new_data_files.len());
         let mut new_remote_data_files = Vec::with_capacity(new_data_files.len());
@@ -489,7 +489,7 @@ impl IcebergTableManager {
         let _guard = if new_deletion_logs.is_empty() {
             None
         } else {
-            Some(self.iceberg_persistency_stats_sync_deletion_vectors.start())
+            Some(self.iceberg_persistence_stats_sync_deletion_vectors.start())
         };
         let mut puffin_deletion_blobs = HashMap::with_capacity(new_deletion_logs.len());
         let mut evicted_files_to_delete = vec![];
@@ -612,7 +612,7 @@ impl IcebergTableManager {
         let _guard = if file_indices_to_import.is_empty() && local_data_file_to_remote.is_empty() {
             None
         } else {
-            Some(self.iceberg_persistency_stats_sync_file_indices.start())
+            Some(self.iceberg_persistence_stats_sync_file_indices.start())
         };
         let mut local_index_file_to_remote = HashMap::new();
 
