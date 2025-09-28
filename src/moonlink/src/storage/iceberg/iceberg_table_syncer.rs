@@ -242,11 +242,7 @@ impl IcebergTableManager {
             });
         }
         // Record data files synchronization latency.
-        let _guard = if new_data_files.is_empty() {
-            None
-        } else {
-            Some(self.iceberg_persistence_stats_sync_data_files.start())
-        };
+        let _guard = self.iceberg_persistence_stats_sync_data_files.start();
         let mut local_data_files_to_remote = HashMap::with_capacity(new_data_files.len());
         let mut new_remote_data_files = Vec::with_capacity(new_data_files.len());
         let mut new_iceberg_data_files = Vec::with_capacity(new_data_files.len());
