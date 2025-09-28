@@ -233,6 +233,14 @@ impl IcebergTableManager {
         old_data_files: Vec<MooncakeDataFileRef>,
         data_file_records_remap: &HashMap<RecordLocation, RemappedRecordLocation>,
     ) -> IcebergResult<DataFileImportResult> {
+        if new_data_files.is_empty() && old_data_files.is_empty() {
+            return Ok(DataFileImportResult {
+                new_iceberg_data_files: Vec::new(),
+                local_data_files_to_remote: HashMap::new(),
+                new_remote_data_files: Vec::new(),
+                remapped_deletion_records: HashMap::new(),
+            });
+        }
         // Record data files synchronization latency.
         let _guard = if new_data_files.is_empty() {
             None
@@ -486,11 +494,13 @@ impl IcebergTableManager {
         new_deletion_logs: HashMap<MooncakeDataFileRef, BatchDeletionVector>,
         file_params: &PersistenceFileParams,
     ) -> IcebergResult<DeletionVectorsSyncResult> {
-        let _guard = if new_deletion_logs.is_empty() {
-            None
-        } else {
-            Some(self.iceberg_persistence_stats_sync_deletion_vectors.start())
-        };
+        if new_deletion_logs.is_empty() {
+            return Ok(DeletionVectorsSyncResult {
+                puffin_deletion_blobs: HashMap::new(),
+                evicted_files_to_delete: Vec::new(),
+            });
+        }
+        let _guard = self.iceberg_persistence_stats_sync_deletion_vectors.start();
         let mut puffin_deletion_blobs = HashMap::with_capacity(new_deletion_logs.len());
         let mut evicted_files_to_delete = vec![];
         let prepared: Vec<IcebergResult<PreparedDeletionVectorBlob>>;
@@ -608,12 +618,11 @@ impl IcebergTableManager {
         // After cache design, we should be able to provide a "handle" abstraction, which could be either local or remote.
         // The hash map here is merely a workaround to pass remote path to iceberg file index structure.
 
+        if file_indices_to_import.is_empty() && local_data_file_to_remote.is_empty() {
+            return Ok(HashMap::new());
+        }
         // Record file indices synchronization latency.
-        let _guard = if file_indices_to_import.is_empty() && local_data_file_to_remote.is_empty() {
-            None
-        } else {
-            Some(self.iceberg_persistence_stats_sync_file_indices.start())
-        };
+        let _guard = self.iceberg_persistence_stats_sync_file_indices.start();
         let mut local_index_file_to_remote = HashMap::new();
 
         let iceberg_table = self.iceberg_table.as_ref().unwrap();
