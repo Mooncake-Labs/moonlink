@@ -216,7 +216,11 @@ mod tests {
         drop(stream1);
         drop(stream2);
         // Give some time for the connections to be returned to the pool
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Invalidate both URIs so any new connects would fail; only reuse from pool should succeed.
+        let _ = std::fs::remove_file(uri1);
+        let _ = std::fs::remove_file(uri2);
 
         // Retrieve streams for both URIs again; should reuse connections from the pool
         let (stream1b, stream2b) = tokio::join!(
