@@ -12,7 +12,7 @@ pub(crate) enum IcebergPersistenceStage {
 
 #[derive(Debug)]
 pub(crate) struct IcebergPersistenceStats {
-    pub(crate) mooncake_table_id: String,
+    mooncake_table_id: String,
     latency: Histogram<u64>,
 }
 
