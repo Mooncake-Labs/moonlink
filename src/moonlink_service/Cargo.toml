@@ -38,7 +38,7 @@ moonlink_proto = { workspace = true }
 moonlink_rpc = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true }
-opentelemetry-proto = { version = "0.30", default-features = false, features = [
+opentelemetry-proto = { version = "0.31", default-features = false, features = [
   "gen-tonic",
   "metrics",
 ] }
