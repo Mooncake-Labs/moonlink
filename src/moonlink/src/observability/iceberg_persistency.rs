@@ -11,12 +11,12 @@ pub(crate) enum IcebergPersistenceStage {
 }
 
 #[derive(Debug)]
-pub(crate) struct IcebergPersistencyStats {
+pub(crate) struct IcebergPersistenceStats {
     pub(crate) mooncake_table_id: String,
     latency: Histogram<u64>,
 }
 
-impl IcebergPersistencyStats {
+impl IcebergPersistenceStats {
     pub(crate) fn new(mooncake_table_id: String, stats_type: IcebergPersistenceStage) -> Self {
         let meter = global::meter("iceberg_persistency");
         let latency = match stats_type {
@@ -44,7 +44,7 @@ impl IcebergPersistencyStats {
     }
 }
 
-impl BaseLatencyExporter for IcebergPersistencyStats {
+impl BaseLatencyExporter for IcebergPersistenceStats {
     fn start<'a>(&'a self) -> LatencyGuard<'a> {
         LatencyGuard::new(self.mooncake_table_id.clone(), self)
     }
