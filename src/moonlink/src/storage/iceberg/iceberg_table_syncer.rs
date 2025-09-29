@@ -725,6 +725,10 @@ impl IcebergTableManager {
         mut snapshot_payload: IcebergSnapshotPayload,
         file_params: PersistenceFileParams,
     ) -> Result<PersistenceResult> {
+        // Start recording overall snapshot synchronization latency.
+        let iceberg_persistence_stats_overall = self.iceberg_persistence_stats_overall.clone();
+        let _guard = iceberg_persistence_stats_overall.start();
+
         // Initialize iceberg table on access.
         self.initialize_iceberg_table_for_once().await?;
 
@@ -813,8 +817,12 @@ impl IcebergTableManager {
             txn = action.apply(txn)?;
         }
 
+        let updated_iceberg_table = {
+            // Start recording transaction commit latency.
+            let _guard = self.iceberg_persistence_stats_transaction_commit.start();
+            txn.commit(&*self.catalog).await?
+        };
         // Commit the transaction.
-        let updated_iceberg_table = txn.commit(&*self.catalog).await?;
         self.iceberg_table = Some(updated_iceberg_table);
 
         self.catalog.clear_puffin_metadata();

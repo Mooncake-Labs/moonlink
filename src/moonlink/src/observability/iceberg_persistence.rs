@@ -5,9 +5,11 @@ use opentelemetry::{global, KeyValue};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum IcebergPersistenceStage {
+    Overall,
     DataFiles,
     FileIndices,
     DeletionVectors,
+    TransactionCommit,
 }
 
 #[derive(Debug)]
@@ -20,6 +22,11 @@ impl IcebergPersistenceStats {
     pub(crate) fn new(mooncake_table_id: String, stats_type: IcebergPersistenceStage) -> Self {
         let meter = global::meter("iceberg_persistence");
         let latency = match stats_type {
+            IcebergPersistenceStage::Overall => meter
+                .u64_histogram("overall_latency")
+                .with_description("Latency (ms) for overall snapshot synchronization")
+                .with_boundaries(vec![50.0, 100.0, 200.0, 300.0, 400.0, 500.0])
+                .build(),
             IcebergPersistenceStage::DataFiles => meter
                 .u64_histogram("sync_data_files_latency")
                 .with_description("Latency (ms) for data files synchronization")
@@ -33,6 +40,11 @@ impl IcebergPersistenceStats {
             IcebergPersistenceStage::DeletionVectors => meter
                 .u64_histogram("sync_deletion_vectors_latency")
                 .with_description("Latency (ms) for deletion vectors synchronization")
+                .with_boundaries(vec![50.0, 100.0, 200.0, 300.0, 400.0, 500.0])
+                .build(),
+            IcebergPersistenceStage::TransactionCommit => meter
+                .u64_histogram("transaction_commit_latency")
+                .with_description("Latency (ms) for transaction commit")
                 .with_boundaries(vec![50.0, 100.0, 200.0, 300.0, 400.0, 500.0])
                 .build(),
         };
