@@ -11,7 +11,7 @@ use tracing::error;
 /// Default HTTP opentelemetry endpoint.
 const DEFAULT_HTTP_OTEL_ENDPOINT: &str = "http://127.0.0.1:3435/v1/metrics";
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_opentelemetry_export() {
     let _guard = TestGuard::new(&get_moonlink_backend_dir());
     let config = get_service_config();
