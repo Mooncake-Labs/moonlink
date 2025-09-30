@@ -301,7 +301,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Opentelemetry feature test
         run: |
-          RUST_BACKTRACE=1 cargo test -p moonlink_service --features=otel-integration -- --nocapture
+          RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features otel-integration --features standalone-test -- otel::test
 
   # ──────────────────────── 6 · Rest catalog test (feature) ─────────────────
   rest_catalog_test:
