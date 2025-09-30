@@ -300,6 +300,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Opentelemetry feature test
+        env:
+            MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
+            NGINX_ADDR: http://nginx.local:80
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features otel-integration --features standalone-test -- otel::test
 
