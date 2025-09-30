@@ -132,7 +132,7 @@ impl IcebergTableManager {
                 IcebergPersistenceStage::DeletionVectors,
             )),
             persistence_stats_transaction_commit: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id,
+                mooncake_table_id.clone(),
                 IcebergPersistenceStage::TransactionCommit,
             )),
             recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
@@ -181,7 +181,7 @@ impl IcebergTableManager {
                 IcebergPersistenceStage::DeletionVectors,
             )),
             persistence_stats_transaction_commit: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id,
+                mooncake_table_id.clone(),
                 IcebergPersistenceStage::TransactionCommit,
             )),
             recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
