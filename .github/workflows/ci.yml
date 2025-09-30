@@ -291,6 +291,18 @@ jobs:
         run: |
           ${{ matrix.cmd }}
   
+  # ──────────────────────── 4 · Otel test (feature) ─────────────────
+  otel_test:
+    name: Opentelemetry tests (feature)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Opentelemetry feature test
+        run: |
+          RUST_BACKTRACE=1 cargo test -p moonlink_service --features=otel-integration -- --nocapture
+
   # ──────────────────────── 5 · Rest catalog test (feature) ─────────────────
   rest_catalog_test:
     name: Rest catalog tests (feature)
