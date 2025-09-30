@@ -88,9 +88,6 @@ pub struct IcebergTableManager {
 
     /// Iceberg persistence stats for transaction commit.
     pub(crate) persistence_stats_transaction_commit: Arc<IcebergPersistenceStats>,
-
-    /// Iceberg table recovery stats.
-    pub(crate) recovery_stats: Arc<IcebergTableRecoveryStats>,
 }
 
 impl IcebergTableManager {
@@ -132,10 +129,9 @@ impl IcebergTableManager {
                 IcebergPersistenceStage::DeletionVectors,
             )),
             persistence_stats_transaction_commit: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
+                mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
@@ -181,10 +177,9 @@ impl IcebergTableManager {
                 IcebergPersistenceStage::DeletionVectors,
             )),
             persistence_stats_transaction_commit: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
+                mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
@@ -267,7 +262,8 @@ impl TableManager for IcebergTableManager {
 
     async fn load_snapshot_from_table(&mut self) -> Result<(u32, MooncakeSnapshot)> {
         // Start recording iceberg recovery latency
-        let recovery_stats = self.recovery_stats.clone();
+        let recovery_stats =
+            IcebergTableRecoveryStats::new(self.mooncake_table_metadata.mooncake_table_id.clone());
         let _guard = recovery_stats.start();
         let snapshot = self.load_snapshot_from_table_impl().await?;
         Ok(snapshot)
