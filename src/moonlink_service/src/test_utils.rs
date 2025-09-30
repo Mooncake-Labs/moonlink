@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "otel-integration", allow(dead_code))]
 use crate::rest_api::{FileUploadResponse, IngestResponse, ListTablesResponse};
 use crate::{ServiceConfig, READINESS_PROBE_PORT};
 use arrow::datatypes::Schema as ArrowSchema;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 
 /// Moonlink backend directory.
-#[cfg(any(feature = "otel-integration", feature = "standalone-test"))]
 pub(crate) fn get_moonlink_backend_dir() -> String {
     if let Ok(backend_dir) = std::env::var("MOONLINK_BACKEND_DIR") {
         backend_dir
@@ -35,7 +35,6 @@ pub(crate) fn get_database_uri() -> String {
 }
 
 /// Util function to get nginx address
-#[cfg(any(feature = "otel-integration", feature = "standalone-test"))]
 pub(crate) fn get_nginx_addr() -> String {
     std::env::var("NGINX_ADDR").unwrap_or_else(|_| NGINX_ADDR.to_string())
 }
@@ -73,7 +72,6 @@ pub(crate) fn get_service_config() -> ServiceConfig {
 }
 
 /// Send request to readiness endpoint and wait until the server is ready.
-#[cfg(any(feature = "otel-integration", feature = "standalone-test"))]
 pub(crate) async fn wait_for_server_ready() {
     let url = format!("http://127.0.0.1:{READINESS_PROBE_PORT}/ready");
     loop {
