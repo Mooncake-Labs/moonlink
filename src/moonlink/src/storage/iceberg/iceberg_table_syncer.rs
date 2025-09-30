@@ -242,7 +242,7 @@ impl IcebergTableManager {
             });
         }
         // Record data files synchronization latency.
-        let _guard = self.persistence_stats_sync_data_files.start();
+        let _guard = self.persistence_stats.sync_data_files.start();
         let mut local_data_files_to_remote = HashMap::with_capacity(new_data_files.len());
         let mut new_remote_data_files = Vec::with_capacity(new_data_files.len());
         let mut new_iceberg_data_files = Vec::with_capacity(new_data_files.len());
@@ -496,7 +496,7 @@ impl IcebergTableManager {
                 evicted_files_to_delete: Vec::new(),
             });
         }
-        let _guard = self.persistence_stats_sync_deletion_vectors.start();
+        let _guard = self.persistence_stats.sync_deletion_vectors.start();
         let mut puffin_deletion_blobs = HashMap::with_capacity(new_deletion_logs.len());
         let mut evicted_files_to_delete = vec![];
         let prepared: Vec<IcebergResult<PreparedDeletionVectorBlob>>;
@@ -618,7 +618,7 @@ impl IcebergTableManager {
             return Ok(HashMap::new());
         }
         // Record file indices synchronization latency.
-        let _guard = self.persistence_stats_sync_file_indices.start();
+        let _guard = self.persistence_stats.sync_file_indices.start();
         let mut local_index_file_to_remote = HashMap::new();
 
         let iceberg_table = self.iceberg_table.as_ref().unwrap();
@@ -726,7 +726,7 @@ impl IcebergTableManager {
         file_params: PersistenceFileParams,
     ) -> Result<PersistenceResult> {
         // Start recording overall snapshot synchronization latency.
-        let persistence_stats_overall = self.persistence_stats_overall.clone();
+        let persistence_stats_overall = self.persistence_stats.stats_overall.clone();
         let _guard = persistence_stats_overall.start();
 
         // Initialize iceberg table on access.
@@ -819,7 +819,7 @@ impl IcebergTableManager {
 
         let updated_iceberg_table = {
             // Start recording transaction commit latency.
-            let _guard = self.persistence_stats_transaction_commit.start();
+            let _guard = self.persistence_stats.transaction_commit.start();
             // Commit the transaction.
             txn.commit(&*self.catalog).await?
         };

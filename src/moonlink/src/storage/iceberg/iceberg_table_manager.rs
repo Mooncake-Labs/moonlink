@@ -1,4 +1,4 @@
-use crate::observability::iceberg_persistence::{IcebergPersistenceStage, IcebergPersistenceStats};
+use crate::observability::iceberg_persistence::IcebergPersistenceStats;
 use crate::observability::iceberg_table_recovery::IcebergTableRecoveryStats;
 use crate::observability::latency_exporter::BaseLatencyExporter;
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
@@ -74,20 +74,8 @@ pub struct IcebergTableManager {
     /// Maps from remote data file path to its file id.
     pub(crate) remote_data_file_to_file_id: HashMap<String, FileId>,
 
-    /// Iceberg persistence stats for overall snapshot synchronization.
-    pub(crate) persistence_stats_overall: Arc<IcebergPersistenceStats>,
-
-    /// Iceberg persistence stats for data files synchronization.
-    pub(crate) persistence_stats_sync_data_files: Arc<IcebergPersistenceStats>,
-
-    /// Iceberg persistence stats for deletion vectors synchronization.
-    pub(crate) persistence_stats_sync_deletion_vectors: Arc<IcebergPersistenceStats>,
-
-    /// Iceberg persistence stats for file indices synchronization.
-    pub(crate) persistence_stats_sync_file_indices: Arc<IcebergPersistenceStats>,
-
-    /// Iceberg persistence stats for transaction commit.
-    pub(crate) persistence_stats_transaction_commit: Arc<IcebergPersistenceStats>,
+    /// Iceberg persistence stats.
+    pub(crate) persistence_stats: Arc<IcebergPersistenceStats>,
 }
 
 impl IcebergTableManager {
@@ -112,26 +100,7 @@ impl IcebergTableManager {
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
-            persistence_stats_overall: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::Overall,
-            )),
-            persistence_stats_sync_data_files: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::DataFiles,
-            )),
-            persistence_stats_sync_file_indices: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::FileIndices,
-            )),
-            persistence_stats_sync_deletion_vectors: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::DeletionVectors,
-            )),
-            persistence_stats_transaction_commit: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id,
-                IcebergPersistenceStage::TransactionCommit,
-            )),
+            persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
         })
     }
 
@@ -160,26 +129,7 @@ impl IcebergTableManager {
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
-            persistence_stats_overall: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::Overall,
-            )),
-            persistence_stats_sync_data_files: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::DataFiles,
-            )),
-            persistence_stats_sync_file_indices: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::FileIndices,
-            )),
-            persistence_stats_sync_deletion_vectors: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id.clone(),
-                IcebergPersistenceStage::DeletionVectors,
-            )),
-            persistence_stats_transaction_commit: Arc::new(IcebergPersistenceStats::new(
-                mooncake_table_id,
-                IcebergPersistenceStage::TransactionCommit,
-            )),
+            persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
         })
     }
 
