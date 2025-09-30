@@ -1,4 +1,3 @@
-use crate::observability::latency_exporter::BaseLatencyExporter;
 use crate::storage::iceberg::deletion_vector::DeletionVector;
 use crate::storage::iceberg::iceberg_table_manager::*;
 use crate::storage::iceberg::index::FileIndexBlob;
@@ -252,10 +251,6 @@ impl IcebergTableManager {
                 MooncakeSnapshot::new(self.mooncake_table_metadata.clone());
             return Ok((next_file_id as u32, empty_mooncake_snapshot));
         }
-
-        // Start recording iceverg recovery latency
-        let iceberg_recovery_stats = self.iceberg_recovery_stats.clone();
-        let _guard = iceberg_recovery_stats.start();
 
         // Load table state into iceberg table manager.
         let snapshot_meta = table_metadata.current_snapshot().unwrap();

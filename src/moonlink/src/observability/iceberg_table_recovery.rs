@@ -13,12 +13,12 @@ pub(crate) struct IcebergTableRecoveryStats {
 
 impl IcebergTableRecoveryStats {
     pub fn new(mooncake_table_id: String) -> Self {
-        let meter = global::meter("iceberg_table_recovery_latency");
+        let meter = global::meter("iceberg_table_recovery");
         IcebergTableRecoveryStats {
             mooncake_table_id,
             latency: meter
-                .u64_histogram("iceberg_table_recovery_latency")
-                .with_description("Latency (ms) for iceberg table recovery.")
+                .u64_histogram("snapshot_load_latency")
+                .with_description("Latency (ms) for iceberg table snapshot loading.")
                 .with_boundaries(vec![50.0, 100.0, 200.0, 300.0, 400.0, 500.0])
                 .build(),
         }

@@ -1,4 +1,6 @@
-use crate::observability::iceberg_persistence::{IcebergPersistenceStage, IcebergPersistenceStats, IcebergTableRecoveryStats};
+use crate::observability::iceberg_persistence::{IcebergPersistenceStage, IcebergPersistenceStats};
+use crate::observability::iceberg_table_recovery::IcebergTableRecoveryStats;
+use crate::observability::latency_exporter::BaseLatencyExporter;
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::iceberg::catalog_utils;
@@ -88,7 +90,7 @@ pub struct IcebergTableManager {
     pub(crate) persistence_stats_transaction_commit: Arc<IcebergPersistenceStats>,
 
     /// Iceberg table recovery stats.
-    pub(crate) iceberg_recovery_stats: Arc<IcebergTableRecoveryStats>,
+    pub(crate) recovery_stats: Arc<IcebergTableRecoveryStats>,
 }
 
 impl IcebergTableManager {
@@ -133,7 +135,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            iceberg_recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
+            recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
@@ -182,7 +184,7 @@ impl IcebergTableManager {
                 mooncake_table_id,
                 IcebergPersistenceStage::TransactionCommit,
             )),
-            iceberg_recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
+            recovery_stats: Arc::new(IcebergTableRecoveryStats::new(mooncake_table_id)),
         })
     }
 
@@ -264,6 +266,9 @@ impl TableManager for IcebergTableManager {
     }
 
     async fn load_snapshot_from_table(&mut self) -> Result<(u32, MooncakeSnapshot)> {
+        // Start recording iceberg recovery latency
+        let recovery_stats = self.recovery_stats.clone();
+        let _guard = recovery_stats.start();
         let snapshot = self.load_snapshot_from_table_impl().await?;
         Ok(snapshot)
     }
