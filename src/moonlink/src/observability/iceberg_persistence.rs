@@ -2,7 +2,6 @@ use crate::observability::latency_exporter::BaseLatencyExporter;
 use crate::observability::latency_guard::LatencyGuard;
 use opentelemetry::metrics::Histogram;
 use opentelemetry::{global, KeyValue};
-use std::sync::Arc;
 
 enum PersistenceStage {
     Overall,
@@ -14,27 +13,36 @@ enum PersistenceStage {
 
 #[derive(Debug)]
 pub(crate) struct IcebergPersistenceStats {
-    pub(crate) stats_overall: Arc<IcebergPersistenceSingleStats>,
-    pub(crate) sync_data_files: Arc<IcebergPersistenceSingleStats>,
-    pub(crate) sync_file_indices: Arc<IcebergPersistenceSingleStats>,
-    pub(crate) sync_deletion_vectors: Arc<IcebergPersistenceSingleStats>,
-    pub(crate) transaction_commit: Arc<IcebergPersistenceSingleStats>,
+    pub(crate) overall: IcebergPersistenceSingleStats,
+    pub(crate) sync_data_files: IcebergPersistenceSingleStats,
+    pub(crate) sync_file_indices: IcebergPersistenceSingleStats,
+    pub(crate) sync_deletion_vectors: IcebergPersistenceSingleStats,
+    pub(crate) transaction_commit: IcebergPersistenceSingleStats,
 }
 
 impl IcebergPersistenceStats {
     pub(crate) fn new(mooncake_table_id: String) -> Self {
-        fn make_stats(id: &str, stage: PersistenceStage) -> Arc<IcebergPersistenceSingleStats> {
-            Arc::new(IcebergPersistenceSingleStats::new(id.to_string(), stage))
-        }
         Self {
-            stats_overall: make_stats(&mooncake_table_id, PersistenceStage::Overall),
-            sync_data_files: make_stats(&mooncake_table_id, PersistenceStage::DataFiles),
-            sync_file_indices: make_stats(&mooncake_table_id, PersistenceStage::FileIndices),
-            sync_deletion_vectors: make_stats(
-                &mooncake_table_id,
+            overall: IcebergPersistenceSingleStats::new(
+                mooncake_table_id.to_string(),
+                PersistenceStage::Overall,
+            ),
+            sync_data_files: IcebergPersistenceSingleStats::new(
+                mooncake_table_id.to_string(),
+                PersistenceStage::DataFiles,
+            ),
+            sync_file_indices: IcebergPersistenceSingleStats::new(
+                mooncake_table_id.to_string(),
+                PersistenceStage::FileIndices,
+            ),
+            sync_deletion_vectors: IcebergPersistenceSingleStats::new(
+                mooncake_table_id.to_string(),
                 PersistenceStage::DeletionVectors,
             ),
-            transaction_commit: make_stats(&mooncake_table_id, PersistenceStage::TransactionCommit),
+            transaction_commit: IcebergPersistenceSingleStats::new(
+                mooncake_table_id.to_string(),
+                PersistenceStage::TransactionCommit,
+            ),
         }
     }
 }

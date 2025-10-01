@@ -726,8 +726,8 @@ impl IcebergTableManager {
         file_params: PersistenceFileParams,
     ) -> Result<PersistenceResult> {
         // Start recording overall snapshot synchronization latency.
-        let persistence_stats_overall = self.persistence_stats.stats_overall.clone();
-        let _guard = persistence_stats_overall.start();
+        let persistence_stats = self.persistence_stats.clone();
+        let _guard = persistence_stats.overall.start();
 
         // Initialize iceberg table on access.
         self.initialize_iceberg_table_for_once().await?;
