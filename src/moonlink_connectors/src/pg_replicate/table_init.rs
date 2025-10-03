@@ -157,9 +157,16 @@ pub async fn build_table_components(
     let last_iceberg_snapshot_lsn = table.get_iceberg_snapshot_lsn();
 
     let (commit_lsn_tx, commit_lsn_rx) = watch::channel(0u64);
+    // Make a receiver first before possible mark operation, otherwise all receiver initializes with 0.
+    let replication_lsn_tx = replication_state.subscribe();
+    if let Some(iceberg_snapshot_lsn) = last_iceberg_snapshot_lsn {
+        commit_lsn_tx.send(iceberg_snapshot_lsn).unwrap();
+        replication_state.mark(iceberg_snapshot_lsn);
+    }
+
     let read_state_manager = ReadStateManager::new(
         &table,
-        replication_state.subscribe(),
+        replication_lsn_tx,
         commit_lsn_rx,
         table_components.read_state_filepath_remap,
     );
