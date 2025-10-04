@@ -4847,6 +4847,7 @@ dependencies = [
  "object_store",
  "parquet",
  "roaring",
+ "tempfile",
  "thiserror 2.0.16",
  "tokio",
 ]
