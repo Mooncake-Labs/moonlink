@@ -1,9 +1,9 @@
+use crate::connection_pool::Pool;
 use crate::error::Result;
 use crate::schema_provider::MooncakeSchemaProvider;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use std::any::Any;
 use std::sync::Arc;
-use tokio::net::UnixStream;
 
 #[derive(Debug)]
 pub struct MooncakeCatalogProvider {
@@ -12,7 +12,8 @@ pub struct MooncakeCatalogProvider {
 
 impl MooncakeCatalogProvider {
     pub async fn try_new(uri: String) -> Result<Self> {
-        UnixStream::connect(&uri).await?;
+        let _ = Pool::get_stream(&uri).await?;
+
         Ok(Self { uri })
     }
 }
