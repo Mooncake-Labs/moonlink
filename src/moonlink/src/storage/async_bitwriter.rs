@@ -209,7 +209,7 @@ mod tests {
     use tokio::io::BufWriter;
     use tokio_bitstream_io::BigEndian;
 
-    /// Test [`write_bit`] intereface.
+    /// Test [`write_bit`] interface.
     #[tokio::test]
     #[rstest]
     #[case(0)]

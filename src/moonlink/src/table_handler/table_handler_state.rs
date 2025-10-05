@@ -57,7 +57,7 @@ pub(crate) enum MaintenanceProcessStatus {
     InProcess,
     /// Maintenance result has been put into snapshot buffer, which will be persisted into iceberg later.
     ReadyToPersist,
-    /// Maintenance task result is being peristed into iceberg.
+    /// Maintenance task result is being persisted into iceberg.
     InPersist,
 }
 
