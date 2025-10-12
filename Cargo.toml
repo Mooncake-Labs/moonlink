@@ -102,7 +102,7 @@ postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", r
 prost = "0.14"
 prost-types = "0.14"
 rand = "0.9"
-regex = "1.11"
+regex = "1.12"
 reqwest = { version = "0.12", features = ["json"] }
 roaring = "0.11"
 rstest = "0.26"
