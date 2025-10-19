@@ -39,7 +39,7 @@ clap = { version = "4", features = ["derive"] }
 const_format = "0.2"
 crc32fast = "1"
 datafusion = "49"
-datafusion-cli = "49"
+datafusion-cli = "50"
 deltalake = "0.28"
 fastbloom = "0.14"
 futures = { version = "0.3", default-features = false }
