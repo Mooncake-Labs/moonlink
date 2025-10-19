@@ -4719,7 +4719,7 @@ dependencies = [
  "fastbloom",
  "function_name",
  "futures",
- "hashbrown 0.15.5",
+ "hashbrown 0.16.0",
  "hmac",
  "iceberg",
  "iceberg-catalog-glue",
