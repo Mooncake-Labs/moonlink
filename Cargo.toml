@@ -129,7 +129,7 @@ tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git", r
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
-typed-builder = "0.22"
+typed-builder = "0.23"
 url = "2.5"
 uuid = { version = "1.18", default-features = false, features = ["v4"] }
 
