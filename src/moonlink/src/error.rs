@@ -46,6 +46,9 @@ pub enum Error {
 
     #[error("{0}")]
     OtelExporterBuildError(ErrorStruct),
+
+    #[error("{0}")]
+    ReadStateManager(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -58,6 +61,10 @@ impl Error {
     #[track_caller]
     pub fn delta_generic_error(message: String) -> Self {
         Self::DeltaLakeError(ErrorStruct::new(message, ErrorStatus::Permanent))
+    }
+    #[track_caller]
+    pub fn read_validation_error(message: String) -> Self {
+        Self::ReadStateManager(ErrorStruct::new(message, ErrorStatus::Permanent))
     }
 }
 
@@ -216,7 +223,8 @@ impl Error {
             | Error::JoinError(err)
             | Error::PbToMoonlinkRowError(err)
             | Error::OtelExporterBuildError(err)
-            | Error::Json(err) => err.status,
+            | Error::Json(err)
+            | Error::ReadStateManager(err) => err.status,
         }
     }
 }
@@ -246,7 +254,7 @@ mod tests {
         if let Error::Io(ref inner) = io_error {
             let loc = inner.location.as_ref().unwrap();
             assert!(loc.contains("src/moonlink/src/error.rs"));
-            assert!(loc.contains("230"));
+            assert!(loc.contains("238"));
             assert!(loc.contains("9"));
         }
     }

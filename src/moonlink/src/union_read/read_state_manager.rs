@@ -1,9 +1,9 @@
 use crate::error::Result;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
+use crate::Error;
 use crate::ReadState;
 use crate::ReadStateFilepathRemap;
-use more_asserts as ma;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -16,6 +16,8 @@ const NO_CACHE_LSN: u64 = u64::MAX;
 const NO_SNAPSHOT_LSN: u64 = u64::MAX;
 /// Commit LSN, which indicates there's no commit.
 const NO_COMMIT_LSN: u64 = 0;
+/// Max read snapshot retries
+const MAX_READ_SNAPSHOT_RETRIES: u8 = 5;
 
 pub struct ReadStateManager {
     last_read_lsn: AtomicU64,
@@ -103,6 +105,7 @@ impl ReadStateManager {
         let mut table_snapshot_rx = self.table_snapshot_watch_receiver.clone();
         let mut replication_lsn_rx = self.replication_lsn_rx.clone();
         let last_commit_lsn = self.last_commit_lsn_rx.clone();
+        let mut retries_number: u8 = 0;
 
         loop {
             let current_snapshot_lsn = *table_snapshot_rx.borrow();
@@ -114,6 +117,7 @@ impl ReadStateManager {
                 current_snapshot_lsn,
                 current_replication_lsn,
                 last_commit_lsn_val,
+                &mut retries_number,
             ) {
                 return self
                     .read_from_snapshot_and_update_cache(
@@ -133,18 +137,50 @@ impl ReadStateManager {
         }
     }
 
+    #[inline]
+    fn validate_lsn_ordering(
+        snapshot_lsn: u64,
+        commit_lsn: u64,
+        replication_lsn: u64,
+    ) -> Result<()> {
+        // validate right ordering lsn: snapshot_lsn<=commit_lsn<=replication_lsn
+        if snapshot_lsn != NO_SNAPSHOT_LSN
+            && commit_lsn != NO_COMMIT_LSN
+            && snapshot_lsn > commit_lsn
+        {
+            return Err(Error::read_validation_error(format!(
+                "snapshot_lsn > commit_lsn: {} > {}",
+                snapshot_lsn, commit_lsn
+            )));
+        }
+        if commit_lsn > replication_lsn {
+            return Err(Error::read_validation_error(format!(
+                "commit_lsn > replication_lsn: {} > {}",
+                commit_lsn, replication_lsn
+            )));
+        }
+        Ok(())
+    }
+
     fn can_satisfy_read_from_snapshot(
         &self,
         requested_lsn: Option<u64>,
         snapshot_lsn: u64,
         replication_lsn: u64,
         commit_lsn: u64,
+        retries_number: &mut u8,
     ) -> bool {
         // Sanity check on read side: iceberg snapshot LSN <= mooncake snapshot LSN <= commit LSN <= replication LSN
-        if snapshot_lsn != NO_SNAPSHOT_LSN && commit_lsn != NO_COMMIT_LSN {
-            ma::assert_le!(snapshot_lsn, commit_lsn);
+        match Self::validate_lsn_ordering(snapshot_lsn, commit_lsn, replication_lsn) {
+            Ok(_) => {} // continue
+            Err(err) => {
+                *retries_number += 1;
+                if *retries_number >= MAX_READ_SNAPSHOT_RETRIES {
+                    panic!("Error after {} retries: {}", retries_number, err);
+                }
+                return false;
+            }
         }
-        ma::assert_le!(commit_lsn, replication_lsn);
 
         // Check snapshot readability.
         let is_snapshot_clean = Self::snapshot_is_clean(snapshot_lsn, commit_lsn);
