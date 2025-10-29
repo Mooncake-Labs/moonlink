@@ -4,6 +4,11 @@ version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 
+[[bin]]
+name = "standalone-validation"
+path = "deploy/validation.rs"
+required-features = ["standalone-validation"]
+
 [features]
 profiling = ["console-subscriber"]
 
@@ -16,6 +21,8 @@ log-rotation-test = []
 # make sure the tests are also named with stress_test prefix
 stress-test = []
 
+standalone-validation = ["arrow", "bytes", "parquet", "arrow-array"]
+
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
 storage-fs = ["moonlink/storage-fs"]
@@ -23,9 +30,12 @@ storage-fs = ["moonlink/storage-fs"]
 [dependencies]
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
+arrow = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.8"
+bytes = { workspace = true, optional = true }
 clap = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
 flexi_logger = { version = "0.31", features = ["trc"] }
@@ -44,6 +54,7 @@ opentelemetry-proto = { version = "0.31", default-features = false, features = [
 ] }
 opentelemetry-stdout = { workspace = true }
 opentelemetry_sdk = { workspace = true }
+parquet = { workspace = true, optional = true }
 prost = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
