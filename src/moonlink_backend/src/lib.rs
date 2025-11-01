@@ -527,9 +527,9 @@ mod tests {
         // Validate metadatas are returned in the correct order.
         assert_eq!(parquet_metadatas.len(), 2);
         let metadata_1 = deserialize_parquet_metadata(&parquet_metadatas[0][..]);
-        assert_eq!(metadata_1.num_rows, 5);
+        assert_eq!(metadata_1.file_metadata().num_rows(), 5);
         let metadata_2 = deserialize_parquet_metadata(&parquet_metadatas[1][..]);
-        assert_eq!(metadata_2.num_rows, 2);
+        assert_eq!(metadata_2.file_metadata().num_rows(), 2);
     }
 
     #[tokio::test]
