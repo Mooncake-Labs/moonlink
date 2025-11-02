@@ -21,13 +21,13 @@ license = "LicenseRef-BSL-1.1"
 [workspace.dependencies]
 anyhow = "1.0"
 apache-avro = "0.20"
-arrow = { version = "56", default-features = false, features = [
+arrow = { version = "57", default-features = false, features = [
   "canonical_extension_types",
 ] }
-arrow-array = "56"
-arrow-buffer = "56"
-arrow-ipc = "56"
-arrow-schema = { version = "56", features = ["serde"] }
+arrow-array = "57"
+arrow-buffer = "57"
+arrow-ipc = "57"
+arrow-schema = { version = "57", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 backon = "1.6"
@@ -88,7 +88,7 @@ opentelemetry_sdk = { version = "0.31", default-features = false, features = [
   "trace",
   "metrics",
 ] }
-parquet = { version = "56", default-features = false, features = [
+parquet = { version = "57", default-features = false, features = [
   "arrow",
   "async",
   "arrow_canonical_extension_types",
