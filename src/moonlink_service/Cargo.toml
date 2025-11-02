@@ -27,7 +27,7 @@ arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }
-console-subscriber = { version = "0.4", optional = true }
+console-subscriber = { version = "0.5", optional = true }
 flexi_logger = { version = "0.31", features = ["trc"] }
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
