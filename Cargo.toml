@@ -81,8 +81,8 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
   "metrics",
 ] }
 opentelemetry-stdout = { version = "0.31", default-features = false, features = [
-    "trace",
-    "metrics",
+  "trace",
+  "metrics",
 ] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = [
   "trace",

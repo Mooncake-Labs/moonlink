@@ -2,8 +2,9 @@ use apache_avro::Schema as AvroSchema;
 use arrow_ipc::writer::StreamWriter;
 use axum::{
     error_handling::HandleErrorLayer,
-    extract::{Path, State},
-    http::{Method, StatusCode},
+    extract::{Path, Request, State},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::{self, Next},
     response::{Json, Response},
     routing::{delete, get, post},
     BoxError, Router,
@@ -39,13 +40,26 @@ pub struct ApiState {
     pub backend: Arc<moonlink_backend::MoonlinkBackend>,
     /// Maps from source table name to schema id.
     pub kafka_schema_id_cache: Arc<RwLock<HashMap<String, u64>>>,
+    /// Bearer token for authentication (cached at startup)
+    pub bearer_token: Option<String>,
 }
 
 impl ApiState {
     pub fn new(backend: Arc<moonlink_backend::MoonlinkBackend>) -> Self {
+        let bearer_token = std::env::var("MOONLINK_REST_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
+
+        if bearer_token.is_some() {
+            info!("Bearer token authentication enabled for REST API");
+        } else {
+            info!("Bearer token authentication disabled for REST API");
+        }
+
         Self {
             backend,
             kafka_schema_id_cache: Arc::new(RwLock::new(HashMap::new())),
+            bearer_token,
         }
     }
 }
@@ -386,6 +400,34 @@ fn get_backend_error_status_code(error: &moonlink_backend::Error) -> StatusCode 
     }
 }
 
+async fn auth_middleware(
+    state: State<ApiState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Use cached bearer token from state (no env var lookup)
+    let Some(ref auth_token) = state.bearer_token else {
+        // No token configured, skip auth
+        return Ok(next.run(request).await);
+    };
+
+    let expected_header = format!("Bearer {}", auth_token);
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|header| header.to_str().ok());
+
+    match auth_header {
+        Some(header) if header == expected_header => Ok(next.run(request).await),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                message: "Invalid or missing bearer token".to_string(),
+            }),
+        )),
+    }
+}
+
 /// Create the router with all API endpoints    
 pub fn create_router(state: ApiState) -> Router {
     let timeout_layer = ServiceBuilder::new()
@@ -421,7 +463,11 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/tables/{table}/optimize", post(optimize_table))
         .route("/tables/{table}/snapshot", post(create_snapshot))
         .route("/tables/{table}/flush", post(flush_table))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
