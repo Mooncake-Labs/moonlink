@@ -418,7 +418,7 @@ async fn auth_middleware(
         .and_then(|header| header.to_str().ok());
 
     match auth_header {
-        Some(header) if header == &expected_header => Ok(next.run(request).await),
+        Some(header) if header == expected_header => Ok(next.run(request).await),
         _ => Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
