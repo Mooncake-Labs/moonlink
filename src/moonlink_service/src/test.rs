@@ -43,6 +43,74 @@ async fn test_health_check_endpoint() {
 
 #[tokio::test]
 #[serial]
+async fn test_bearer_token_authentication() {
+    let _guard = TestGuard::new(&get_moonlink_backend_dir());
+
+    // Set the environment variable for bearer token authentication
+    std::env::set_var("MOONLINK_REST_TOKEN", "test-secret-token");
+
+    let config = get_service_config();
+    tokio::spawn(async move {
+        start_with_config(config).await.unwrap();
+    });
+    wait_for_server_ready().await;
+
+    let client = reqwest::Client::new();
+
+    // Should fail without auth header
+    let response = client
+        .get(format!("{REST_ADDR}/health"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "Request without auth header should return 401"
+    );
+
+    // Should fail with wrong token format
+    let response = client
+        .get(format!("{REST_ADDR}/health"))
+        .header("content-type", "application/json")
+        .header("Authorization", "wrong-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "Request with wrong token format should return 401"
+    );
+
+    // Should succeed with correct Bearer token
+    let response = client
+        .get(format!("{REST_ADDR}/health"))
+        .header("content-type", "application/json")
+        .header("Authorization", "Bearer test-secret-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "Response status is {response:?}"
+    );
+
+    let response: HealthResponse = response.json().await.unwrap();
+    assert_eq!(response.service, "moonlink-rest-api");
+    assert_eq!(response.status, "healthy");
+    ma::assert_gt!(response.timestamp, 0);
+
+    // Clean up environment variable
+    std::env::remove_var("MOONLINK_REST_TOKEN");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_schema() {
     let _guard = TestGuard::new(&get_moonlink_backend_dir());
     let config = get_service_config();

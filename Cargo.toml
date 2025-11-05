@@ -1,15 +1,15 @@
 [workspace]
 members = [
-    "src/moonlink",
-    "src/moonlink_backend",
-    "src/moonlink_connectors",
-    "src/moonlink_datafusion",
-    "src/moonlink_error",
-    "src/moonlink_metadata_store",
-    "src/moonlink_proto",
-    "src/moonlink_rpc",
-    "src/moonlink_service",
-    "src/moonlink_table_metadata",
+  "src/moonlink",
+  "src/moonlink_backend",
+  "src/moonlink_connectors",
+  "src/moonlink_datafusion",
+  "src/moonlink_error",
+  "src/moonlink_metadata_store",
+  "src/moonlink_proto",
+  "src/moonlink_rpc",
+  "src/moonlink_service",
+  "src/moonlink_table_metadata",
 ]
 resolver = "2"
 
@@ -81,8 +81,8 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
   "metrics",
 ] }
 opentelemetry-stdout = { version = "0.31", default-features = false, features = [
-    "trace",
-    "metrics",
+  "trace",
+  "metrics",
 ] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = [
   "trace",
