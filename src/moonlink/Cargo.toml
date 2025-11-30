@@ -102,7 +102,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 mockall = "0.13"
 pico-args = "0.5"
 rand = { workspace = true }
