@@ -100,7 +100,7 @@ Moonlink commits data as **Iceberg v3 tables with deletion vectors**. These tabl
 
 For workloads requiring sub-second visibility into new data, Moonlink supports real-time querying:
 
-1. **DuckDB** — with the [`duckb_mooncake`](https://github.com/Mooncake-Labs/duckdb_mooncake)  extension.
+1. **DuckDB** — with the [`duckdb_mooncake`](https://github.com/Mooncake-Labs/duckdb_mooncake) extension.
 2. **Postgres** — with the [`pg_mooncake`](https://github.com/Mooncake-Labs/pg_mooncake) extension.
 3. **DataFusion** – with [`Moonlink Datafusion`](https://github.com/Mooncake-Labs/moonlink/tree/main/src/moonlink_datafusion)
 
