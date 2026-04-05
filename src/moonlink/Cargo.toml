@@ -63,7 +63,7 @@ fastbloom = { workspace = true }
 function_name = { version = "0.3", optional = true }
 futures = { workspace = true }
 hashbrown = { workspace = true }
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true }
 iceberg = { workspace = true }
 iceberg-catalog-glue = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
