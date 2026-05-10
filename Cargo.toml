@@ -70,7 +70,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 object_store = "0.12"
 opendal = { version = "0.54", default-features = false, features = ["layers-throttle"] }
-opentelemetry = { version = "0.31", default-features = false, features = [
+opentelemetry = { version = "0.32", default-features = false, features = [
   "trace",
   "metrics",
 ] }
