@@ -65,7 +65,7 @@ moonlink_table_metadata = { path = "src/moonlink_table_metadata" }
 more-asserts = "0.3"
 multimap = { version = "0.10", default-features = false }
 native-tls = "0.2.14"
-nix = { version = "0.30", default-features = false, features = ["fs"] }
+nix = { version = "0.31", default-features = false, features = ["fs"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 object_store = "0.12"
