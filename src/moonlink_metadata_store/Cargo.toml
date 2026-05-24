@@ -29,7 +29,7 @@ postgres-native-tls = { workspace = true }
 postgres-types = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
   "sqlite",
   "runtime-tokio",
 ], optional = true }
