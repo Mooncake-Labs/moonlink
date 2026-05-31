@@ -84,7 +84,7 @@ opentelemetry-stdout = { version = "0.31", default-features = false, features = 
     "trace",
     "metrics",
 ] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = [
+opentelemetry_sdk = { version = "0.32", default-features = false, features = [
   "trace",
   "metrics",
 ] }
