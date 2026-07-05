@@ -103,7 +103,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
-mockall = "0.13"
+mockall = "0.15"
 pico-args = "0.5"
 rand = { workspace = true }
 rstest = { workspace = true }
