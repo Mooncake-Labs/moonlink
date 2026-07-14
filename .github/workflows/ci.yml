@@ -472,10 +472,11 @@ jobs:
           files: lcov.info
           fail_ci_if_error: true
 
-  # ────────────────────────8 · Chaos test ────────────────────────────
-  chaos_test:
-    name: Chaos test
+  # ──────────────────────── 8 · Chaos + regression tests ────────────────────
+  chaos_and_regression_tests:
+    name: Chaos & Regression Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v5
@@ -492,257 +493,45 @@ jobs:
           mold-version: 2.40.3
           make-default: true
 
-      - name: Start chaos test
-        timeout-minutes: 10
+      # Keep the existing coverage, but build the chaos-enabled test binary only
+      # once. Running each group in sequence avoids resource-contention flakes
+      # and prevents the S3/GCS chaos tests from running without their fixtures.
+      - name: Run chaos and regression tests
         run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_on_local_fs --features=chaos-test -p moonlink -- --nocapture
+          set -euo pipefail
+
+          filters=(
+            table_handler::chaos_test::test_chaos_on_local_fs
+            table_handler::chaos_test::test_local_system_optimization_chaos
+            table_handler::chaos_test::test_chaos_injection
+            table_handler::chaos_test::test_disk_slice_chaos
+            table_handler::chaos_test::test_append_only_chaos
+            table_handler::chaos_test::test_upsert_chaos
+            table_handler::chaos_test::test_replay_chaos
+            table_handler::regression
+          )
+
+          for filter in "${filters[@]}"; do
+            RUST_BACKTRACE=1 cargo test \
+              "$filter" \
+              --features=chaos-test \
+              -p moonlink \
+              -- \
+              --nocapture \
+              --test-threads=2
+          done
 
       #  ────────────────────── Upload chaos dump ────────────────────────────
       - name: Upload chaos dumps
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
+          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}
           path: /tmp/chaos_test_*
           retention-days: 3
           if-no-files-found: warn
 
-  # ───────────── 9 · Chaos test with local fs optimization ─────────────
-  chaos_test_with_local_fs_optimization:
-    name: Chaos test with local filesystem optimization
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_local_system_optimization_chaos --features=chaos-test -p moonlink -- --nocapture
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
-  # ───────────── 10 · Chaos test with chaos injection ─────────────
-  chaos_test_with_chaos_injection:
-    name: Chaos test with chaos injection
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_injection --features=chaos-test -p moonlink -- --nocapture
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
-  # ───────────── 11 · Chaos test for disk slice write ─────────────
-  disk_slice_write_with_chaos:
-    name: Chaos test for disk slice write
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_disk_slice_chaos --features=chaos-test -p moonlink -- --nocapture
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
-  # ───────────── 12 · Chaos test for append only operation ─────────────
-  append_only_chaos:
-    name: Chaos test for append only operation
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_append_only_chaos --features=chaos-test -p moonlink -- --nocapture
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
-  # ───────────── 13 · Chaos test for table upsert operation ─────────────
-  upsert_operation_chaos:
-    name: Chaos test for upsert operation
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_upsert_chaos --features=chaos-test -p moonlink -- --nocapture
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
-  # ───────────── 14 · Regression test  ─────────────
-  regression_test:
-    name: Regression test
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start regression test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::regression --features=chaos-test -p moonlink -- --nocapture
-  
-  # ───────────── 15 · Replay chaos test  ─────────────
-  replay_chaos_test:
-    name: Replay chaos test
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Start replay chaos test
-        timeout-minutes: 10
-        run: |
-          RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_replay_chaos --features=chaos-test -p moonlink -- --nocapture
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
-  # ───────────── 16 · PostgreSQL Integration Tests ─────────────
+  # ───────────── 9 · PostgreSQL Integration Tests ─────────────
   postgres_tests:
     name: PostgreSQL Integration Tests
     runs-on: ubuntu-latest
@@ -841,7 +630,7 @@ jobs:
         run: |
           RUST_BACKTRACE=1 cargo test test_bulk_insert_multiple_iterations --features=bulk-ingestion-test -p moonlink_backend -- --nocapture
 
-  # ───────────── 17 · Moonlink Service Integration Tests ─────────────
+  # ───────────── 10 · Moonlink Service Integration Tests ─────────────
   moonlink_service_tests:
     name: Moonlink Service Integration Tests
     runs-on: ubuntu-latest
