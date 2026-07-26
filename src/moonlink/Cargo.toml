@@ -52,7 +52,7 @@ arrow-schema = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 bincode = { workspace = true }
 bitstream-io = { workspace = true }
 bytes = { workspace = true }
