@@ -223,7 +223,7 @@ impl TableManager for IcebergTableManager {
             NamespaceIdent::from_strs(&self.config.namespace).unwrap(),
             self.config.table_name.clone(),
         );
-        self.catalog.drop_table(&table_ident).await?;
+        self.catalog.purge_table(&table_ident).await?;
 
         // Unset all data members.
         self.snapshot_loaded = false;

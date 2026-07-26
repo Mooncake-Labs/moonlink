@@ -44,6 +44,10 @@ use crate::storage::table::iceberg::file_catalog::METADATA_DIRECTORY;
 use crate::storage::table::iceberg::file_catalog::VERSION_HINT_FILENAME;
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
+use crate::storage::table::iceberg::moonlink_catalog::{
+    CatalogAccess, PuffinBlobType, PuffinWrite, SchemaUpdate,
+};
+use crate::storage::table::iceberg::puffin_writer_proxy::PuffinBlobMetadataProxy;
 use crate::storage::table::iceberg::schema_utils::*;
 use crate::storage::table::iceberg::test_utils::*;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
@@ -60,13 +64,19 @@ use futures::{stream, StreamExt};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::storage::table::iceberg::compat::arrow_schema_to_schema;
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
-use iceberg::NamespaceIdent;
-use iceberg::TableIdent;
+use async_trait::async_trait;
+use iceberg::spec::{Schema as IcebergSchema, TableMetadata};
+use iceberg::table::Table as IcebergTable;
+use iceberg::{
+    Catalog, Namespace, NamespaceIdent, Result as IcebergResult, TableCommit, TableCreation,
+    TableIdent,
+};
 use parquet::arrow::AsyncArrowWriter;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -882,6 +892,176 @@ async fn test_sync_snapshot_with_gcs() {
 /// ================================
 /// Test drop table
 /// ================================
+
+#[derive(Debug)]
+struct PurgeTrackingCatalog {
+    drop_called: Arc<AtomicBool>,
+    purge_called: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Catalog for PurgeTrackingCatalog {
+    async fn list_namespaces(
+        &self,
+        _parent: Option<&NamespaceIdent>,
+    ) -> IcebergResult<Vec<NamespaceIdent>> {
+        unreachable!()
+    }
+
+    async fn create_namespace(
+        &self,
+        _namespace: &NamespaceIdent,
+        _properties: HashMap<String, String>,
+    ) -> IcebergResult<Namespace> {
+        unreachable!()
+    }
+
+    async fn get_namespace(&self, _namespace: &NamespaceIdent) -> IcebergResult<Namespace> {
+        unreachable!()
+    }
+
+    async fn namespace_exists(&self, _namespace: &NamespaceIdent) -> IcebergResult<bool> {
+        unreachable!()
+    }
+
+    async fn update_namespace(
+        &self,
+        _namespace: &NamespaceIdent,
+        _properties: HashMap<String, String>,
+    ) -> IcebergResult<()> {
+        unreachable!()
+    }
+
+    async fn drop_namespace(&self, _namespace: &NamespaceIdent) -> IcebergResult<()> {
+        unreachable!()
+    }
+
+    async fn list_tables(&self, _namespace: &NamespaceIdent) -> IcebergResult<Vec<TableIdent>> {
+        unreachable!()
+    }
+
+    async fn create_table(
+        &self,
+        _namespace: &NamespaceIdent,
+        _creation: TableCreation,
+    ) -> IcebergResult<IcebergTable> {
+        unreachable!()
+    }
+
+    async fn load_table(&self, _table: &TableIdent) -> IcebergResult<IcebergTable> {
+        unreachable!()
+    }
+
+    async fn drop_table(&self, _table: &TableIdent) -> IcebergResult<()> {
+        self.drop_called.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn purge_table(&self, _table: &TableIdent) -> IcebergResult<()> {
+        self.purge_called.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn table_exists(&self, _table: &TableIdent) -> IcebergResult<bool> {
+        unreachable!()
+    }
+
+    async fn rename_table(&self, _src: &TableIdent, _dest: &TableIdent) -> IcebergResult<()> {
+        unreachable!()
+    }
+
+    async fn register_table(
+        &self,
+        _table: &TableIdent,
+        _metadata_location: String,
+    ) -> IcebergResult<IcebergTable> {
+        unreachable!()
+    }
+
+    async fn update_table(&self, _commit: TableCommit) -> IcebergResult<IcebergTable> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl SchemaUpdate for PurgeTrackingCatalog {
+    async fn update_table_schema(
+        &mut self,
+        _new_schema: IcebergSchema,
+        _table_ident: TableIdent,
+    ) -> IcebergResult<IcebergTable> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl CatalogAccess for PurgeTrackingCatalog {
+    fn get_warehouse_location(&self) -> &str {
+        unreachable!()
+    }
+
+    async fn load_metadata(
+        &self,
+        _table_ident: &TableIdent,
+    ) -> IcebergResult<(String, TableMetadata)> {
+        unreachable!()
+    }
+}
+
+impl PuffinWrite for PurgeTrackingCatalog {
+    fn record_puffin_metadata(
+        &mut self,
+        _puffin_filepath: String,
+        _puffin_metadata: Vec<PuffinBlobMetadataProxy>,
+        _puffin_blob_type: PuffinBlobType,
+    ) {
+        unreachable!()
+    }
+
+    fn set_data_files_to_remove(&mut self, _data_files: HashSet<String>) {
+        unreachable!()
+    }
+
+    fn set_index_puffin_files_to_remove(&mut self, _puffin_filepaths: HashSet<String>) {
+        unreachable!()
+    }
+
+    fn clear_puffin_metadata(&mut self) {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn test_table_manager_drop_uses_purge_semantics() {
+    let iceberg_temp_dir = tempdir().unwrap();
+    let iceberg_table_config = get_iceberg_table_config(&iceberg_temp_dir);
+    let table_temp_dir = tempdir().unwrap();
+    let mooncake_table_metadata =
+        create_test_table_metadata(table_temp_dir.path().to_str().unwrap().to_string());
+    let cache_temp_dir = tempdir().unwrap();
+    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
+    let filesystem_accessor = create_test_filesystem_accessor(&iceberg_table_config);
+    let mut manager = IcebergTableManager::new_with_filesystem_accessor(
+        mooncake_table_metadata,
+        object_storage_cache,
+        filesystem_accessor,
+        iceberg_table_config,
+    )
+    .unwrap();
+
+    let drop_called = Arc::new(AtomicBool::new(false));
+    let purge_called = Arc::new(AtomicBool::new(false));
+    manager.catalog = Box::new(PurgeTrackingCatalog {
+        drop_called: drop_called.clone(),
+        purge_called: purge_called.clone(),
+    });
+
+    manager.drop_table().await.unwrap();
+
+    assert!(!drop_called.load(Ordering::Relaxed));
+    assert!(purge_called.load(Ordering::Relaxed));
+}
+
 ///
 /// Test iceberg table manager drop table.
 async fn test_drop_table_impl(iceberg_table_config: IcebergTableConfig) {
