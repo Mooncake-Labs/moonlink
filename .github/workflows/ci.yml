@@ -35,11 +35,11 @@ jobs:
         with:
           components: rustfmt,clippy
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-deny
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-sort
 
@@ -433,9 +433,9 @@ jobs:
           mold-version: 2.40.3
           make-default: true
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with: { tool: cargo-llvm-cov }
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with: { tool: nextest }
 
       - name: Run tests via llvm-cov/nextest
