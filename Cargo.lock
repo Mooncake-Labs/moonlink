@@ -3963,7 +3963,7 @@ dependencies = [
  "serde_repr",
  "serde_with",
  "strum 0.27.2",
- "thrift",
+ "thrift 0.17.0",
  "tokio",
  "typed-builder 0.20.1",
  "url",
@@ -4770,7 +4770,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "thiserror",
- "thrift",
+ "thrift 0.25.0",
  "tokio",
  "tokio-postgres",
  "tracing-subscriber",
@@ -5442,6 +5442,15 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
+version = "3.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
@@ -5525,7 +5534,7 @@ dependencies = [
  "seq-macro",
  "simdutf8",
  "snap",
- "thrift",
+ "thrift 0.17.0",
  "tokio",
  "twox-hash",
  "zstd",
@@ -7835,6 +7844,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "thrift"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f8cd99ff3e9130b04b10cd955d18d09aed0fb2f2fc2b4555ef49169fc519efe"
+dependencies = [
+ "byteorder",
+ "log",
+ "ordered-float 3.9.2",
+ "threadpool",
+ "uuid",
+ "varint-rs",
+]
+
+[[package]]
 name = "time"
 version = "0.3.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8491,6 +8514,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "varint-rs"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfa6c38708f6257f1ec2ca7e5a11f9bbf58a27d7060078b6b333624968183d96"
 
 [[package]]
 name = "vcpkg"
