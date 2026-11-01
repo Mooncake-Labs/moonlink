@@ -104,7 +104,7 @@ prost-types = "0.14"
 rand = "0.9"
 regex = "1.12"
 reqwest = { version = "0.12", features = ["json"] }
-roaring = "0.11"
+roaring = "0.12"
 rstest = "0.26"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = "1"
