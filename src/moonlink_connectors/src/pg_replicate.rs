@@ -233,8 +233,23 @@ impl PostgresConnection {
             }
             Err(_) => quote_identifier(table_name).into_owned(),
         };
-        let sql = format!("ALTER TABLE {} REPLICA IDENTITY FULL;", ident);
-        self.run_control_query(&sql).await?;
+        // REPLICA IDENTITY does not recurse from a partitioned parent to its
+        // leaves. pgoutput needs full old rows from each physical partition,
+        // even when the publication publishes via the partition root.
+        let relation = quote_literal(&ident);
+        let sql = format!(
+            "SELECT format('ALTER TABLE %s REPLICA IDENTITY FULL;', relid) \
+             FROM (SELECT {relation}::regclass AS relid \
+                   UNION SELECT relid FROM pg_catalog.pg_partition_tree({relation}::regclass)) relations"
+        );
+        let statements = self.run_control_query(&sql).await?;
+        for message in statements {
+            if let SimpleQueryMessage::Row(row) = message {
+                if let Some(statement) = row.get(0) {
+                    self.run_control_query(statement).await?;
+                }
+            }
+        }
         Ok(())
     }
 
