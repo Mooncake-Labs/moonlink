@@ -1076,6 +1076,60 @@ async fn test_empty_table_snapshot_creation() {
     }
 }
 
+/// A database-wide replication position can advance without a new commit to this table.
+#[tokio::test]
+async fn test_force_snapshot_after_unrelated_commit() {
+    let temp_dir = tempdir().unwrap();
+    let mut config = MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+    config.row_identity = IdentityProp::Keys(vec![0]);
+    config.persistence_config.new_data_file_count = 1000;
+    config.persistence_config.new_committed_deletion_log = 1000;
+    let mut env = TestEnvironment::new(temp_dir, config.clone()).await;
+    env.append_row(1, "John", 30, 0, None).await;
+    env.commit(1).await;
+    env.set_readable_lsn_with_cap(1, 100);
+    env.verify_snapshot(100, &[1]).await;
+
+    let rx = env.table_event_manager.initiate_snapshot(100).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        TableEventManager::synchronize_force_snapshot_request(rx, 100),
+    )
+    .await
+    .expect("snapshot must persist the older table commit")
+    .unwrap();
+
+    let mut manager = env.create_iceberg_table_manager(config).await;
+    let (_, snapshot) = manager.load_snapshot_from_table().await.unwrap();
+    assert_eq!(snapshot.disk_files.len(), 1);
+    env.shutdown().await;
+}
+
+/// Replication can catch up after an already persisted table's snapshot request.
+#[tokio::test]
+async fn test_force_snapshot_waits_for_unrelated_commit() {
+    let mut env = TestEnvironment::default().await;
+    env.append_row(1, "John", 30, 0, None).await;
+    env.commit(1).await;
+    env.set_readable_lsn(1);
+    env.flush_table_and_sync(1, None).await;
+
+    let rx = env.table_event_manager.initiate_snapshot(100).await;
+    let wait = TableEventManager::synchronize_force_snapshot_request(rx, 100);
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(600), &mut wait)
+            .await
+            .is_err()
+    );
+    env.set_readable_lsn_with_cap(1, 100);
+    tokio::time::timeout(std::time::Duration::from_secs(5), &mut wait)
+        .await
+        .expect("snapshot must observe replication progress without a table write")
+        .unwrap();
+    env.shutdown().await;
+}
+
 /// Testing scenario: request iceberg snapshot with multiple LSNs.
 #[tokio::test]
 async fn test_multiple_snapshot_requests() {
@@ -2514,6 +2568,40 @@ async fn test_alter_table() {
 
     env.set_readable_lsn(2);
     env.verify_snapshot(2, &[1, 2]).await;
+
+    env.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_alter_table_after_persistence() {
+    let mut env = TestEnvironment::default().await;
+
+    env.append_row(1, "Alice", 25, /*lsn=*/ 0, /*xact_id=*/ None)
+        .await;
+    env.set_readable_lsn(1);
+    env.flush_table_and_sync(1, None).await;
+
+    // An up-to-date data snapshot must not satisfy the schema-change snapshot.
+    env.send_event(TableEvent::AlterTable {
+        columns_to_drop: vec!["name".to_string()],
+    })
+    .await;
+    env.send_event(TableEvent::Append {
+        row: MoonlinkRow::new(vec![RowValue::Int32(2), RowValue::Int32(30)]),
+        lsn: 1,
+        xact_id: None,
+        is_recovery: false,
+    })
+    .await;
+    env.commit(2).await;
+
+    env.set_readable_lsn(2);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        env.verify_snapshot(2, &[1, 2]),
+    )
+    .await
+    .expect("ALTER TABLE must finish when the preceding data is already persisted");
 
     env.shutdown().await;
 }
