@@ -4,15 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeJsonError;
 use thiserror::Error;
 
-#[cfg(feature = "metadata-postgres")]
-use tokio_postgres::Error as TokioPostgresError;
-
 #[derive(Clone, Debug, Error, Deserialize, Serialize)]
 pub enum Error {
-    #[cfg(feature = "metadata-postgres")]
-    #[error("{0}")]
-    TokioPostgres(ErrorStruct),
-
     #[error("{0}")]
     PostgresRowCountError(ErrorStruct),
 
@@ -39,17 +32,6 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(feature = "metadata-postgres")]
-impl From<TokioPostgresError> for Error {
-    #[track_caller]
-    fn from(source: TokioPostgresError) -> Self {
-        Error::TokioPostgres(
-            ErrorStruct::new("tokio postgres error".to_string(), ErrorStatus::Permanent)
-                .with_source(source),
-        )
-    }
-}
 
 impl From<sqlx::Error> for Error {
     #[track_caller]
@@ -81,8 +63,6 @@ impl From<std::io::Error> for Error {
 impl Error {
     pub fn get_status(&self) -> ErrorStatus {
         match self {
-            #[cfg(feature = "metadata-postgres")]
-            Error::TokioPostgres(err) => err.status,
             Error::PostgresRowCountError(err)
             | Error::Sqlx(err)
             | Error::SqliteRowCountError(err)

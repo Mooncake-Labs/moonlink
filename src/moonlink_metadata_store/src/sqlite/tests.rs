@@ -7,11 +7,7 @@ use moonlink::{
 use tempfile::{tempdir, TempDir};
 
 /// Source table uri.
-#[cfg(not(feature = "test-tls"))]
 const SRC_TABLE_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable";
-#[cfg(feature = "test-tls")]
-const SRC_TABLE_URI: &str =
-    "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
 
 /// Test table name.
 const SRC_TABLE_NAME: &str = "src_table";

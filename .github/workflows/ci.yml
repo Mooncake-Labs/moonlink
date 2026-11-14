@@ -606,7 +606,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_connectors --lib --features connector-pg
-          RUST_BACKTRACE=1 cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3"
+          RUST_BACKTRACE=1 cargo test --package moonlink_metadata_store --tests --features "test-utils storage-s3"
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features postgres-integration -- --nocapture
 
       - name: Build Backend integration tests

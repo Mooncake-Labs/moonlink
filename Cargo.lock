@@ -2539,17 +2539,12 @@ dependencies = [
  "moonlink",
  "moonlink_error",
  "more-asserts",
- "native-tls",
- "postgres-native-tls",
- "postgres-types",
  "serde",
  "serde_json",
- "serial_test",
  "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-postgres",
  "url",
 ]
 
