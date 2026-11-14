@@ -111,19 +111,12 @@ impl SnapshotTableState {
             // Get persisted deletion vector, in iceberg puffin blob format.
             let puffin_deletion_blob = disk_deletion_vector.puffin_deletion_blob.as_ref().unwrap();
 
-            // Add one more reference for puffin cache handle.
-            // There'll be no IO operations during cache access, thus no failure or evicted files expected.
-            let (new_puffin_cache_handle, cur_evicted) = self
-                .object_storage_cache
-                .get_cache_entry(
-                    puffin_deletion_blob.puffin_file_cache_handle.file_id,
-                    /*remote_filepath=*/ "",
-                    /*filesystem_accessor*/ self.filesystem_accessor.as_ref(),
-                )
-                .await
-                .unwrap();
-            assert!(cur_evicted.is_empty());
-            puffin_cache_handles.push(new_puffin_cache_handle.unwrap());
+            // The snapshot keeps the puffin file pinned; take one more reference for this read.
+            let new_puffin_cache_handle = puffin_deletion_blob.puffin_file_cache_handle.clone();
+            self.object_storage_cache
+                .increment_reference_count(&new_puffin_cache_handle)
+                .await;
+            puffin_cache_handles.push(new_puffin_cache_handle);
 
             let puffin_file_index = puffin_cache_handles.len() - 1;
             deletion_vector_blob_at_read.push(DeletionVector {

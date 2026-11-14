@@ -1391,6 +1391,9 @@ mod test_utils;
 mod failure_tests;
 
 #[cfg(test)]
+mod cache_budget_tests;
+
+#[cfg(test)]
 #[cfg(feature = "chaos-test")]
 mod chaos_table_metadata;
 

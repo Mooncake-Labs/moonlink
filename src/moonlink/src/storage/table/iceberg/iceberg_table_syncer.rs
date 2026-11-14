@@ -446,7 +446,7 @@ impl IcebergTableManager {
         );
         let (cache_handle, evicted_files_to_delete) = self
             .object_storage_cache
-            .get_cache_entry(
+            .get_cache_entry_pinned(
                 unique_file_id,
                 &deletion_vector_blob.puffin_filepath,
                 self.filesystem_accessor.as_ref(),
@@ -465,7 +465,7 @@ impl IcebergTableManager {
             })?;
 
         let puffin_blob_ref = PuffinBlobRef {
-            puffin_file_cache_handle: cache_handle.unwrap(),
+            puffin_file_cache_handle: cache_handle,
             start_offset: 4_u32, // Puffin file starts with 4 magic bytes.
             blob_size: deletion_vector_blob.blob_size as u32,
             num_rows: deletion_vector_blob.deleted_row_count,
