@@ -749,7 +749,9 @@ impl TableHandler {
                         }
                     }
                     TableEvent::IndexMergeResult { index_merge_result } => {
-                        table_handler_state.mark_index_merge_completed().await;
+                        table_handler_state
+                            .mark_index_merge_completed(&index_merge_result)
+                            .await;
                         match index_merge_result {
                             Ok(index_merge_result) => {
                                 table.record_index_merge_completion(&index_merge_result);
@@ -766,6 +768,7 @@ impl TableHandler {
                             }
                             Err(err) => {
                                 error!(error = ?err, "failed to perform index merge");
+                                table.on_index_merge_failed();
                             }
                         }
                     }
@@ -783,6 +786,7 @@ impl TableHandler {
                             Err(err) => {
                                 // TODO(hjiang): Need to record failed compaction result back to snapshot, so committed deletion logs could be pruned.
                                 error!(error = ?err, "failed to perform compaction");
+                                table.on_data_compaction_failed();
                             }
                         }
                         // Check whether need to drop table.
@@ -1273,3 +1277,6 @@ mod errored_state_tests;
 
 #[cfg(test)]
 mod errored_drop_tests;
+
+#[cfg(test)]
+mod maintenance_failure_tests;

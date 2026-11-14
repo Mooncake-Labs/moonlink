@@ -637,14 +637,27 @@ impl TableHandlerState {
         self.get_maintenance_task_option(&self.data_compaction_request_status)
     }
 
-    /// Mark index merge completion.
-    pub(crate) async fn mark_index_merge_completed(&mut self) {
+    /// Mark index merge completion. A failed merge leaves nothing to persist, so maintenance
+    /// goes back to idle and any optimize waiter gets the error.
+    pub(crate) async fn mark_index_merge_completed(
+        &mut self,
+        index_merge_result: &Result<crate::storage::mooncake_table::FileIndiceMergeResult>,
+    ) {
         assert_eq!(
             self.table_maintenance_process_status,
             MaintenanceProcessStatus::InProcess
         );
         self.index_merge_request_status = MaintenanceRequestStatus::Unrequested;
-        self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+        match index_merge_result {
+            Ok(_) => {
+                self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+            }
+            Err(err) => {
+                self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
+                // Background maintenance has no waiter; ignore the missing receiver.
+                let _ = self.table_maintenance_completion_tx.send(Err(err.clone()));
+            }
+        }
     }
 
     /// Mark data compaction completion.
@@ -659,9 +672,8 @@ impl TableHandlerState {
             }
             Err(err) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
-                self.table_maintenance_completion_tx
-                    .send(Err(err.clone()))
-                    .unwrap();
+                // Background maintenance has no waiter; ignore the missing receiver.
+                let _ = self.table_maintenance_completion_tx.send(Err(err.clone()));
             }
         }
     }

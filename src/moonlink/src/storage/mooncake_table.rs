@@ -835,6 +835,27 @@ impl MooncakeTable {
         self.next_snapshot_task.data_compaction_result = data_compaction_res;
     }
 
+    /// A background index merge failed: nothing to apply, allow the next one.
+    pub(crate) fn on_index_merge_failed(&mut self) {
+        assert!(
+            self.background_task_status_for_validation
+                .index_merge_ongoing
+        );
+        self.background_task_status_for_validation
+            .index_merge_ongoing = false;
+    }
+
+    /// A background data compaction failed: nothing to apply, allow the next one.
+    pub(crate) fn on_data_compaction_failed(&mut self) {
+        assert!(
+            self.background_task_status_for_validation
+                .data_compaction_ongoing
+        );
+        self.background_task_status_for_validation
+            .data_compaction_ongoing = false;
+        self.next_snapshot_task.compacting_data_files.clear();
+    }
+
     /// Record index merge completion event.
     pub(crate) fn record_index_merge_completion(&self, file_indices_res: &FileIndiceMergeResult) {
         if let Some(event_replay_tx) = &self.event_replay_tx {

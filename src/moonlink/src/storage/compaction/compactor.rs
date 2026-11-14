@@ -381,11 +381,36 @@ impl CompactionBuilder {
     }
 
     /// Perform a compaction operation, and get the result back.
-    ///
-    /// TODO(hjiang): Error handling, all references should be unpinned on error.
+    /// On failure the pins taken for this compaction are released and partially written outputs
+    /// are removed, so nothing leaks and a later compaction can retry.
     #[tracing::instrument(name = "compaction_build", skip_all)]
-    #[allow(clippy::mutable_key_type)]
     pub(crate) async fn build(mut self) -> Result<DataCompactionResult> {
+        let original_payload = self.compaction_payload.clone();
+        match self.build_impl().await {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let mut files_to_delete =
+                    original_payload.unpin_referenced_compaction_payload().await;
+                files_to_delete.extend(
+                    self.new_data_files
+                        .iter()
+                        .map(|(file, _)| file.file_path().clone()),
+                );
+                if let Some(file) = &self.cur_new_data_file {
+                    files_to_delete.push(file.file_path().clone());
+                }
+                if let Err(delete_err) =
+                    crate::storage::io_utils::delete_local_files(&files_to_delete).await
+                {
+                    tracing::warn!(error = ?delete_err, "failed to clean up after failed compaction");
+                }
+                Err(err)
+            }
+        }
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    async fn build_impl(&mut self) -> Result<DataCompactionResult> {
         let old_data_files = self
             .compaction_payload
             .disk_files
@@ -458,7 +483,7 @@ impl CompactionBuilder {
             remapped_data_files: old_record_loc_to_new_mapping,
             old_data_files,
             old_file_indices,
-            new_data_files: self.new_data_files,
+            new_data_files: std::mem::take(&mut self.new_data_files),
             new_file_indices,
             evicted_files_to_delete,
         })
