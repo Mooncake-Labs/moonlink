@@ -1,7 +1,7 @@
 {
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
-    "runServices": ["postgres", "minio", "fake-gcs", "iceberg-rest"],
+    "runServices": ["postgres", "minio", "fake-gcs"],
     "workspaceFolder": "/workspaces/moonlink",
     "initializeCommand": "bash ./.devcontainer/prebuild.sh",
     "features": {

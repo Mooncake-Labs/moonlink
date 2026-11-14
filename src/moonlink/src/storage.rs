@@ -42,13 +42,8 @@ pub use mooncake_table_config::IcebergPersistenceConfig;
 pub use mooncake_table_config::MooncakeTableConfig;
 pub use table::common::table_manager::TableManager;
 pub use table::iceberg::base_iceberg_snapshot_fetcher::BaseIcebergSnapshotFetcher;
-pub use table::iceberg::cloud_security_config::{AwsSecurityConfig, CloudSecurityConfig};
 pub use table::iceberg::iceberg_snapshot_fetcher::IcebergSnapshotFetcher;
 pub use table::iceberg::iceberg_table_config::FileCatalogConfig as IcebergFileCatalogConfig;
-#[cfg(all(feature = "catalog-glue", feature = "storage-s3"))]
-pub use table::iceberg::iceberg_table_config::GlueCatalogConfig as IcebergGlueCatalogConfig;
-#[cfg(feature = "catalog-rest")]
-pub use table::iceberg::iceberg_table_config::RestCatalogConfig as IcebergRestCatalogConfig;
 pub use table::iceberg::iceberg_table_config::{IcebergCatalogConfig, IcebergTableConfig};
 pub use table::iceberg::iceberg_table_manager::IcebergTableManager;
 

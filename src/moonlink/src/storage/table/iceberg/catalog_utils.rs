@@ -1,14 +1,10 @@
 #[cfg(test)]
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::table::iceberg::file_catalog::FileCatalog;
-#[cfg(all(feature = "catalog-glue", feature = "storage-s3"))]
-use crate::storage::table::iceberg::glue_catalog::GlueCatalog;
 use crate::storage::table::iceberg::iceberg_table_config::IcebergCatalogConfig;
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::moonlink_catalog::MoonlinkCatalog;
 use crate::storage::table::iceberg::puffin_writer_proxy::append_puffin_metadata_and_rewrite;
-#[cfg(feature = "catalog-rest")]
-use crate::storage::table::iceberg::rest_catalog::RestCatalog;
 use crate::storage::table::iceberg::table_commit_proxy::TableCommitProxy;
 use crate::storage::table::iceberg::table_update_proxy::TableUpdateProxy;
 
@@ -22,10 +18,7 @@ use iceberg::TableCommit;
 use iceberg::TableCreation;
 use iceberg::{spec::TableMetadataBuilder, Result as IcebergResult, TableRequirement, TableUpdate};
 
-/// Create a catelog based on the provided type.
-///
-/// It's worth noting catalog and warehouse uri are not 1-1 mapping; for example, rest catalog could handle warehouse.
-/// Here we simply deduce catalog type from warehouse because both filesystem and object storage catalog are only able to handle certain scheme.
+/// Create the catalog described by the table config.
 pub async fn create_catalog(
     config: IcebergTableConfig,
     iceberg_schema: IcebergSchema,
@@ -34,28 +27,6 @@ pub async fn create_catalog(
         IcebergCatalogConfig::File { accessor_config } => {
             Ok(Box::new(FileCatalog::new(accessor_config, iceberg_schema)?))
         }
-        #[cfg(feature = "catalog-rest")]
-        IcebergCatalogConfig::Rest {
-            rest_catalog_config,
-        } => Ok(Box::new(
-            RestCatalog::new(
-                rest_catalog_config,
-                config.data_accessor_config,
-                iceberg_schema,
-            )
-            .await?,
-        )),
-        #[cfg(all(feature = "catalog-glue", feature = "storage-s3"))]
-        IcebergCatalogConfig::Glue {
-            glue_catalog_config,
-        } => Ok(Box::new(
-            GlueCatalog::new(
-                glue_catalog_config,
-                config.data_accessor_config,
-                iceberg_schema,
-            )
-            .await?,
-        )),
     }
 }
 
@@ -67,20 +38,6 @@ pub async fn create_catalog_without_schema(
         IcebergCatalogConfig::File { accessor_config } => {
             Ok(Box::new(FileCatalog::new_without_schema(accessor_config)?))
         }
-        #[cfg(feature = "catalog-rest")]
-        IcebergCatalogConfig::Rest {
-            rest_catalog_config,
-        } => Ok(Box::new(
-            RestCatalog::new_without_schema(rest_catalog_config, config.data_accessor_config)
-                .await?,
-        )),
-        #[cfg(all(feature = "catalog-glue", feature = "storage-s3"))]
-        IcebergCatalogConfig::Glue {
-            glue_catalog_config,
-        } => Ok(Box::new(
-            GlueCatalog::new_without_schema(glue_catalog_config, config.data_accessor_config)
-                .await?,
-        )),
     }
 }
 
