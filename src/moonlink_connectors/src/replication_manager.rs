@@ -10,6 +10,7 @@ use moonlink::{
 use moonlink::{ReadStateFilepathRemap, TableStatusReader};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -475,8 +476,7 @@ impl ReplicationManager {
     pub fn get_table_reader(
         &self,
         mooncake_table_id: &MooncakeTableId,
-    ) -> Result<&ReadStateManager> {
-        self.check_not_errored(mooncake_table_id)?;
+    ) -> Result<Arc<ReadStateManager>> {
         let (src_table_id, connection) = self.get_replication_connection(mooncake_table_id)?;
         Ok(connection.get_table_reader(mooncake_table_id, src_table_id))
     }

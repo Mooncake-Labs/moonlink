@@ -136,13 +136,15 @@ fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
     ErrorStruct::new("backend error".to_string(), ErrorStatus::Permanent).with_source(e)
 }
 
-async fn handle_stream<S>(backend: Arc<MoonlinkBackend>, mut stream: S) -> Result<()>
+async fn handle_stream<S>(backend: Arc<MoonlinkBackend>, stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Split so a pending ScanTableBegin can notice the peer closing while it waits for an LSN.
+    let (mut reader, mut stream) = tokio::io::split(stream);
     let mut map = HashMap::new();
     loop {
-        let request = match read_request(&mut stream).await? {
+        let request = match read_request(&mut reader).await? {
             Incoming::Request(request) => request,
             Incoming::Malformed(e) => {
                 warn!("malformed RPC request: {e}");
@@ -248,11 +250,22 @@ where
                 table,
                 lsn,
             } => {
-                match backend
-                    .scan_table(database.to_string(), table.to_string(), Some(lsn))
-                    .await
-                    .map_err(into_error_struct)
-                {
+                let scan = backend.scan_table(database.to_string(), table.to_string(), Some(lsn));
+                tokio::pin!(scan);
+                let mut probe = [0u8; 1];
+                let scan_result = tokio::select! {
+                    res = &mut scan => res,
+                    // Requests are strictly request/response, so nothing may arrive while a scan is
+                    // pending: EOF means the client is gone, and any byte breaks framing.
+                    peer = reader.read(&mut probe) => {
+                        match peer {
+                            Ok(0) | Err(_) => debug!("client disconnected during ScanTableBegin for {database}.{table}"),
+                            Ok(_) => warn!("unexpected bytes while ScanTableBegin for {database}.{table} is pending; closing connection"),
+                        }
+                        return Ok(());
+                    }
+                };
+                match scan_result.map_err(into_error_struct) {
                     Ok(state) => {
                         let res: RpcResult<ScanTableBeginResponse> = Ok(state.data.clone());
                         // Register before replying so the files stay pinned while the client reads them.
@@ -354,6 +367,68 @@ mod tests {
         server_handle.abort();
         let _ = server_handle.await;
         std::panic::set_hook(prev_hook);
+    }
+
+    /// A client that disconnects while its ScanTableBegin waits for an LSN must not leave the
+    /// connection task waiting until the scan timeout.
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn pending_scan_is_cancelled_when_client_disconnects() {
+        use crate::test_utils::pg;
+        use std::time::Duration;
+
+        let table = "rpc_disconnect_test";
+        let pg_client = pg::connect().await;
+        pg::create_source_table(&pg_client, table, 1).await;
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(
+            MoonlinkBackend::new(base_path, None, Box::new(sqlite_store))
+                .await
+                .unwrap(),
+        );
+        backend
+            .create_table(
+                "postgres".to_string(),
+                table.to_string(),
+                format!("public.{table}"),
+                pg::database_uri(),
+                "{}".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        let far_lsn = pg::current_wal_lsn(&pg_client).await + (1u64 << 40);
+
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        let connection = tokio::spawn(super::handle_stream(backend.clone(), server));
+        moonlink_rpc::write(
+            &mut client,
+            &moonlink_rpc::Request::ScanTableBegin {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(client);
+
+        let res = tokio::time::timeout(Duration::from_secs(5), connection)
+            .await
+            .expect("connection task kept waiting after the client disconnected");
+        assert!(res.unwrap().is_ok());
+
+        backend
+            .drop_table("postgres".to_string(), table.to_string())
+            .await
+            .unwrap();
+        pg::drop_source_table(&pg_client, table).await;
     }
 }
 

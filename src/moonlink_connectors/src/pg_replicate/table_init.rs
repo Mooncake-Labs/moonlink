@@ -139,17 +139,18 @@ pub async fn build_table_components(
     }
     let handler_replication_lsn_rx = table_replication_state.subscribe();
 
+    let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
     let read_state_manager = ReadStateManager::new(
         &table,
         replication_lsn_rx,
         commit_lsn_rx,
         table_components.read_state_filepath_remap,
-    );
+    )
+    .with_table_status(event_sync_receiver.table_status_rx.clone());
     let table_status_reader = TableStatusReader::new(
         &table_components.moonlink_table_config.iceberg_table_config,
         &table,
     );
-    let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
     let table_handler_timers = create_table_handler_timers();
     let table_handler = TableHandler::new(
         table,

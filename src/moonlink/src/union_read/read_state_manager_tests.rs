@@ -266,3 +266,44 @@ async fn snapshot_lock_not_held_during_temp_parquet_write() {
     release_tx.send(()).unwrap();
     reader.await.unwrap().unwrap();
 }
+
+/// Reads of an errored table fail at once, and a read waiting for an LSN ends as soon as the table
+/// becomes errored instead of waiting out the scan timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn errored_table_fails_reads_immediately_and_wakes_waiters() {
+    use crate::TableStatus;
+
+    let mut env = Env::new("errored").await;
+    env.commit_and_snapshot(&[1], 100, /*flush=*/ false).await;
+    env.publish(100, 100, 100);
+    let (status_tx, status_rx) = watch::channel(TableStatus::Healthy);
+    let rsm = Arc::new(
+        ReadStateManager::new(
+            &env.table,
+            env.replication_tx.subscribe(),
+            env.commit_tx.subscribe(),
+            get_read_state_filepath_remap(),
+        )
+        .with_table_status(status_rx),
+    );
+    assert_rows(&rsm.try_read(Some(100)).await.unwrap(), &[1]).await;
+
+    let waiting = tokio::spawn({
+        let rsm = rsm.clone();
+        async move { rsm.try_read(Some(500)).await.map(|_| ()) }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    status_tx
+        .send(TableStatus::Errored("mirror t is out of sync".to_string()))
+        .unwrap();
+    let res = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("waiting read did not observe the errored state")
+        .unwrap();
+    let err = res.expect_err("waiting read must fail");
+    assert!(err.to_string().contains("out of sync"), "{err}");
+
+    // New reads fail immediately, even for already-snapshotted LSNs.
+    let err = rsm.try_read(Some(100)).await.expect_err("errored table");
+    assert!(err.to_string().contains("out of sync"), "{err}");
+}

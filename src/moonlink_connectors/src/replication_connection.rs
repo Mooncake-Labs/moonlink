@@ -12,13 +12,13 @@ use crate::pg_replicate::source_fingerprint;
 use moonlink::TableStatus;
 use std::collections::HashMap;
 use std::hash::Hash;
-use tokio::sync::watch;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 
 struct TableState {
     src_table_name: String,
-    reader: ReadStateManager,
+    reader: Arc<ReadStateManager>,
     event_manager: TableEventManager,
     status_reader: TableStatusReader,
     /// Persists the errored state when the table enters it.
@@ -146,12 +146,16 @@ impl ReplicationConnection {
         &self,
         mooncake_table_id: &MooncakeTableId,
         src_table_id: SrcTableId,
-    ) -> &ReadStateManager {
+    ) -> Arc<ReadStateManager> {
         let unique_table_id = UniqueTableId {
             mooncake_table_id: mooncake_table_id.clone(),
             src_table_id,
         };
-        &self.table_states.get(&unique_table_id).unwrap().reader
+        self.table_states
+            .get(&unique_table_id)
+            .unwrap()
+            .reader
+            .clone()
     }
 
     pub fn get_table_status_reader(
@@ -255,7 +259,7 @@ impl ReplicationConnection {
         );
         let table_state = TableState {
             src_table_name: src_table_name.to_string(),
-            reader: table_resources.read_state_manager,
+            reader: Arc::new(table_resources.read_state_manager),
             event_manager: table_resources.table_event_manager,
             status_reader: table_resources.table_status_reader,
             errored_marker_writer,

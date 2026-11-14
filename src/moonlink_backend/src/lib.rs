@@ -14,9 +14,9 @@ use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
-#[cfg(feature = "test-utils")]
-pub use recovery_utils::set_recovery_delay_between_tables_for_test;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::recovery_utils::BackendAttributes;
@@ -24,6 +24,10 @@ use crate::table_status::TableStatus;
 
 /// Type alias for filepath remap function, which remaps http URI to local filepath if possible.
 type HttpFilepathRemap = std::sync::Arc<dyn Fn(String) -> String + Send + Sync>;
+
+/// Upper bound for a scan waiting until the mirror reaches the requested LSN. The pg_mooncake
+/// backend issuing the scan blocks uninterruptibly (no statement_timeout / cancel) for this long.
+const DEFAULT_SCAN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Max concurrency to fetch parquet metadata in parallel.
 const DEFAULT_PARQUET_METADATA_FETCH_PARALLELISM: usize = 128;
@@ -40,7 +44,10 @@ pub struct MoonlinkBackend {
     // Metadata storage accessor.
     metadata_store_accessor: Box<dyn MetadataStoreTrait>,
 
-    replication_manager: Arc<RwLock<ReplicationManager>>,
+    replication_manager: RwLock<ReplicationManager>,
+
+    /// See [`DEFAULT_SCAN_WAIT_TIMEOUT`].
+    scan_wait_timeout_ms: AtomicU64,
 }
 
 impl MoonlinkBackend {
@@ -136,7 +143,14 @@ impl MoonlinkBackend {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager,
             metadata_store_accessor,
+            scan_wait_timeout_ms: AtomicU64::new(DEFAULT_SCAN_WAIT_TIMEOUT.as_millis() as u64),
         })
+    }
+
+    /// Override how long [`Self::scan_table`] waits for the requested LSN.
+    pub fn set_scan_wait_timeout(&self, timeout: Duration) {
+        self.scan_wait_timeout_ms
+            .store(timeout.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
@@ -362,14 +376,32 @@ impl MoonlinkBackend {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
 
-        let read_state = {
+        let mooncake_table_id = MooncakeTableId { database, table };
+        // Do not hold the manager lock while waiting for the LSN: a queued writer (drop/create
+        // table) would otherwise block every scan of every table behind this wait.
+        let table_reader = {
             let manager = self.replication_manager.read().await;
-            let mooncake_table_id = MooncakeTableId { database, table };
-            let table_reader = manager.get_table_reader(&mooncake_table_id)?;
-            table_reader.try_read(lsn).await?
+            manager.get_table_reader(&mooncake_table_id)?
         };
-
-        Ok(read_state.clone())
+        let timeout = Duration::from_millis(self.scan_wait_timeout_ms.load(Ordering::Relaxed));
+        match tokio::time::timeout(timeout, table_reader.try_read(lsn)).await {
+            Ok(read_state) => Ok(read_state?),
+            Err(_) => {
+                let (snapshot_lsn, commit_lsn, replication_lsn) = table_reader.lsn_status();
+                let snapshot_lsn = if snapshot_lsn == u64::MAX {
+                    "none".to_string()
+                } else {
+                    snapshot_lsn.to_string()
+                };
+                Err(Error::scan_lsn_timeout(format!(
+                    "mirror {mooncake_table_id} did not reach LSN {} within {timeout:?} \
+                     (replicated up to {replication_lsn}, committed {commit_lsn}, snapshot {snapshot_lsn}); \
+                     replication may be stalled or catching up, or src_uri points at a different server \
+                     whose LSNs are not comparable. Retry, or check mooncake.list_tables().",
+                    lsn.unwrap_or_default()
+                )))
+            }
+        }
     }
 
     /// Gracefully shutdown a replication connection identified by its URI.

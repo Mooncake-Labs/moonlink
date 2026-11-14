@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::event_sync::TableStatus;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
 use crate::ReadState;
@@ -115,6 +116,8 @@ pub struct ReadStateManager {
     last_commit_lsn_rx: watch::Receiver<u64>,
     /// Functor which maps local filepath to remote URI if possible, should be applied on all files within [`ReadState`].
     read_state_filepath_remap: ReadStateFilepathRemap,
+    /// Table health; reads of an errored table fail instead of waiting or serving stale data.
+    table_status_rx: Option<watch::Receiver<TableStatus>>,
 }
 
 impl ReadStateManager {
@@ -144,6 +147,47 @@ impl ReadStateManager {
             replication_lsn_rx,
             last_commit_lsn_rx,
             read_state_filepath_remap,
+            table_status_rx: None,
+        }
+    }
+
+    /// Fail reads once the table enters the errored state, including reads waiting for an LSN.
+    pub fn with_table_status(mut self, table_status_rx: watch::Receiver<TableStatus>) -> Self {
+        self.table_status_rx = Some(table_status_rx);
+        self
+    }
+
+    /// Current (snapshot, commit, replication) LSNs, for diagnostics.
+    pub fn lsn_status(&self) -> (u64, u64, u64) {
+        (
+            *self.table_snapshot_watch_receiver.borrow(),
+            *self.last_commit_lsn_rx.borrow(),
+            *self.replication_lsn_rx.borrow(),
+        )
+    }
+
+    fn check_healthy(status_rx: &mut Option<watch::Receiver<TableStatus>>) -> Result<()> {
+        if let Some(rx) = status_rx {
+            if let TableStatus::Errored(message) = &*rx.borrow_and_update() {
+                return Err(crate::Error::table_errored(message));
+            }
+        }
+        Ok(())
+    }
+
+    async fn table_status_changed(
+        status_rx: &mut Option<watch::Receiver<TableStatus>>,
+    ) -> Result<()> {
+        match status_rx {
+            Some(rx) => {
+                if rx.changed().await.is_err() {
+                    return Err(crate::Error::table_errored(
+                        "table dropped while a read was waiting for it",
+                    ));
+                }
+                Ok(())
+            }
+            None => std::future::pending().await,
         }
     }
 
@@ -164,8 +208,10 @@ impl ReadStateManager {
         let mut table_snapshot_rx = self.table_snapshot_watch_receiver.clone();
         let mut replication_lsn_rx = self.replication_lsn_rx.clone();
         let last_commit_lsn = self.last_commit_lsn_rx.clone();
+        let mut table_status_rx = self.table_status_rx.clone();
 
         loop {
+            Self::check_healthy(&mut table_status_rx)?;
             let view = LsnView::observe(
                 &mut replication_lsn_rx,
                 &last_commit_lsn,
@@ -180,11 +226,13 @@ impl ReadStateManager {
             if view.can_satisfy(requested_lsn) {
                 return self.read_from_snapshot_and_update_cache(view).await;
             }
-            // `observe` marked both receivers as seen, so these wait for the next update.
-            if requested_lsn.unwrap() > view.replication {
-                replication_lsn_rx.changed().await?;
-            } else {
-                table_snapshot_rx.changed().await?;
+            // `observe` and `check_healthy` marked the receivers as seen, so these wait for the
+            // next update.
+            let wait_replication = requested_lsn.unwrap() > view.replication;
+            tokio::select! {
+                res = replication_lsn_rx.changed(), if wait_replication => res?,
+                res = table_snapshot_rx.changed(), if !wait_replication => res?,
+                res = Self::table_status_changed(&mut table_status_rx) => res?,
             }
         }
     }
