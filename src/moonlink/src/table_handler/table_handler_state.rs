@@ -152,7 +152,11 @@ impl TableHandlerState {
             mooncake_snapshot_ongoing: false,
             initial_persistence_lsn,
             last_unflushed_commit_lsn: None,
-            latest_commit_lsn: None,
+            // Everything up to the persisted snapshot counts as applied, so transactions postgres
+            // re-sends after a restart are skipped like those re-sent after a reconnect, streamed
+            // ones included. A copied table's floor is its copy boundary instead
+            // (`initial_persistence_lsn`); a table never has both.
+            latest_commit_lsn: persistence_snapshot_lsn,
             special_table_state: SpecialTableState::Normal,
             // Force snapshot fields.
             table_consistent_view_lsn: persistence_snapshot_lsn,
