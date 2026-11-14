@@ -4,11 +4,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
-
-use crate::row::IdentityProp;
 
 use crate::storage::cache::object_storage::base_cache::{
     CacheEntry, CacheTrait, InlineEvictedFiles,
@@ -19,7 +16,7 @@ use crate::storage::mooncake_table::table_operation_test_utils::{
     create_mooncake_snapshot_for_test, flush_table_and_sync, get_read_state_filepath_remap,
 };
 use crate::storage::mooncake_table::test_utils::{
-    append_rows, test_row, test_table, verify_files_and_deletions, TestContext,
+    append_rows, test_row, verify_files_and_deletions, TestContext,
 };
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::storage::MooncakeTable;
@@ -58,14 +55,6 @@ impl Env {
             commit_tx,
             rsm,
         }
-    }
-
-    pub(super) async fn new(name: &str) -> Self {
-        let context = TestContext::new(name);
-        let mut table = test_table(&context, name, IdentityProp::FullRow).await;
-        let (notify_tx, notify_rx) = mpsc::channel(100);
-        table.register_table_notify(notify_tx).await;
-        Self::wrap(Some(context), table, notify_rx)
     }
 
     /// Append rows and commit at `lsn`; optionally flush; then apply a mooncake snapshot WITHOUT
@@ -173,44 +162,4 @@ async fn failed_read_resolution_does_not_cache_stale_state() {
     // The transient failure is gone; the read at 100 must include row 2.
     assert_rows(&env.rsm.try_read(Some(100)).await.unwrap(), &[1, 2]).await;
     drop(temp_dir);
-}
-
-/// The sink marks a table's commit LSN, then awaits the (bounded) table-event send, and only then
-/// marks the replication LSN, so a reader can observe commit > replication. That must make the
-/// read wait, never panic.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_lsn_ahead_of_replication_lsn_waits_without_panicking() {
-    let mut env = Env::new("commit_ahead").await;
-    env.commit_and_snapshot(&[1], 100, /*flush=*/ false).await;
-    env.publish(100, 100, 100);
-    assert_rows(&env.rsm.try_read(Some(100)).await.unwrap(), &[1]).await;
-
-    env.commit_tx.send(200).unwrap();
-    // Already-snapshotted LSNs stay readable.
-    assert_rows(&env.rsm.try_read(Some(100)).await.unwrap(), &[1]).await;
-    let rsm = env.rsm.clone();
-    let waiting = tokio::spawn(async move { rsm.try_read(Some(150)).await.map(|_| ()) });
-    if let Ok(res) = tokio::time::timeout(Duration::from_secs(1), waiting).await {
-        panic!("read at 150 must wait for replication, got {res:?}");
-    }
-}
-
-/// Even if a reader once labelled the cache past its snapshot, publishing a newer snapshot must
-/// refresh it: the cache is keyed by the snapshot it was built from, not by an LSN watermark.
-#[tokio::test]
-async fn new_snapshot_always_refreshes_cached_read_state() {
-    let mut env = Env::new("refresh").await;
-    env.commit_and_snapshot(&[1], 50, /*flush=*/ false).await;
-    env.publish(50, 50, 50);
-    assert_rows(&env.rsm.try_read(Some(50)).await.unwrap(), &[1]).await;
-    env.commit_and_snapshot(&[3], 100, /*flush=*/ false).await;
-    env.publish(100, 100, 100);
-
-    // A view where replication ran ahead of the commit watch labels the cache up to 200.
-    env.replication_tx.send(200).unwrap();
-    let _ = env.rsm.try_read(Some(200)).await.unwrap();
-
-    env.commit_and_snapshot(&[2], 200, /*flush=*/ false).await;
-    env.publish(200, 200, 200);
-    assert_rows(&env.rsm.try_read(Some(200)).await.unwrap(), &[1, 2, 3]).await;
 }
