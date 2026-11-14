@@ -253,6 +253,13 @@ impl TableHandler {
                         Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
                             .await;
                     }
+                    TableEvent::ReplicationProgress { lsn } => {
+                        if table_handler_state
+                            .has_no_unpersisted_commit(table.get_persistence_snapshot_lsn())
+                        {
+                            advance_flush_lsn(&event_sync_sender.flush_lsn_tx, lsn);
+                        }
+                    }
                     // ==============================
                     // Bulk ingestion events
                     // ==============================
@@ -262,9 +269,14 @@ impl TableHandler {
                         lsn,
                     } => {
                         if table_handler_state.special_table_state == SpecialTableState::InitialCopy
-                            && !files.is_empty()
                         {
-                            table_handler_state.initial_copy_loaded_files = true;
+                            if !files.is_empty() {
+                                table_handler_state.initial_copy_loaded_files = true;
+                            }
+                        } else {
+                            // A bulk load is a commit at `lsn` that has to be persisted too.
+                            table_handler_state.latest_commit_lsn =
+                                table_handler_state.latest_commit_lsn.max(Some(lsn));
                         }
                         table.batch_ingest(files, storage_config, lsn).await;
                     }

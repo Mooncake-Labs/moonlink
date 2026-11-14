@@ -87,6 +87,11 @@ pub enum PostgresReplicationCommand {
         boundary_lsn: u64,
         rows_copied: bool,
     },
+    /// The table has its initial data (recovered, or initial copy done): from now on it may report
+    /// replication progress as its flush LSN when it has nothing left to persist.
+    TableReady {
+        src_table_id: SrcTableId,
+    },
     /// Start streaming from the slot. Sent once every table that needs changes from the slot is
     /// registered: until then the slot must not advance past changes a table still needs, and
     /// changes for an unregistered table would be dropped.
@@ -992,6 +997,11 @@ impl PostgresConnection {
             !(is_recovery && initial_copy_performed),
             "initial copy should not be performed during recovery"
         );
+        self.cmd_tx
+            .send(PostgresReplicationCommand::TableReady {
+                src_table_id: table_schema.src_table_id,
+            })
+            .await?;
 
         if let Err(e) =
             source_fingerprint::write(table_base_path, mooncake_table_id, &fingerprint).await
@@ -1500,6 +1510,10 @@ async fn apply_command_without_stream(
                 .await;
             true
         }
+        Some(PostgresReplicationCommand::TableReady { src_table_id }) => {
+            sink.mark_ready_for_progress(src_table_id);
+            true
+        }
         Some(PostgresReplicationCommand::StartStreaming) => {
             *streaming_requested = true;
             true
@@ -1678,6 +1692,8 @@ pub async fn run_event_loop(
                     if status_ticks % ERRORED_WARNING_EVERY_TICKS == 1 {
                         warn_about_stalled_mirrors(&sink, &table_status_rxs, slot_hold.load(Ordering::SeqCst));
                     }
+                    // Tables report it back through their flush LSN, in time for a later update.
+                    sink.send_replication_progress();
                     // With no healthy table (every one errored) nothing needs the WAL received so far.
                     let lsn_to_send = if slot_hold.load(Ordering::SeqCst) {
                         PgLsn::from(0)
@@ -1708,6 +1724,9 @@ pub async fn run_event_loop(
                             saved_schemas = stream.as_mut().schemas_snapshot();
                             break;
                         }
+                    }
+                    PostgresReplicationCommand::TableReady { src_table_id } => {
+                        sink.mark_ready_for_progress(src_table_id);
                     }
                     PostgresReplicationCommand::StartStreaming => {}
                     PostgresReplicationCommand::DropTable { src_table_id } => {

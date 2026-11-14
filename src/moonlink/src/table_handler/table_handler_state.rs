@@ -310,6 +310,19 @@ impl TableHandlerState {
         }
     }
 
+    /// Whether every committed change this table has applied is persisted, so the replication slot
+    /// may move past the current replication position for it.
+    pub(crate) fn has_no_unpersisted_commit(&self, persistence_snapshot_lsn: Option<u64>) -> bool {
+        if self.special_table_state != SpecialTableState::Normal {
+            return false;
+        }
+        match (self.latest_commit_lsn, persistence_snapshot_lsn) {
+            (None, _) => true,
+            (Some(commit_lsn), Some(persisted_lsn)) => commit_lsn <= persisted_lsn,
+            (Some(_), None) => false,
+        }
+    }
+
     pub(crate) fn is_in_blocking_state(&self) -> bool {
         self.special_table_state != SpecialTableState::Normal
     }

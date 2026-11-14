@@ -176,4 +176,117 @@ mod tests {
             late.len()
         );
     }
+
+    /// A mirror that stops receiving writes must not hold the replication slot back: once another
+    /// mirror's changes are persisted, the slot moves past the idle mirror's last change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn idle_table_does_not_pin_slot() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+
+        // Idle table gets one write, persisted, then never written again.
+        let idle_lsn = insert_range(&client, "rr_b", 1, 10).await;
+        persist(&backend, TABLE_B, idle_lsn).await;
+
+        // Active table keeps writing and persisting.
+        let mut active_lsn = 0;
+        for round in 0..5 {
+            active_lsn = insert_range(&client, "rr_a", round * 100, round * 100 + 99).await;
+            persist(&backend, TABLE_A, active_lsn).await;
+        }
+        // The user-facing "force a snapshot" on the idle table, too.
+        let now = current_wal_lsn(&client).await;
+        backend
+            .create_snapshot(DATABASE.to_string(), TABLE_B.to_string(), now)
+            .await
+            .unwrap();
+
+        let mut confirmed = 0;
+        for _ in 0..35 {
+            confirmed = confirmed_flush_lsn(&client).await;
+            if confirmed >= active_lsn {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        assert!(
+            confirmed >= active_lsn,
+            "slot pinned by idle table: confirmed_flush_lsn={confirmed:X} idle_iceberg_lsn={idle_lsn:X} active_iceberg_lsn={active_lsn:X}"
+        );
+    }
+
+    /// Wait until the slot is confirmed at `lsn` or later; returns the last confirmed LSN.
+    async fn wait_for_confirmed(client: &Client, lsn: u64) -> u64 {
+        let mut confirmed = 0;
+        for _ in 0..40 {
+            confirmed = confirmed_flush_lsn(client).await;
+            if confirmed >= lsn {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        confirmed
+    }
+
+    /// A mirror of a table that never had a row has nothing to persist and must not pin the slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn empty_table_does_not_pin_slot() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+
+        let active_lsn = insert_range(&client, "rr_a", 1, 100).await;
+        persist(&backend, TABLE_A, active_lsn).await;
+        let confirmed = wait_for_confirmed(&client, active_lsn).await;
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        assert!(
+            confirmed >= active_lsn,
+            "slot pinned by an empty mirror: confirmed_flush_lsn={confirmed:X} active_iceberg_lsn={active_lsn:X}"
+        );
+    }
+
+    /// After a restart, a recovered mirror with nothing new must not pin the slot either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn recovered_idle_table_does_not_pin_slot() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+        let idle_lsn = insert_range(&client, "rr_b", 1, 10).await;
+        persist(&backend, TABLE_B, idle_lsn).await;
+
+        backend
+            .shutdown_connection(&get_database_uri(), false)
+            .await;
+        drop(backend);
+        let base_path = tmp.path().to_str().unwrap().to_string();
+        let backend = create_backend_from_base_path(base_path).await;
+
+        let active_lsn = insert_range(&client, "rr_a", 1, 100).await;
+        persist(&backend, TABLE_A, active_lsn).await;
+        let confirmed = wait_for_confirmed(&client, active_lsn).await;
+        let b = scan_id_counts(
+            &backend,
+            DATABASE.to_string(),
+            TABLE_B.to_string(),
+            active_lsn,
+        )
+        .await;
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        assert_eq!(b, counts(1, 10), "idle mirror after restart");
+        assert!(
+            confirmed >= active_lsn,
+            "slot pinned by a recovered idle mirror: confirmed_flush_lsn={confirmed:X} idle_iceberg_lsn={idle_lsn:X} active_iceberg_lsn={active_lsn:X}"
+        );
+    }
 }

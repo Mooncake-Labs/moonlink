@@ -6,8 +6,8 @@ use crate::pg_replicate::{
 use moonlink::TableEvent;
 use moonlink::{CommitState, ReplicationState};
 use postgres_replication::protocol::Column as ReplicationColumn;
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
@@ -65,6 +65,8 @@ pub struct Sink {
     copy_failures: HashMap<SrcTableId, Vec<(u64, String)>>,
     /// Each table's own replication LSN, which its readers use; see `track_table_replication`.
     table_replication_states: HashMap<SrcTableId, Arc<ReplicationState>>,
+    /// Tables that may receive replication progress (recovered, or past their initial copy).
+    progress_ready_tables: HashSet<SrcTableId>,
 }
 
 impl Sink {
@@ -109,6 +111,24 @@ impl Sink {
             copy_boundaries: HashMap::new(),
             copy_failures: HashMap::new(),
             table_replication_states: HashMap::new(),
+            progress_ready_tables: HashSet::new(),
+        }
+    }
+
+    /// From now on, send the table replication progress. Until its initial copy is done, a new
+    /// table must keep holding the slot back however little it has applied.
+    pub fn mark_ready_for_progress(&mut self, src_table_id: SrcTableId) {
+        self.progress_ready_tables.insert(src_table_id);
+    }
+
+    /// Tell every ready table that all changes up to the current replication LSN have been
+    /// delivered to it. Skipped for a table whose channel is full; the next round catches up.
+    pub fn send_replication_progress(&self) {
+        let lsn = self.replication_state.now();
+        for src_table_id in &self.progress_ready_tables {
+            if let Some(sender) = self.event_senders.get(src_table_id) {
+                let _ = sender.try_send(TableEvent::ReplicationProgress { lsn });
+            }
         }
     }
 
@@ -322,6 +342,7 @@ impl Sink {
         self.copy_boundaries.remove(&src_table_id);
         self.copy_failures.remove(&src_table_id);
         self.table_replication_states.remove(&src_table_id);
+        self.progress_ready_tables.remove(&src_table_id);
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;
