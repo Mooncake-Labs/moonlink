@@ -2458,6 +2458,9 @@ mod lookup_key_tests;
 mod compaction_group_tests;
 
 #[cfg(test)]
+mod size_tiered_compaction_tests;
+
+#[cfg(test)]
 mod catalog_robustness_tests;
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 /// This file contains maintenance related features for mooncake snapshot.
+use crate::storage::compaction::size_tiering::{pick_similar_sized, SizedCandidate};
 use crate::storage::compaction::table_compaction::SingleFileToCompact;
 use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
@@ -134,11 +135,22 @@ impl SnapshotTableState {
             );
         }
 
-        let chosen_groups = choose_compaction_groups(
-            eligible_groups,
-            min_data_compaction_file_num_threshold,
-            max_data_compaction_file_num_threshold,
-        );
+        // Background compaction only merges groups of similar size, so earlier outputs are not
+        // rewritten again with every few new small files; explicit requests merge everything
+        // eligible.
+        let chosen_groups = if matches!(data_compaction_option, MaintenanceOption::BestEffort(_)) {
+            choose_similar_sized_compaction_groups(
+                eligible_groups,
+                min_data_compaction_file_num_threshold,
+                max_data_compaction_file_num_threshold,
+            )
+        } else {
+            choose_compaction_groups(
+                eligible_groups,
+                min_data_compaction_file_num_threshold,
+                max_data_compaction_file_num_threshold,
+            )
+        };
         let chosen_file_count: usize = chosen_groups.iter().map(|g| g.files.len()).sum();
         if chosen_file_count < min_data_compaction_file_num_threshold {
             // There're two possibilities here:
@@ -355,6 +367,26 @@ impl SnapshotTableState {
             assert!(file_indices_to_merge.insert(cur_file_index.clone()));
         }
 
+        // Background index merges only combine indices of similar size, so a merged index is not
+        // rewritten again with every few new small ones.
+        if matches!(index_merge_option, MaintenanceOption::BestEffort(_)) {
+            let candidates = file_indices_to_merge
+                .into_iter()
+                .map(|file_index| SizedCandidate {
+                    bytes: file_index.get_index_blocks_size(),
+                    weight: 1,
+                    item: file_index,
+                })
+                .collect();
+            file_indices_to_merge = pick_similar_sized(
+                candidates,
+                min_index_merge_file_num_threshold,
+                max_index_merge_file_num_threshold,
+            )
+            .into_iter()
+            .collect();
+        }
+
         // To avoid too many small IO operations, only attempt an index merge when accumulated small indices exceeds the threshold.
         if file_indices_to_merge.len() >= min_index_merge_file_num_threshold {
             let payload = FileIndiceMergePayload {
@@ -512,6 +544,27 @@ pub(crate) struct CompactionGroupFile {
 pub(crate) struct CompactionGroup {
     pub(crate) files: Vec<CompactionGroupFile>,
     pub(crate) file_indices: Vec<FileIndex>,
+}
+
+/// Like [`choose_compaction_groups`], restricted to groups of similar live size.
+pub(crate) fn choose_similar_sized_compaction_groups(
+    eligible: Vec<CompactionGroup>,
+    min_files: usize,
+    max_files: usize,
+) -> Vec<CompactionGroup> {
+    let candidates = eligible
+        .into_iter()
+        .map(|group| SizedCandidate {
+            bytes: group
+                .files
+                .iter()
+                .map(|f| (f.file_size * (100 - f.deletion_percentage.min(100)) / 100) as u64)
+                .sum(),
+            weight: group.files.len(),
+            item: group,
+        })
+        .collect();
+    pick_similar_sized(candidates, min_files, max_files)
 }
 
 /// Pick whole groups to compact, up to `max_files` data files in total. Returns an empty list if

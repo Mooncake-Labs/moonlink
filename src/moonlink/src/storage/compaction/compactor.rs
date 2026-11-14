@@ -275,11 +275,13 @@ impl CompactionBuilder {
             old_start_row_idx += cur_num_rows;
         }
 
-        // Bytes to write already reached target compacted data file size, flush and close.
-        if self.cur_arrow_writer.is_some()
-            && self.cur_arrow_writer.as_ref().unwrap().memory_size()
+        // Bytes to write already reached target compacted data file size, flush and close. Count
+        // the row groups already written, not only the one in progress.
+        let reached_final_size = self.cur_arrow_writer.as_ref().is_some_and(|writer| {
+            writer.bytes_written() + writer.in_progress_size()
                 >= self.file_params.data_file_final_size as usize
-        {
+        });
+        if reached_final_size {
             self.flush_arrow_writer().await?;
         }
 
