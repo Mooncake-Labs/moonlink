@@ -111,7 +111,7 @@ impl UnpersistedRecords {
     pub(crate) fn get_unpersisted_file_indices_set(&self) -> HashSet<GlobalIndex> {
         let expected_len = self.new_file_indices.len()
             + self.merged_file_indices_to_add.len()
-            + self.compacted_data_files_to_add.len();
+            + self.compacted_file_indices_to_add.len();
         let mut unpersisted_file_indices = HashSet::new();
         unpersisted_file_indices.extend(self.new_file_indices.iter().cloned());
         unpersisted_file_indices.extend(self.merged_file_indices_to_add.iter().cloned());

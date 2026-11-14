@@ -2062,3 +2062,6 @@ mod stream_delete_tests;
 
 #[cfg(test)]
 mod lookup_key_tests;
+
+#[cfg(test)]
+mod compaction_group_tests;

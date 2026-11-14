@@ -113,14 +113,6 @@ impl CompactionBuilder {
         get_unique_file_id_for_flush(cur_table_auto_incr_id, cur_file_idx)
     }
 
-    /// Util function to get the index of file after compaction, by the given [`file_id`].
-    fn get_file_index_after_compaction(start_table_auto_incr_id: u64, file_id: FileId) -> usize {
-        let compacted_file_idx = (file_id.0
-            - storage_utils::NUM_FILES_PER_FLUSH * start_table_auto_incr_id)
-            % storage_utils::NUM_FILES_PER_FLUSH;
-        compacted_file_idx as usize
-    }
-
     /// Util function to create a new data file.
     fn create_new_data_file(&self) -> MooncakeDataFileRef {
         assert!(self.cur_new_data_file.is_none());
@@ -357,10 +349,38 @@ impl CompactionBuilder {
                 None
             };
 
-        let start_table_auto_incr_id = self.file_params.table_auto_incr_ids.start as u64;
+        // Every input index must only cover files being compacted; entries of any other file
+        // would be dropped from the rewritten index.
+        let input_files: HashSet<FileId> = self
+            .compaction_payload
+            .disk_files
+            .iter()
+            .map(|f| f.file_id.file_id)
+            .collect();
+        if let Some(file) = old_file_indices
+            .iter()
+            .flat_map(|index| index.files.iter())
+            .find(|f| !input_files.contains(&f.file_id()))
+        {
+            return Err(crate::Error::from(iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                format!(
+                    "file index covers data file {} which is not part of the compaction",
+                    file.file_path()
+                ),
+            )));
+        }
+
+        // Segment index = position of the data file in the new index's file list.
+        let new_data_files = self.get_new_compacted_data_files();
+        let seg_idx_by_file_id: HashMap<FileId, usize> = new_data_files
+            .iter()
+            .enumerate()
+            .map(|(idx, file)| (file.file_id(), idx))
+            .collect();
         let get_seg_idx = |new_record_location: RecordLocation| -> usize /*seg_idx*/ {
             let file_id = new_record_location.get_file_id().unwrap();
-            Self::get_file_index_after_compaction(start_table_auto_incr_id, file_id)
+            seg_idx_by_file_id[&file_id]
         };
 
         let file_id_for_index_file = self.get_next_file_id();
@@ -373,7 +393,7 @@ impl CompactionBuilder {
                 /*num_rows=*/ old_to_new_remap.len() as u32,
                 /*file_id=*/ file_id_for_index_file,
                 old_file_indices,
-                /*new_data_files=*/ self.get_new_compacted_data_files(),
+                new_data_files,
                 get_remapped_record_location,
                 get_seg_idx,
             )
