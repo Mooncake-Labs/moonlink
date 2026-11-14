@@ -14,6 +14,8 @@ use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
+#[cfg(feature = "test-utils")]
+pub use recovery_utils::set_recovery_delay_between_tables_for_test;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

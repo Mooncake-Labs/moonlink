@@ -22,6 +22,20 @@ pub(crate) struct BackendAttributes {
     pub(crate) temp_files_dir: String,
 }
 
+/// Delay before recovering each table after the first, so tests can widen the window in which
+/// some tables are registered and others are not.
+#[cfg(feature = "test-utils")]
+static RECOVERY_DELAY_BETWEEN_TABLES_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "test-utils")]
+pub fn set_recovery_delay_between_tables_for_test(delay: std::time::Duration) {
+    RECOVERY_DELAY_BETWEEN_TABLES_MS.store(
+        delay.as_millis() as u64,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
 /// Recover the given table.
 async fn recover_table(
     mut metadata_entry: TableMetadataEntry,
@@ -90,7 +104,14 @@ pub(super) async fn recover_all_tables(
     // No slot advances until every table is restored or pending.
     replication_manager.set_hold_all_slots(true);
     let mut pending = Vec::new();
-    for mut cur_metadata_entry in table_metadata_entries.into_iter() {
+    for (index, mut cur_metadata_entry) in table_metadata_entries.into_iter().enumerate() {
+        #[cfg(feature = "test-utils")]
+        if index > 0 {
+            let delay = RECOVERY_DELAY_BETWEEN_TABLES_MS.load(std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        #[cfg(not(feature = "test-utils"))]
+        let _ = index;
         // Update certain attributes, which are not persisted before crash.
         cur_metadata_entry
             .moonlink_table_config
@@ -145,6 +166,8 @@ pub(super) async fn recover_all_tables(
     }
     replication_manager.set_hold_all_slots(false);
 
+    // Stream only now that every recovered mirror is registered: until then the slot must not be
+    // acknowledged past changes a mirror still has to replay.
     for uri in unique_uris.into_iter() {
         if let Err(e) = replication_manager.start_replication(&uri).await {
             warn!(error = ?e, "no replication started for a source with no recovered mirror");
@@ -276,6 +299,14 @@ pub(crate) fn retry_pending_recoveries(
                     Ok(()) => {
                         info!(%table, "mirror restored");
                         manager.end_retry(retry.mooncake_table_id, None).await;
+                        // At startup no mirror of this source may have been restored, so nothing
+                        // started streaming yet.
+                        if let Err(e) = manager
+                            .start_replication(&retry.metadata_entry.src_table_uri)
+                            .await
+                        {
+                            warn!(error = ?e, %table, "failed to start replication");
+                        }
                     }
                     Err(e) if is_transient(&e) && started.elapsed() < PENDING_RECOVERY_LIMIT => {
                         warn!(error = ?e, %table, "mirror cannot be restored yet; retrying");

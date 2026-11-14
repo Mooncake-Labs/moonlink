@@ -187,6 +187,11 @@ impl ReplicationConnection {
         Ok(())
     }
 
+    /// Let the replication task stream from the slot; tables added before this are all in place.
+    pub async fn start_streaming(&self) -> Result<()> {
+        self.source.start_streaming().await
+    }
+
     /// Add a table for replication
     pub async fn add_table_replication(
         &mut self,

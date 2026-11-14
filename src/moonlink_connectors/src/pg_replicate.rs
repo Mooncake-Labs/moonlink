@@ -71,7 +71,9 @@ pub enum PostgresReplicationCommand {
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
         table_status_rx: watch::Receiver<TableStatus>,
-        /// Restart the stream once the table is registered, so postgres replays from the slot.
+        /// The table was recovered and needs its changes after its snapshot from the slot. Before
+        /// streaming starts that needs nothing more; a table registered later (a recovery that is
+        /// retried) restarts the stream so postgres replays from the slot.
         replay_from_slot: bool,
         ready_tx: oneshot::Sender<()>,
     },
@@ -84,6 +86,10 @@ pub enum PostgresReplicationCommand {
         boundary_lsn: u64,
         rows_copied: bool,
     },
+    /// Start streaming from the slot. Sent once every table that needs changes from the slot is
+    /// registered: until then the slot must not advance past changes a table still needs, and
+    /// changes for an unregistered table would be dropped.
+    StartStreaming,
     Shutdown,
 }
 
@@ -726,6 +732,14 @@ impl PostgresConnection {
         Ok(ready_rx)
     }
 
+    /// Let the replication loop start streaming; see [`PostgresReplicationCommand::StartStreaming`].
+    pub async fn start_streaming(&self) -> Result<()> {
+        self.cmd_tx
+            .send(PostgresReplicationCommand::StartStreaming)
+            .await?;
+        Ok(())
+    }
+
     /// Drop table from PostgreSQL replication
     pub async fn drop_table_from_replication(&self, src_table_id: SrcTableId) -> Result<()> {
         self.registered_tables.lock().unwrap().remove(&src_table_id);
@@ -933,16 +947,17 @@ impl PostgresConnection {
                     .take()
                     .expect("flush_lsn_rx is None"),
                 table_resources.table_event_manager.subscribe_table_status(),
-                // A recovered table's changes after its iceberg snapshot may already have been
-                // streamed (and dropped) before it was registered.
-                /*replay_from_slot=*/
-                is_recovery,
+                /*replay_from_slot=*/ is_recovery,
             )
             .await?;
 
         // Wait until the event loop has registered sink and schema
         if let Err(e) = ready_rx.await {
             error!(error = ?e, "failed to add table to replication");
+        }
+        // Recovery starts streaming once every recovered table is registered.
+        if !is_recovery {
+            self.start_streaming().await?;
         }
 
         // Perform initial copy
@@ -1429,6 +1444,7 @@ fn next_backoff(current: Duration) -> Duration {
 /// stream. Returns false when the loop must stop.
 async fn apply_command_without_stream(
     cmd: Option<PostgresReplicationCommand>,
+    streaming_requested: &mut bool,
     sink: &mut Sink,
     flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
     table_status_rxs: &mut HashMap<SrcTableId, watch::Receiver<TableStatus>>,
@@ -1478,6 +1494,10 @@ async fn apply_command_without_stream(
                 .await;
             true
         }
+        Some(PostgresReplicationCommand::StartStreaming) => {
+            *streaming_requested = true;
+            true
+        }
         Some(PostgresReplicationCommand::Shutdown) | None => false,
     }
 }
@@ -1487,6 +1507,7 @@ async fn apply_command_without_stream(
 async fn wait_applying_commands(
     delay: Duration,
     cmd_rx: &mut mpsc::Receiver<PostgresReplicationCommand>,
+    streaming_requested: &mut bool,
     sink: &mut Sink,
     flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
     table_status_rxs: &mut HashMap<SrcTableId, watch::Receiver<TableStatus>>,
@@ -1498,7 +1519,7 @@ async fn wait_applying_commands(
         tokio::select! {
             _ = &mut sleep => return true,
             cmd = cmd_rx.recv() => {
-                if !apply_command_without_stream(cmd, sink, flush_lsn_rxs, table_status_rxs, saved_schemas).await {
+                if !apply_command_without_stream(cmd, streaming_requested, sink, flush_lsn_rxs, table_status_rxs, saved_schemas).await {
                     return false;
                 }
             }
@@ -1520,16 +1541,18 @@ pub async fn run_event_loop(
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
     let mut table_status_rxs: HashMap<SrcTableId, watch::Receiver<TableStatus>> = HashMap::new();
     let mut last_seen_end_lsn: Option<PgLsn> = None;
+    let mut streaming_requested = false;
 
     let mut current_backoff = Duration::from_secs(0);
 
     'outer: loop {
-        // With no table registered every change would be dropped, including what a recovering
-        // table needs replayed from the slot, so wait for the first table before streaming.
-        while flush_lsn_rxs.is_empty() {
+        // Stream only once asked to (after recovery has registered every recovered table) and while
+        // some table is registered: with none, every change would be dropped.
+        while !streaming_requested || flush_lsn_rxs.is_empty() {
             let cmd = cmd_rx.recv().await;
             if !apply_command_without_stream(
                 cmd,
+                &mut streaming_requested,
                 &mut sink,
                 &mut flush_lsn_rxs,
                 &mut table_status_rxs,
@@ -1559,6 +1582,7 @@ pub async fn run_event_loop(
                 if !wait_applying_commands(
                     current_backoff,
                     &mut cmd_rx,
+                    &mut streaming_requested,
                     &mut sink,
                     &mut flush_lsn_rxs,
                     &mut table_status_rxs,
@@ -1591,6 +1615,7 @@ pub async fn run_event_loop(
                 if !wait_applying_commands(
                     current_backoff,
                     &mut cmd_rx,
+                    &mut streaming_requested,
                     &mut sink,
                     &mut flush_lsn_rxs,
                     &mut table_status_rxs,
@@ -1677,6 +1702,7 @@ pub async fn run_event_loop(
                             break;
                         }
                     }
+                    PostgresReplicationCommand::StartStreaming => {}
                     PostgresReplicationCommand::DropTable { src_table_id } => {
                         sink.drop_table(src_table_id);
                         flush_lsn_rxs.remove(&src_table_id);
@@ -1774,6 +1800,7 @@ pub async fn run_event_loop(
         if !wait_applying_commands(
             current_backoff,
             &mut cmd_rx,
+            &mut streaming_requested,
             &mut sink,
             &mut flush_lsn_rxs,
             &mut table_status_rxs,

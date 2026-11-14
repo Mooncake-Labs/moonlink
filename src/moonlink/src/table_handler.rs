@@ -74,6 +74,13 @@ impl TableHandler {
         // Create channel for events
         let (event_sender, event_receiver) = mpsc::channel(MAX_BUFFERED_TABLE_EVENTS);
 
+        // A recovered table has persisted everything up to its snapshot; report that before the
+        // replication slot is first acknowledged, so the slot never moves past what it still needs.
+        advance_flush_lsn(
+            &event_sync_sender.flush_lsn_tx,
+            table.get_persistence_snapshot_lsn().unwrap_or(0),
+        );
+
         // Register channel for internal control events.
         table.register_table_notify(event_sender.clone()).await;
         // Register channel for mooncake table events replay.
@@ -668,10 +675,10 @@ impl TableHandler {
 
                                 // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
                                 let iceberg_flush_lsn = snapshot_res.flush_lsn;
-                                event_sync_sender
-                                    .flush_lsn_tx
-                                    .send(iceberg_flush_lsn)
-                                    .unwrap();
+                                advance_flush_lsn(
+                                    &event_sync_sender.flush_lsn_tx,
+                                    iceberg_flush_lsn,
+                                );
                                 table.set_persistence_snapshot_res(snapshot_res);
                                 table_handler_state.persistence_snapshot_result_consumed = false;
 
@@ -1184,6 +1191,18 @@ impl TableHandler {
             }
         }
     }
+}
+
+/// The flush LSN feeds the replication slot acknowledgement, so it only moves forward.
+fn advance_flush_lsn(flush_lsn_tx: &watch::Sender<u64>, lsn: u64) {
+    flush_lsn_tx.send_if_modified(|current| {
+        if lsn > *current {
+            *current = lsn;
+            true
+        } else {
+            false
+        }
+    });
 }
 
 #[cfg(test)]
