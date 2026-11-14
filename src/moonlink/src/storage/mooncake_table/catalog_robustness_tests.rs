@@ -119,12 +119,11 @@ async fn test_schema_change_does_not_overwrite_current_metadata() {
     table.force_empty_persistence_payload();
     create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
     let after = metadata_versions(&context);
-    // Every commit (data + schema) adds new versions; none is rewritten.
-    assert!(
-        after.len() >= before.len() + 3,
+    // Three commits (data, schema, forced) write three new versions; none rewrites an existing
+    // one. (Old versions are garbage collected, so compare the newest version number.)
+    assert_eq!(
+        after.last().unwrap(),
+        &(before.last().unwrap() + 3),
         "before {before:?}, after {after:?}"
     );
-    let distinct: std::collections::HashSet<_> = after.iter().collect();
-    assert_eq!(distinct.len(), after.len());
-    assert_eq!(after, (0..after.len() as u32).collect::<Vec<_>>());
 }

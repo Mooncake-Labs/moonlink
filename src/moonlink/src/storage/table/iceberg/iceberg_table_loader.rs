@@ -52,6 +52,11 @@ impl IcebergTableManager {
         let file_index_blob =
             FileIndexBlob::load_from_index_blob(file_io.clone(), entry.data_file()).await?;
         let mut cur_iceberg_file_index = file_index_blob.file_index;
+        let index_block_paths: Vec<String> = cur_iceberg_file_index
+            .index_block_files
+            .iter()
+            .map(|b| b.filepath.clone())
+            .collect();
         let table_id = TableId(self.mooncake_table_metadata.table_id);
         let mooncake_file_index = cur_iceberg_file_index
             .as_mooncake_file_index(
@@ -67,6 +72,8 @@ impl IcebergTableManager {
             mooncake_file_index.clone(),
             entry.data_file().file_path().to_string(),
         );
+        self.persisted_index_block_files
+            .insert(entry.data_file().file_path().to_string(), index_block_paths);
 
         Ok(Some(mooncake_file_index))
     }

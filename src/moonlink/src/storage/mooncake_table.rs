@@ -58,6 +58,7 @@ use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::table::common::table_manager::{PersistenceFileParams, TableManager};
+use crate::storage::table::iceberg::gc::{IcebergGcContext, LiveReadSeqProvider};
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::table::iceberg::puffin_utils::PuffinBlobRef;
@@ -541,6 +542,11 @@ pub struct MooncakeTable {
     /// A failed persistence task leaves the table manager here (the success path returns it in
     /// the result), so the table can retry instead of losing it.
     failed_persistence_table_manager: Arc<std::sync::Mutex<Option<Box<dyn TableManager>>>>,
+
+    /// Mooncake snapshot sequence (shared with the snapshot state), bumped by every snapshot.
+    snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Shared with the iceberg table manager for garbage collection.
+    gc_context: Option<Arc<IcebergGcContext>>,
 }
 
 /// Deletes a table's iceberg table and local files without the `MooncakeTable` itself; used when
@@ -627,37 +633,60 @@ impl MooncakeTable {
             path: base_path,
         });
         let iceberg_table_config_for_factory = iceberg_table_config.clone();
-        let iceberg_table_manager = Box::new(
-            IcebergTableManager::new(
-                metadata.clone(),
-                object_storage_cache.clone(),
-                table_filesystem_accessor.clone(),
-                iceberg_table_config,
-            )
-            .await?,
-        );
+        let gc_context = Arc::new(IcebergGcContext::default());
+        let mut iceberg_table_manager = IcebergTableManager::new(
+            metadata.clone(),
+            object_storage_cache.clone(),
+            table_filesystem_accessor.clone(),
+            iceberg_table_config,
+        )
+        .await?;
+        iceberg_table_manager.gc_context = Some(gc_context.clone());
+        let iceberg_table_manager = Box::new(iceberg_table_manager);
 
         let factory = IcebergTableManagerFactory {
             iceberg_table_config: iceberg_table_config_for_factory,
             object_storage_cache: object_storage_cache.clone(),
             filesystem_accessor: table_filesystem_accessor.clone(),
         };
-        let mut table = Self::new_with_table_manager(
+        let mut table = Self::new_with_table_manager_and_snapshot_seq(
             metadata,
             iceberg_table_manager,
             object_storage_cache,
             table_filesystem_accessor,
+            // The table, its snapshot state and the table manager's GC share one counter.
+            gc_context.snapshot_seq.clone(),
         )
         .await?;
         table.table_manager_factory = Some(factory);
+        table.gc_context = Some(gc_context);
         Ok(table)
     }
 
+    /// Build a table around an injected table manager (tests use mocks).
+    #[cfg(test)]
     pub(crate) async fn new_with_table_manager(
+        table_metadata: Arc<TableMetadata>,
+        table_manager: Box<dyn TableManager>,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    ) -> Result<Self> {
+        Self::new_with_table_manager_and_snapshot_seq(
+            table_metadata,
+            table_manager,
+            object_storage_cache,
+            table_filesystem_accessor,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        )
+        .await
+    }
+
+    async fn new_with_table_manager_and_snapshot_seq(
         table_metadata: Arc<TableMetadata>,
         mut table_manager: Box<dyn TableManager>,
         object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Self> {
         table_metadata.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
@@ -720,8 +749,11 @@ impl MooncakeTable {
             table_manager_factory: None,
             in_flight_tasks: InFlightTasks::default(),
             failed_persistence_table_manager: Arc::new(std::sync::Mutex::new(None)),
+            snapshot_seq,
+            gc_context: None,
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
         };
+        table.snapshot.try_write().unwrap().snapshot_seq = table.snapshot_seq.clone();
         if let Some(index_swap) = rebuilt_file_indices {
             // Applied by the first mooncake snapshot (before any deletion is resolved) and
             // persisted by the first iceberg commit, which also stamps the new key version.
@@ -1372,6 +1404,23 @@ impl MooncakeTable {
     /// Number of background tasks that may still read or write table files.
     pub(crate) fn in_flight_background_tasks(&self) -> usize {
         self.in_flight_tasks.count()
+    }
+
+    /// Mooncake snapshot sequence: incremented after every mooncake snapshot (including ones that
+    /// only apply compaction or index merge results). Read without locking; a read state should
+    /// record the value it was built from while holding the snapshot read lock.
+    pub fn snapshot_seq_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.snapshot_seq.clone()
+    }
+
+    /// Let garbage collection know which snapshot sequences live readers still use. Without a
+    /// provider, superseded data files are kept for a grace period before deletion.
+    // Installed by the read path.
+    #[allow(dead_code)]
+    pub(crate) fn set_live_read_seq_provider(&self, provider: LiveReadSeqProvider) {
+        if let Some(gc_context) = &self.gc_context {
+            *gc_context.live_read_seq_provider.lock().unwrap() = Some(provider);
+        }
     }
 
     /// Everything needed to drop this table later without the table itself.

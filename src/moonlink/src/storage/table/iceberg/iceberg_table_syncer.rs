@@ -652,11 +652,18 @@ impl IcebergTableManager {
         for cur_res in file_index_import_results.into_iter() {
             let expected_new_count =
                 local_index_file_to_remote.len() + cur_res.local_index_file_to_remote.len();
+            let remote_index_blocks: Vec<String> = cur_res
+                .local_index_file_to_remote
+                .values()
+                .cloned()
+                .collect();
             local_index_file_to_remote.extend(cur_res.local_index_file_to_remote);
             let actual_new_count = local_index_file_to_remote.len();
             // Assert there's duplicate local index file.
             assert_eq!(expected_new_count, actual_new_count);
 
+            self.persisted_index_block_files
+                .insert(cur_res.puffin_filepath.clone(), remote_index_blocks);
             assert!(self
                 .persisted_file_indices
                 .insert(cur_res.mooncake_file_index, cur_res.puffin_filepath.clone())
@@ -696,7 +703,11 @@ impl IcebergTableManager {
         self.catalog.set_index_puffin_files_to_remove(
             file_indices_to_remove
                 .iter()
-                .map(|cur_index| self.persisted_file_indices.remove(cur_index).unwrap())
+                .map(|cur_index| {
+                    let puffin_filepath = self.persisted_file_indices.remove(cur_index).unwrap();
+                    self.persisted_index_block_files.remove(&puffin_filepath);
+                    puffin_filepath
+                })
                 .collect::<HashSet<String>>(),
         );
 

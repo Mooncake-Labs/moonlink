@@ -6,6 +6,7 @@ pub(crate) mod deletion_vector;
 mod deletion_vector_manifest_manager;
 pub(crate) mod file_catalog;
 mod file_index_manifest_manager;
+pub(crate) mod gc;
 mod iceberg_schema_manager;
 pub mod iceberg_snapshot_fetcher;
 pub(crate) mod iceberg_table_config;

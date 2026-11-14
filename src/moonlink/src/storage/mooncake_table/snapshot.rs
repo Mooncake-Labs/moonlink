@@ -92,6 +92,10 @@ pub(crate) struct SnapshotTableState {
 
     /// Batch ID counter for non-streaming operations
     pub(super) non_streaming_batch_id_counter: Arc<BatchIdCounter>,
+
+    /// Mooncake snapshot sequence, incremented at the end of every snapshot update; shared with
+    /// the owning table (and its garbage collection) through an `Arc`.
+    pub(crate) snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A committed deletion that found no row to delete.
@@ -182,6 +186,7 @@ impl SnapshotTableState {
 
         let table_config = metadata.config.clone();
         Ok(Self {
+            snapshot_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             iceberg_warehouse_location,
             table_instance_id: uuid::Uuid::new_v4(),
             mooncake_table_metadata: metadata.clone(),
@@ -666,6 +671,10 @@ impl SnapshotTableState {
         {
             self.assert_current_snapshot_consistent().await;
         }
+
+        // Published after every state change of this update (readers hold the read lock).
+        self.snapshot_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         MooncakeSnapshotOutput {
             uuid: opt.uuid,

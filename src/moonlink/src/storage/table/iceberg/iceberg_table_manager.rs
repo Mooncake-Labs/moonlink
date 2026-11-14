@@ -71,11 +71,21 @@ pub struct IcebergTableManager {
     /// Maps from mooncake file index to remote puffin filepath.
     pub(crate) persisted_file_indices: HashMap<MooncakeFileIndex, String>,
 
+    /// Remote index block files of each persisted index puffin (keyed by puffin path); the
+    /// in-memory file indices refer to cache copies instead.
+    pub(crate) persisted_index_block_files: HashMap<String, Vec<String>>,
+
     /// Maps from remote data file path to its file id.
     pub(crate) remote_data_file_to_file_id: HashMap<String, FileId>,
 
     /// Iceberg persistence stats.
     pub(crate) persistence_stats: Arc<IcebergPersistenceStats>,
+
+    /// Set for tables owned by a mooncake table; enables garbage collection.
+    pub(crate) gc_context: Option<Arc<crate::storage::table::iceberg::gc::IcebergGcContext>>,
+    /// Data-directory files no longer referenced, with when / at which mooncake snapshot
+    /// sequence they were first seen unreferenced.
+    pub(crate) gc_unreferenced_since: HashMap<String, (std::time::Instant, u64)>,
 }
 
 impl IcebergTableManager {
@@ -99,8 +109,11 @@ impl IcebergTableManager {
             filesystem_accessor,
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
+            persisted_index_block_files: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
             persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
+            gc_context: None,
+            gc_unreferenced_since: HashMap::new(),
         })
     }
 
@@ -128,8 +141,11 @@ impl IcebergTableManager {
             filesystem_accessor,
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
+            persisted_index_block_files: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
             persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
+            gc_context: None,
+            gc_unreferenced_since: HashMap::new(),
         })
     }
 
@@ -201,7 +217,13 @@ impl TableManager for IcebergTableManager {
             .sync_snapshot_and_evolve_schema(snapshot_payload, file_params)
             .await
         {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                // Best effort: a failed cleanup only leaves files behind for the next run.
+                if let Err(e) = self.collect_garbage(/*at_load=*/ false).await {
+                    tracing::warn!(error = ?e, "iceberg garbage collection failed");
+                }
+                Ok(result)
+            }
             Err(err) => Err(self.recover_after_failed_sync(backup, err).await),
         }
     }
@@ -212,6 +234,10 @@ impl TableManager for IcebergTableManager {
             IcebergTableRecoveryStats::new(self.mooncake_table_metadata.mooncake_table_id.clone());
         let _guard = recovery_stats.start();
         let snapshot = self.load_snapshot_from_table_impl().await?;
+        // No reader exists yet: remove everything left over by earlier runs.
+        if let Err(e) = self.collect_garbage(/*at_load=*/ true).await {
+            tracing::warn!(error = ?e, "iceberg garbage collection at load failed");
+        }
         Ok(snapshot)
     }
 
@@ -226,6 +252,7 @@ impl TableManager for IcebergTableManager {
         self.snapshot_loaded = false;
         self.persisted_data_files.clear();
         self.persisted_file_indices.clear();
+        self.persisted_index_block_files.clear();
         self.remote_data_file_to_file_id.clear();
 
         Ok(())
@@ -236,6 +263,7 @@ impl TableManager for IcebergTableManager {
 struct SyncStateBackup {
     persisted_data_files: HashMap<FileId, DataFileEntry>,
     persisted_file_indices: HashMap<MooncakeFileIndex, String>,
+    persisted_index_block_files: HashMap<String, Vec<String>>,
     remote_data_file_to_file_id: HashMap<String, FileId>,
     current_snapshot_id: Option<i64>,
 }
@@ -245,6 +273,7 @@ impl IcebergTableManager {
         SyncStateBackup {
             persisted_data_files: self.persisted_data_files.clone(),
             persisted_file_indices: self.persisted_file_indices.clone(),
+            persisted_index_block_files: self.persisted_index_block_files.clone(),
             remote_data_file_to_file_id: self.remote_data_file_to_file_id.clone(),
             current_snapshot_id: self
                 .iceberg_table
@@ -259,6 +288,7 @@ impl IcebergTableManager {
     async fn recover_after_failed_sync(&mut self, backup: SyncStateBackup, err: Error) -> Error {
         self.persisted_data_files = backup.persisted_data_files;
         self.persisted_file_indices = backup.persisted_file_indices;
+        self.persisted_index_block_files = backup.persisted_index_block_files;
         self.remote_data_file_to_file_id = backup.remote_data_file_to_file_id;
         self.catalog.clear_puffin_metadata();
         match utils::get_table_if_exists(
