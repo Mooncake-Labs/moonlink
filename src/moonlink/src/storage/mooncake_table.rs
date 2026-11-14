@@ -2065,3 +2065,6 @@ mod lookup_key_tests;
 
 #[cfg(test)]
 mod compaction_group_tests;
+
+#[cfg(test)]
+mod catalog_robustness_tests;

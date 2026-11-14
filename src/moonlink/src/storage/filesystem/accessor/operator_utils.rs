@@ -12,6 +12,10 @@ use opendal::layers::TimeoutLayer;
 use opendal::services;
 use opendal::Operator;
 
+/// Temp-file directory for atomic writes, created under the filesystem root. Hidden (dot) entries
+/// are never treated as namespaces or tables.
+pub(crate) const DEFAULT_ATOMIC_WRITE_SUBDIR: &str = ".moonlink_atomic_tmp";
+
 fn create_opendal_operator_impl(storage_config: &StorageConfig) -> Result<Operator> {
     match storage_config {
         #[cfg(feature = "storage-fs")]
@@ -19,10 +23,18 @@ fn create_opendal_operator_impl(storage_config: &StorageConfig) -> Result<Operat
             root_directory,
             atomic_write_dir,
         } => {
-            let mut builder = services::Fs::default().root(root_directory);
-            if let Some(atomic_write_dir) = atomic_write_dir {
-                builder = builder.atomic_write_dir(atomic_write_dir);
-            }
+            // Always write through a temp file + rename, so a crash or a full disk never leaves a
+            // truncated metadata file or version hint behind. The default temp directory lives
+            // under the root, i.e. on the same filesystem, which keeps the rename atomic.
+            let atomic_write_dir = atomic_write_dir.clone().unwrap_or_else(|| {
+                std::path::Path::new(root_directory)
+                    .join(DEFAULT_ATOMIC_WRITE_SUBDIR)
+                    .to_string_lossy()
+                    .to_string()
+            });
+            let builder = services::Fs::default()
+                .root(root_directory)
+                .atomic_write_dir(&atomic_write_dir);
             Ok(Operator::new(builder)?.finish())
         }
         #[cfg(feature = "storage-gcs")]

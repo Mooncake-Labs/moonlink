@@ -177,6 +177,22 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(dirs)
     }
 
+    async fn list_direct_files(&self, folder: &str) -> Result<Vec<String>> {
+        let sanitized_folder = self.sanitize_path(folder);
+        let prefix = format!("{sanitized_folder}/");
+        let mut files = Vec::new();
+        for cur_entry in self.get_operator().await?.list(&prefix).await?.iter() {
+            if cur_entry.path().ends_with('/') {
+                continue;
+            }
+            let file_name = cur_entry.path().trim_start_matches(&prefix).to_string();
+            if !file_name.is_empty() && !file_name.contains('/') {
+                files.push(file_name);
+            }
+        }
+        Ok(files)
+    }
+
     // TODO(hjiang): Remove this test function once fake-gcs fix the sending empty body will be error issue.
     #[cfg(all(feature = "storage-gcs", test))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {

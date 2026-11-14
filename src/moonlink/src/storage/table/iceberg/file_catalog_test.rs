@@ -75,8 +75,13 @@ async fn test_local_iceberg_table_creation() {
     indicator_pathbuf.push(NAMESPACE_INDICATOR_OBJECT_NAME);
     let indicator_filepath = indicator_pathbuf.to_str().unwrap().to_string();
 
-    // The iceberg table should be placed under the temporary directory.
+    // The iceberg table should be placed under the temporary directory (next to the hidden
+    // atomic-write temp directory).
     let (dirs, files) = get_entities_under_directory(warehouse_path).await;
+    let dirs: Vec<String> = dirs
+        .into_iter()
+        .filter(|d| !d.rsplit('/').next().unwrap_or("").starts_with('.'))
+        .collect();
     assert_eq!(dirs, vec![namespace_filepath.clone()]);
     assert!(files.is_empty());
 

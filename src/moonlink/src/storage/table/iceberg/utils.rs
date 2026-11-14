@@ -100,25 +100,19 @@ pub(crate) async fn get_or_create_iceberg_table<C: MoonlinkCatalog + ?Sized>(
 ) -> IcebergResult<IcebergTable> {
     let namespace_ident = NamespaceIdent::from_strs(namespace).unwrap();
     let table_ident = TableIdent::new(namespace_ident.clone(), table_name.to_string());
-    let should_create = match catalog.load_table(&table_ident).await {
-        Ok(existing_table) => {
-            return Ok(existing_table);
-        }
-        Err(_) => true,
-    };
-
-    if should_create {
-        create_iceberg_table(
-            catalog,
-            warehouse_uri,
-            table_name,
-            namespace_ident,
-            arrow_schema,
-        )
-        .await
-    } else {
-        unreachable!()
+    // Only create a table that does not exist; any other load failure is returned, never
+    // "fixed" by overwriting the existing table with an empty one.
+    if catalog.table_exists(&table_ident).await? {
+        return catalog.load_table(&table_ident).await;
     }
+    create_iceberg_table(
+        catalog,
+        warehouse_uri,
+        table_name,
+        namespace_ident,
+        arrow_schema,
+    )
+    .await
 }
 
 /// Get iceberg table if exists.
