@@ -69,6 +69,7 @@ pub enum PostgresReplicationCommand {
         schema: TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
+        replication_state: Arc<ReplicationState>,
         flush_lsn_rx: watch::Receiver<u64>,
         table_status_rx: watch::Receiver<TableStatus>,
         /// The table was recovered and needs its changes after its snapshot from the slot. Before
@@ -709,6 +710,7 @@ impl PostgresConnection {
         schema: TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
+        replication_state: Arc<ReplicationState>,
         flush_lsn_rx: watch::Receiver<u64>,
         table_status_rx: watch::Receiver<TableStatus>,
         replay_from_slot: bool,
@@ -723,6 +725,7 @@ impl PostgresConnection {
             schema,
             event_sender,
             commit_state,
+            replication_state,
             flush_lsn_rx,
             table_status_rx,
             replay_from_slot,
@@ -942,6 +945,7 @@ impl PostgresConnection {
                 table_schema.clone(),
                 table_resources.event_sender.clone(),
                 commit_lsn_tx,
+                table_resources.replication_state.clone(),
                 table_resources
                     .flush_lsn_rx
                     .take()
@@ -1456,6 +1460,7 @@ async fn apply_command_without_stream(
             schema,
             event_sender,
             commit_state,
+            replication_state,
             flush_lsn_rx,
             table_status_rx,
             replay_from_slot,
@@ -1469,6 +1474,7 @@ async fn apply_command_without_stream(
                 &schema,
                 /*initial_copy=*/ !replay_from_slot,
             );
+            sink.track_table_replication(src_table_id, replication_state);
             flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
             table_status_rxs.insert(src_table_id, table_status_rx);
             saved_schemas.retain(|s| s.src_table_id != src_table_id);
@@ -1688,8 +1694,9 @@ pub async fn run_event_loop(
                     }
                 },
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, table_status_rx, replay_from_slot, ready_tx } => {
+                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, replication_state, flush_lsn_rx, table_status_rx, replay_from_slot, ready_tx } => {
                         sink.add_table(src_table_id, event_sender, commit_state, &schema, /*initial_copy=*/ !replay_from_slot);
+                        sink.track_table_replication(src_table_id, replication_state);
                         flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                         table_status_rxs.insert(src_table_id, table_status_rx);
                         stream.as_mut().add_table_schema(schema);

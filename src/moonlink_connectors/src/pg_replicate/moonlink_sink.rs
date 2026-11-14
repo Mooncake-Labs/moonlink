@@ -63,6 +63,8 @@ pub struct Sink {
     /// Failures of copying tables with their transaction's final LSN, judged against the copy's
     /// boundary once it is known.
     copy_failures: HashMap<SrcTableId, Vec<(u64, String)>>,
+    /// Each table's own replication LSN, which its readers use; see `track_table_replication`.
+    table_replication_states: HashMap<SrcTableId, Arc<ReplicationState>>,
 }
 
 impl Sink {
@@ -106,7 +108,19 @@ impl Sink {
             deferred_commit_marks: HashMap::new(),
             copy_boundaries: HashMap::new(),
             copy_failures: HashMap::new(),
+            table_replication_states: HashMap::new(),
         }
+    }
+
+    /// Mark the table's own replication LSN along with the stream's from now on. It starts at the
+    /// stream's position; a recovered table's state already covers its snapshot.
+    pub fn track_table_replication(
+        &mut self,
+        src_table_id: SrcTableId,
+        state: Arc<ReplicationState>,
+    ) {
+        state.mark(self.replication_state.now());
+        self.table_replication_states.insert(src_table_id, state);
     }
 
     /// Transactions whose final LSN is below this are already in the table (copied or applied);
@@ -179,7 +193,8 @@ impl Sink {
         self.replication_state.now()
     }
 
-    /// Advance the replication LSN, first publishing the deferred commit LSNs it now covers.
+    /// Advance the replication LSN of the stream and of every table (all changes up to `lsn` have
+    /// been handed to the tables), first publishing the deferred commit LSNs it now covers.
     fn mark_replication(&mut self, lsn: u64) {
         let commit_lsn_txs = &self.commit_lsn_txs;
         self.deferred_commit_marks.retain(|table_id, commit_lsn| {
@@ -192,6 +207,9 @@ impl Sink {
             false
         });
         self.replication_state.mark(lsn);
+        for state in self.table_replication_states.values() {
+            state.mark(lsn);
+        }
     }
 
     /// The initial copy of `table_id` finished at `boundary_lsn`. Its commit LSN becomes the
@@ -303,6 +321,7 @@ impl Sink {
         self.deferred_commit_marks.remove(&src_table_id);
         self.copy_boundaries.remove(&src_table_id);
         self.copy_failures.remove(&src_table_id);
+        self.table_replication_states.remove(&src_table_id);
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;

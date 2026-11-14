@@ -130,4 +130,50 @@ mod tests {
             "B lost rows: B iceberg={l1:X}, B in-memory up to {l2:X}, slot confirmed when B registered={confirmed_at_b_registration:X}"
         );
     }
+
+    /// Right after a restart, a recovered table whose post-snapshot changes are still being replayed
+    /// from the slot must not serve a read at an LSN covering those changes without them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn recovered_table_read_waits_for_slot_replay() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+
+        // B: rows 1..=10 persisted, 11..=20 only in memory.
+        let l1 = insert_range(&client, "rr_b", 1, 10).await;
+        persist(&backend, TABLE_B, l1).await;
+        let l2 = insert_range(&client, "rr_b", 11, 20).await;
+        backend
+            .scan_table(DATABASE.to_string(), TABLE_B.to_string(), Some(l2))
+            .await
+            .unwrap();
+        // A: persisted at a later LSN.
+        let l3 = insert_range(&client, "rr_a", 1, 5).await;
+        persist(&backend, TABLE_A, l3).await;
+        assert!(confirmed_flush_lsn(&client).await < l2);
+
+        // Crash and recover.
+        backend
+            .shutdown_connection(&get_database_uri(), false)
+            .await;
+        drop(backend);
+        let base_path = tmp.path().to_str().unwrap().to_string();
+        let backend = create_backend_from_base_path(base_path).await;
+
+        let early = scan_id_counts(&backend, DATABASE.to_string(), TABLE_B.to_string(), l2).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let late = scan_id_counts(&backend, DATABASE.to_string(), TABLE_B.to_string(), l2).await;
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        assert_eq!(late, counts(1, 20), "rows lost after replay");
+        assert_eq!(
+            early,
+            counts(1, 20),
+            "read at LSN {l2:X} right after restart returned {} rows (stale), {} rows 5s later",
+            early.len(),
+            late.len()
+        );
+    }
 }
