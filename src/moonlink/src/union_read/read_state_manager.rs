@@ -197,10 +197,15 @@ impl ReadStateManager {
             cache.valid_upto = cache.valid_upto.max(view.valid_upto());
             return Ok(cache.state.clone());
         }
-        let snapshot_read_output = {
+        // Only collection happens under the snapshot lock; the temp parquet is written after it is
+        // released. The cache write guard still serializes materialization per table.
+        let pending_read = {
             let mut table_state_snapshot = self.table_snapshot.write().await;
-            table_state_snapshot.request_read().await?
+            table_state_snapshot.prepare_read().await?
         };
+        #[cfg(test)]
+        test_hooks::before_materialize().await;
+        let snapshot_read_output = pending_read.materialize().await?;
         let state = snapshot_read_output
             .take_as_read_state(self.read_state_filepath_remap.clone())
             .await?;
@@ -211,6 +216,25 @@ impl ReadStateManager {
             state: state.clone(),
         };
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    /// When set, the next materialization reports `reached` and waits for `release`.
+    pub(crate) static BLOCK_MATERIALIZE: Mutex<
+        Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    > = Mutex::new(None);
+
+    pub(crate) async fn before_materialize() {
+        let hook = BLOCK_MATERIALIZE.lock().unwrap().take();
+        if let Some((reached, release)) = hook {
+            let _ = reached.send(());
+            let _ = release.await;
+        }
     }
 }
 

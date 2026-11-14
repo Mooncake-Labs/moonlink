@@ -238,3 +238,31 @@ async fn in_memory_temp_file_is_not_shared_between_read_states() {
 
     assert_rows(&env.rsm.try_read(Some(200)).await.unwrap(), &[1, 2]).await;
 }
+
+/// Writing the temporary parquet for unflushed rows must not hold the table snapshot lock: the
+/// snapshot task, and with it ingestion, would stall behind reader disk IO.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_lock_not_held_during_temp_parquet_write() {
+    use crate::union_read::read_state_manager::test_hooks::BLOCK_MATERIALIZE;
+    use tokio::sync::oneshot;
+
+    let mut env = Env::new("lock_scope").await;
+    env.commit_and_snapshot(&[1, 2], 100, /*flush=*/ false)
+        .await;
+    env.publish(100, 100, 100);
+
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *BLOCK_MATERIALIZE.lock().unwrap() = Some((reached_tx, release_rx));
+    let rsm = env.rsm.clone();
+    let reader = tokio::spawn(async move { rsm.try_read(Some(100)).await.map(|_| ()) });
+    reached_rx.await.unwrap();
+
+    let snapshot = env.table.get_state_for_reader().0;
+    assert!(
+        snapshot.try_write().is_ok(),
+        "snapshot lock is held while the in-memory parquet is being written"
+    );
+    release_tx.send(()).unwrap();
+    reader.await.unwrap().unwrap();
+}
