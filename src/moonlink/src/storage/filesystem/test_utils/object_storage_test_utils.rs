@@ -1,10 +1,10 @@
 /// Testing utils for object storage.
-#[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
+#[cfg(feature = "storage-s3")]
 pub(crate) const TEST_RETRY_COUNT: usize = 2;
-#[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
+#[cfg(feature = "storage-s3")]
 pub(crate) const TEST_RETRY_INIT_MILLISEC: u64 = 100;
 
-#[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
+#[cfg(feature = "storage-s3")]
 use rand::Rng;
 
 /// Get object storage bucket name from warehouse uri.
@@ -19,13 +19,12 @@ pub(crate) fn get_bucket_from_warehouse_uri(warehouse_uri: &str) -> String {
     // Fallback: strip scheme manually (e.g., "s3://bucket/dir1/dir2")
     warehouse_uri
         .strip_prefix("s3://")
-        .or_else(|| warehouse_uri.strip_prefix("gs://"))
         .and_then(|rest| rest.split('/').next())
         .unwrap_or_default()
         .to_string()
 }
 
-#[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
+#[cfg(feature = "storage-s3")]
 pub(crate) fn get_bucket_and_warehouse(
     bucket_prefix: &str,
     warehouse_uri_prefix: &str,
@@ -54,10 +53,6 @@ mod tests {
         assert_eq!(
             get_bucket_from_warehouse_uri("s3://my-bucket/dir1/dir2/abc.parquet"),
             "my-bucket"
-        );
-        assert_eq!(
-            get_bucket_from_warehouse_uri("gs://another-bucket/folder/file"),
-            "another-bucket"
         );
     }
 }

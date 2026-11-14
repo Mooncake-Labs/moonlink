@@ -102,38 +102,6 @@ pub(crate) fn create_file_io(accessor_config: &AccessorConfig) -> IcebergResult<
     match &accessor_config.storage_config {
         #[cfg(feature = "storage-fs")]
         StorageConfig::FileSystem { .. } => FileIOBuilder::new_fs_io().build(),
-        #[cfg(feature = "storage-gcs")]
-        StorageConfig::Gcs {
-            project,
-            region,
-            endpoint,
-            disable_auth,
-            access_key_id,
-            secret_access_key,
-            ..
-        } => {
-            // Testing environment.
-            if *disable_auth {
-                let file_io_builder = FileIOBuilder::new("GCS")
-                    .with_prop(iceberg::io::GCS_PROJECT_ID, project)
-                    .with_prop(iceberg::io::GCS_SERVICE_PATH, endpoint.as_ref().unwrap())
-                    .with_prop(iceberg::io::GCS_NO_AUTH, "true")
-                    .with_prop(iceberg::io::GCS_ALLOW_ANONYMOUS, "true")
-                    .with_prop(iceberg::io::GCS_DISABLE_CONFIG_LOAD, "true")
-                    .with_prop(iceberg::io::GCS_DISABLE_VM_METADATA, "true");
-                return file_io_builder.build();
-            }
-
-            // Production environment.
-            let file_io_builder = FileIOBuilder::new("S3")
-                .with_prop(iceberg::io::S3_ENDPOINT, "https://storage.googleapis.com")
-                .with_prop(iceberg::io::S3_REGION, region)
-                .with_prop(iceberg::io::S3_ACCESS_KEY_ID, access_key_id)
-                .with_prop(iceberg::io::S3_SECRET_ACCESS_KEY, secret_access_key)
-                .with_prop(iceberg::io::S3_DISABLE_CONFIG_LOAD, "true")
-                .with_prop(iceberg::io::S3_DISABLE_EC2_METADATA, "true");
-            file_io_builder.build()
-        }
         #[cfg(feature = "storage-s3")]
         StorageConfig::S3 {
             access_key_id,

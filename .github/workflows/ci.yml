@@ -59,87 +59,6 @@ jobs:
       - name: cargo dependency format and check
         run: cargo sort --workspace --check
 
-  # ──────────────────────── 2 · GCS test (feature, chaos) ─────────────────
-  gcs_test:
-    name: GCS tests (feature, chaos)
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        type: [feature, chaos]
-        include:
-          - type: feature
-            name: GCS feature test
-            timeout-minutes: 10
-            cmd: |
-              RUST_BACKTRACE=1 cargo test --lib --features=storage-gcs
-          - type: chaos
-            name: GCS chaos test
-            timeout-minutes: 20
-            cmd: |
-              RUST_BACKTRACE=1 cargo test test_gcs_chaos --features=chaos-test,storage-gcs -p moonlink -- --nocapture
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      # ─────────────────────── Start Fake GCS Server ──────────────────────────
-      - name: Start Fake GCS Server
-        timeout-minutes: 2
-        run: |
-          docker run -d \
-            --name fake-gcs \
-            -p 4443:4443 \
-            -e STORAGE_DIR=/data \
-            fsouza/fake-gcs-server:latest \
-            -scheme http -port 4443
-
-      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
-      - name: Add gcs.local to /etc/hosts
-        run: |
-          echo "127.0.0.1 gcs.local" | sudo tee -a /etc/hosts
-
-      # ───────────────────── Wait for Fake GCS to be ready ───────────────────
-      - name: Wait for Fake GCS ready
-        timeout-minutes: 2
-        run: |
-          set -euo pipefail
-          for i in {1..10}; do
-            if curl -sf http://gcs.local:4443/storage/v1/b; then
-              echo "Fake GCS is ready!"
-              exit 0
-            fi
-            echo "Waiting for Fake GCS..."
-            sleep 2
-          done
-          echo "ERROR: Fake GCS failed to start."
-          exit 1
-
-      # ────────────────────── Toolchain + Test Tools ─────────────────────────
-      - name: Run ${{ matrix.name }}
-        timeout-minutes: ${{ matrix.timeout-minutes }}
-        run: |
-          ${{ matrix.cmd }}
-
-      #  ────────────────────── Upload chaos dump ────────────────────────────
-      - name: Upload chaos dumps
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: chaos-dumps-${{ github.run_id }}-${{ github.job }}-${{ matrix.target || 'no-matrix' }}
-          path: /tmp/chaos_test_*
-          retention-days: 3
-          if-no-files-found: warn
-
   # ──────────────────────── 3 · S3 test (feature, chaos) ───────────────────
   s3_test:
     name: S3 tests (feature, chaos)
@@ -687,7 +606,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_connectors --lib --features connector-pg
-          RUST_BACKTRACE=1 cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3 storage-gcs"
+          RUST_BACKTRACE=1 cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3"
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features postgres-integration -- --nocapture
 
       - name: Build Backend integration tests

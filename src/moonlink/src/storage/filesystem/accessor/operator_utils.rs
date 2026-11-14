@@ -70,39 +70,6 @@ fn create_opendal_operator_impl(storage_config: &StorageConfig) -> Result<Operat
                 .atomic_write_dir(&atomic_write_dir);
             Ok(Operator::new(builder)?.finish())
         }
-        #[cfg(feature = "storage-gcs")]
-        StorageConfig::Gcs {
-            region,
-            bucket,
-            endpoint,
-            access_key_id,
-            secret_access_key,
-            disable_auth,
-            ..
-        } => {
-            // Test environment.
-            if *disable_auth {
-                let builder = services::Gcs::default()
-                    .root("/")
-                    .bucket(bucket)
-                    .endpoint(endpoint.as_ref().unwrap())
-                    .disable_config_load()
-                    .disable_vm_metadata()
-                    .allow_anonymous();
-                return Ok(Operator::new(builder)?.finish());
-            }
-
-            let builder = services::S3::default()
-                .root("/")
-                .region(region)
-                .bucket(bucket)
-                .endpoint("https://storage.googleapis.com")
-                .access_key_id(access_key_id)
-                .secret_access_key(secret_access_key)
-                .disable_config_load()
-                .disable_ec2_metadata();
-            Ok(Operator::new(builder)?.finish())
-        }
         #[cfg(feature = "storage-s3")]
         StorageConfig::S3 {
             access_key_id,

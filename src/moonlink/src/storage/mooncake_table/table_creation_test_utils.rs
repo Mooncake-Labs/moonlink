@@ -6,8 +6,6 @@ use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-#[cfg(feature = "storage-gcs")]
-use crate::storage::filesystem::gcs::gcs_test_utils;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils;
 #[cfg(feature = "chaos-test")]
@@ -116,15 +114,6 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
         #[cfg(not(feature = "storage-s3"))]
         {
             panic!("S3 support not enabled. Enable `storage-s3` feature.");
-        }
-    } else if warehouse_uri.starts_with("gs://") {
-        #[cfg(feature = "storage-gcs")]
-        {
-            gcs_test_utils::create_gcs_storage_config(&warehouse_uri)
-        }
-        #[cfg(not(feature = "storage-gcs"))]
-        {
-            panic!("GCS support not enabled. Enable `storage-gcs` feature.");
         }
     } else {
         let storage_config = StorageConfig::FileSystem {

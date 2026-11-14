@@ -99,16 +99,16 @@ async fn test_conditional_write() {
 async fn test_stream_read(#[case] file_size: usize) {
     let (bucket, warehouse_uri) = get_test_s3_bucket_and_warehouse();
     let _test_guard = TestGuard::new(bucket.clone()).await;
-    let gcs_storage_config = create_s3_storage_config(&warehouse_uri);
+    let s3_storage_config = create_s3_storage_config(&warehouse_uri);
 
     // Prepare remote file.
     let remote_filepath = format!("{warehouse_uri}/remote");
     let expected_content =
-        create_remote_file(&remote_filepath, gcs_storage_config.clone(), file_size).await;
+        create_remote_file(&remote_filepath, s3_storage_config.clone(), file_size).await;
 
     // Stream read from destination path.
     let mut actual_content = vec![];
-    let filesystem_accessor = create_filesystem_accessor(gcs_storage_config);
+    let filesystem_accessor = create_filesystem_accessor(s3_storage_config);
     let mut read_stream = filesystem_accessor
         .stream_read(&remote_filepath)
         .await

@@ -231,69 +231,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "storage-gcs")]
-    fn test_table_config_from_valid_json_with_gcs() {
-        let serialized = r#"
-            {
-                "mooncake": {
-                    "skip_index_merge": true
-                },
-                "iceberg": {
-                    "storage_config": {
-                        "gcs": {
-                            "project": "gcs-proj",
-                            "region": "us-west1",
-                            "bucket": "moonlink",
-                            "access_key_id": "access-key",
-                            "secret_access_key": "secret"
-                        }
-                    }
-                },
-                "wal": {
-                    "storage_config": {
-                        "gcs": {
-                            "project": "gcs-proj",
-                            "region": "us-west1",
-                            "bucket": "moonlink-wal",
-                            "access_key_id": "access-key-wal",
-                            "secret_access_key": "secret-wal"
-                        }
-                    }
-                }
-            }
-        "#;
-
-        // Deserialize and check.
-        let actual_table_config = TableConfig::from_json_or_default(
-            serialized,
-            /*default_table_directory=*/ "/tmp/path",
-        )
-        .unwrap();
-        let expected_table_config = TableConfig {
-            mooncake_config: MooncakeConfig {
-                mem_slice_bytes: None,
-                skip_index_merge: true,
-                skip_data_compaction: false,
-                append_only: None,
-                row_identity: None,
-            },
-            iceberg_config: Some(AccessorConfig::new_with_storage_config(
-                moonlink::StorageConfig::Gcs {
-                    project: "gcs-proj".to_string(),
-                    region: "us-west1".to_string(),
-                    bucket: "moonlink".to_string(),
-                    access_key_id: "access-key".to_string(),
-                    secret_access_key: "secret".to_string(),
-                    endpoint: None,
-                    disable_auth: false,
-                    write_option: None,
-                },
-            )),
-        };
-        assert_eq!(expected_table_config, actual_table_config);
-    }
-
-    #[test]
     #[cfg(feature = "storage-s3")]
     fn test_table_config_from_valid_json_with_s3() {
         let serialized = r#"

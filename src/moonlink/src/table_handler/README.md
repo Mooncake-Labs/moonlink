@@ -1,6 +1,6 @@
 # Moonlink Chaos Test README
 
-This document explains the purpose, scope, and usage of the Moonlink **chaos test** suite that stress‑tests moonlink core, including persistence, and snapshot semantics across backends (FS/S3/GCS) and table modes (regular, append‑only, upsert).
+This document explains the purpose, scope, and usage of the Moonlink **chaos test** suite that stress‑tests moonlink core, including persistence, and snapshot semantics across backends (FS/S3) and table modes (regular, append‑only, upsert).
 
 ---
 

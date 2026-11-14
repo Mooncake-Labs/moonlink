@@ -1,8 +1,4 @@
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-#[cfg(feature = "storage-gcs")]
-use crate::storage::filesystem::gcs::gcs_test_utils;
-#[cfg(feature = "storage-gcs")]
-use crate::storage::filesystem::gcs::test_guard::TestGuard as GcsTestGuard;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils;
 #[cfg(feature = "storage-s3")]
@@ -12,8 +8,6 @@ use crate::storage::table::iceberg::catalog_test_impl::*;
 use crate::storage::table::iceberg::file_catalog::FileCatalog;
 use crate::storage::table::iceberg::file_catalog::NAMESPACE_INDICATOR_OBJECT_NAME;
 use crate::storage::table::iceberg::file_catalog_test_utils::*;
-#[cfg(feature = "storage-gcs")]
-use crate::storage::table::iceberg::gcs_test_utils as iceberg_gcs_test_utils;
 #[cfg(feature = "storage-s3")]
 use crate::storage::table::iceberg::s3_test_utils as iceberg_s3_test_utils;
 
@@ -99,14 +93,6 @@ async fn create_s3_catalog() -> (FileCatalog, S3TestGuard) {
     let file_catalog = iceberg_s3_test_utils::create_test_s3_catalog(&warehouse_uri);
     (file_catalog, test_guard)
 }
-// Create GCS catalog with local fake gcs deployment and a random bucket.
-#[cfg(feature = "storage-gcs")]
-async fn create_gcs_catalog() -> (FileCatalog, GcsTestGuard) {
-    let (bucket_name, warehouse_uri) = gcs_test_utils::get_test_gcs_bucket_and_warehouse();
-    let test_guard = GcsTestGuard::new(bucket_name).await;
-    let file_catalog = iceberg_gcs_test_utils::create_gcs_catalog(&warehouse_uri);
-    (file_catalog, test_guard)
-}
 
 /// ==============================
 /// Test with features
@@ -125,12 +111,6 @@ async fn test_catalog_namespace_operations_s3() {
     let (catalog, _test_guard) = create_s3_catalog().await;
     test_catalog_namespace_operations_impl(&catalog).await
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_catalog_namespace_operations_gcs() {
-    let (catalog, _test_guard) = create_gcs_catalog().await;
-    test_catalog_namespace_operations_impl(&catalog).await
-}
 
 /// Table operations test.
 #[tokio::test]
@@ -145,12 +125,6 @@ async fn test_catalog_table_operations_s3() {
     let (catalog, _test_guard) = create_s3_catalog().await;
     test_catalog_table_operations_impl(&catalog).await
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_catalog_table_operations_gcs() {
-    let (catalog, _test_guard) = create_gcs_catalog().await;
-    test_catalog_table_operations_impl(&catalog).await
-}
 
 /// List operation test.
 #[tokio::test]
@@ -163,12 +137,6 @@ async fn test_list_operation_filesystem() {
 #[cfg(feature = "storage-s3")]
 async fn test_list_operation_s3() {
     let (catalog, _test_guard) = create_s3_catalog().await;
-    test_list_operation_impl(&catalog).await
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_list_operation_gcs() {
-    let (catalog, _test_guard) = create_gcs_catalog().await;
     test_list_operation_impl(&catalog).await
 }
 
@@ -188,12 +156,6 @@ async fn test_update_table_s3() {
     let (mut catalog, _test_guard) = create_s3_catalog().await;
     test_update_table_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_update_table_gcs() {
-    let (mut catalog, _test_guard) = create_gcs_catalog().await;
-    test_update_table_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
-}
 
 /// Update schema test.
 #[tokio::test]
@@ -206,12 +168,6 @@ async fn test_update_schema() {
 #[cfg(feature = "storage-s3")]
 async fn test_update_schema_s3() {
     let (mut catalog, _test_guard) = create_s3_catalog().await;
-    test_update_schema_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(feature = "storage-gcs")]
-async fn test_update_schema_gcs() {
-    let (mut catalog, _test_guard) = create_gcs_catalog().await;
     test_update_schema_impl(&mut catalog, NAMESPACE.to_string(), TABLE.to_string()).await;
 }
 

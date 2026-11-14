@@ -9,7 +9,6 @@ default = ["storage-fs", "metadata-sqlite"]
 storage-all = ["storage-fs", "metadata-postgres", "metadata-sqlite"]
 
 storage-s3 = ["moonlink/storage-s3"]
-storage-gcs = ["moonlink/storage-gcs"]
 storage-fs = ["moonlink/storage-fs"]
 
 metadata-all = ["metadata-sqlite", "metadata-postgres"]

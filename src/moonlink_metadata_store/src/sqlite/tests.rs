@@ -23,21 +23,6 @@ const TABLE: &str = "dst_schema.dst_table";
 /// Create a filesystem config for test.
 fn get_storage_config() -> StorageConfig {
     #[allow(unreachable_code)]
-    #[cfg(feature = "storage-gcs")]
-    {
-        return StorageConfig::Gcs {
-            project: "project".to_string(),
-            region: "region".to_string(),
-            bucket: "bucket".to_string(),
-            access_key_id: "access_key_id".to_string(),
-            secret_access_key: "secret_access_key".to_string(),
-            endpoint: None,
-            disable_auth: false,
-            write_option: None,
-        };
-    }
-
-    #[allow(unreachable_code)]
     #[cfg(feature = "storage-s3")]
     {
         return StorageConfig::S3 {
@@ -83,7 +68,7 @@ pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
     }
 }
 
-// S3/GCS builders moved to crate test_utils and re-used here.
+// S3 builders live in crate test_utils and are re-used here.
 
 async fn check_persisted_metadata(sqlite_metadata_store: &SqliteMetadataStore) {
     let metadata_entries = sqlite_metadata_store
@@ -172,35 +157,6 @@ async fn test_table_metadata_store_and_load_s3() {
 
     let metadata_store = SqliteMetadataStore::new(sqlite_path.clone()).await.unwrap();
     let moonlink_table_config = get_s3_moonlink_table_config();
-
-    metadata_store
-        .store_table_metadata(
-            DATABASE,
-            TABLE,
-            SRC_TABLE_NAME,
-            SRC_TABLE_URI,
-            moonlink_table_config.clone(),
-        )
-        .await
-        .unwrap();
-
-    let entries = metadata_store
-        .get_all_table_metadata_entries()
-        .await
-        .unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].moonlink_table_config, moonlink_table_config);
-}
-
-#[cfg(feature = "storage-gcs")]
-#[tokio::test]
-async fn test_table_metadata_store_and_load_gcs() {
-    use crate::test_utils::get_gcs_moonlink_table_config;
-    let tmp_dir = tempdir().unwrap();
-    let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
-
-    let metadata_store = SqliteMetadataStore::new(sqlite_path.clone()).await.unwrap();
-    let moonlink_table_config = get_gcs_moonlink_table_config();
 
     metadata_store
         .store_table_metadata(

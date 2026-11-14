@@ -27,7 +27,7 @@ async fn ensure_parquet_files_local_filesystem(
         // Already at local filesystem, skip.
         #[cfg(feature = "storage-fs")]
         StorageConfig::FileSystem { .. } => Ok(parquet_file),
-        #[cfg(any(feature = "storage-gcs", feature = "storage-s3"))]
+        #[cfg(feature = "storage-s3")]
         _ => {
             let filename_without_suffix = std::path::Path::new(&parquet_file)
                 .file_stem()
@@ -51,11 +51,7 @@ async fn ensure_parquet_files_local_filesystem(
                 .await?;
             Ok(local_parquet_filepath)
         }
-        #[cfg(all(
-            not(feature = "storage-fs"),
-            not(feature = "storage-gcs"),
-            not(feature = "storage-s3")
-        ))]
+        #[cfg(all(not(feature = "storage-fs"), not(feature = "storage-s3")))]
         _ => {
             panic!("Unknown storage config {:?}", storage_config);
         }

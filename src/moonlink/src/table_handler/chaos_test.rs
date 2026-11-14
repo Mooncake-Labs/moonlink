@@ -1,9 +1,5 @@
 use crate::event_sync::create_table_event_syncer;
 use crate::row::{MoonlinkRow, RowValue};
-#[cfg(feature = "storage-gcs")]
-use crate::storage::filesystem::gcs::gcs_test_utils::*;
-#[cfg(feature = "storage-gcs")]
-use crate::storage::filesystem::gcs::test_guard::TestGuard as GcsTestGuard;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils::*;
 #[cfg(feature = "storage-s3")]
@@ -1370,76 +1366,6 @@ async fn test_s3_chaos_with_data_compaction() {
     let (bucket, warehouse_uri) = get_test_s3_bucket_and_warehouse();
     let _test_guard = S3TestGuard::new(bucket.clone()).await;
     let accessor_config = create_s3_storage_config(&warehouse_uri);
-    let test_env_config = TestEnvConfig {
-        test_name: function_name!(),
-        local_filesystem_optimization_enabled: false,
-        disk_slice_write_chaos_enabled: false,
-        special_table_option: SpecialTableOption::None,
-        maintenance_option: TableMaintenanceOption::DataCompaction,
-        error_injection_enabled: false,
-        event_count: 5000,
-        storage_config: accessor_config.storage_config,
-    };
-    let env = TestEnvironment::new(test_env_config).await;
-    chaos_test_impl(env).await;
-}
-
-/// ============================
-/// GCS persistence
-/// ============================
-///
-/// Chaos test with no background table maintenance enabled.
-#[named]
-#[cfg(feature = "storage-gcs")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_gcs_chaos_with_no_background_maintenance() {
-    let (bucket, warehouse_uri) = get_test_gcs_bucket_and_warehouse();
-    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
-    let accessor_config = create_gcs_storage_config(&warehouse_uri);
-    let test_env_config = TestEnvConfig {
-        test_name: function_name!(),
-        local_filesystem_optimization_enabled: false,
-        disk_slice_write_chaos_enabled: false,
-        special_table_option: SpecialTableOption::None,
-        maintenance_option: TableMaintenanceOption::NoTableMaintenance,
-        error_injection_enabled: false,
-        event_count: 4000,
-        storage_config: accessor_config.storage_config,
-    };
-    let env = TestEnvironment::new(test_env_config).await;
-    chaos_test_impl(env).await;
-}
-
-/// Chaos test with index merge enabled by default.
-#[named]
-#[cfg(feature = "storage-gcs")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_gcs_chaos_with_index_merge() {
-    let (bucket, warehouse_uri) = get_test_gcs_bucket_and_warehouse();
-    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
-    let accessor_config = create_gcs_storage_config(&warehouse_uri);
-    let test_env_config = TestEnvConfig {
-        test_name: function_name!(),
-        local_filesystem_optimization_enabled: false,
-        disk_slice_write_chaos_enabled: false,
-        special_table_option: SpecialTableOption::None,
-        maintenance_option: TableMaintenanceOption::IndexMerge,
-        error_injection_enabled: false,
-        event_count: 5000,
-        storage_config: accessor_config.storage_config,
-    };
-    let env = TestEnvironment::new(test_env_config).await;
-    chaos_test_impl(env).await;
-}
-
-/// Chaos test with data compaction enabled by default.
-#[named]
-#[cfg(feature = "storage-gcs")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_gcs_chaos_with_data_compaction() {
-    let (bucket, warehouse_uri) = get_test_gcs_bucket_and_warehouse();
-    let _test_guard = GcsTestGuard::new(bucket.clone()).await;
-    let accessor_config = create_gcs_storage_config(&warehouse_uri);
     let test_env_config = TestEnvConfig {
         test_name: function_name!(),
         local_filesystem_optimization_enabled: false,

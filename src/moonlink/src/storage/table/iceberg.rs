@@ -34,10 +34,6 @@ pub(crate) mod validation;
 #[cfg(test)]
 mod s3_test_utils;
 
-#[cfg(feature = "storage-gcs")]
-#[cfg(test)]
-mod gcs_test_utils;
-
 #[cfg(test)]
 mod tests;
 
