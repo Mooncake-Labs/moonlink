@@ -690,6 +690,16 @@ impl IcebergTableManager {
             return Ok(vec![]);
         }
 
+        // Process file indices to remove first: file indices compare equal when they cover the
+        // same data files, so a replacement index (e.g. rebuilt for the same file) must not
+        // collide with the one it replaces.
+        self.catalog.set_index_puffin_files_to_remove(
+            file_indices_to_remove
+                .iter()
+                .map(|cur_index| self.persisted_file_indices.remove(cur_index).unwrap())
+                .collect::<HashSet<String>>(),
+        );
+
         // Import new file indices.
         let local_index_block_to_remote = self
             .import_file_indices(file_indices_to_import, &local_data_file_to_remote)
@@ -708,14 +718,6 @@ impl IcebergTableManager {
                 )
             })
             .collect::<Vec<_>>();
-
-        // Process file indices to remove.
-        self.catalog.set_index_puffin_files_to_remove(
-            file_indices_to_remove
-                .iter()
-                .map(|cur_index| self.persisted_file_indices.remove(cur_index).unwrap())
-                .collect::<HashSet<String>>(),
-        );
 
         Ok(remote_file_indices)
     }
@@ -787,10 +789,23 @@ impl IcebergTableManager {
             .await?;
 
         // Update snapshot summary properties.
-        let snapshot_properties = HashMap::<String, String>::from([(
-            MOONCAKE_TABLE_FLUSH_LSN.to_string(),
-            snapshot_payload.flush_lsn.to_string(),
-        )]);
+        // Every commit carries all rebuilt indices (see MooncakeTable::new_with_table_manager), so
+        // stamping the current lookup-key version is always accurate.
+        #[allow(unused_mut)]
+        let mut snapshot_properties = HashMap::<String, String>::from([
+            (
+                MOONCAKE_TABLE_FLUSH_LSN.to_string(),
+                snapshot_payload.flush_lsn.to_string(),
+            ),
+            (
+                crate::storage::table::common::MOONCAKE_LOOKUP_KEY_VERSION.to_string(),
+                crate::row::LOOKUP_KEY_VERSION.to_string(),
+            ),
+        ]);
+        #[cfg(test)]
+        if crate::row::LEGACY_LOOKUP_KEY_SALT_FOR_TEST.with(|salt| salt.get()) != 0 {
+            snapshot_properties.remove(crate::storage::table::common::MOONCAKE_LOOKUP_KEY_VERSION);
+        }
 
         let mut txn = Transaction::new(self.iceberg_table.as_ref().unwrap());
         let mut action = txn.fast_append();

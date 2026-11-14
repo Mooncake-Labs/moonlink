@@ -327,11 +327,13 @@ impl IcebergTableManager {
             }
         }
 
-        let mooncake_snapshot = self.transform_to_mooncake_snapshot(
+        let mut mooncake_snapshot = self.transform_to_mooncake_snapshot(
             loaded_deletion_vector,
             loaded_file_indices,
             snapshot_property.flush_lsn,
         );
+        // Tables persisted before the property existed used a per-process random hash.
+        mooncake_snapshot.lookup_key_version = snapshot_property.lookup_key_version.unwrap_or(1);
         Ok((next_file_id as u32, mooncake_snapshot))
     }
 }

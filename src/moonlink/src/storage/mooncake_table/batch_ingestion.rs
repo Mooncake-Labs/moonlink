@@ -163,7 +163,7 @@ impl MooncakeTable {
     }
 
     /// Build a single GlobalIndex spanning `files` by scanning Parquet with identity projection.
-    async fn build_index_for_files(
+    pub(crate) async fn build_index_for_files(
         files: Vec<MooncakeDataFileRef>,
         identity: IdentityProp,
         table_dir: PathBuf,

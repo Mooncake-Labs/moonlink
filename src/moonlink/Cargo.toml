@@ -44,7 +44,6 @@ chaos-test = ["function_name"]
 profile-test = ["pprof", "function_name"]
 
 [dependencies]
-ahash = "0.8"
 anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
@@ -88,6 +87,7 @@ roaring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha1 = { version = "0.10", optional = true }
+siphasher = "1"
 smallvec = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

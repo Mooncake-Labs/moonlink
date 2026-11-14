@@ -183,6 +183,9 @@ pub struct Snapshot {
     pub(crate) largest_flush_lsn: Option<u64>,
     /// indices
     pub(crate) indices: MooncakeIndex,
+    /// Lookup-key hash version of the file indices loaded from persistence (see
+    /// [`crate::row::LOOKUP_KEY_VERSION`]); older indices are rebuilt on load.
+    pub(crate) lookup_key_version: u32,
 }
 
 impl Snapshot {
@@ -194,6 +197,7 @@ impl Snapshot {
             flush_lsn: None,
             largest_flush_lsn: None,
             indices: MooncakeIndex::new(),
+            lookup_key_version: crate::row::LOOKUP_KEY_VERSION,
         }
     }
 
@@ -657,7 +661,13 @@ impl MooncakeTable {
     ) -> Result<Self> {
         table_metadata.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
-        let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
+        let (mut next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
+        let rebuilt_file_indices = Self::rebuild_legacy_file_indices(
+            &table_metadata,
+            &current_snapshot,
+            &mut next_file_id,
+        )
+        .await?;
         let last_persistence_snapshot_lsn = current_snapshot.flush_lsn;
         if let Some(last_persistence_snapshot_lsn) = last_persistence_snapshot_lsn {
             table_snapshot_watch_sender
@@ -669,7 +679,7 @@ impl MooncakeTable {
         let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
         let mooncake_table_id = table_metadata.mooncake_table_id.clone();
 
-        Ok(Self {
+        let mut table = Self {
             mem_slice: MemSlice::new(
                 table_metadata.schema.clone(),
                 table_metadata.config.batch_size,
@@ -711,7 +721,63 @@ impl MooncakeTable {
             in_flight_tasks: InFlightTasks::default(),
             failed_persistence_table_manager: Arc::new(std::sync::Mutex::new(None)),
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
-        })
+        };
+        if let Some(index_swap) = rebuilt_file_indices {
+            // Applied by the first mooncake snapshot (before any deletion is resolved) and
+            // persisted by the first iceberg commit, which also stamps the new key version.
+            table.next_snapshot_task.index_merge_result = index_swap;
+            table.next_snapshot_task.force_empty_persistence_payload = true;
+        }
+        Ok(table)
+    }
+
+    /// File indices persisted with an older lookup-key hash (per-process random seeds before
+    /// version 2) cannot find any row after a restart. Rebuild them from the data files, one index
+    /// per data file, and return the swap to apply as an index-merge result.
+    async fn rebuild_legacy_file_indices(
+        table_metadata: &Arc<TableMetadata>,
+        snapshot: &Snapshot,
+        next_file_id: &mut u32,
+    ) -> Result<Option<FileIndiceMergeResult>> {
+        let identity = &table_metadata.config.row_identity;
+        let hashed_identity = matches!(identity, IdentityProp::FullRow | IdentityProp::Keys(_));
+        if snapshot.lookup_key_version >= crate::row::LOOKUP_KEY_VERSION
+            || !hashed_identity
+            || snapshot.indices.file_indices.is_empty()
+        {
+            return Ok(None);
+        }
+        tracing::warn!(
+            table = table_metadata.mooncake_table_id,
+            data_files = snapshot.disk_files.len(),
+            "table was written by an older moonlink whose file indices are not restart-safe; rebuilding them from the data files"
+        );
+        let mut new_file_indices = Vec::with_capacity(snapshot.disk_files.len());
+        for data_file in snapshot.disk_files.keys() {
+            let index_file_id = *next_file_id as u64;
+            *next_file_id += 1;
+            let index = Self::build_index_for_files(
+                vec![data_file.clone()],
+                identity.clone(),
+                table_metadata.path.clone(),
+                index_file_id,
+            )
+            .await
+            .map_err(|e| {
+                crate::Error::table_errored(&crate::Error::errored_table_message(
+                    &table_metadata.mooncake_table_id,
+                    &format!(
+                        "file indices written by an older moonlink could not be rebuilt ({e})"
+                    ),
+                ))
+            })?;
+            new_file_indices.push(index);
+        }
+        Ok(Some(FileIndiceMergeResult {
+            uuid: uuid::Uuid::new_v4(),
+            old_file_indices: snapshot.indices.file_indices.iter().cloned().collect(),
+            new_file_indices,
+        }))
     }
 
     pub(crate) fn alter_table(
@@ -1993,3 +2059,6 @@ mod deleted_batch_flush_tests;
 
 #[cfg(test)]
 mod stream_delete_tests;
+
+#[cfg(test)]
+mod lookup_key_tests;

@@ -1,6 +1,6 @@
 use iceberg::spec::TableMetadata;
 
-use crate::storage::table::common::MOONCAKE_TABLE_FLUSH_LSN;
+use crate::storage::table::common::{MOONCAKE_LOOKUP_KEY_VERSION, MOONCAKE_TABLE_FLUSH_LSN};
 use iceberg::Result as IcebergResult;
 
 /// This file contains util functions on iceberg snapshot.
@@ -9,6 +9,9 @@ use iceberg::Result as IcebergResult;
 pub(super) struct SnapshotProperty {
     /// Iceberg flush LSN.
     pub(super) flush_lsn: Option<u64>,
+    /// Lookup-key hash version of the persisted file indices; None for tables written before the
+    /// property existed.
+    pub(super) lookup_key_version: Option<u32>,
 }
 
 /// Get moonlink customized snapshot
@@ -24,7 +27,27 @@ pub(super) fn get_snapshot_properties(
         .additional_properties
         .get(MOONCAKE_TABLE_FLUSH_LSN)
     {
-        flush_lsn = Some(lsn.parse().unwrap());
+        flush_lsn = Some(lsn.parse().map_err(|_| {
+            iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                format!("invalid {MOONCAKE_TABLE_FLUSH_LSN} snapshot property: {lsn}"),
+            )
+        })?);
     }
-    Ok(SnapshotProperty { flush_lsn })
+    let lookup_key_version = match snapshot_summary
+        .additional_properties
+        .get(MOONCAKE_LOOKUP_KEY_VERSION)
+    {
+        Some(v) => Some(v.parse().map_err(|_| {
+            iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                format!("invalid {MOONCAKE_LOOKUP_KEY_VERSION} snapshot property: {v}"),
+            )
+        })?),
+        None => None,
+    };
+    Ok(SnapshotProperty {
+        flush_lsn,
+        lookup_key_version,
+    })
 }
