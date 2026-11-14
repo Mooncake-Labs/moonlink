@@ -259,3 +259,55 @@ async fn test_compaction_with_more_than_100_outputs() {
     }
     delete_all_and_check(&mut table, &mut rx, FILES).await;
 }
+
+/// A compaction commit rewrites the data-file manifests; files that land in manifests that
+/// rolled over (here every 2 entries) must stay in the table.
+#[tokio::test]
+async fn test_compaction_commit_keeps_files_beyond_manifest_rollover() {
+    use crate::storage::table::iceberg::data_file_manifest_manager::MAX_MANIFEST_ENTRY_COUNT_FOR_TEST;
+    MAX_MANIFEST_ENTRY_COUNT_FOR_TEST.with(|c| c.set(2));
+    let context = TestContext::new("manifest_rollover");
+    let no_merge = FileIndexMergeConfig {
+        min_file_indices_to_merge: u32::MAX,
+        max_file_indices_to_merge: u32::MAX,
+        index_block_final_size: u64::MAX,
+    };
+    {
+        let (mut table, mut rx) = table_with(
+            &context,
+            compaction_config(2, 2, u64::MAX),
+            no_merge.clone(),
+        )
+        .await;
+        flush_files(&mut table, &mut rx, 5).await;
+        let (_, compaction) = snapshot_and_persist(
+            &mut table,
+            &mut rx,
+            opt(
+                MaintenanceOption::Skip,
+                MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+            ),
+        )
+        .await;
+        let payload = compaction.take_payload().expect("compaction payload");
+        assert_eq!(payload.disk_files.len(), 2);
+        perform_data_compaction_for_test(&mut table, &mut rx, payload).await;
+        snapshot_and_persist(
+            &mut table,
+            &mut rx,
+            opt(MaintenanceOption::Skip, MaintenanceOption::Skip),
+        )
+        .await;
+    }
+    MAX_MANIFEST_ENTRY_COUNT_FOR_TEST.with(|c| {
+        c.set(crate::storage::table::iceberg::data_file_manifest_manager::DEFAULT_MAX_MANIFEST_ENTRY_COUNT)
+    });
+
+    // Reload from disk: three untouched files plus the compacted one, all five rows.
+    let (table, _rx) = table_with(&context, compaction_config(2, 2, u64::MAX), no_merge).await;
+    let guard = table.snapshot.read().await;
+    let files = &guard.current_snapshot.disk_files;
+    assert_eq!(files.len(), 4, "data files lost from the iceberg snapshot");
+    let rows: usize = files.values().map(|e| e.num_rows).sum();
+    assert_eq!(rows, 5);
+}

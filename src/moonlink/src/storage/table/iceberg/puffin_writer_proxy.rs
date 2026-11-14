@@ -347,9 +347,7 @@ pub(crate) async fn append_puffin_metadata_and_rewrite(
     file_index_manifest_manager.add_new_puffin_blobs(file_index_blobs_to_add)?;
 
     // Attempt to finalize all existing manifest entries.
-    if let Some(manifest_file) = data_file_manifest_manager.finalize().await? {
-        manifest_list_writer.add_manifests(std::iter::once(manifest_file))?;
-    }
+    manifest_list_writer.add_manifests(data_file_manifest_manager.finalize().await?.into_iter())?;
     if let Some(manifest_file) = deletion_vector_manifest_manager.finalize().await? {
         manifest_list_writer.add_manifests(std::iter::once(manifest_file))?;
     }
