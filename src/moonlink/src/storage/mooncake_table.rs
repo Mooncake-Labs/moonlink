@@ -1727,8 +1727,6 @@ impl MooncakeTable {
 
     /// Let garbage collection know which snapshot sequences live readers still use. Without a
     /// provider, superseded data files are kept for a grace period before deletion.
-    // Installed by the read path.
-    #[allow(dead_code)]
     pub(crate) fn set_live_read_seq_provider(&self, provider: LiveReadSeqProvider) {
         if let Some(gc_context) = &self.gc_context {
             *gc_context.live_read_seq_provider.lock().unwrap() = Some(provider);

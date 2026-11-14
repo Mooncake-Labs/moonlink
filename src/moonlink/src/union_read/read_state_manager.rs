@@ -1,10 +1,13 @@
 use crate::error::Result;
 use crate::event_sync::TableStatus;
+use crate::storage::table::iceberg::gc::LiveReadSeqProvider;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
+use crate::union_read::live_reads::LiveReadSeqs;
 use crate::ReadState;
 use crate::ReadStateFilepathRemap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::sync::{watch, RwLock};
 
 /// Snapshot LSN, which indicates there's no snapshot LSN update.
@@ -19,15 +22,35 @@ struct CachedRead {
     /// Requests up to this LSN are answered by `state`: no commit of this table in
     /// `(snapshot, valid_upto]` existed when it was materialized.
     valid_upto: u64,
+    /// Snapshot sequence the state was built from. Maintenance-only snapshots (compaction, index
+    /// merge, iceberg import) bump it without moving the snapshot LSN.
+    snapshot_seq: u64,
     state: Arc<ReadState>,
 }
 
 impl CachedRead {
+    fn empty(read_state_filepath_remap: ReadStateFilepathRemap) -> Self {
+        Self {
+            snapshot_key: None,
+            valid_upto: 0,
+            snapshot_seq: 0,
+            state: Arc::new(ReadState::new(
+                /*data_files=*/ Vec::new(),
+                /*puffin_cache_handles=*/ Vec::new(),
+                /*deletion_vectors_at_read=*/ Vec::new(),
+                /*position_deletes=*/ Vec::new(),
+                /*associated_files=*/ Vec::new(),
+                /*cache_handles=*/ Vec::new(),
+                read_state_filepath_remap,
+            )),
+        }
+    }
+
     /// Rows up to the snapshot are always covered. Beyond it, also require the CURRENT view to be
     /// clean: a commit at or below `valid_upto` that was marked late (e.g. buffered during initial
     /// copy) makes the view dirty and forces a wait for its snapshot.
-    fn reusable(&self, view: &LsnView, requested_lsn: Option<u64>) -> bool {
-        if self.snapshot_key != Some(view.snapshot) {
+    fn reusable(&self, view: &LsnView, snapshot_seq: u64, requested_lsn: Option<u64>) -> bool {
+        if self.snapshot_key != Some(view.snapshot) || self.snapshot_seq != snapshot_seq {
             return false;
         }
         match requested_lsn {
@@ -109,7 +132,9 @@ impl LsnView {
 }
 
 pub struct ReadStateManager {
-    cache: RwLock<CachedRead>,
+    cache: Arc<RwLock<CachedRead>>,
+    snapshot_seq: Arc<AtomicU64>,
+    live_reads: Arc<LiveReadSeqs>,
     table_snapshot: Arc<RwLock<SnapshotTableState>>,
     table_snapshot_watch_receiver: watch::Receiver<u64>,
     replication_lsn_rx: watch::Receiver<u64>,
@@ -128,20 +153,21 @@ impl ReadStateManager {
         read_state_filepath_remap: ReadStateFilepathRemap,
     ) -> Self {
         let (table_snapshot, table_snapshot_watch_receiver) = table.get_state_for_reader();
+        let cache = Arc::new(RwLock::new(CachedRead::empty(
+            read_state_filepath_remap.clone(),
+        )));
+        let snapshot_seq = table.snapshot_seq_handle();
+        let live_reads = Arc::new(LiveReadSeqs::default());
+        table.set_live_read_seq_provider(Self::live_read_seq_provider(
+            Arc::downgrade(&cache),
+            snapshot_seq.clone(),
+            live_reads.clone(),
+            read_state_filepath_remap.clone(),
+        ));
         ReadStateManager {
-            cache: RwLock::new(CachedRead {
-                snapshot_key: None,
-                valid_upto: 0,
-                state: Arc::new(ReadState::new(
-                    /*data_files=*/ Vec::new(),
-                    /*puffin_cache_handles=*/ Vec::new(),
-                    /*deletion_vectors_at_read=*/ Vec::new(),
-                    /*position_deletes=*/ Vec::new(),
-                    /*associated_files=*/ Vec::new(),
-                    /*cache_handles=*/ Vec::new(),
-                    read_state_filepath_remap.clone(), // Unused
-                )),
-            }),
+            cache,
+            snapshot_seq,
+            live_reads,
             table_snapshot,
             table_snapshot_watch_receiver,
             replication_lsn_rx,
@@ -149,6 +175,30 @@ impl ReadStateManager {
             read_state_filepath_remap,
             table_status_rx: None,
         }
+    }
+
+    /// Oldest snapshot sequence any live read state was built from, for garbage collection.
+    /// On an idle table the cached read state would pin superseded files forever, so a cached
+    /// state that is outdated and not held by any scan is released first.
+    fn live_read_seq_provider(
+        cache: Weak<RwLock<CachedRead>>,
+        snapshot_seq: Arc<AtomicU64>,
+        live_reads: Arc<LiveReadSeqs>,
+        read_state_filepath_remap: ReadStateFilepathRemap,
+    ) -> LiveReadSeqProvider {
+        Arc::new(move || {
+            if let Some(cache) = cache.upgrade() {
+                if let Ok(mut cached) = cache.try_write() {
+                    if cached.snapshot_key.is_some()
+                        && cached.snapshot_seq != snapshot_seq.load(Ordering::SeqCst)
+                        && Arc::strong_count(&cached.state) == 1
+                    {
+                        *cached = CachedRead::empty(read_state_filepath_remap.clone());
+                    }
+                }
+            }
+            live_reads.min()
+        })
     }
 
     /// Fail reads once the table enters the errored state, including reads waiting for an LSN.
@@ -219,7 +269,8 @@ impl ReadStateManager {
             );
             {
                 let cache = self.cache.read().await;
-                if cache.reusable(&view, requested_lsn) {
+                let snapshot_seq = self.snapshot_seq.load(Ordering::SeqCst);
+                if cache.reusable(&view, snapshot_seq, requested_lsn) {
                     return Ok(cache.state.clone());
                 }
             }
@@ -240,27 +291,35 @@ impl ReadStateManager {
     #[tracing::instrument(name = "update_read_state", skip_all)]
     async fn read_from_snapshot_and_update_cache(&self, view: LsnView) -> Result<Arc<ReadState>> {
         let mut cache = self.cache.write().await;
-        if cache.snapshot_key == Some(view.snapshot) {
+        if cache.snapshot_key == Some(view.snapshot)
+            && cache.snapshot_seq == self.snapshot_seq.load(Ordering::SeqCst)
+        {
             // Same snapshot already materialized; only the label can grow.
             cache.valid_upto = cache.valid_upto.max(view.valid_upto());
             return Ok(cache.state.clone());
         }
         // Only collection happens under the snapshot lock; the temp parquet is written after it is
         // released. The cache write guard still serializes materialization per table.
-        let pending_read = {
+        let (pending_read, live_read_guard) = {
             let mut table_state_snapshot = self.table_snapshot.write().await;
-            table_state_snapshot.prepare_read().await?
+            let pending_read = table_state_snapshot.prepare_read().await?;
+            // Register under the snapshot lock: from here on GC keeps this snapshot's files.
+            let guard = self.live_reads.register(pending_read.snapshot_seq());
+            (pending_read, guard)
         };
+        let snapshot_seq = pending_read.snapshot_seq();
         #[cfg(test)]
         test_hooks::before_materialize().await;
         let snapshot_read_output = pending_read.materialize().await?;
         let state = snapshot_read_output
             .take_as_read_state(self.read_state_filepath_remap.clone())
             .await?;
+        state.attach_live_read_guard(live_read_guard);
         // Publish only after the read state was built, so a failure keeps the previous key.
         *cache = CachedRead {
             snapshot_key: Some(view.snapshot),
             valid_upto: view.valid_upto(),
+            snapshot_seq,
             state: state.clone(),
         };
         Ok(state)
@@ -418,6 +477,7 @@ mod tests {
         let mk = |key: Option<u64>, valid_upto: u64| CachedRead {
             snapshot_key: key,
             valid_upto,
+            snapshot_seq: 7,
             state: Arc::new(ReadState::new(
                 vec![],
                 vec![],
@@ -431,18 +491,20 @@ mod tests {
         let clean_at_100 = LsnView::normalize(150, 100, 100);
         let dirty_at_100 = LsnView::normalize(150, 120, 100);
         // Same snapshot, within label.
-        assert!(mk(Some(100), 150).reusable(&clean_at_100, Some(150)));
+        assert!(mk(Some(100), 150).reusable(&clean_at_100, 7, Some(150)));
         // Same snapshot, beyond label.
-        assert!(!mk(Some(100), 150).reusable(&clean_at_100, Some(151)));
+        assert!(!mk(Some(100), 150).reusable(&clean_at_100, 7, Some(151)));
         // A later-marked commit at/below the label makes the view dirty: only the snapshot range is served.
-        assert!(!mk(Some(100), 150).reusable(&dirty_at_100, Some(120)));
-        assert!(mk(Some(100), 150).reusable(&dirty_at_100, Some(100)));
+        assert!(!mk(Some(100), 150).reusable(&dirty_at_100, 7, Some(120)));
+        assert!(mk(Some(100), 150).reusable(&dirty_at_100, 7, Some(100)));
         // A newer snapshot was published: never reuse, even if the label is higher.
-        assert!(!mk(Some(100), 200).reusable(&LsnView::normalize(200, 200, 200), Some(200)));
+        assert!(!mk(Some(100), 200).reusable(&LsnView::normalize(200, 200, 200), 7, Some(200)));
         // Empty cache.
-        assert!(!mk(None, u64::MAX).reusable(&clean_at_100, Some(1)));
+        assert!(!mk(None, u64::MAX).reusable(&clean_at_100, 7, Some(1)));
         // Latest read reuses only a clean current snapshot.
-        assert!(mk(Some(100), 100).reusable(&clean_at_100, None));
-        assert!(!mk(Some(100), 100).reusable(&dirty_at_100, None));
+        assert!(mk(Some(100), 100).reusable(&clean_at_100, 7, None));
+        assert!(!mk(Some(100), 100).reusable(&dirty_at_100, 7, None));
+        // A maintenance-only snapshot (same LSN, new sequence) also forces a refresh.
+        assert!(!mk(Some(100), 150).reusable(&clean_at_100, 8, Some(100)));
     }
 }

@@ -4,6 +4,7 @@
 //
 
 use crate::storage::io_utils;
+use crate::union_read::live_reads::LiveReadGuard;
 use crate::NonEvictableHandle;
 use moonlink_table_metadata::{DeletionVector, MooncakeTableMetadata, PositionDelete};
 
@@ -25,6 +26,8 @@ pub struct ReadState {
     pub(crate) associated_files: Vec<String>,
     /// Cache handles for data files.
     cache_handles: Vec<NonEvictableHandle>,
+    /// Keeps garbage collection from deleting the files of the snapshot this was built from.
+    live_read_guard: std::sync::OnceLock<LiveReadGuard>,
 }
 
 impl Drop for ReadState {
@@ -63,6 +66,12 @@ impl Drop for ReadState {
             }
             .instrument(info_span!("read_state_cleanup")),
         );
+    }
+}
+
+impl ReadState {
+    pub(crate) fn attach_live_read_guard(&self, guard: LiveReadGuard) {
+        let _ = self.live_read_guard.set(guard);
     }
 }
 
@@ -114,6 +123,7 @@ impl ReadState {
 
         cache_handles.extend(puffin_cache_handles);
         Self {
+            live_read_guard: std::sync::OnceLock::new(),
             data,
             associated_files,
             cache_handles,
@@ -155,6 +165,7 @@ pub fn decode_serialized_read_state_for_testing(
         data,
         associated_files: vec![],
         cache_handles: vec![],
+        live_read_guard: std::sync::OnceLock::new(),
     };
     decode_read_state_for_testing(&read_state)
 }

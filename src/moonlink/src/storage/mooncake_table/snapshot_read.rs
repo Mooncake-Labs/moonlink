@@ -180,6 +180,7 @@ impl SnapshotTableState {
             object_storage_cache: self.object_storage_cache.clone(),
             filesystem_accessor: self.filesystem_accessor.clone(),
             table_notifier: self.table_notify.as_ref().unwrap().clone(),
+            snapshot_seq: self.snapshot_seq.load(std::sync::atomic::Ordering::SeqCst),
         };
 
         assert!(matches!(
@@ -229,9 +230,15 @@ pub(crate) struct PendingRead {
     object_storage_cache: Arc<dyn CacheTrait>,
     filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     table_notifier: Sender<TableEvent>,
+    /// Snapshot sequence the read was prepared from (read under the snapshot lock).
+    snapshot_seq: u64,
 }
 
 impl PendingRead {
+    pub(crate) fn snapshot_seq(&self) -> u64 {
+        self.snapshot_seq
+    }
+
     /// Write committed in-memory rows to a temporary parquet file (deleted with the ReadState).
     pub(crate) async fn materialize(mut self) -> Result<SnapshotReadOutput> {
         let mut associated_files = Vec::new();

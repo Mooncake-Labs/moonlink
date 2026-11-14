@@ -307,3 +307,109 @@ async fn errored_table_fails_reads_immediately_and_wakes_waiters() {
     let err = rsm.try_read(Some(100)).await.expect_err("errored table");
     assert!(err.to_string().contains("out of sync"), "{err}");
 }
+
+mod gc {
+    use super::*;
+    use crate::storage::mooncake_table::table_operation_test_utils::{
+        create_mooncake_and_persist_for_test, perform_data_compaction_for_test,
+        sync_mooncake_snapshot,
+    };
+    use crate::storage::snapshot_options::{
+        IcebergSnapshotOption, MaintenanceOption, SnapshotOption,
+    };
+
+    fn data_parquet_count(env: &Env) -> usize {
+        let dir = env
+            ._context
+            .as_ref()
+            .unwrap()
+            .path()
+            .join("default")
+            .join("gc")
+            .join("data");
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".parquet"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// One flushed and persisted data file per row; readers are told about each snapshot.
+    async fn write_files(env: &mut Env, ids: std::ops::RangeInclusive<i32>) {
+        for id in ids {
+            let lsn = id as u64 * 10;
+            append_rows(&mut env.table, vec![test_row(id, "r", id)]).unwrap();
+            env.table.commit(lsn);
+            flush_table_and_sync(&mut env.table, &mut env.notify_rx, lsn)
+                .await
+                .unwrap();
+            create_mooncake_and_persist_for_test(&mut env.table, &mut env.notify_rx).await;
+            env.publish(lsn, lsn, lsn);
+        }
+    }
+
+    /// Compact all data files into one and persist it; garbage collection runs on the commit.
+    async fn compact_everything(env: &mut Env) {
+        assert!(env.table.try_create_mooncake_snapshot(SnapshotOption {
+            uuid: uuid::Uuid::new_v4(),
+            force_create: true,
+            dump_snapshot: false,
+            iceberg_snapshot_option: IcebergSnapshotOption::Skip,
+            index_merge_option: MaintenanceOption::Skip,
+            data_compaction_option: MaintenanceOption::ForceFull(uuid::Uuid::new_v4()),
+        }));
+        let (_, _, _, compaction, _) =
+            sync_mooncake_snapshot(&mut env.table, &mut env.notify_rx).await;
+        let payload = compaction.take_payload().expect("compaction payload");
+        perform_data_compaction_for_test(&mut env.table, &mut env.notify_rx, payload).await;
+        env.table.force_empty_persistence_payload();
+        create_mooncake_and_persist_for_test(&mut env.table, &mut env.notify_rx).await;
+    }
+
+    /// Files of an open read state survive compaction until the read state is dropped.
+    #[tokio::test]
+    async fn gc_keeps_files_of_open_read_states() {
+        let mut env = Env::new("gc").await;
+        write_files(&mut env, 1..=4).await;
+        let open_scan = env.rsm.try_read(Some(40)).await.unwrap();
+        assert_eq!(data_parquet_count(&env), 4);
+
+        compact_everything(&mut env).await;
+        assert_eq!(
+            data_parquet_count(&env),
+            5,
+            "files deleted under an open read state"
+        );
+        assert_rows(&open_scan, &[1, 2, 3, 4]).await;
+
+        // The scan ends; the next commit collects the superseded files.
+        drop(open_scan);
+        write_files(&mut env, 5..=5).await;
+        assert_eq!(data_parquet_count(&env), 2);
+        assert_rows(&env.rsm.try_read(Some(50)).await.unwrap(), &[1, 2, 3, 4, 5]).await;
+    }
+
+    /// On an idle table the cached read state is the only holder of the old files; it must not
+    /// pin them forever.
+    #[tokio::test]
+    async fn idle_cached_read_state_does_not_pin_superseded_files() {
+        let mut env = Env::new("gc").await;
+        write_files(&mut env, 1..=4).await;
+        drop(env.rsm.try_read(Some(40)).await.unwrap());
+
+        compact_everything(&mut env).await;
+        // The predecessor iceberg version stays loadable until the next commit.
+        assert_eq!(data_parquet_count(&env), 5);
+        write_files(&mut env, 5..=5).await;
+        assert_eq!(
+            data_parquet_count(&env),
+            2,
+            "the idle cached read state pinned superseded files"
+        );
+        // The next scan rebuilds from the compacted snapshot.
+        assert_rows(&env.rsm.try_read(Some(50)).await.unwrap(), &[1, 2, 3, 4, 5]).await;
+    }
+}
