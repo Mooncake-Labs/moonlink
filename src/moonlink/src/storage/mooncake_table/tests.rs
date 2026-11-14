@@ -861,9 +861,12 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
             mut data_file_paths,
             ..
         } = snapshot.request_read().await.unwrap();
+        // Only the two flushed files: the earlier in-memory file must not be re-attached, or
+        // rows 1 and 2 would be returned twice.
+        assert_eq!(data_file_paths.len(), 2);
         data_file_paths.sort_by_key(|data_file| data_file.get_file_path());
-        verify_file_contents(&data_file_paths[1].get_file_path(), &[1], Some(1));
-        verify_file_contents(&data_file_paths[2].get_file_path(), &[2], Some(1));
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1], Some(1));
+        verify_file_contents(&data_file_paths[1].get_file_path(), &[2], Some(1));
     }
 }
 

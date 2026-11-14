@@ -214,3 +214,27 @@ async fn new_snapshot_always_refreshes_cached_read_state() {
     env.publish(200, 200, 200);
     assert_rows(&env.rsm.try_read(Some(200)).await.unwrap(), &[1, 2, 3]).await;
 }
+
+/// A read between "snapshot applied" and "snapshot LSN published" materializes the in-memory
+/// rows for the new snapshot version. Each read state must own its temporary file: dropping the
+/// first one must not delete a file that a cached read state still serves.
+#[tokio::test]
+async fn in_memory_temp_file_is_not_shared_between_read_states() {
+    let mut env = Env::new("shared_tmp").await;
+    env.commit_and_snapshot(&[1], 100, /*flush=*/ false).await;
+    env.publish(100, 100, 100);
+
+    env.commit_and_snapshot(&[2], 200, /*flush=*/ false).await;
+    env.commit_tx.send(200).unwrap();
+    env.replication_tx.send(200).unwrap();
+    let first = env.rsm.try_read(Some(100)).await.unwrap();
+
+    env.table.notify_snapshot_reader(200);
+    let second = env.rsm.try_read(Some(200)).await.unwrap();
+    drop(second);
+    drop(first);
+    // Read state cleanup runs on detached tasks.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_rows(&env.rsm.try_read(Some(200)).await.unwrap(), &[1, 2]).await;
+}
