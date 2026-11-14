@@ -13,8 +13,6 @@ pub(crate) const ICEBERG_TEST_NAMESPACE: &str = "namespace";
 pub(crate) const ICEBERG_TEST_TABLE: &str = "test_table";
 #[cfg(feature = "catalog-rest")]
 pub(crate) const REST_CATALOG_TEST_URI: &str = "http://iceberg-rest.local:8181";
-/// Delta test table name.
-pub(crate) const DELTA_TEST_TABLE: &str = "test_table";
 /// Test constant for table id.
 pub(crate) const TEST_TABLE_ID: TableId = TableId(0);
 /// File attributes for a fake file.

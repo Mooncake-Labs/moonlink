@@ -18,7 +18,6 @@ storage-fs = ["opendal/services-fs", "iceberg/storage-fs"]
 storage-s3 = [
     "opendal/services-s3",
     "iceberg/storage-s3",
-    "deltalake/s3",
     "base64",
     "hmac",
     "sha1",
@@ -57,7 +56,6 @@ bitstream-io = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 crc32fast = { workspace = true }
-deltalake = { workspace = true }
 fastbloom = { workspace = true }
 function_name = { version = "0.3", optional = true }
 futures = { workspace = true }
