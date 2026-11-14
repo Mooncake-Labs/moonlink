@@ -32,11 +32,18 @@ impl LsnState {
     /// Mark the replication position as `lsn` if it is newer than the current
     /// value.
     pub fn mark(&self, lsn: u64) {
-        if lsn > self.current.load(Ordering::SeqCst) {
-            self.current.store(lsn, Ordering::SeqCst);
-            // `send` drops the value when nobody is subscribed yet, and later subscribers would
-            // then start from a stale LSN.
-            self.tx.send_replace(lsn);
+        // Concurrent marks (the replication loop, table setup, the initial copy) must never make
+        // either value move backwards: readers assert LSN ordering across these watermarks.
+        if self.current.fetch_max(lsn, Ordering::SeqCst) < lsn {
+            // Unlike `send`, this also updates the value while nobody is subscribed yet.
+            self.tx.send_if_modified(|current| {
+                if lsn > *current {
+                    *current = lsn;
+                    true
+                } else {
+                    false
+                }
+            });
         }
     }
 
@@ -85,5 +92,46 @@ mod tests {
         // Not newer than the current value, so nothing is sent.
         state.mark(42);
         assert_eq!(*state.subscribe().borrow(), 42);
+    }
+
+    #[test]
+    fn concurrent_marks_never_move_the_watermark_backwards() {
+        let state = LsnState::new();
+        let rx = state.subscribe();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = {
+            let (state, stop) = (state.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (mut last_watched, mut last_now) = (0, 0);
+                while !stop.load(Ordering::SeqCst) {
+                    let watched = *rx.borrow();
+                    let now = state.now();
+                    assert!(
+                        watched >= last_watched,
+                        "watch went from {last_watched} to {watched}"
+                    );
+                    assert!(now >= last_now, "now() went from {last_now} to {now}");
+                    (last_watched, last_now) = (watched, now);
+                }
+            })
+        };
+        let markers: Vec<_> = (0..8u64)
+            .map(|thread| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    for i in 0..20_000u64 {
+                        state.mark(i * 8 + thread);
+                    }
+                })
+            })
+            .collect();
+        for marker in markers {
+            marker.join().unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        observer.join().unwrap();
+        let max = 19_999 * 8 + 7;
+        assert_eq!(state.now(), max);
+        assert_eq!(*state.subscribe().borrow(), max);
     }
 }
