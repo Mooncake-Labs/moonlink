@@ -15,6 +15,10 @@ struct MooncakeTableConfigForPersistence {
     #[serde(default = "MooncakeTableConfig::default_mem_slice_size")]
     mem_slice_size: usize,
 
+    /// Approximate mem slice bytes which also trigger a flush.
+    #[serde(default = "MooncakeTableConfig::default_mem_slice_bytes")]
+    mem_slice_bytes: usize,
+
     /// Number of new deletion records which decides whether to create a new mooncake table snapshot.
     #[serde(default = "MooncakeTableConfig::default_snapshot_deletion_record_count")]
     snapshot_deletion_record_count: usize,
@@ -98,6 +102,7 @@ impl MoonlinkTableConfigForPersistence {
             append_only: self.mooncake_table_config.append_only,
             row_identity: self.mooncake_table_config.row_identity.clone(),
             mem_slice_size: self.mooncake_table_config.mem_slice_size,
+            mem_slice_bytes: self.mooncake_table_config.mem_slice_bytes,
             snapshot_deletion_record_count: self
                 .mooncake_table_config
                 .snapshot_deletion_record_count,
@@ -129,6 +134,7 @@ pub(crate) fn parse_moonlink_table_config(
         iceberg_table_config,
         mooncake_table_config: MooncakeTableConfigForPersistence {
             mem_slice_size: mooncake_config.mem_slice_size,
+            mem_slice_bytes: mooncake_config.mem_slice_bytes,
             snapshot_deletion_record_count: mooncake_config.snapshot_deletion_record_count,
             batch_size: mooncake_config.batch_size,
             disk_slice_parquet_file_size: mooncake_config
@@ -216,6 +222,25 @@ mod tests {
     }
 
     // Testing scenario: serialized json config only contains partial fields, check whether json deserialization succeeds, and populates default value correctly.
+    /// A configured mem slice byte budget survives persistence (it is reloaded at restart).
+    #[test]
+    fn test_mem_slice_bytes_persisted() {
+        let mooncake_table_config = MooncakeTableConfig {
+            mem_slice_bytes: 4 * 1024 * 1024,
+            ..Default::default()
+        };
+        let moonlink_table_config = MoonlinkTableConfig {
+            iceberg_table_config: IcebergTableConfig::default(),
+            mooncake_table_config,
+        };
+        let persisted = parse_moonlink_table_config(moonlink_table_config).unwrap();
+        let restored = deserialize_moonlink_table_config(persisted).unwrap();
+        assert_eq!(
+            restored.mooncake_table_config.mem_slice_bytes,
+            4 * 1024 * 1024
+        );
+    }
+
     #[test]
     fn test_mooncake_persisted_config_serde() {
         // Intentionally miss a few fields persisted config.
@@ -237,6 +262,7 @@ mod tests {
         let expected_persisted_config = MooncakeTableConfigForPersistence {
             // Mooncake table config.
             mem_slice_size: MooncakeTableConfig::default_mem_slice_size(),
+            mem_slice_bytes: MooncakeTableConfig::default_mem_slice_bytes(),
             snapshot_deletion_record_count:
                 MooncakeTableConfig::default_snapshot_deletion_record_count(),
             batch_size: MooncakeTableConfig::default_batch_size(),

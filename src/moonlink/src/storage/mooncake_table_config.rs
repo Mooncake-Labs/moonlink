@@ -121,6 +121,10 @@ impl Default for IcebergPersistenceConfig {
 pub struct MooncakeTableConfig {
     /// Number of batch records which decides when to flush records from MemSlice to disk.
     pub mem_slice_size: usize,
+    /// Approximate in-memory bytes of a MemSlice (or of one streamed transaction) that also
+    /// trigger a flush, so memory per table stays bounded for wide rows.
+    #[serde(default = "MooncakeTableConfig::default_mem_slice_bytes")]
+    pub mem_slice_bytes: usize,
     /// Number of new deletion records which decides whether to create a new mooncake table snapshot.
     pub snapshot_deletion_record_count: usize,
     /// Max number of rows in each record batch within MemSlice.
@@ -162,12 +166,16 @@ impl MooncakeTableConfig {
     #[cfg(not(debug_assertions))]
     pub(crate) const DEFAULT_BATCH_SIZE: usize = 4096;
 
+    /// Default byte budget of a mem slice before it is flushed.
+    pub const DEFAULT_MEM_SLICE_BYTES: usize = 16 * 1024 * 1024;
+
     /// Default local directory to hold temporary files for union read.
     pub const DEFAULT_TEMP_FILE_DIRECTORY: &str = "/tmp/moonlink_temp_file";
 
     pub fn new(temp_files_directory: String) -> Self {
         Self {
             mem_slice_size: Self::DEFAULT_MEM_SLICE_SIZE,
+            mem_slice_bytes: Self::DEFAULT_MEM_SLICE_BYTES,
             snapshot_deletion_record_count: Self::DEFAULT_SNAPSHOT_DELETION_RECORD_COUNT,
             batch_size: Self::DEFAULT_BATCH_SIZE,
             disk_slice_writer_config: DiskSliceWriterConfig::default(),
@@ -183,6 +191,9 @@ impl MooncakeTableConfig {
     // Default value accessor.
     pub fn default_mem_slice_size() -> usize {
         Self::DEFAULT_MEM_SLICE_SIZE
+    }
+    pub fn default_mem_slice_bytes() -> usize {
+        Self::DEFAULT_MEM_SLICE_BYTES
     }
     pub fn default_snapshot_deletion_record_count() -> usize {
         Self::DEFAULT_SNAPSHOT_DELETION_RECORD_COUNT
