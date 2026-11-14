@@ -2068,3 +2068,6 @@ mod compaction_group_tests;
 
 #[cfg(test)]
 mod catalog_robustness_tests;
+
+#[cfg(test)]
+mod gc_tests;

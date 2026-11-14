@@ -667,7 +667,7 @@ impl Catalog for FileCatalog {
         // Construct new metadata with updates.
         let updates = commit.take_updates();
         let builder = reflect_table_updates(builder, updates)?;
-        let metadata = builder.build()?.metadata;
+        let metadata = expire_snapshots_and_metadata_log(builder.build()?.metadata)?;
 
         // Write metadata file.
         let metadata_directory = format!(
@@ -841,4 +841,35 @@ fn metadata_file_version(path: &str) -> Option<u32> {
         .strip_suffix(".metadata.json")?
         .parse()
         .ok()
+}
+
+/// Moonlink only ever reads the current snapshot, so every commit drops all older snapshots and
+/// keeps a single previous entry in the metadata log. Without this, each metadata file embeds the
+/// full history and grows with every commit.
+fn expire_snapshots_and_metadata_log(metadata: TableMetadata) -> IcebergResult<TableMetadata> {
+    const PREVIOUS_VERSIONS_MAX: &str = "write.metadata.previous-versions-max";
+    let current = metadata.current_snapshot_id();
+    let expired: Vec<i64> = metadata
+        .snapshots()
+        .map(|snapshot| snapshot.snapshot_id())
+        .filter(|id| Some(*id) != current)
+        .collect();
+    let needs_property = metadata
+        .properties()
+        .get(PREVIOUS_VERSIONS_MAX)
+        .map(String::as_str)
+        != Some("1");
+    if expired.is_empty() && !needs_property {
+        return Ok(metadata);
+    }
+    let mut builder =
+        TableMetadataBuilder::new_from_metadata(metadata, /*current_file_location=*/ None)
+            .remove_snapshots(&expired);
+    if needs_property {
+        builder = builder.set_properties(std::collections::HashMap::from([(
+            PREVIOUS_VERSIONS_MAX.to_string(),
+            "1".to_string(),
+        )]))?;
+    }
+    Ok(builder.build()?.metadata)
 }
