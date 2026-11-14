@@ -1988,6 +1988,8 @@ pub(crate) mod test_utils_commons;
 #[cfg(test)]
 pub(crate) mod cache_test_utils;
 
-
 #[cfg(test)]
 mod deleted_batch_flush_tests;
+
+#[cfg(test)]
+mod stream_delete_tests;
