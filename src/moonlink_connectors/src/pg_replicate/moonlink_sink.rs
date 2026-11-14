@@ -509,12 +509,13 @@ impl Sink {
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
-                self.deliver_pending_transaction_changes().await;
-                self.warn_if_before_keepalive(commit_body.end_lsn(), "commit");
+                ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
-                for table_id in self.transaction_state.touched_tables.clone() {
-                    self.mark_table_commit(table_id, commit_body.end_lsn());
-                    let event_sender = self.event_senders.get(&table_id);
+                for table_id in &self.transaction_state.touched_tables {
+                    let event_sender = self.event_senders.get(table_id);
+                    if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id) {
+                        commit_lsn_tx.mark(commit_body.end_lsn());
+                    }
                     if let Some(event_sender) = event_sender {
                         if let Err(e) = Self::send_table_event(
                             event_sender,
@@ -542,24 +543,14 @@ impl Sink {
                     end_lsn = stream_commit_body.end_lsn(),
                     "stream commit"
                 );
-                self.warn_if_before_keepalive(stream_commit_body.end_lsn(), "stream commit");
-                // Before the commit is marked: marking raises the tables' floors past this
-                // transaction, which would make its own failures look like replay. A failed table
-                // is detached, so its part of the transaction is never committed.
-                for (table_id, reason) in self
-                    .pending_stream_failures
-                    .remove(&xact_id)
-                    .unwrap_or_default()
-                {
-                    self.fail_table_at(table_id, stream_commit_body.commit_lsn(), reason)
-                        .await;
-                }
-                self.stream_subxacts.remove(&xact_id);
+                ma::assert_ge!(stream_commit_body.end_lsn(), self.max_keepalive_lsn_seen);
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
-                if let Some(tables_in_txn) = self.streaming_transactions_state.remove(&xact_id) {
-                    for table_id in tables_in_txn.touched_tables {
-                        self.mark_table_commit(table_id, stream_commit_body.end_lsn());
-                        let event_sender = self.event_senders.get(&table_id);
+                if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
+                    for table_id in &tables_in_txn.touched_tables {
+                        let event_sender = self.event_senders.get(table_id);
+                        if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id) {
+                            commit_lsn_tx.mark(stream_commit_body.end_lsn());
+                        }
                         if let Some(event_sender) = event_sender {
                             if let Err(e) = Self::send_table_event(
                                 event_sender,

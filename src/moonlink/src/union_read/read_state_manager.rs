@@ -190,40 +190,12 @@ impl ReadStateManager {
     }
 
     #[tracing::instrument(name = "update_read_state", skip_all)]
-    async fn read_from_snapshot_and_update_cache(
-        &self,
-        current_snapshot_lsn: u64,
-        current_replication_lsn: u64,
-        current_commit_lsn: u64,
-    ) -> Result<Arc<ReadState>> {
-        let mut table_state_snapshot = self.table_snapshot.write().await;
-        let mut last_read_state_guard = self.last_read_state.write().await;
-        let is_snapshot_clean = current_snapshot_lsn == current_commit_lsn;
-
-        let last_read_lsn = self.last_read_lsn.load(Ordering::Acquire);
-        if last_read_lsn < current_snapshot_lsn || last_read_lsn == NO_READ_LSN {
-            // Only calculate effective_lsn if we're not uninitialized
-            let effective_lsn = if last_read_lsn == NO_READ_LSN {
-                // For uninitialized cache, just use the current snapshot LSN
-                current_snapshot_lsn
-            } else {
-                // If the snapshot is fully committed and replication has progressed further,
-                // we can consider the state valid up to the replication LSN.
-                if is_snapshot_clean && current_snapshot_lsn < current_replication_lsn {
-                    current_replication_lsn
-                } else {
-                    current_snapshot_lsn
-                }
-            };
-
-            let snapshot_read_output = table_state_snapshot.request_read().await?;
-            let read_state = snapshot_read_output
-                .take_as_read_state(self.read_state_filepath_remap.clone())
-                .await?;
-            // Advance the cached LSN only once the new state exists; otherwise a failed resolve
-            // would leave the previous snapshot cached under the new LSN.
-            *last_read_state_guard = read_state;
-            self.last_read_lsn.store(effective_lsn, Ordering::Release);
+    async fn read_from_snapshot_and_update_cache(&self, view: LsnView) -> Result<Arc<ReadState>> {
+        let mut cache = self.cache.write().await;
+        if cache.snapshot_key == Some(view.snapshot) {
+            // Same snapshot already materialized; only the label can grow.
+            cache.valid_upto = cache.valid_upto.max(view.valid_upto());
+            return Ok(cache.state.clone());
         }
         let snapshot_read_output = {
             let mut table_state_snapshot = self.table_snapshot.write().await;
