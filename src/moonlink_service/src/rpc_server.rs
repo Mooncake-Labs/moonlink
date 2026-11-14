@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::UnixListener;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 fn is_disconnect(io: &std::io::Error) -> bool {
     matches!(io.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
@@ -69,10 +69,45 @@ pub async fn start_unix_server(
         tokio::spawn(async move {
             match handle_stream(backend, stream).await {
                 Err(e) if is_closed_connection(&e) => {}
-                Err(e) => panic!("Unexpected Unix RPC server error: {e}"),
+                // One misbehaving client must never take the service down; just drop it.
+                Err(e) => warn!("closing RPC connection after error: {e}"),
                 Ok(()) => {}
             }
         });
+    }
+}
+
+/// Largest request frame accepted. Real requests are a few hundred bytes; the cap stops a
+/// garbage length prefix from allocating up to 4 GiB.
+const MAX_REQUEST_FRAME_BYTES: usize = 64 << 20;
+
+enum Incoming {
+    Request(Request),
+    /// A complete frame that does not decode (unknown variant, client/server version skew).
+    /// Framing is still in sync, so the server can answer with an error and continue.
+    Malformed(moonlink_rpc::Error),
+}
+
+/// Read one length-prefixed request frame, then decode it with `moonlink_rpc::read` so the wire
+/// format stays defined in one place.
+async fn read_request<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Incoming> {
+    let mut len_bytes = [0u8; 4];
+    reader.read_exact(&mut len_bytes).await?;
+    let len = u32::from_ne_bytes(len_bytes) as usize;
+    if len > MAX_REQUEST_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("request frame of {len} bytes exceeds {MAX_REQUEST_FRAME_BYTES}"),
+        )
+        .into());
+    }
+    let mut frame = Vec::with_capacity(4 + len);
+    frame.extend_from_slice(&len_bytes);
+    frame.resize(4 + len, 0);
+    reader.read_exact(&mut frame[4..]).await?;
+    match read::<_, Request>(&mut frame.as_slice()).await {
+        Ok(request) => Ok(Incoming::Request(request)),
+        Err(e) => Ok(Incoming::Malformed(e)),
     }
 }
 
@@ -107,7 +142,21 @@ where
 {
     let mut map = HashMap::new();
     loop {
-        let request = read(&mut stream).await?;
+        let request = match read_request(&mut stream).await? {
+            Incoming::Request(request) => request,
+            Incoming::Malformed(e) => {
+                warn!("malformed RPC request: {e}");
+                // `Err` encodes identically for every response type, so any client can decode it.
+                let res: RpcResult<()> = Err(ErrorStruct::new(
+                    "malformed or unsupported request (client/server version mismatch?)"
+                        .to_string(),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(e));
+                write(&mut stream, &res).await?;
+                continue;
+            }
+        };
         match request {
             Request::CreateSnapshot {
                 database,
@@ -206,8 +255,15 @@ where
                 {
                     Ok(state) => {
                         let res: RpcResult<ScanTableBeginResponse> = Ok(state.data.clone());
+                        // Register before replying so the files stay pinned while the client reads them.
+                        if map
+                            .insert((database.clone(), table.clone()), state)
+                            .is_some()
+                        {
+                            // The client lost track of its previous scan; the new one supersedes it.
+                            warn!("duplicate ScanTableBegin for {database}.{table}; releasing the previous scan");
+                        }
                         write(&mut stream, &res).await?;
-                        assert!(map.insert((database, table), state).is_none());
                     }
                     Err(err) => {
                         let res: RpcResult<ScanTableBeginResponse> = Err(err);
@@ -216,7 +272,10 @@ where
                 }
             }
             Request::ScanTableEnd { database, table } => {
-                assert!(map.remove(&(database, table)).is_some());
+                // Idempotent: duckdb_mooncake ignores ScanTableEnd errors anyway.
+                if map.remove(&(database.clone(), table.clone())).is_none() {
+                    debug!("ScanTableEnd for {database}.{table} without a matching ScanTableBegin");
+                }
                 write(&mut stream, &RpcResult::<ScanTableEndResponse>::Ok(())).await?;
             }
             // Kept for wire compatibility (pg_mooncake mooncake.load_files); loading files is not implemented.

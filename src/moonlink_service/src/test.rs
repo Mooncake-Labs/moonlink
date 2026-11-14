@@ -84,6 +84,66 @@ async fn test_unsupported_rpcs() {
         .is_empty());
 }
 
+/// A complete frame that does not decode (client/server version skew) gets an error reply, and
+/// the connection keeps serving requests.
+#[tokio::test]
+#[serial]
+async fn test_malformed_request_gets_error_and_connection_survives() {
+    use tokio::io::AsyncWriteExt;
+    let service = TestService::start().await;
+    let mut stream = service.connect().await;
+    // Variant index 99 does not exist.
+    let payload = [99u8, 0, 0];
+    stream
+        .write_all(&(payload.len() as u32).to_ne_bytes())
+        .await
+        .unwrap();
+    stream.write_all(&payload).await.unwrap();
+    let res: moonlink_rpc::RpcResult<()> = moonlink_rpc::read(&mut stream).await.unwrap();
+    assert!(res.is_err(), "expected an error reply, got {res:?}");
+    assert!(moonlink_rpc::list_tables(&mut stream)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// An absurd length prefix closes only that connection, without allocating the frame.
+#[tokio::test]
+#[serial]
+async fn test_oversized_frame_closes_only_that_connection() {
+    use tokio::io::AsyncWriteExt;
+    let service = TestService::start().await;
+    let mut stream = service.connect().await;
+    stream.write_all(&u32::MAX.to_ne_bytes()).await.unwrap();
+    let res: moonlink_rpc::Result<moonlink_rpc::RpcResult<()>> = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        moonlink_rpc::read(&mut stream),
+    )
+    .await
+    .expect("server kept the connection open waiting for a 4 GiB frame");
+    assert!(matches!(res, Err(moonlink_rpc::Error::Io(_))), "{res:?}");
+    let mut other = service.connect().await;
+    assert!(moonlink_rpc::list_tables(&mut other)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// ScanTableEnd without a matching ScanTableBegin is a no-op, not a dead connection.
+#[tokio::test]
+#[serial]
+async fn test_scan_end_without_begin_is_a_noop() {
+    let service = TestService::start().await;
+    let mut stream = service.connect().await;
+    moonlink_rpc::scan_table_end(&mut stream, "postgres".to_string(), "public.t".to_string())
+        .await
+        .unwrap();
+    assert!(moonlink_rpc::list_tables(&mut stream)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 #[cfg(feature = "postgres-integration")]
 mod postgres {
     use super::*;
@@ -327,6 +387,48 @@ mod postgres {
             .await
             .unwrap()
             .is_empty());
+        pg::drop_source_table(&pg_client, table).await;
+    }
+
+    /// A second ScanTableBegin for the same table on one connection replaces the first scan
+    /// instead of killing the connection, and the files of the returned scan stay readable.
+    #[tokio::test]
+    #[serial]
+    async fn test_duplicate_scan_begin_supersedes_previous_scan() {
+        let pg_client = pg::connect().await;
+        let table = "service_duplicate_scan_test";
+        pg::create_source_table(&pg_client, table, 3).await;
+
+        let service = TestService::start().await;
+        let mut stream = service.connect().await;
+        create_mirror_table(&mut stream, table, "{}").await.unwrap();
+        let lsn = pg::current_wal_lsn(&pg_client).await;
+
+        let _first = moonlink_rpc::scan_table_begin(
+            &mut stream,
+            DATABASE.to_string(),
+            table.to_string(),
+            lsn,
+        )
+        .await
+        .unwrap();
+        let second = moonlink_rpc::scan_table_begin(
+            &mut stream,
+            DATABASE.to_string(),
+            table.to_string(),
+            lsn,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_rows_in_read_state(second), 3);
+        moonlink_rpc::scan_table_end(&mut stream, DATABASE.to_string(), table.to_string())
+            .await
+            .unwrap();
+        assert_eq!(scan_row_count(&mut stream, table, lsn).await, 3);
+
+        moonlink_rpc::drop_table(&mut stream, DATABASE.to_string(), table.to_string())
+            .await
+            .unwrap();
         pg::drop_source_table(&pg_client, table).await;
     }
 }
