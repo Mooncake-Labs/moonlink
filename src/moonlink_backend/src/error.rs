@@ -54,7 +54,7 @@ pub enum Error {
     InsufficientDiskSpace(ErrorStruct),
 
     #[error("{0}")]
-    ScanLsnTimeout(ErrorStruct),
+    LsnWaitTimeout(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -85,8 +85,8 @@ impl Error {
     }
 
     #[track_caller]
-    pub fn scan_lsn_timeout(message: String) -> Self {
-        Self::ScanLsnTimeout(ErrorStruct::new(message, ErrorStatus::Temporary))
+    pub fn lsn_wait_timeout(message: String) -> Self {
+        Self::LsnWaitTimeout(ErrorStruct::new(message, ErrorStatus::Temporary))
     }
 
     pub fn get_status(&self) -> ErrorStatus {
@@ -104,7 +104,7 @@ impl Error {
             Error::DataCorruptionError(es) => es.status,
             Error::InvalidConfig(es) => es.status,
             Error::InsufficientDiskSpace(es) => es.status,
-            Error::ScanLsnTimeout(es) => es.status,
+            Error::LsnWaitTimeout(es) => es.status,
         }
     }
 

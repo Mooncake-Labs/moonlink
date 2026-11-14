@@ -25,9 +25,10 @@ use crate::table_status::TableStatus;
 /// Type alias for filepath remap function, which remaps http URI to local filepath if possible.
 type HttpFilepathRemap = std::sync::Arc<dyn Fn(String) -> String + Send + Sync>;
 
-/// Upper bound for a scan waiting until the mirror reaches the requested LSN. The pg_mooncake
-/// backend issuing the scan blocks uninterruptibly (no statement_timeout / cancel) for this long.
-const DEFAULT_SCAN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for a scan or snapshot request waiting until replication reaches the requested
+/// LSN. The pg_mooncake backend issuing the request blocks uninterruptibly (no statement_timeout /
+/// cancel) for this long.
+const DEFAULT_LSN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Max concurrency to fetch parquet metadata in parallel.
 const DEFAULT_PARQUET_METADATA_FETCH_PARALLELISM: usize = 128;
@@ -46,8 +47,8 @@ pub struct MoonlinkBackend {
 
     replication_manager: RwLock<ReplicationManager>,
 
-    /// See [`DEFAULT_SCAN_WAIT_TIMEOUT`].
-    scan_wait_timeout_ms: AtomicU64,
+    /// See [`DEFAULT_LSN_WAIT_TIMEOUT`].
+    lsn_wait_timeout_ms: AtomicU64,
 }
 
 impl MoonlinkBackend {
@@ -143,14 +144,19 @@ impl MoonlinkBackend {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager,
             metadata_store_accessor,
-            scan_wait_timeout_ms: AtomicU64::new(DEFAULT_SCAN_WAIT_TIMEOUT.as_millis() as u64),
+            lsn_wait_timeout_ms: AtomicU64::new(DEFAULT_LSN_WAIT_TIMEOUT.as_millis() as u64),
         })
     }
 
-    /// Override how long [`Self::scan_table`] waits for the requested LSN.
-    pub fn set_scan_wait_timeout(&self, timeout: Duration) {
-        self.scan_wait_timeout_ms
+    /// Override how long [`Self::scan_table`] and [`Self::create_snapshot`] wait for replication
+    /// to reach the requested LSN.
+    pub fn set_lsn_wait_timeout(&self, timeout: Duration) {
+        self.lsn_wait_timeout_ms
             .store(timeout.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn lsn_wait_timeout(&self) -> Duration {
+        Duration::from_millis(self.lsn_wait_timeout_ms.load(Ordering::Relaxed))
     }
 
     /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
@@ -159,13 +165,34 @@ impl MoonlinkBackend {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
 
+        let mooncake_table_id = MooncakeTableId { database, table };
+        let table_reader = {
+            let manager = self.replication_manager.read().await;
+            manager.get_table_reader(&mooncake_table_id)?
+        };
+        // Resolve the LSN first, without any manager lock: `lsn` is the end of the caller's last
+        // transaction, which need not be a commit of this table.
+        let timeout = self.lsn_wait_timeout();
+        let target_lsn =
+            match tokio::time::timeout(timeout, table_reader.wait_for_lsn_coverage(lsn)).await {
+                Ok(target_lsn) => target_lsn?,
+                Err(_) => {
+                    let (_, commit_lsn, replication_lsn) = table_reader.lsn_status();
+                    return Err(Error::lsn_wait_timeout(format!(
+                        "mirror {mooncake_table_id}: replication did not reach LSN {lsn} within \
+                         {timeout:?} (replicated up to {replication_lsn}, committed {commit_lsn}); \
+                         replication may be stalled or catching up, or src_uri points at a \
+                         different server whose LSNs are not comparable. Retry, or check \
+                         mooncake.list_tables()."
+                    )));
+                }
+            };
         let rx = {
             let mut manager = self.replication_manager.write().await;
-            let mooncake_table_id = MooncakeTableId { database, table };
             let writer = manager.get_table_event_manager(&mooncake_table_id)?;
-            writer.initiate_snapshot(lsn).await
+            writer.initiate_snapshot(target_lsn).await
         };
-        TableEventManager::synchronize_force_snapshot_request(rx, lsn).await?;
+        TableEventManager::synchronize_force_snapshot_request(rx, target_lsn).await?;
         Ok(())
     }
 
@@ -383,7 +410,7 @@ impl MoonlinkBackend {
             let manager = self.replication_manager.read().await;
             manager.get_table_reader(&mooncake_table_id)?
         };
-        let timeout = Duration::from_millis(self.scan_wait_timeout_ms.load(Ordering::Relaxed));
+        let timeout = self.lsn_wait_timeout();
         match tokio::time::timeout(timeout, table_reader.try_read(lsn)).await {
             Ok(read_state) => Ok(read_state?),
             Err(_) => {
@@ -393,7 +420,7 @@ impl MoonlinkBackend {
                 } else {
                     snapshot_lsn.to_string()
                 };
-                Err(Error::scan_lsn_timeout(format!(
+                Err(Error::lsn_wait_timeout(format!(
                     "mirror {mooncake_table_id} did not reach LSN {} within {timeout:?} \
                      (replicated up to {replication_lsn}, committed {commit_lsn}, snapshot {snapshot_lsn}); \
                      replication may be stalled or catching up, or src_uri points at a different server \

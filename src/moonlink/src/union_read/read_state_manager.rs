@@ -207,6 +207,34 @@ impl ReadStateManager {
         self
     }
 
+    /// Wait until replication reached `lsn`, then return the LSN a snapshot must cover so that it
+    /// contains every commit of this table at or below `lsn`: `min(lsn, table commit LSN)`.
+    ///
+    /// Callers pass the end of the session's last transaction, which may be WAL without a commit
+    /// for this table (an xid-less transaction that pruned pages, a logical message, a commit to
+    /// another table); waiting for a table commit at that LSN would never end. Once replication is
+    /// at `lsn`, the producer order (commit LSN marked before replication LSN, table events sent in
+    /// between) guarantees every such commit was already handed to the table handler.
+    pub async fn wait_for_lsn_coverage(&self, lsn: u64) -> Result<u64> {
+        let mut replication_lsn_rx = self.replication_lsn_rx.clone();
+        let mut table_status_rx = self.table_status_rx.clone();
+        loop {
+            Self::check_healthy(&mut table_status_rx)?;
+            let replication = *replication_lsn_rx.borrow_and_update();
+            let commit = *self.last_commit_lsn_rx.borrow();
+            if commit >= lsn {
+                return Ok(lsn);
+            }
+            if replication >= lsn {
+                return Ok(commit);
+            }
+            tokio::select! {
+                res = replication_lsn_rx.changed() => res?,
+                res = Self::table_status_changed(&mut table_status_rx) => res?,
+            }
+        }
+    }
+
     /// Current (snapshot, commit, replication) LSNs, for diagnostics.
     pub fn lsn_status(&self) -> (u64, u64, u64) {
         (

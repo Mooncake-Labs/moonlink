@@ -17,7 +17,7 @@ mod tests {
     async fn test_scan_wait_is_bounded() {
         let (guard, client) = TestGuard::new(Some("scan_wait_bounded"), true).await;
         let backend = guard.backend();
-        backend.set_scan_wait_timeout(Duration::from_secs(1));
+        backend.set_lsn_wait_timeout(Duration::from_secs(1));
         let lsn = unreachable_lsn(&client).await;
 
         let started = Instant::now();
@@ -51,7 +51,7 @@ mod tests {
     async fn test_waiting_scan_does_not_block_other_requests() {
         let (guard, client) = TestGuard::new(Some("scan_wait_lock"), true).await;
         let backend = guard.backend().clone();
-        backend.set_scan_wait_timeout(Duration::from_secs(60));
+        backend.set_lsn_wait_timeout(Duration::from_secs(60));
         let lsn = unreachable_lsn(&client).await;
 
         let waiting = tokio::spawn({

@@ -308,6 +308,35 @@ async fn errored_table_fails_reads_immediately_and_wakes_waiters() {
     assert!(err.to_string().contains("out of sync"), "{err}");
 }
 
+/// Snapshot requests resolve the session LSN against replication progress: once replication is at
+/// the LSN, the table's latest commit is the LSN a snapshot has to cover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lsn_coverage_resolves_to_last_table_commit_once_replicated() {
+    let env = Env::new("coverage").await;
+    env.commit_tx.send(100).unwrap();
+    env.replication_tx.send(100).unwrap();
+
+    // A commit of this table at or past the LSN: the LSN itself.
+    assert_eq!(env.rsm.wait_for_lsn_coverage(80).await.unwrap(), 80);
+    assert_eq!(env.rsm.wait_for_lsn_coverage(100).await.unwrap(), 100);
+
+    // WAL past the last table commit (no commit at 150): wait for replication, then the commit.
+    let rsm = env.rsm.clone();
+    let waiting = tokio::spawn(async move { rsm.wait_for_lsn_coverage(150).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !waiting.is_finished(),
+        "must wait until replication reaches the LSN"
+    );
+    env.replication_tx.send(160).unwrap();
+    let covered = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(covered, 100);
+}
+
 mod gc {
     use super::*;
     use crate::storage::mooncake_table::table_operation_test_utils::{
