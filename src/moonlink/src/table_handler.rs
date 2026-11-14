@@ -25,6 +25,7 @@ use tracing::{debug, error, info_span, warn};
 pub(crate) mod table_handler_state;
 use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
+    MAX_CONSECUTIVE_PERSISTENCE_FAILURES,
 };
 
 const MAX_BUFFERED_TABLE_EVENTS: usize = 32_768;
@@ -570,7 +571,8 @@ impl TableHandler {
                             min_pending_flush_lsn,
                             table_handler_state.persistence_snapshot_result_consumed,
                             table_handler_state.persistence_snapshot_ongoing,
-                        ) {
+                        ) && table_handler_state.persistence_backoff_elapsed()
+                        {
                             if let Some(persistence_snapshot_payload) =
                                 mooncake_snapshot_result.persistence_snapshot_payload
                             {
@@ -697,6 +699,8 @@ impl TableHandler {
                                         .send(Ok(()));
                                 }
 
+                                table_handler_state.record_persistence_success();
+
                                 // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
                                 let iceberg_flush_lsn = snapshot_res.flush_lsn;
                                 advance_flush_lsn(
@@ -714,6 +718,28 @@ impl TableHandler {
                                 );
                             }
                             Err(e) => {
+                                // Take the table manager back; an unknown commit outcome or a
+                                // lost manager cannot be retried safely.
+                                let manager_recovered = table.on_persistence_failed();
+                                let outcome_unknown = !manager_recovered
+                                    || matches!(e, crate::Error::IcebergCommitOutcomeUnknown(_));
+                                let failures = table_handler_state.record_persistence_failure();
+                                error!(
+                                    error = ?e,
+                                    table = table.mooncake_table_id(),
+                                    failures,
+                                    "iceberg persistence failed"
+                                );
+                                let errored_reason = if outcome_unknown {
+                                    Some(format!("iceberg persistence failed and its outcome is unknown: {e}"))
+                                } else if failures >= MAX_CONSECUTIVE_PERSISTENCE_FAILURES {
+                                    Some(format!(
+                                        "iceberg persistence failed {failures} times in a row, last error: {e}"
+                                    ))
+                                } else {
+                                    None
+                                };
+
                                 if table_handler_state.has_pending_force_snapshot_request() {
                                     if let Err(send_err) = table_handler_state
                                         .force_snapshot_completion_tx
@@ -737,6 +763,23 @@ impl TableHandler {
 
                                 // If iceberg snapshot fails, send error back to all broadcast subscribers and unset force snapshot requests.
                                 table_handler_state.largest_force_snapshot_lsn = None;
+
+                                if let Some(reason) = errored_reason {
+                                    if Self::process_errored_table_event(
+                                        TableEvent::EnterErrored { reason },
+                                        &mut table,
+                                        &mut table_handler_state,
+                                        &mut errored_drop,
+                                        &table_handler_event_sender,
+                                    )
+                                    .await
+                                    {
+                                        Self::drop_errored_table(&mut table, event_sync_sender)
+                                            .await;
+                                        return;
+                                    }
+                                    continue;
+                                }
                             }
                         }
 
@@ -823,8 +866,22 @@ impl TableHandler {
                             }
                         }
                         Some(Err(e)) => {
-                            error!(error = ?e, "failed to flush disk slice");
-                            panic!("Fatal flush error: {e:?}");
+                            // The flush task already retried; the rows cannot be made durable.
+                            error!(error = ?e, table = table.mooncake_table_id(), "failed to flush disk slice");
+                            if Self::process_errored_table_event(
+                                TableEvent::EnterErrored {
+                                    reason: format!("writing table data to disk failed: {e}"),
+                                },
+                                &mut table,
+                                &mut table_handler_state,
+                                &mut errored_drop,
+                                &table_handler_event_sender,
+                            )
+                            .await
+                            {
+                                Self::drop_errored_table(&mut table, event_sync_sender).await;
+                                return;
+                            }
                         }
                         None => {
                             debug!("flush result is none");
@@ -946,11 +1003,18 @@ impl TableHandler {
                 persistence_snapshot_result,
             } => {
                 table_handler_state.persistence_snapshot_ongoing = false;
-                if let Ok(mut res) = persistence_snapshot_result {
-                    if let Some(manager) = res.table_manager.take() {
-                        table.restore_table_manager(manager);
+                match persistence_snapshot_result {
+                    Ok(mut res) => {
+                        if let Some(manager) = res.table_manager.take() {
+                            table.restore_table_manager(manager);
+                        }
+                        Self::delete_evicted_files(std::mem::take(
+                            &mut res.evicted_files_to_delete,
+                        ));
                     }
-                    Self::delete_evicted_files(std::mem::take(&mut res.evicted_files_to_delete));
+                    Err(_) => {
+                        table.on_persistence_failed();
+                    }
                 }
             }
             TableEvent::EvictedFilesToDelete { evicted_files } => {
@@ -1280,3 +1344,6 @@ mod errored_drop_tests;
 
 #[cfg(test)]
 mod maintenance_failure_tests;
+
+#[cfg(test)]
+mod persistence_failure_tests;

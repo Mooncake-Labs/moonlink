@@ -11,6 +11,14 @@ use more_asserts as ma;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info};
 
+/// Consecutive failed iceberg persistence attempts after which the table is errored.
+pub(crate) const MAX_CONSECUTIVE_PERSISTENCE_FAILURES: u32 = 10;
+#[cfg(not(test))]
+const PERSISTENCE_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const PERSISTENCE_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+const PERSISTENCE_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SpecialTableState {
     Normal,
@@ -142,6 +150,17 @@ pub(crate) struct TableHandlerState {
     // ================================================
     //
     pub(crate) table_status_tx: Option<watch::Sender<TableStatus>>,
+
+    // ================================================
+    // Persistence retry
+    // ================================================
+    //
+    /// Consecutive failed iceberg persistence attempts.
+    pub(crate) consecutive_persistence_failures: u32,
+    /// Do not start another iceberg persistence before this instant.
+    pub(crate) persistence_retry_after: Option<std::time::Instant>,
+    /// A persistence failed and must be retried even without new writes.
+    pub(crate) persistence_retry_pending: bool,
 }
 
 impl TableHandlerState {
@@ -181,12 +200,41 @@ impl TableHandlerState {
             initial_copy_buffered_events: Vec::new(),
             initial_copy_loaded_files: false,
             table_status_tx: None,
+            consecutive_persistence_failures: 0,
+            persistence_retry_after: None,
+            persistence_retry_pending: false,
         }
     }
 
     pub(crate) fn with_table_status_tx(mut self, tx: watch::Sender<TableStatus>) -> Self {
         self.table_status_tx = Some(tx);
         self
+    }
+
+    /// Record a failed iceberg persistence and back off exponentially; returns the number of
+    /// consecutive failures.
+    pub(crate) fn record_persistence_failure(&mut self) -> u32 {
+        self.consecutive_persistence_failures += 1;
+        let exponent = std::cmp::min(self.consecutive_persistence_failures - 1, 16);
+        let backoff = std::cmp::min(
+            PERSISTENCE_RETRY_BASE_BACKOFF.saturating_mul(1 << exponent),
+            PERSISTENCE_RETRY_MAX_BACKOFF,
+        );
+        self.persistence_retry_after = Some(std::time::Instant::now() + backoff);
+        self.persistence_retry_pending = true;
+        self.consecutive_persistence_failures
+    }
+
+    pub(crate) fn record_persistence_success(&mut self) {
+        self.consecutive_persistence_failures = 0;
+        self.persistence_retry_after = None;
+        self.persistence_retry_pending = false;
+    }
+
+    pub(crate) fn persistence_backoff_elapsed(&self) -> bool {
+        self.persistence_retry_after
+            .map(|t| std::time::Instant::now() >= t)
+            .unwrap_or(true)
     }
 
     pub(crate) fn is_errored(&self) -> bool {
@@ -274,6 +322,13 @@ impl TableHandlerState {
         uuid: uuid::Uuid,
     ) -> SnapshotOption {
         let mut force_create = request_force;
+        // Retry a failed persistence once its backoff has elapsed, even if nothing new arrived.
+        if self.persistence_retry_pending
+            && self.persistence_backoff_elapsed()
+            && !self.persistence_snapshot_ongoing
+        {
+            force_create = true;
+        }
         if self.table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
             force_create = true;
         }

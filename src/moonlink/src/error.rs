@@ -50,11 +50,21 @@ pub enum Error {
     /// [`Error::TableErrored`] this does not say anything about the table's data.
     #[error("{0}")]
     TableHandlerStopped(ErrorStruct),
+
+    /// An iceberg commit failed in a way that may or may not have changed the committed table;
+    /// retrying could duplicate or lose data.
+    #[error("{0}")]
+    IcebergCommitOutcomeUnknown(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
 
 impl Error {
+    #[track_caller]
+    pub fn iceberg_commit_outcome_unknown(message: String) -> Self {
+        Self::IcebergCommitOutcomeUnknown(ErrorStruct::new(message, ErrorStatus::Permanent))
+    }
+
     /// User-facing message for an errored mirror table.
     pub fn errored_table_message(table_name: &str, reason: &str) -> String {
         format!(
@@ -245,7 +255,8 @@ impl Error {
             | Error::PbToMoonlinkRowError(err)
             | Error::Json(err)
             | Error::TableErrored(err)
-            | Error::TableHandlerStopped(err) => err.status,
+            | Error::TableHandlerStopped(err)
+            | Error::IcebergCommitOutcomeUnknown(err) => err.status,
         }
     }
 }

@@ -171,6 +171,7 @@ async fn table_with_gated_persistence(
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     released: Arc<AtomicBool>,
+    iceberg_dropped: Arc<AtomicBool>,
 ) -> MooncakeTable {
     let config = MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
     let metadata = Arc::new(MooncakeTableMetadata {
@@ -202,8 +203,10 @@ async fn table_with_gated_persistence(
             )))
         })
     });
-    mock.expect_drop_table()
-        .returning(|| Box::pin(async { Ok(()) }));
+    mock.expect_drop_table().returning(move || {
+        iceberg_dropped.store(true, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    });
     MooncakeTable::new_with_table_manager(
         metadata,
         Box::new(mock),
@@ -214,18 +217,21 @@ async fn table_with_gated_persistence(
     .unwrap()
 }
 
-/// DROP of an errored table waits for an in-flight iceberg persistence.
+/// DROP of an errored table waits for an in-flight iceberg persistence, then drops the iceberg
+/// table with the manager the failed persistence handed back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_errored_drop_waits_for_inflight_persistence() {
     let temp_dir = tempdir().unwrap();
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
+    let iceberg_dropped = Arc::new(AtomicBool::new(false));
     let table = table_with_gated_persistence(
         &temp_dir,
         entered.clone(),
         release.clone(),
         released.clone(),
+        iceberg_dropped.clone(),
     )
     .await;
     let mut env = TestEnvironment::new_with_mooncake_table(temp_dir, table).await;
@@ -252,6 +258,7 @@ async fn test_errored_drop_waits_for_inflight_persistence() {
         .expect("drop hung after persistence finished")
         .unwrap();
     assert!(released.load(Ordering::SeqCst));
+    assert!(iceberg_dropped.load(Ordering::SeqCst));
 }
 
 /// A persistence that never reports back does not block DROP of an errored table forever.
@@ -263,6 +270,7 @@ async fn test_errored_drop_times_out_on_stuck_persistence() {
         &temp_dir,
         entered.clone(),
         Arc::new(tokio::sync::Notify::new()),
+        Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
     )
     .await;

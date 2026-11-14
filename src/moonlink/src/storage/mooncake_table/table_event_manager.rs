@@ -70,11 +70,16 @@ impl TableEventManager {
 
     /// Initiate an iceberg snapshot event, return the channel for synchronization.
     pub async fn initiate_snapshot(&mut self, lsn: u64) -> watch::Receiver<Option<Result<u64>>> {
-        self.table_event_tx
+        // Only results published after this request count; an error from an earlier, failed
+        // attempt must not fail this one.
+        let mut rx = self.force_snapshot_completion_rx.clone();
+        rx.mark_unchanged();
+        // If the handler is gone, the receiver reports it on the first wait.
+        let _ = self
+            .table_event_tx
             .send(TableEvent::ForceSnapshot { lsn: Some(lsn) })
-            .await
-            .unwrap();
-        self.force_snapshot_completion_rx.clone()
+            .await;
+        rx
     }
 
     /// Util function to decide whether the current LSN satisfies the requested LSN.
@@ -94,9 +99,12 @@ impl TableEventManager {
         mut rx: watch::Receiver<Option<Result<u64>>>,
         requested_lsn: u64,
     ) -> Result<()> {
-        // Fast-path: check whether existing persisted table LSN has already satisfied the requested LSN.
-        if Self::is_iceberg_snapshot_ready(&rx.borrow(), requested_lsn)? {
-            return Ok(());
+        // Fast-path: the persisted table LSN already satisfies the request. A stale error from an
+        // earlier attempt is ignored here; only errors published after the request fail it.
+        if let Some(Ok(current_lsn)) = &*rx.borrow() {
+            if *current_lsn >= requested_lsn {
+                return Ok(());
+            }
         }
 
         // Otherwise falls back to loop until requested LSN is met.
@@ -104,7 +112,7 @@ impl TableEventManager {
             if rx.changed().await.is_err() {
                 return Err(self_stopped_error());
             }
-            if Self::is_iceberg_snapshot_ready(&rx.borrow(), requested_lsn)? {
+            if Self::is_iceberg_snapshot_ready(&rx.borrow_and_update(), requested_lsn)? {
                 break;
             }
         }

@@ -231,6 +231,13 @@ impl std::fmt::Debug for Snapshot {
     }
 }
 
+/// Attempts for writing a flushed disk slice before the table is errored.
+const FLUSH_WRITE_ATTEMPTS: u32 = 5;
+#[cfg(not(test))]
+const FLUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const FLUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+
 struct RecordBatchWithDeletionVector {
     batch_id: u64,
     record_batch: Arc<RecordBatch>,
@@ -525,6 +532,10 @@ pub struct MooncakeTable {
 
     /// Background tasks (flush, snapshot, maintenance, persistence) that have not reported back.
     in_flight_tasks: InFlightTasks,
+
+    /// A failed persistence task leaves the table manager here (the success path returns it in
+    /// the result), so the table can retry instead of losing it.
+    failed_persistence_table_manager: Arc<std::sync::Mutex<Option<Box<dyn TableManager>>>>,
 }
 
 #[derive(Clone)]
@@ -663,6 +674,7 @@ impl MooncakeTable {
             event_replay_tx: None,
             table_manager_factory: None,
             in_flight_tasks: InFlightTasks::default(),
+            failed_persistence_table_manager: Arc::new(std::sync::Mutex::new(None)),
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
         })
     }
@@ -1001,12 +1013,26 @@ impl MooncakeTable {
             );
         }
 
-        let mut disk_slice_clone = disk_slice.clone();
+        let pristine_disk_slice = disk_slice.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
         tokio::task::spawn(async move {
-            let flush_result = disk_slice_clone.write().await;
+            // Transient IO errors (e.g. a briefly full disk) are retried from the unwritten slice;
+            // each attempt rewrites the same file names.
+            let mut attempt = 1;
+            let flush_result = loop {
+                let mut candidate = pristine_disk_slice.clone();
+                match candidate.write().await {
+                    Ok(()) => break Ok(candidate),
+                    Err(e) if attempt < FLUSH_WRITE_ATTEMPTS => {
+                        tracing::warn!(error = ?e, attempt, "disk slice write failed, retrying");
+                        tokio::time::sleep(FLUSH_RETRY_BACKOFF * attempt).await;
+                        attempt += 1;
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
             match flush_result {
-                Ok(()) => {
+                Ok(disk_slice_clone) => {
                     notifier
                         .send(TableEvent::FlushResult {
                             event_id,
@@ -1598,6 +1624,17 @@ impl MooncakeTable {
             .await;
     }
 
+    /// Called after a failed iceberg persistence: take the table manager back and allow the next
+    /// persistence. Returns false if the manager could not be recovered.
+    pub(crate) fn on_persistence_failed(&mut self) -> bool {
+        self.background_task_status_for_validation
+            .persistence_snapshot_ongoing = false;
+        if let Some(manager) = self.failed_persistence_table_manager.lock().unwrap().take() {
+            self.iceberg_table_manager = Some(manager);
+        }
+        self.iceberg_table_manager.is_some()
+    }
+
     /// Persist an iceberg snapshot.
     async fn persist_iceberg_snapshot_impl(
         mut iceberg_table_manager: Box<dyn TableManager>,
@@ -1605,6 +1642,7 @@ impl MooncakeTable {
         table_notify: TaskNotifier,
         table_auto_incr_ids: std::ops::Range<u32>,
         table_event_id: uuid::Uuid,
+        failed_table_manager_slot: Arc<std::sync::Mutex<Option<Box<dyn TableManager>>>>,
     ) {
         // Perform iceberg snapshot operation.
         let flush_lsn = snapshot_payload.flush_lsn;
@@ -1652,8 +1690,9 @@ impl MooncakeTable {
             .sync_snapshot(snapshot_payload, persistence_file_params)
             .await;
 
-        // Notify on event error.
+        // Notify on event error; hand the table manager back first so the table can retry.
         if let Err(err) = iceberg_persistence_res {
+            *failed_table_manager_slot.lock().unwrap() = Some(iceberg_table_manager);
             table_notify
                 .send(TableEvent::PersistenceSnapshotResult {
                     persistence_snapshot_result: Err(err),
@@ -1770,6 +1809,7 @@ impl MooncakeTable {
                     .notifier(self.table_notify.as_ref().unwrap().clone()),
                 table_auto_incr_ids,
                 table_event_id,
+                self.failed_persistence_table_manager.clone(),
             )
             .instrument(info_span!("persist_iceberg_snapshot")),
         );
