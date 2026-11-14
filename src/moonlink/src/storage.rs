@@ -11,6 +11,7 @@ pub(crate) mod path_utils;
 pub(crate) mod snapshot_options;
 pub(crate) mod storage_utils;
 pub(crate) mod table;
+pub(crate) mod task_supervisor;
 pub(super) mod timer;
 
 pub use crate::event_sync::EventSyncReceiver;

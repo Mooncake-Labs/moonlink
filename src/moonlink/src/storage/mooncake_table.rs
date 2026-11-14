@@ -61,6 +61,7 @@ use crate::storage::table::common::table_manager::{PersistenceFileParams, TableM
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::table::iceberg::puffin_utils::PuffinBlobRef;
+use crate::storage::task_supervisor::spawn_supervised;
 use crate::table_notify::TableEvent;
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -536,6 +537,40 @@ pub struct MooncakeTable {
     /// A failed persistence task leaves the table manager here (the success path returns it in
     /// the result), so the table can retry instead of losing it.
     failed_persistence_table_manager: Arc<std::sync::Mutex<Option<Box<dyn TableManager>>>>,
+}
+
+/// Deletes a table's iceberg table and local files without the `MooncakeTable` itself; used when
+/// the table event loop died and only DROP must still work.
+pub(crate) struct TableDropper {
+    factory: Option<IcebergTableManagerFactory>,
+    metadata: Arc<TableMetadata>,
+    in_flight_tasks: InFlightTasks,
+}
+
+impl TableDropper {
+    pub(crate) async fn drop_all(self, max_wait_for_tasks: std::time::Duration) -> Result<()> {
+        // An in-flight persistence could write into the warehouse after it was dropped, which a
+        // re-created mirror would then load; other tasks could fail on files deleted under them.
+        let deadline = std::time::Instant::now() + max_wait_for_tasks;
+        while self.in_flight_tasks.count() > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if let Some(factory) = self.factory {
+            let mut manager = IcebergTableManager::new(
+                self.metadata.clone(),
+                factory.object_storage_cache,
+                factory.filesystem_accessor,
+                factory.iceberg_table_config,
+            )
+            .await?;
+            manager.drop_table().await?;
+        }
+        match tokio::fs::remove_dir_all(&self.metadata.path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1014,8 +1049,9 @@ impl MooncakeTable {
         }
 
         let pristine_disk_slice = disk_slice.clone();
+        let supervisor_notify = table_notify_tx.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
-        tokio::task::spawn(async move {
+        spawn_supervised("flush", supervisor_notify, async move {
             // Transient IO errors (e.g. a briefly full disk) are retried from the unwritten slice;
             // each attempt rewrites the same file names.
             let mut attempt = 1;
@@ -1192,7 +1228,8 @@ impl MooncakeTable {
             .notifier(self.table_notify.as_ref().unwrap().clone());
         let snapshot_stats = self.snapshot_stats.clone();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(async move {
+        let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
+        spawn_supervised("mooncake snapshot", supervisor_notify, async move {
             let _latency_guard = snapshot_stats.start();
             Self::create_snapshot_async(cur_snapshot, next_snapshot_task, opt, table_notify)
                 .instrument(info_span!("create_snapshot_async"))
@@ -1269,6 +1306,15 @@ impl MooncakeTable {
     /// Number of background tasks that may still read or write table files.
     pub(crate) fn in_flight_background_tasks(&self) -> usize {
         self.in_flight_tasks.count()
+    }
+
+    /// Everything needed to drop this table later without the table itself.
+    pub(crate) fn dropper(&self) -> TableDropper {
+        TableDropper {
+            factory: self.table_manager_factory.clone(),
+            metadata: self.metadata.clone(),
+            in_flight_tasks: self.in_flight_tasks.clone(),
+        }
     }
 
     /// Give back a table manager returned by a background task.
@@ -1491,7 +1537,8 @@ impl MooncakeTable {
             .notifier(self.table_notify.as_ref().unwrap().clone());
 
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(async move {
+        let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
+        spawn_supervised("index merge", supervisor_notify, async move {
             let result: Result<()> = async move {
                 let mut builder = GlobalIndexBuilder::new();
                 builder.set_directory(table_directory);
@@ -1579,7 +1626,10 @@ impl MooncakeTable {
         self.next_snapshot_task.compacting_data_files = compaction_payload.get_data_files();
 
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(
+        let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
+        spawn_supervised(
+            "data compaction",
+            supervisor_notify,
             async move {
                 let builder = CompactionBuilder::new(compaction_payload, schema_ref, file_params);
                 let data_compaction_result = builder.build().await;
@@ -1801,7 +1851,9 @@ impl MooncakeTable {
                 .unwrap();
         }
 
-        tokio::task::spawn(
+        spawn_supervised(
+            "iceberg persistence",
+            self.table_notify.as_ref().unwrap().clone(),
             Self::persist_iceberg_snapshot_impl(
                 iceberg_table_manager,
                 snapshot_payload,

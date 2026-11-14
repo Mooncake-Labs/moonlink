@@ -11,12 +11,16 @@
 use crate::event_sync::EventSyncSender;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::AlterTableRequest;
+use crate::storage::mooncake_table::TableDropper;
 use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
+use crate::storage::task_supervisor::panic_message;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_handler_timer::TableHandlerTimer;
 use crate::table_notify::TableEvent;
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -112,18 +116,38 @@ impl TableHandler {
             }
         });
 
+        // If the event loop itself panics, a minimal loop keeps serving the table's channel: it
+        // marks the table errored, fails waiters and still performs DROP.
+        let fallback = EventLoopPanicFallback {
+            dropper: table.dropper(),
+            table_name: table.mooncake_table_id().to_string(),
+            drop_completion_tx: event_sync_sender.drop_table_completion_tx.clone(),
+            force_snapshot_completion_tx: event_sync_sender.force_snapshot_completion_tx.clone(),
+            table_maintenance_completion_tx: event_sync_sender
+                .table_maintenance_completion_tx
+                .clone(),
+            table_status_tx: event_sync_sender.table_status_tx.clone(),
+        };
+
         // Spawn the task with the oneshot receiver
         let event_handle = Some(tokio::spawn(
             async move {
-                Self::event_loop(
+                let mut event_receiver = event_receiver;
+                let result = AssertUnwindSafe(Self::event_loop(
                     table_handler_event_sender,
                     event_sync_sender,
-                    event_receiver,
+                    &mut event_receiver,
                     replication_lsn_rx,
                     handler_event_replay_tx,
                     table,
-                )
+                ))
+                .catch_unwind()
                 .await;
+                if let Err(payload) = result {
+                    fallback
+                        .run(&mut event_receiver, panic_message(payload.as_ref()))
+                        .await;
+                }
             }
             .instrument(info_span!("table_event_loop")),
         ));
@@ -146,7 +170,7 @@ impl TableHandler {
     async fn event_loop(
         table_handler_event_sender: Sender<TableEvent>,
         event_sync_sender: EventSyncSender,
-        mut event_receiver: Receiver<TableEvent>,
+        event_receiver: &mut Receiver<TableEvent>,
         replication_lsn_rx: watch::Receiver<u64>,
         handler_event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
         mut table: MooncakeTable,
@@ -247,7 +271,10 @@ impl TableHandler {
                     }
                 }
                 if table_handler_state.is_errored()
-                    || matches!(event, TableEvent::EnterErrored { .. })
+                    || matches!(
+                        event,
+                        TableEvent::EnterErrored { .. } | TableEvent::BackgroundTaskFailed { .. }
+                    )
                 {
                     let drop_now = Self::process_errored_table_event(
                         event,
@@ -891,6 +918,10 @@ impl TableHandler {
                     // Replication events
                     // ==============================
                     //
+                    #[cfg(test)]
+                    TableEvent::PanicForTest => {
+                        panic!("event loop panic injected by test");
+                    }
                     _ => {
                         unreachable!("unexpected event: {:?}", event);
                     }
@@ -941,6 +972,13 @@ impl TableHandler {
     ) -> bool {
         match event {
             TableEvent::EnterErrored { reason } => {
+                if Self::enter_errored(table_handler_state, table, reason) == Some(true) {
+                    Self::request_errored_drop(errored_drop, table_handler_event_sender);
+                }
+            }
+            // The failed task stopped counting as in flight when it panicked.
+            TableEvent::BackgroundTaskFailed { task, message } => {
+                let reason = format!("internal error in {task}: {message}");
                 if Self::enter_errored(table_handler_state, table, reason) == Some(true) {
                     Self::request_errored_drop(errored_drop, table_handler_event_sender);
                 }
@@ -1347,3 +1385,64 @@ mod maintenance_failure_tests;
 
 #[cfg(test)]
 mod persistence_failure_tests;
+
+/// Serves a table whose event loop panicked: the table is errored, requests fail, DROP works.
+struct EventLoopPanicFallback {
+    dropper: TableDropper,
+    table_name: String,
+    drop_completion_tx: crate::event_sync::DropCompletionSender,
+    force_snapshot_completion_tx: watch::Sender<Option<crate::Result<u64>>>,
+    table_maintenance_completion_tx: tokio::sync::broadcast::Sender<crate::Result<()>>,
+    table_status_tx: watch::Sender<crate::event_sync::TableStatus>,
+}
+
+impl EventLoopPanicFallback {
+    async fn run(self, event_receiver: &mut Receiver<TableEvent>, panic_message: String) {
+        let reason = format!("internal error in table event loop: {panic_message}");
+        error!(
+            table = self.table_name,
+            reason, "mirror table entered the errored state; it must be dropped and re-created"
+        );
+        let message = crate::Error::errored_table_message(&self.table_name, &reason);
+        let _ = self
+            .table_status_tx
+            .send(crate::event_sync::TableStatus::Errored(message.clone()));
+        let _ = self
+            .force_snapshot_completion_tx
+            .send(Some(Err(crate::Error::table_errored(&message))));
+        let _ = self
+            .table_maintenance_completion_tx
+            .send(Err(crate::Error::table_errored(&message)));
+        while let Some(event) = event_receiver.recv().await {
+            match event {
+                TableEvent::DropTable => {
+                    let result = self
+                        .dropper
+                        .drop_all(ERRORED_DROP_BACKGROUND_TASK_WAIT)
+                        .await;
+                    if let Err(e) = &result {
+                        error!(error = ?e, table = self.table_name, "failed to drop errored table");
+                    }
+                    let _ = self.drop_completion_tx.send(result);
+                    return;
+                }
+                TableEvent::ForceSnapshot { .. } => {
+                    let _ = self
+                        .force_snapshot_completion_tx
+                        .send(Some(Err(crate::Error::table_errored(&message))));
+                }
+                TableEvent::ForceRegularIndexMerge
+                | TableEvent::ForceRegularDataCompaction
+                | TableEvent::ForceFullMaintenance => {
+                    let _ = self
+                        .table_maintenance_completion_tx
+                        .send(Err(crate::Error::table_errored(&message)));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests;

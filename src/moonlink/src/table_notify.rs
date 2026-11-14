@@ -143,6 +143,11 @@ pub enum TableEvent {
     ReplicationProgress { lsn: u64 },
     /// Internal: an errored table stopped waiting for in-flight background tasks before dropping.
     ErroredDropTimeout,
+    /// Internal: a background task of the table panicked.
+    BackgroundTaskFailed { task: &'static str, message: String },
+    /// Test-only: make the event loop panic.
+    #[cfg(test)]
+    PanicForTest,
     /// Test-only: how long an errored table waits for background tasks before dropping.
     #[cfg(test)]
     SetErroredDropWaitForTest { wait: std::time::Duration },
