@@ -3616,6 +3616,7 @@ name = "moonlink_service"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arrow-array",
  "arrow-ipc",
  "arrow-schema",
  "moonlink",
@@ -3625,6 +3626,7 @@ dependencies = [
  "moonlink_metadata_store",
  "moonlink_rpc",
  "parquet",
+ "roaring",
  "serde",
  "serial_test",
  "tempfile",
