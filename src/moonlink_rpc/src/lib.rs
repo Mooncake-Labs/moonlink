@@ -9,6 +9,8 @@ macro_rules! rpcs {
         $($func:ident($($name:ident: $type:ty),*) -> $res:ty;)*
     ) => {
         paste::paste! {
+            /// ORDER IS THE WIRE FORMAT (duckdb_mooncake pins moonlink_rpc); append only.
+            /// Variants are encoded by index, see `tests/wire_golden.rs`.
             #[derive(Debug, Serialize, Deserialize)]
             pub enum Request {
                 $([<$func:camel>] {
@@ -25,6 +27,7 @@ macro_rules! rpcs {
     };
 }
 
+// ORDER IS THE WIRE FORMAT (duckdb_mooncake pins moonlink_rpc); append only.
 rpcs! {
     create_snapshot(database: String, table: String, lsn: u64) -> ();
     create_table(database: String, table: String, src: String, src_uri: String, table_config: String) -> ();
