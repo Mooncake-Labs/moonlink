@@ -245,17 +245,14 @@ async fn in_memory_temp_file_is_not_shared_between_read_states() {
 /// snapshot task, and with it ingestion, would stall behind reader disk IO.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_lock_not_held_during_temp_parquet_write() {
-    use crate::union_read::read_state_manager::test_hooks::BLOCK_MATERIALIZE;
-    use tokio::sync::oneshot;
+    use crate::union_read::read_state_manager::test_hooks::block_next_materialize;
 
     let mut env = Env::new("lock_scope").await;
     env.commit_and_snapshot(&[1, 2], 100, /*flush=*/ false)
         .await;
     env.publish(100, 100, 100);
 
-    let (reached_tx, reached_rx) = oneshot::channel();
-    let (release_tx, release_rx) = oneshot::channel();
-    *BLOCK_MATERIALIZE.lock().unwrap() = Some((reached_tx, release_rx));
+    let (reached_rx, release_tx) = block_next_materialize(&env.rsm);
     let rsm = env.rsm.clone();
     let reader = tokio::spawn(async move { rsm.try_read(Some(100)).await.map(|_| ()) });
     reached_rx.await.unwrap();
@@ -603,8 +600,7 @@ mod gc {
     /// must not leak the cache pins and the temp parquet its read state build took.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_scan_does_not_leak_cache_pins_or_temp_files() {
-        use crate::union_read::read_state_manager::test_hooks::BLOCK_MATERIALIZE;
-        use tokio::sync::oneshot;
+        use crate::union_read::read_state_manager::test_hooks::block_next_materialize;
 
         let (mut env, cache) = production_cache_env("gc_cancel").await;
         for id in 1..=3 {
@@ -620,9 +616,7 @@ mod gc {
         env.publish(30, 30, 30);
         let baseline = pinned_refs(&cache).await;
 
-        let (reached_tx, reached_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
-        *BLOCK_MATERIALIZE.lock().unwrap() = Some((reached_tx, release_rx));
+        let (reached_rx, release_tx) = block_next_materialize(&env.rsm);
         let rsm = env.rsm.clone();
         let scan = tokio::spawn(async move { rsm.try_read(None).await.map(|_| ()) });
         reached_rx.await.unwrap();

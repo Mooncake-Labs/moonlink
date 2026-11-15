@@ -373,7 +373,7 @@ impl ReadStateManager {
         };
         let snapshot_seq = pending_read.snapshot_seq();
         #[cfg(test)]
-        test_hooks::before_materialize().await;
+        test_hooks::before_materialize(&table_snapshot).await;
         let snapshot_read_output = pending_read.materialize().await?;
         let state = snapshot_read_output
             .take_as_read_state(read_state_filepath_remap)
@@ -398,16 +398,42 @@ impl ReadStateManager {
 
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    use std::sync::Mutex;
+    use super::{ReadStateManager, RwLock, SnapshotTableState};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
 
-    /// When set, the next materialization reports `reached` and waits for `release`.
-    pub(crate) static BLOCK_MATERIALIZE: Mutex<
-        Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
-    > = Mutex::new(None);
+    type Hook = (oneshot::Sender<()>, oneshot::Receiver<()>);
 
-    pub(crate) async fn before_materialize() {
-        let hook = BLOCK_MATERIALIZE.lock().unwrap().take();
+    /// Armed hooks, keyed by the table snapshot they apply to, so that reads of other tables
+    /// (tests run in parallel in one process) never take them.
+    static BLOCK_MATERIALIZE: Mutex<Option<HashMap<usize, Hook>>> = Mutex::new(None);
+
+    fn key(table_snapshot: &Arc<RwLock<SnapshotTableState>>) -> usize {
+        Arc::as_ptr(table_snapshot) as usize
+    }
+
+    /// Make the next materialization of `manager`'s table report on the returned receiver and
+    /// wait until the returned sender fires (or is dropped).
+    pub(crate) fn block_next_materialize(
+        manager: &ReadStateManager,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        BLOCK_MATERIALIZE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(key(&manager.table_snapshot), (reached_tx, release_rx));
+        (reached_rx, release_tx)
+    }
+
+    pub(crate) async fn before_materialize(table_snapshot: &Arc<RwLock<SnapshotTableState>>) {
+        let hook = BLOCK_MATERIALIZE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|hooks| hooks.remove(&key(table_snapshot)));
         if let Some((reached, release)) = hook {
             let _ = reached.send(());
             let _ = release.await;
