@@ -114,6 +114,19 @@ async fn scan_rows(
     col: &str,
     timeout: Duration,
 ) -> Option<BTreeMap<i64, Option<String>>> {
+    scan_rows_as(backend, dst, lsn, col, timeout, None).await
+}
+
+/// [`scan_rows`], with the column cast to `as_type` first (e.g. dates and timestamps as their
+/// stored day or microsecond counts).
+async fn scan_rows_as(
+    backend: &MoonlinkBackend,
+    dst: &str,
+    lsn: u64,
+    col: &str,
+    timeout: Duration,
+    as_type: Option<DataType>,
+) -> Option<BTreeMap<i64, Option<String>>> {
     let state = tokio::time::timeout(
         timeout,
         backend.scan_table(DB.to_string(), dst.to_string(), Some(lsn)),
@@ -143,6 +156,10 @@ async fn scan_rows(
                 .unwrap()
                 .clone();
             let column = batch.column_by_name(col).unwrap();
+            let column = match &as_type {
+                Some(as_type) => &cast(column, as_type).unwrap(),
+                None => column,
+            };
             // Nested values (lists, structs) have no cast to text and bytes may not be utf-8;
             // display them instead (bytes as hex).
             let vals = match column.data_type() {
@@ -3836,4 +3853,85 @@ async fn unlogged_partitioned_member_with_logged_leaves_replicates() {
         .simple_query("DROP TABLE IF EXISTS rv_part;")
         .await
         .unwrap();
+}
+
+/// Dates and timestamps before year 1 (BC) or after 9999 replicate exactly, in the initial copy
+/// and through CDC; infinite ones cannot be stored in a mirror, so they refuse the copy and error
+/// the mirror instead of being dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dates_beyond_years_1_to_9999_replicate_and_infinity_errors() {
+    let values = [
+        ("2040-04-10 BC", "2040-04-10 12:34:56.5 BC"),
+        ("0001-01-01 BC", "0001-01-01 00:00:00 BC"),
+        ("0001-01-01", "0001-01-01 23:59:59.999999"),
+        ("1900-02-28", "1900-02-28 01:02:03"),
+        ("10000-01-01", "10000-01-01 23:59:59.999999"),
+        ("12345-06-07", "12345-06-07 12:00:00"),
+    ];
+    let row = |id: usize, (date, ts): &(&str, &str)| format!("({id}, '{date}', '{ts}', '{ts}')");
+    let copied: Vec<String> = values.iter().enumerate().map(|(i, v)| row(i, v)).collect();
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_dates, rv_inf;
+         CREATE TABLE rv_dates (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ);
+         INSERT INTO rv_dates VALUES {};
+         CREATE TABLE rv_inf (id BIGINT PRIMARY KEY, d DATE);
+         INSERT INTO rv_inf VALUES (1, 'infinity');",
+        copied.join(", ")
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_dates_mc", "public.rv_dates", &uri).await;
+    let streamed: Vec<String> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| row(i + 100, v))
+        .collect();
+    client
+        .simple_query(&format!(
+            "INSERT INTO rv_dates VALUES {}; UPDATE rv_dates SET ts = ts - interval '1 day' WHERE id = 3;",
+            streamed.join(", ")
+        ))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    for (column, epoch) in [
+        ("d", "(d - DATE '1970-01-01')::bigint"),
+        ("ts", "(extract(epoch FROM ts) * 1000000)::bigint"),
+        ("tz", "(extract(epoch FROM tz) * 1000000)::bigint"),
+    ] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {epoch}::text FROM rv_dates"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(source.len(), 12);
+        let mirror = scan_rows_as(
+            &backend,
+            "rv_dates_mc",
+            lsn,
+            column,
+            Duration::from_secs(30),
+            Some(DataType::Int64),
+        )
+        .await;
+        assert_eq!(mirror, Some(source), "column {column}");
+    }
+
+    let backend = Arc::new(backend);
+    let err = try_mirror(&backend, &tmp, "rv_inf_mc", "public.rv_inf", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("infinite date or timestamp"), "{err}");
+    client
+        .simple_query("INSERT INTO rv_dates VALUES (200, 'infinity', '2020-01-01', '2020-01-01');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_dates_mc", lsn)
+        .await
+        .expect("an infinite date must error the mirror");
+    assert!(err.contains("infinite date or timestamp"), "{err}");
 }

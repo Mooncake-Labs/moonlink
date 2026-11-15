@@ -43,6 +43,13 @@ pub enum FromTextError {
     #[error("invalid timestamp: {0} ")]
     InvalidTimestamp(#[from] chrono::ParseError),
 
+    /// Iceberg dates and timestamps have no infinite values; mirrors store only finite ones.
+    #[error("'{0}' (infinite date or timestamp) cannot be stored")]
+    InfiniteDateTime(String),
+
+    #[error("year out of the supported range")]
+    YearOutOfRange,
+
     #[error("invalid array: {0}")]
     InvalidArray(#[from] ArrayParseError),
 
@@ -54,6 +61,48 @@ pub enum FromTextError {
 }
 
 pub struct TextFormatConverter;
+
+/// Postgres prints dates (ISO DateStyle) as `YYYY-MM-DD`, with more year digits after 9999 and a
+/// ` BC` suffix before year 1; chrono uses astronomical years (1 BC is year 0) and wants a sign on
+/// years beyond four digits. Returns the text with the year rewritten for chrono.
+fn chrono_date_text(text: &str) -> Result<String, FromTextError> {
+    if matches!(text, "infinity" | "-infinity") {
+        return Err(FromTextError::InfiniteDateTime(text.to_string()));
+    }
+    let (text, bc) = match text.strip_suffix(" BC") {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    };
+    let digits = text.find('-').unwrap_or(text.len());
+    let year: i32 = text[..digits]
+        .parse()
+        .map_err(|_| FromTextError::YearOutOfRange)?;
+    let year = if bc { 1 - year } else { year };
+    Ok(format!("{year:+05}{}", &text[digits..]))
+}
+
+pub(crate) fn parse_date(text: &str) -> Result<NaiveDate, FromTextError> {
+    Ok(NaiveDate::parse_from_str(
+        &chrono_date_text(text)?,
+        "%Y-%m-%d",
+    )?)
+}
+
+pub(crate) fn parse_timestamp(text: &str) -> Result<NaiveDateTime, FromTextError> {
+    Ok(NaiveDateTime::parse_from_str(
+        &chrono_date_text(text)?,
+        "%Y-%m-%d %H:%M:%S%.f",
+    )?)
+}
+
+pub(crate) fn parse_timestamptz(text: &str) -> Result<DateTime<Utc>, FromTextError> {
+    let text = chrono_date_text(text)?;
+    let value = match DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%#z") {
+        Ok(value) => value,
+        Err(_) => DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%:z")?,
+    };
+    Ok(value.into())
+}
 
 #[derive(Debug, Error)]
 pub enum ArrayParseError {
@@ -195,13 +244,10 @@ impl TextFormatConverter {
                 |str| Ok(Some(hex::from_bytea_hex(str)?)),
                 ArrayCell::Bytes,
             ),
-            Type::DATE => {
-                let val = NaiveDate::parse_from_str(str, "%Y-%m-%d")?;
-                Ok(Cell::Date(val))
-            }
+            Type::DATE => Ok(Cell::Date(parse_date(str)?)),
             Type::DATE_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(NaiveDate::parse_from_str(str, "%Y-%m-%d")?)),
+                |str| Ok(Some(parse_date(str)?)),
                 ArrayCell::Date,
             ),
             Type::TIME => {
@@ -213,60 +259,18 @@ impl TextFormatConverter {
                 |str| Ok(Some(NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?)),
                 ArrayCell::Time,
             ),
-            Type::TIMESTAMP => {
-                let val = NaiveDateTime::parse_from_str(str, "%Y-%m-%d %H:%M:%S%.f")?;
-                Ok(Cell::TimeStamp(val))
-            }
+            Type::TIMESTAMP => Ok(Cell::TimeStamp(parse_timestamp(str)?)),
             Type::TIMESTAMP_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| {
-                    Ok(Some(NaiveDateTime::parse_from_str(
-                        str,
-                        "%Y-%m-%d %H:%M:%S%.f",
-                    )?))
-                },
+                |str| Ok(Some(parse_timestamp(str)?)),
                 ArrayCell::TimeStamp,
             ),
-            Type::TIMESTAMPTZ => {
-                let val =
-                    match DateTime::<FixedOffset>::parse_from_str(str, "%Y-%m-%d %H:%M:%S%.f%#z") {
-                        Ok(val) => val,
-                        Err(_) => {
-                            DateTime::<FixedOffset>::parse_from_str(str, "%Y-%m-%d %H:%M:%S%.f%:z")?
-                        }
-                    };
-                Ok(Cell::TimeStampTz(val.into()))
-            }
-            Type::TIMESTAMPTZ_ARRAY => {
-                match TextFormatConverter::parse_array(
-                    str,
-                    |str| {
-                        Ok(Some(
-                            DateTime::<FixedOffset>::parse_from_str(
-                                str,
-                                "%Y-%m-%d %H:%M:%S%.f%#z",
-                            )?
-                            .into(),
-                        ))
-                    },
-                    ArrayCell::TimeStampTz,
-                ) {
-                    Ok(val) => Ok(val),
-                    Err(_) => TextFormatConverter::parse_array(
-                        str,
-                        |str| {
-                            Ok(Some(
-                                DateTime::<FixedOffset>::parse_from_str(
-                                    str,
-                                    "%Y-%m-%d %H:%M:%S%.f%:z",
-                                )?
-                                .into(),
-                            ))
-                        },
-                        ArrayCell::TimeStampTz,
-                    ),
-                }
-            }
+            Type::TIMESTAMPTZ => Ok(Cell::TimeStampTz(parse_timestamptz(str)?)),
+            Type::TIMESTAMPTZ_ARRAY => TextFormatConverter::parse_array(
+                str,
+                |str| Ok(Some(parse_timestamptz(str)?)),
+                ArrayCell::TimeStampTz,
+            ),
             Type::UUID => {
                 let val = Uuid::parse_str(str)?;
                 Ok(Cell::Uuid(val))
@@ -1118,5 +1122,83 @@ mod tests {
                 CompositeParseError::FieldCountMismatch
             ))
         ));
+    }
+
+    #[test]
+    fn dates_outside_years_1_to_9999_keep_their_value() {
+        use chrono::Datelike;
+        assert_eq!(
+            parse_date("2020-01-02").unwrap(),
+            NaiveDate::from_ymd_opt(2020, 1, 2).unwrap()
+        );
+        // 2040 BC is astronomical year -2039.
+        assert_eq!(
+            parse_date("2040-04-10 BC").unwrap(),
+            NaiveDate::from_ymd_opt(-2039, 4, 10).unwrap()
+        );
+        assert_eq!(parse_date("0001-01-01 BC").unwrap().year(), 0);
+        assert_eq!(
+            parse_date("10000-01-01").unwrap(),
+            NaiveDate::from_ymd_opt(10000, 1, 1).unwrap()
+        );
+        assert_eq!(
+            parse_timestamp("2040-04-10 12:00:00.5 BC").unwrap(),
+            NaiveDate::from_ymd_opt(-2039, 4, 10)
+                .unwrap()
+                .and_hms_milli_opt(12, 0, 0, 500)
+                .unwrap()
+        );
+        assert_eq!(
+            parse_timestamp("12345-06-07 01:02:03").unwrap(),
+            NaiveDate::from_ymd_opt(12345, 6, 7)
+                .unwrap()
+                .and_hms_opt(1, 2, 3)
+                .unwrap()
+        );
+        assert_eq!(
+            parse_timestamptz("10000-03-12 23:58:48+05:30").unwrap(),
+            NaiveDate::from_ymd_opt(10000, 3, 12)
+                .unwrap()
+                .and_hms_opt(18, 28, 48)
+                .unwrap()
+                .and_utc()
+        );
+        assert_eq!(
+            parse_timestamptz("0044-03-15 12:00:00+00 BC").unwrap(),
+            NaiveDate::from_ymd_opt(-43, 3, 15)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_utc()
+        );
+        assert_eq!(
+            parse_timestamptz("2020-01-01 00:00:00-08").unwrap(),
+            NaiveDate::from_ymd_opt(2020, 1, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap()
+                .and_utc()
+        );
+    }
+
+    #[test]
+    fn infinite_and_unrepresentable_dates_are_errors() {
+        for text in ["infinity", "-infinity"] {
+            assert!(matches!(
+                parse_date(text),
+                Err(FromTextError::InfiniteDateTime(_))
+            ));
+            assert!(matches!(
+                parse_timestamp(text),
+                Err(FromTextError::InfiniteDateTime(_))
+            ));
+            assert!(matches!(
+                parse_timestamptz(text),
+                Err(FromTextError::InfiniteDateTime(_))
+            ));
+        }
+        // Postgres dates reach year 5874897, beyond chrono's range.
+        assert!(parse_date("5874897-12-31").is_err());
+        assert!(parse_timestamp("294276-12-31 23:59:59").is_err());
     }
 }
