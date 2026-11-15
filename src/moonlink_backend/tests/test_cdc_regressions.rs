@@ -2944,3 +2944,65 @@ async fn partition_the_mirror_role_cannot_read_is_judged_by_size() {
         .await
         .unwrap();
 }
+
+/// A mirror created on a fresh connection whose slot lags behind its table's history (held for a
+/// mirror of the database that cannot be restored yet): the loop starts streaming that history
+/// right after the new table registers. The new mirror must already be in copy mode then, so the
+/// replay (INSERT 9; TRUNCATE; INSERT 2) is judged against the copy's boundary instead of being
+/// applied on top of the copy.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn mirror_created_on_a_lagging_slot_does_not_apply_replayed_history() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_re, rv_held;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_role2') THEN
+             EXECUTE 'DROP OWNED BY rv_role2'; EXECUTE 'DROP ROLE rv_role2';
+           END IF;
+         END $$;
+         CREATE ROLE rv_role2 LOGIN REPLICATION PASSWORD 'rv2';
+         CREATE TABLE rv_re (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_held (id BIGINT PRIMARY KEY);
+         GRANT SELECT ON rv_held TO rv_role2;",
+    )
+    .await;
+    let other_uri = uri_for_user(&uri, "rv_role2", "rv2");
+    mirror(&backend, &tmp, "rv_re_mc", "public.rv_re", &uri).await;
+    mirror(&backend, &tmp, "rv_held_mc", "public.rv_held", &other_uri).await;
+    client
+        .simple_query("INSERT INTO rv_re VALUES (9); TRUNCATE rv_re; INSERT INTO rv_re VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_re_mc", lsn).await.is_some());
+    backend
+        .drop_table(DB.to_string(), "rv_re_mc".to_string())
+        .await
+        .unwrap();
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    // rv_held cannot be restored for now (its role cannot log in): pending, its slot held.
+    client
+        .simple_query("ALTER ROLE rv_role2 NOLOGIN;")
+        .await
+        .unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    let err = scan_error(&backend, "rv_held_mc").await.unwrap();
+    assert!(err.contains("not available yet"), "{err}");
+    mirror(&backend, &tmp, "rv_re_new", "public.rv_re", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_re_new", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_re_new", lsn).await, Some(vec![2]));
+    for dst in ["rv_re_new", "rv_held_mc"] {
+        backend
+            .drop_table(DB.to_string(), dst.to_string())
+            .await
+            .unwrap();
+    }
+    client
+        .simple_query("DROP TABLE rv_re, rv_held; DROP OWNED BY rv_role2; DROP ROLE rv_role2;")
+        .await
+        .unwrap();
+}

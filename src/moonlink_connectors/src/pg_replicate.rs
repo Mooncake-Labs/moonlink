@@ -567,9 +567,6 @@ impl PostgresConnection {
             return Ok(false);
         }
 
-        if let Err(e) = event_sender.send(TableEvent::StartInitialCopy).await {
-            error!(error = ?e, "failed to send StartInitialCopy event");
-        }
         publication_source
             .add_table_to_publication(&schema.table_name)
             .await?;
@@ -898,6 +895,19 @@ impl PostgresConnection {
             .commit_state
             .take()
             .expect("commit_lsn_tx is None");
+        // A new mirror is in copy mode before the stream can deliver anything for it: the slot
+        // may replay the table's history (a re-created mirror), which the copy already holds and
+        // the handler must buffer and judge against the copy's boundary.
+        if !is_recovery {
+            if table_resources
+                .event_sender
+                .send(TableEvent::StartInitialCopy)
+                .await
+                .is_err()
+            {
+                return Err(crate::Error::table_not_found(table_name.to_string()));
+            }
+        }
         let ready_rx = self
             .add_table_to_replication(
                 table_schema.src_table_id,
