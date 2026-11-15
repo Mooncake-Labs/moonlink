@@ -523,6 +523,12 @@ struct IcebergTableManagerFactory {
 /// may trail what was applied); the commit LSN must never move backwards, and must not panic.
 pub(crate) fn clamp_commit_lsn(lsn: u64, commit_lsn_baseline: u64) -> u64 {
     if lsn < commit_lsn_baseline {
+        // Re-sent transactions are skipped before they get here; reaching this is a bug that tests
+        // must catch, while a release build keeps the table running.
+        debug_assert!(
+            false,
+            "commit LSN {lsn} is behind the table's commit LSN {commit_lsn_baseline}"
+        );
         tracing::warn!(
             lsn,
             commit_lsn_baseline,

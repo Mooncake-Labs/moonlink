@@ -1017,7 +1017,7 @@ impl TableHandler {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
-        if table_handler_state.is_replayed_applied_event(&event) {
+        if table_handler_state.skip_resent_event(&event) {
             // Streamed rows of a replayed transaction were collected again; drop them.
             if let TableEvent::Commit {
                 xact_id: Some(xact_id),

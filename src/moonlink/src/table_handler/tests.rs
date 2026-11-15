@@ -1891,6 +1891,38 @@ async fn test_streamed_commit_below_either_replay_floor_is_skipped() {
     env.verify_snapshot(150, &[2]).await;
 }
 
+/// Testing scenario: transactions re-sent after a restart are skipped and counted; the first new
+/// event ends the run of skips.
+#[test]
+fn test_resent_events_are_skipped_and_counted() {
+    let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
+    let (force_snapshot_completion_tx, _) = watch::channel(None);
+    let mut state = TableHandlerState::new(
+        table_maintenance_completion_tx,
+        force_snapshot_completion_tx,
+        /*initial_persistence_lsn=*/ Some(100),
+        /*persistence_snapshot_lsn=*/ Some(100),
+    );
+    let append = |lsn| TableEvent::Append {
+        row: MoonlinkRow::new(vec![RowValue::Int32(1)]),
+        xact_id: None,
+        lsn,
+    };
+    let commit = |lsn| TableEvent::Commit { lsn, xact_id: None };
+
+    for (row_lsn, commit_lsn) in [(20, 26), (40, 60), (90, 100)] {
+        assert!(state.skip_resent_event(&append(row_lsn)));
+        assert!(state.skip_resent_event(&commit(commit_lsn)));
+    }
+    assert_eq!(state.skipped_resent_events, 6);
+    assert_eq!(state.skipped_resent_commits, 3);
+
+    // A new transaction, whose commit record starts at the persisted LSN, is applied.
+    assert!(!state.skip_resent_event(&append(100)));
+    assert!(!state.skip_resent_event(&commit(120)));
+    assert_eq!(state.skipped_resent_events, 6);
+}
+
 /// ---- Util functions unit test ----
 #[test]
 fn test_get_persisted_table_lsn() {

@@ -9,7 +9,7 @@ use crate::table_notify::TableEvent;
 use crate::Result;
 use more_asserts as ma;
 use tokio::sync::{broadcast, watch};
-use tracing::error;
+use tracing::{debug, error, info};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SpecialTableState {
@@ -87,6 +87,11 @@ pub(crate) struct TableHandlerState {
     pub(crate) table_consistent_view_lsn: Option<u64>,
     // Latest LSN of the table's latest commit.
     pub(crate) latest_commit_lsn: Option<u64>,
+    /// Re-sent events skipped because the table had already applied them (see [`Self::skip_resent_event`]).
+    pub(crate) skipped_resent_events: u64,
+    /// Re-sent commits skipped in total, and the commit LSNs of the current run of skips.
+    pub(crate) skipped_resent_commits: u64,
+    skipped_run: Option<SkippedRun>,
     // Last unflushed commit LSN for non-streaming transaction.
     // Used to flush non-streaming writes at streaming transaction commit.
     pub(crate) last_unflushed_commit_lsn: Option<u64>,
@@ -157,6 +162,9 @@ impl TableHandlerState {
             // ones included. A copied table's floor is its copy boundary instead
             // (`initial_persistence_lsn`); a table never has both.
             latest_commit_lsn: persistence_snapshot_lsn,
+            skipped_resent_events: 0,
+            skipped_resent_commits: 0,
+            skipped_run: None,
             special_table_state: SpecialTableState::Normal,
             // Force snapshot fields.
             table_consistent_view_lsn: persistence_snapshot_lsn,
@@ -312,6 +320,44 @@ impl TableHandlerState {
 
     /// Whether every committed change this table has applied is persisted, so the replication slot
     /// may move past the current replication position for it.
+    /// Whether to skip `event` because the table already applied it (postgres re-sends everything
+    /// after the slot's confirmed LSN on a restart or reconnect). Skips are counted, and a run of
+    /// them is logged once it ends, so a skip that should not have happened leaves a trace.
+    pub(crate) fn skip_resent_event(&mut self, event: &TableEvent) -> bool {
+        if !self.is_replayed_applied_event(event) {
+            if event.is_ingest_event() {
+                self.finish_skipped_run();
+            }
+            return false;
+        }
+        self.skipped_resent_events += 1;
+        let run = self.skipped_run.get_or_insert(SkippedRun::default());
+        run.events += 1;
+        if let TableEvent::Commit { lsn, .. } = event {
+            debug!(
+                lsn,
+                "skipping a re-sent transaction the table already applied"
+            );
+            self.skipped_resent_commits += 1;
+            run.commits += 1;
+            run.first_commit_lsn.get_or_insert(*lsn);
+            run.last_commit_lsn = Some(*lsn);
+        }
+        true
+    }
+
+    fn finish_skipped_run(&mut self) {
+        if let Some(run) = self.skipped_run.take() {
+            info!(
+                transactions = run.commits,
+                events = run.events,
+                first_commit_lsn = run.first_commit_lsn,
+                last_commit_lsn = run.last_commit_lsn,
+                "skipped re-sent transactions the table had already applied"
+            );
+        }
+    }
+
     pub(crate) fn has_no_unpersisted_commit(&self, persistence_snapshot_lsn: Option<u64>) -> bool {
         if self.special_table_state != SpecialTableState::Normal {
             return false;
@@ -613,4 +659,13 @@ impl TableHandlerState {
         }
         true
     }
+}
+
+/// Consecutive skipped re-sent events, logged as one line when the run ends.
+#[derive(Debug, Default)]
+struct SkippedRun {
+    events: u64,
+    commits: u64,
+    first_commit_lsn: Option<u64>,
+    last_commit_lsn: Option<u64>,
 }
