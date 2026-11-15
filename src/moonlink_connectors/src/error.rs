@@ -48,6 +48,9 @@ pub enum Error {
     // Background writer task failed (panic/cancel/join error).
     #[error("{0}")]
     WriterTaskFailed(ErrorStruct),
+    // The mirror is in the errored state; the message tells the user what to do.
+    #[error("{0}")]
+    TableErrored(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -57,6 +60,17 @@ impl Error {
     pub fn table_not_found(table_name: String) -> Self {
         Error::TableNotFound(ErrorStruct {
             message: format!("Table {table_name} not found"),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
+    /// Request on a mirror that is in the errored state.
+    #[track_caller]
+    pub fn table_errored(message: &str) -> Self {
+        Error::TableErrored(ErrorStruct {
+            message: message.to_string(),
             status: ErrorStatus::Permanent,
             source: None,
             location: Some(Location::caller().to_string()),

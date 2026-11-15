@@ -1,9 +1,11 @@
+use crate::errored_tables::{self, ErroredTable};
 use crate::pg_replicate::table::SrcTableId;
 use crate::pg_replicate::SourceIdentity;
 use crate::ReplicationConnection;
 use crate::{Error, Result};
 use moonlink::{
-    MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
+    IcebergTableConfig, MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager,
+    TableEventManager,
 };
 use moonlink::{ReadStateFilepathRemap, TableStatusReader};
 use std::collections::hash_map::Entry;
@@ -28,6 +30,8 @@ pub struct ReplicationManager {
     uri_keys: HashMap<String, String>,
     /// Maps from mooncake table id to (source key, source table id).
     table_info: HashMap<MooncakeTableId, (String, SrcTableId)>,
+    /// Recovered mirrors that are not served (errored before, or failed to recover).
+    errored_tables: HashMap<MooncakeTableId, ErroredTable>,
     /// Base directory for mooncake tables.
     table_base_path: String,
     /// Object storage cache.
@@ -42,6 +46,7 @@ impl ReplicationManager {
             connections: HashMap::new(),
             uri_keys: HashMap::new(),
             table_info: HashMap::new(),
+            errored_tables: HashMap::new(),
             table_base_path,
             object_storage_cache,
             shutdown_handles: Vec::new(),
@@ -112,7 +117,9 @@ impl ReplicationManager {
         debug!(%src_uri, table_name, "adding table through manager");
 
         // Error handling: don't allow duplicate mooncake table id be registered.
-        if self.table_info.contains_key(&mooncake_table_id) {
+        if self.table_info.contains_key(&mooncake_table_id)
+            || self.errored_tables.contains_key(&mooncake_table_id)
+        {
             return Err(Error::repl_duplicate_table(mooncake_table_id.to_string()));
         }
 
@@ -153,6 +160,38 @@ impl ReplicationManager {
         Ok(())
     }
 
+    /// Message of a mirror persisted as errored by an earlier run, if any.
+    pub async fn persisted_errored_message(
+        &self,
+        mooncake_table_id: &MooncakeTableId,
+    ) -> Option<String> {
+        errored_tables::read_marker(&self.table_base_path, mooncake_table_id).await
+    }
+
+    /// Register a recovered mirror that is not served: every request on it returns `message`, and
+    /// dropping it deletes its data.
+    pub fn add_errored_table(
+        &mut self,
+        mooncake_table_id: MooncakeTableId,
+        message: String,
+        iceberg_table_config: IcebergTableConfig,
+    ) {
+        self.errored_tables.insert(
+            mooncake_table_id,
+            ErroredTable {
+                message,
+                iceberg_table_config,
+            },
+        );
+    }
+
+    fn check_not_errored(&self, mooncake_table_id: &MooncakeTableId) -> Result<()> {
+        match self.errored_tables.get(mooncake_table_id) {
+            Some(errored) => Err(Error::table_errored(&errored.message)),
+            None => Ok(()),
+        }
+    }
+
     pub async fn start_replication(&mut self, src_uri: &str) -> Result<()> {
         let key = self.source_key(src_uri).await?;
         let Some(connection) = self.connections.get_mut(&key) else {
@@ -168,6 +207,12 @@ impl ReplicationManager {
     /// If the table is not tracked, logs a message and returns successfully.
     /// Return whether the table is tracked by moonlink.
     pub async fn drop_table(&mut self, mooncake_table_id: &MooncakeTableId) -> Result<bool> {
+        if let Some(errored) = self.errored_tables.remove(mooncake_table_id) {
+            // Best effort: the mirror is gone from moonlink either way.
+            let _ = errored_tables::drop_iceberg_table_files(&errored.iceberg_table_config).await;
+            errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;
+            return Ok(true);
+        }
         let (table_uri, src_table_id) = match self.table_info.get(mooncake_table_id) {
             Some(info) => info.clone(),
             None => {
@@ -196,6 +241,7 @@ impl ReplicationManager {
         &self,
         mooncake_table_id: &MooncakeTableId,
     ) -> Result<&ReadStateManager> {
+        self.check_not_errored(mooncake_table_id)?;
         let (src_table_id, connection) = self.get_replication_connection(mooncake_table_id)?;
         Ok(connection.get_table_reader(mooncake_table_id, src_table_id))
     }
@@ -204,6 +250,7 @@ impl ReplicationManager {
         &self,
         mooncake_table_id: &MooncakeTableId,
     ) -> Result<&TableStatusReader> {
+        self.check_not_errored(mooncake_table_id)?;
         let (src_table_id, connection) = self.get_replication_connection(mooncake_table_id)?;
         Ok(connection.get_table_status_reader(mooncake_table_id, src_table_id))
     }
@@ -230,6 +277,7 @@ impl ReplicationManager {
         &mut self,
         mooncake_table_id: &MooncakeTableId,
     ) -> Result<&mut TableEventManager> {
+        self.check_not_errored(mooncake_table_id)?;
         let (uri, src_table_id) = self
             .table_info
             .get(mooncake_table_id)

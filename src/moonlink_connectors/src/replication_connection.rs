@@ -5,16 +5,21 @@ use moonlink::{
     ReadStateManager, TableEventManager, TableStatusReader,
 };
 
+use crate::errored_tables;
+use moonlink::TableStatus;
 use std::collections::HashMap;
 use std::hash::Hash;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 struct TableState {
     src_table_name: String,
     reader: ReadStateManager,
     event_manager: TableEventManager,
     status_reader: TableStatusReader,
+    /// Persists the errored state when the table enters it.
+    errored_marker_writer: JoinHandle<()>,
 }
 
 /// Id which uniquely identifies a table, including source information (src uri, src table id) and destination information (mooncake table id).
@@ -22,6 +27,33 @@ struct TableState {
 struct UniqueTableId {
     mooncake_table_id: MooncakeTableId,
     src_table_id: u32,
+}
+
+/// Record the errored state on disk as soon as the table enters it, so it survives restarts.
+fn spawn_errored_marker_writer(
+    base_path: String,
+    mooncake_table_id: MooncakeTableId,
+    mut table_status: watch::Receiver<TableStatus>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let errored = match &*table_status.borrow_and_update() {
+                TableStatus::Errored(message) => Some(message.clone()),
+                TableStatus::Healthy => None,
+            };
+            if let Some(message) = errored {
+                if let Err(e) =
+                    errored_tables::write_marker(&base_path, &mooncake_table_id, &message).await
+                {
+                    error!(error = %e, table = %mooncake_table_id, "failed to persist errored state");
+                }
+                return;
+            }
+            if table_status.changed().await.is_err() {
+                return;
+            }
+        }
+    })
 }
 
 /// Manages replication for table(s) within a database from PostgreSQL CDC.
@@ -165,11 +197,17 @@ impl ReplicationConnection {
             )
             .await?;
 
+        let errored_marker_writer = spawn_errored_marker_writer(
+            self.table_base_path.clone(),
+            mooncake_table_id.clone(),
+            table_resources.table_event_manager.subscribe_table_status(),
+        );
         let table_state = TableState {
             src_table_name: src_table_name.to_string(),
             reader: table_resources.read_state_manager,
             event_manager: table_resources.table_event_manager,
             status_reader: table_resources.table_status_reader,
+            errored_marker_writer,
         };
 
         // TODO(hjiang): Add assertion or error propagation.
@@ -205,6 +243,7 @@ impl ReplicationConnection {
         // it is important to drop table from table handler first,
         // otherwise table handler will panic when trying to send back notification to sinks
         debug!(src_table_id, "drop table from table handler");
+        table_state.errored_marker_writer.abort();
         let mut event_manager = table_state.event_manager;
         // The table is already unregistered; finish the drop even if one step fails, otherwise
         // the mirror could never be dropped (or re-created) again.
@@ -217,6 +256,7 @@ impl ReplicationConnection {
             warn!(error = ?e, src_table_id, "failed to remove table from replication");
         }
 
+        errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;
         debug!(src_table_id, "table dropped");
         Ok(())
     }

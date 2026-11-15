@@ -859,3 +859,129 @@ async fn second_mirror_of_same_source_is_refused() {
     let lsn = current_wal_lsn(&client).await;
     assert_eq!(scan_ids(&backend, "rv_one_mc", lsn).await, Some(vec![1]));
 }
+
+async fn scan_error(backend: &MoonlinkBackend, dst: &str) -> Option<String> {
+    backend
+        .scan_table(DB.to_string(), dst.to_string(), None)
+        .await
+        .err()
+        .map(|e| format!("{e:?}"))
+}
+
+/// A mirror that cannot be recovered at startup (its source table was dropped) must not stop
+/// the service or the other mirrors; it reports why and can be dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn startup_survives_a_mirror_whose_source_is_gone() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_keep, rv_gone;
+         CREATE TABLE rv_keep (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_gone (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_keep_mc", "public.rv_keep", &uri).await;
+    mirror(&backend, &tmp, "rv_gone_mc", "public.rv_gone", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_keep VALUES (1); INSERT INTO rv_gone VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    scan_ids(&backend, "rv_keep_mc", lsn).await.unwrap();
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    client.simple_query("DROP TABLE rv_gone;").await.unwrap();
+
+    let backend = new_backend(&tmp).await.expect("startup must not fail");
+    client
+        .simple_query("INSERT INTO rv_keep VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_keep_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+    let err = scan_error(&backend, "rv_gone_mc")
+        .await
+        .expect("must be errored");
+    assert!(
+        err.contains("could not be restored") && err.contains("re-create"),
+        "{err}"
+    );
+    backend
+        .drop_table(DB.to_string(), "rv_gone_mc".to_string())
+        .await
+        .unwrap();
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    let err = scan_error(&backend, "rv_gone_mc").await.unwrap();
+    assert!(err.contains("not found"), "dropped mirror came back: {err}");
+}
+
+/// A mirror that entered the errored state stays errored across a restart (the slot has moved
+/// past it, so resuming would serve stale data as if healthy), and once dropped it can be
+/// re-created from scratch with the current source contents.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn errored_mirror_stays_errored_after_restart_until_recreated() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ddl, rv_bystander;
+         CREATE TABLE rv_ddl (id BIGINT PRIMARY KEY, a INT);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ddl_mc", "public.rv_ddl", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query(
+            "INSERT INTO rv_ddl VALUES (1, 1);
+             ALTER TABLE rv_ddl ADD COLUMN b INT;
+             INSERT INTO rv_ddl VALUES (2, 2, 2);
+             INSERT INTO rv_bystander VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    assert!(snapshot_error(&backend, "rv_ddl_mc", lsn).await.is_some());
+    // Let the errored state be persisted.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    let backend = new_backend(&tmp).await.unwrap();
+    let err = scan_error(&backend, "rv_ddl_mc")
+        .await
+        .expect("errored mirror must stay errored after restart");
+    assert!(err.contains("schema changes are not supported"), "{err}");
+    client
+        .simple_query("INSERT INTO rv_bystander VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+
+    backend
+        .drop_table(DB.to_string(), "rv_ddl_mc".to_string())
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_ddl_mc", "public.rv_ddl", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_ddl_mc", lsn).await, Some(vec![1, 2]));
+}
