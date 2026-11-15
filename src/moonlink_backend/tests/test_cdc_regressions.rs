@@ -481,6 +481,19 @@ async fn snapshot_error(backend: &MoonlinkBackend, dst: &str, lsn: u64) -> Optio
     .map(|e| error_text(&e))
 }
 
+/// Wait (up to 20 s) for the source comparison, which polls every 5 s, to error `dst`. Asks for a
+/// snapshot at `reached`, an LSN the mirror already reached, so a healthy mirror answers at once
+/// instead of waiting for a commit an erroring one never applies.
+async fn wait_until_errored(backend: &MoonlinkBackend, dst: &str, reached: u64) -> String {
+    for _ in 0..20 {
+        if let Some(err) = snapshot_error(backend, dst, reached).await {
+            return err;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    panic!("{dst} was not errored within 20 s");
+}
+
 /// Any change to a mirrored table's definition puts that mirror, and only that mirror, into the
 /// errored state; it never panics replication and the mirror can still be dropped.
 #[rstest::rstest]
@@ -1424,21 +1437,21 @@ async fn inheritance_parent_is_refused() {
     .await
     .unwrap();
     client
+        .simple_query("INSERT INTO rv_later_parent VALUES (1);")
+        .await
+        .unwrap();
+    let reached = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_later_parent_mc", reached).await,
+        Some(vec![1])
+    );
+    client
         .simple_query(
             "CREATE TABLE rv_later_child () INHERITS (rv_later_parent); INSERT INTO rv_later_child VALUES (7);",
         )
         .await
         .unwrap();
-    let mut err = None;
-    for _ in 0..20 {
-        let lsn = current_wal_lsn(&client).await;
-        err = snapshot_error(&backend, "rv_later_parent_mc", lsn).await;
-        if err.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let err = err.expect("must be errored once a child appears while running");
+    let err = wait_until_errored(&backend, "rv_later_parent_mc", reached).await;
     assert!(err.contains("gained inheritance children"), "{err}");
     client
         .simple_query("DROP TABLE rv_parent, rv_later_parent, rv_parent_ok CASCADE;")
@@ -1819,7 +1832,7 @@ async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(&format!(
         "DROP TABLE IF EXISTS rv_nested;
-         DROP TYPE IF EXISTS rv_mood, rv_span;
+         DROP TYPE IF EXISTS rv_mood, rv_span CASCADE;
          DROP DOMAIN IF EXISTS rv_dspan;
          CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
          CREATE TYPE rv_span AS (n INT, d INTERVAL);
@@ -3841,22 +3854,18 @@ async fn unlogged_partition_errors_the_mirror(#[case] ddl: &str) {
     )
     .await;
     mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_part VALUES (2, 'b');")
+        .await
+        .unwrap();
+    let reached = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_part_mc", reached).await,
+        Some(vec![1, 2])
+    );
     client.simple_query(ddl).await.unwrap();
-    // Nothing of an unlogged partition reaches the stream; the source is polled every 5 s.
-    let mut err = None;
-    for _ in 0..20 {
-        client
-            .simple_query("INSERT INTO rv_part VALUES (2, 'b') ON CONFLICT (id) DO UPDATE SET v = rv_part.v || 'x';")
-            .await
-            .unwrap();
-        let lsn = current_wal_lsn(&client).await;
-        err = snapshot_error(&backend, "rv_part_mc", lsn).await;
-        if err.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let err = err.expect("a mirror with an unlogged partition must be errored");
+    // Nothing of an unlogged partition reaches the stream; the source is compared every 5 s.
+    let err = wait_until_errored(&backend, "rv_part_mc", reached).await;
     assert!(
         err.contains("is unlogged, so postgres never sends its changes"),
         "{err}"
@@ -4302,8 +4311,8 @@ async fn renamed_enum_value_errors_the_mirror(#[case] column_type: &str, #[case]
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(&format!(
         "DROP TABLE IF EXISTS rv_en, rv_en_bystander;
-         DROP DOMAIN IF EXISTS rv_dmood;
-         DROP TYPE IF EXISTS rv_feeling, rv_mood;
+         DROP DOMAIN IF EXISTS rv_dmood CASCADE;
+         DROP TYPE IF EXISTS rv_feeling, rv_mood CASCADE;
          CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
          CREATE DOMAIN rv_dmood AS rv_mood;
          CREATE TYPE rv_feeling AS (m rv_mood, n INT);
@@ -4332,34 +4341,24 @@ async fn renamed_enum_value_errors_the_mirror(#[case] column_type: &str, #[case]
         .simple_query("INSERT INTO rv_en (id) VALUES (2);")
         .await
         .unwrap();
-    let lsn = current_wal_lsn(&client).await;
-    assert_eq!(snapshot_error(&backend, "rv_en_mc", lsn).await, None);
-    assert_eq!(scan_ids(&backend, "rv_en_mc", lsn).await, Some(vec![1, 2]));
+    let reached = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_en_mc", reached).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_en_mc", reached).await,
+        Some(vec![1, 2])
+    );
 
     client
         .simple_query("ALTER TYPE rv_mood RENAME VALUE 'sad' TO 'unhappy';")
         .await
         .unwrap();
-    let mut err = None;
-    for _ in 0..20 {
-        client
-            .simple_query("INSERT INTO rv_en_bystander VALUES (1) ON CONFLICT DO NOTHING;")
-            .await
-            .unwrap();
-        let lsn = current_wal_lsn(&client).await;
-        err = snapshot_error(&backend, "rv_en_mc", lsn).await;
-        if err.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let err = err.expect("a renamed enum value must error the mirror");
+    let err = wait_until_errored(&backend, "rv_en_mc", reached).await;
     assert!(
         err.contains("enum value 'sad' its columns can hold was renamed to 'unhappy'"),
         "{err}"
     );
-    let lsn = current_wal_lsn(&client).await;
-    assert_eq!(snapshot_error(&backend, "rv_en_by_mc", lsn).await, None);
+    // The other mirror of the database is unaffected.
+    assert_eq!(scan_error(&backend, "rv_en_by_mc").await, None);
 
     // Renamed while moonlink is stopped: errored at recovery.
     let backend = Arc::new(backend);
@@ -4383,4 +4382,8 @@ async fn renamed_enum_value_errors_the_mirror(#[case] column_type: &str, #[case]
         .await
         .expect("renamed while stopped: errored at recovery");
     assert!(err.contains("was renamed to 'glad'"), "{err}");
+    client
+        .simple_query("DROP TABLE rv_en; DROP DOMAIN rv_dmood; DROP TYPE rv_feeling, rv_mood;")
+        .await
+        .unwrap();
 }
