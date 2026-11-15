@@ -1036,6 +1036,60 @@ async fn partitioned_source_replicates_updates_and_deletes(#[case] columns: &str
     );
 }
 
+/// TRUNCATE is not applied to mirrors; a truncated source puts only its mirror in the errored
+/// state (never silently keeps the old rows), and a truncate that rolls back changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn truncate_errors_only_that_mirror() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_trunc, rv_rolled_back, rv_bystander;
+         CREATE TABLE rv_trunc (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_rolled_back (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    for t in ["rv_trunc", "rv_rolled_back", "rv_bystander"] {
+        mirror(
+            &backend,
+            &tmp,
+            &format!("{t}_mc"),
+            &format!("public.{t}"),
+            &uri,
+        )
+        .await;
+    }
+    // Separate statements: in one multi-statement query, ROLLBACK would also undo the INSERTs.
+    for sql in [
+        "INSERT INTO rv_trunc VALUES (1); INSERT INTO rv_rolled_back VALUES (1);",
+        "BEGIN; TRUNCATE rv_rolled_back; ROLLBACK;",
+        "TRUNCATE rv_trunc;",
+        "INSERT INTO rv_trunc VALUES (2); INSERT INTO rv_bystander VALUES (1);",
+    ] {
+        client.simple_query(sql).await.unwrap();
+    }
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    assert_eq!(
+        scan_ids(&backend, "rv_rolled_back_mc", lsn).await,
+        Some(vec![1])
+    );
+    let err = snapshot_error(&backend, "rv_trunc_mc", lsn)
+        .await
+        .expect("truncated mirror must be errored");
+    assert!(
+        err.contains("was truncated") && err.contains("re-create"),
+        "{err}"
+    );
+    backend
+        .drop_table(DB.to_string(), "rv_trunc_mc".to_string())
+        .await
+        .unwrap();
+}
+
 /// A mirror whose source never changes after creation (here: still empty) must be readable at
 /// any later LSN, e.g. the reader's own last commit to another table.
 #[tokio::test(flavor = "multi_thread")]

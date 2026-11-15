@@ -264,9 +264,10 @@ impl CdcEventConverter {
                         delete_body,
                     )?)
                 }
-                LogicalReplicationMessage::Truncate(_) => {
-                    Err(CdcEventConversionError::MessageNotSupported)
-                }
+                LogicalReplicationMessage::Truncate(truncate_body) => Ok(CdcEvent::Truncate {
+                    src_table_ids: truncate_body.rel_ids().to_vec(),
+                    xact_id: truncate_body.xid(),
+                }),
                 LogicalReplicationMessage::StreamStart(stream_start_body) => {
                     Ok(CdcEvent::StreamStart(stream_start_body))
                 }
@@ -303,6 +304,11 @@ pub enum CdcEvent {
     StreamStop(StreamStopBody),
     StreamCommit(StreamCommitBody),
     StreamAbort(StreamAbortBody),
+    /// Tables truncated on the source; `xact_id` is set inside a streamed transaction.
+    Truncate {
+        src_table_ids: Vec<SrcTableId>,
+        xact_id: Option<u32>,
+    },
     /// The table can no longer be mirrored (e.g. its schema changed); it enters the errored state.
     TableUnsupported {
         src_table_id: SrcTableId,

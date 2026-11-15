@@ -34,6 +34,8 @@ pub struct Sink {
     replication_state: Arc<ReplicationState>,
     /// Source table names, for logs.
     table_names: HashMap<SrcTableId, String>,
+    /// Tables truncated inside a streamed transaction that has not committed yet.
+    pending_stream_truncates: HashMap<u32, Vec<SrcTableId>>,
     /// Cached sender for the last table used on the hot path.
     /// Avoids a HashMap lookup when consecutive rows target the same table.
     cached_event_sender: Option<(SrcTableId, Sender<TableEvent>)>,
@@ -76,6 +78,7 @@ impl Sink {
             },
             replication_state,
             table_names: HashMap::new(),
+            pending_stream_truncates: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
             max_keepalive_lsn_seen: 0,
@@ -102,6 +105,8 @@ impl Sink {
     /// Postgres re-sends transactions that were still streaming when replication reconnects, so
     /// their partially received rows are dropped.
     pub async fn abort_in_progress_streams(&mut self) {
+        // Postgres re-sends these transactions from the start, truncates included.
+        self.pending_stream_truncates.clear();
         for (xact_id, state) in std::mem::take(&mut self.streaming_transactions_state) {
             for table_id in state.touched_tables {
                 if let Some(event_sender) = self.event_senders.get(&table_id) {
@@ -147,6 +152,23 @@ impl Sink {
             }
         }
         self.event_senders.remove(&src_table_id)
+    }
+
+    /// Mirrors do not apply TRUNCATE (a delete of every row would rewrite the whole table); a
+    /// truncated source leaves its mirror out of sync, so the mirror enters the errored state.
+    async fn fail_truncated_tables(&mut self, src_table_ids: Vec<SrcTableId>) {
+        for src_table_id in src_table_ids {
+            let table_name = self
+                .table_names
+                .get(&src_table_id)
+                .cloned()
+                .unwrap_or_else(|| src_table_id.to_string());
+            self.fail_table(
+                src_table_id,
+                format!("source table {table_name} was truncated"),
+            )
+            .await;
+        }
     }
 
     /// Put one mirror into the errored state because CDC can no longer apply its source's changes
@@ -290,6 +312,9 @@ impl Sink {
                     self.streaming_transactions_state.remove(&xact_id);
                 }
                 self.streaming_last_key = None;
+                if let Some(truncated) = self.pending_stream_truncates.remove(&xact_id) {
+                    self.fail_truncated_tables(truncated).await;
+                }
                 let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
                 self.replication_state.mark(pg_lsn.into());
             }
@@ -372,6 +397,18 @@ impl Sink {
             } => {
                 self.fail_table(src_table_id, reason).await;
             }
+            CdcEvent::Truncate {
+                src_table_ids,
+                xact_id,
+            } => match xact_id {
+                // A streamed transaction can still abort; act on its truncates at commit.
+                Some(xact_id) => self
+                    .pending_stream_truncates
+                    .entry(xact_id)
+                    .or_default()
+                    .extend(src_table_ids),
+                None => self.fail_truncated_tables(src_table_ids).await,
+            },
             CdcEvent::Type(type_body) => {
                 debug!(
                     type_id = type_body.id(),
@@ -410,6 +447,7 @@ impl Sink {
                     }
                 }
                 self.streaming_transactions_state.remove(&xact_id);
+                self.pending_stream_truncates.remove(&xact_id);
                 self.streaming_last_key = None;
             }
         }
