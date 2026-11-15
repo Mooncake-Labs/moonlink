@@ -38,6 +38,10 @@ pub struct Sink {
     pending_stream_failures: HashMap<u32, Vec<(SrcTableId, String)>>,
     /// Streamed transaction whose changes are being received (between StreamStart and StreamStop).
     current_stream_xid: Option<u32>,
+    /// Per streamed transaction: its subtransactions (savepoints, PL/pgSQL exception blocks) with
+    /// the tables each touched. Postgres tags their changes with the subtransaction's xid; they
+    /// are applied as part of the top-level transaction.
+    stream_subxacts: HashMap<u32, HashMap<u32, Vec<SrcTableId>>>,
     /// Cached sender for the last table used on the hot path.
     /// Avoids a HashMap lookup when consecutive rows target the same table.
     cached_event_sender: Option<(SrcTableId, Sender<TableEvent>)>,
@@ -94,6 +98,7 @@ impl Sink {
             table_names: HashMap::new(),
             pending_stream_failures: HashMap::new(),
             current_stream_xid: None,
+            stream_subxacts: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
             max_keepalive_lsn_seen: 0,
@@ -248,6 +253,7 @@ impl Sink {
         // Postgres re-sends these transactions from the start, failures included.
         self.pending_stream_failures.clear();
         self.current_stream_xid = None;
+        self.stream_subxacts.clear();
         for (xact_id, state) in std::mem::take(&mut self.streaming_transactions_state) {
             for table_id in state.touched_tables {
                 if let Some(event_sender) = self.event_senders.get(&table_id) {
@@ -340,6 +346,27 @@ impl Sink {
             .is_err()
         {
             warn!(table = %table_name, "table handler already stopped");
+        }
+    }
+
+    /// The transaction a change belongs to: inside a stream, a change tagged with a subtransaction
+    /// of the streamed transaction belongs to the top-level one (committed with it), and the table
+    /// is recorded as touched by that subtransaction (see the subtransaction arm of StreamAbort).
+    fn top_level_xid(&mut self, table_id: SrcTableId, xact_id: Option<u32>) -> Option<u32> {
+        match (xact_id, self.current_stream_xid) {
+            (Some(xid), Some(top)) if xid != top => {
+                let tables = self
+                    .stream_subxacts
+                    .entry(top)
+                    .or_default()
+                    .entry(xid)
+                    .or_default();
+                if !tables.contains(&table_id) {
+                    tables.push(table_id);
+                }
+                Some(top)
+            }
+            _ => xact_id,
         }
     }
 
@@ -449,6 +476,7 @@ impl Sink {
                     self.fail_table_at(table_id, stream_commit_body.commit_lsn(), reason)
                         .await;
                 }
+                self.stream_subxacts.remove(&xact_id);
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 if let Some(tables_in_txn) = self.streaming_transactions_state.remove(&xact_id) {
                     for table_id in tables_in_txn.touched_tables {
@@ -474,6 +502,7 @@ impl Sink {
                 self.mark_replication(pg_lsn.into());
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
+                let xact_id = self.top_level_xid(table_id, xact_id);
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
                 if let Some(event_sender) = self.get_event_sender_for(table_id) {
                     if let Err(e) = Self::send_table_event(
@@ -491,6 +520,7 @@ impl Sink {
                 }
             }
             CdcEvent::Update((table_id, old_table_row, new_table_row, xact_id)) => {
+                let xact_id = self.top_level_xid(table_id, xact_id);
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
                 if let Some(event_sender) = self.get_event_sender_for(table_id) {
                     if let Err(e) = Self::send_table_event(
@@ -521,6 +551,7 @@ impl Sink {
                 }
             }
             CdcEvent::Delete((table_id, table_row, xact_id)) => {
+                let xact_id = self.top_level_xid(table_id, xact_id);
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
                 if let Some(event_sender) = self.get_event_sender_for(table_id) {
                     if let Err(e) = Self::send_table_event(
@@ -560,7 +591,9 @@ impl Sink {
             } => match xact_id {
                 // A streamed transaction can still abort; act on its truncates at commit.
                 Some(xact_id) => {
-                    let previous = self.current_stream_xid.replace(xact_id);
+                    // A subtransaction's truncate belongs to the streamed top-level transaction.
+                    let top = self.current_stream_xid.unwrap_or(xact_id);
+                    let previous = self.current_stream_xid.replace(top);
                     self.fail_truncated_tables(src_table_ids).await;
                     self.current_stream_xid = previous;
                 }
@@ -589,6 +622,36 @@ impl Sink {
             }
             CdcEvent::StreamAbort(stream_abort_body) => {
                 let xact_id = stream_abort_body.xid();
+                let subxid = stream_abort_body.subxid();
+                if subxid != xact_id {
+                    // A rolled-back savepoint: its changes are already in the top-level
+                    // transaction's batch and cannot be taken out of it. The tables it touched are
+                    // errored if the transaction commits (judged then, like its other failures);
+                    // the rest of the transaction applies normally.
+                    let tables = self
+                        .stream_subxacts
+                        .get_mut(&xact_id)
+                        .and_then(|subxacts| subxacts.remove(&subxid))
+                        .unwrap_or_default();
+                    warn!(
+                        xact_id,
+                        subxid,
+                        tables = tables.len(),
+                        "savepoint rolled back inside a streamed transaction"
+                    );
+                    for table_id in tables {
+                        let table_name = self
+                            .table_name(table_id)
+                            .unwrap_or_else(|| table_id.to_string());
+                        self.pending_stream_failures.entry(xact_id).or_default().push((
+                            table_id,
+                            format!(
+                                "a savepoint that changed source table {table_name} was rolled back inside a transaction large enough to be streamed (logical_decoding_work_mem); its changes cannot be taken back"
+                            ),
+                        ));
+                    }
+                    return Ok(());
+                }
                 warn!(xact_id, "stream transaction aborted");
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
@@ -606,6 +669,7 @@ impl Sink {
                 }
                 self.streaming_transactions_state.remove(&xact_id);
                 self.pending_stream_failures.remove(&xact_id);
+                self.stream_subxacts.remove(&xact_id);
                 self.streaming_last_key = None;
             }
         }

@@ -3394,3 +3394,191 @@ async fn database_whose_mirrors_are_all_errored_does_not_pin_its_slot(#[case] re
         "slot pinned at {after} (< {target}) although every mirror of the database is errored"
     );
 }
+
+/// Savepoints inside a streamed (large) transaction: Postgres tags a subtransaction's changes with
+/// its own xid. Released savepoints, nested ones and PL/pgSQL exception blocks commit with the
+/// transaction, exactly. A rolled-back savepoint's changes cannot be taken back out of the
+/// streamed transaction, so the mirrors of the tables it changed are errored when the transaction
+/// commits; other tables of the transaction stay exact, and if the whole transaction rolls back
+/// (stream abort) nothing is applied and nothing errors. Non-streamed transactions are exact.
+#[rstest::rstest]
+#[case::released_savepoint(
+    "SAVEPOINT s; INSERT INTO rv_sp SELECT i, repeat('s', 500) FROM generate_series(1001, 1400) i; RELEASE SAVEPOINT s;",
+    true,
+    "COMMIT",
+    false
+)]
+#[case::update_and_delete_in_nested_savepoints(
+    "SAVEPOINT s1; UPDATE rv_sp SET v = 'upd' WHERE id < -100; SAVEPOINT s2; DELETE FROM rv_sp WHERE id < -250; RELEASE SAVEPOINT s2; RELEASE SAVEPOINT s1;",
+    true,
+    "COMMIT",
+    false
+)]
+#[case::plpgsql_exception_block(
+    "DO $$ BEGIN BEGIN INSERT INTO rv_sp SELECT i, repeat('p', 500) FROM generate_series(2001, 2400) i; EXCEPTION WHEN others THEN NULL; END; END $$;",
+    true,
+    "COMMIT",
+    false
+)]
+#[case::rolled_back_savepoint(
+    "SAVEPOINT s; INSERT INTO rv_sp SELECT i, repeat('s', 500) FROM generate_series(1001, 1400) i; ROLLBACK TO SAVEPOINT s;",
+    true,
+    "COMMIT",
+    true
+)]
+#[case::rolled_back_savepoint_then_transaction_rolled_back(
+    "SAVEPOINT s; INSERT INTO rv_sp SELECT i, repeat('s', 500) FROM generate_series(1001, 1400) i; ROLLBACK TO SAVEPOINT s;",
+    true,
+    "ROLLBACK",
+    false
+)]
+#[case::released_savepoint_then_transaction_rolled_back(
+    "SAVEPOINT s; INSERT INTO rv_sp SELECT i, repeat('s', 500) FROM generate_series(1001, 1400) i; RELEASE SAVEPOINT s;",
+    true,
+    "ROLLBACK",
+    false
+)]
+#[case::released_savepoint_not_streamed(
+    "SAVEPOINT s; INSERT INTO rv_sp SELECT i, repeat('s', 500) FROM generate_series(1001, 1400) i; RELEASE SAVEPOINT s;",
+    false,
+    "COMMIT",
+    false
+)]
+#[case::rolled_back_savepoint_not_streamed(
+    "SAVEPOINT s; INSERT INTO rv_sp SELECT i, repeat('s', 500) FROM generate_series(1001, 1400) i; ROLLBACK TO SAVEPOINT s;",
+    false,
+    "COMMIT",
+    false
+)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn savepoints_in_a_streamed_transaction_apply_exactly_or_error_the_mirror(
+    #[case] savepoint: &str,
+    #[case] streamed: bool,
+    #[case] end: &str,
+    #[case] errors: bool,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_sp, rv_sq;
+         CREATE TABLE rv_sp (id BIGINT PRIMARY KEY, v TEXT);
+         CREATE TABLE rv_sq (id BIGINT PRIMARY KEY, v TEXT);
+         INSERT INTO rv_sp SELECT i, 'pre' FROM generate_series(-300, -1) i;",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_sp_mc", "public.rv_sp", &uri).await;
+    mirror(&backend, &tmp, "rv_sq_mc", "public.rv_sq", &uri).await;
+    stream_large_transactions(&client, streamed).await;
+    let result = client
+        .simple_query(&format!(
+            "BEGIN;
+             INSERT INTO rv_sq SELECT i, repeat('a', 500) FROM generate_series(1, 400) i;
+             INSERT INTO rv_sp VALUES (0, 'top');
+             {savepoint}
+             INSERT INTO rv_sq SELECT i, repeat('b', 500) FROM generate_series(401, 800) i;
+             INSERT INTO rv_sp VALUES (1, 'top');
+             {end};"
+        ))
+        .await;
+    stream_large_transactions(&client, false).await;
+    result.unwrap();
+    // A later small transaction: the mirrors keep following after the large one.
+    client
+        .simple_query(
+            "INSERT INTO rv_sp VALUES (5000, 'after'); INSERT INTO rv_sq VALUES (5000, 'after');",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let source = |table: &'static str| {
+        let client = &client;
+        async move {
+            client
+                .query(&format!("SELECT id, v FROM {table}"), &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect::<BTreeMap<i64, Option<String>>>()
+        }
+    };
+    assert_eq!(snapshot_error(&backend, "rv_sq_mc", lsn).await, None);
+    assert_eq!(
+        scan_rows(&backend, "rv_sq_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source("rv_sq").await),
+        "table without savepoint changes"
+    );
+    let sp_error = snapshot_error(&backend, "rv_sp_mc", lsn).await;
+    if errors {
+        let err = sp_error.expect("a rolled-back savepoint must error the mirror it changed");
+        assert!(err.contains("savepoint"), "{err}");
+    } else {
+        assert_eq!(sp_error, None);
+        assert_eq!(
+            scan_rows(&backend, "rv_sp_mc", lsn, "v", Duration::from_secs(30)).await,
+            Some(source("rv_sp").await),
+            "table with savepoint changes"
+        );
+    }
+}
+
+/// A failure of a streamed transaction (TRUNCATE, unconvertible value) is not erased by a
+/// savepoint rolled back later in it.
+#[rstest::rstest]
+#[case::truncate_then_rollback_to_savepoint(
+    "INSERT INTO rv_st VALUES (10, '2024-01-01'); TRUNCATE rv_st; INSERT INTO rv_st VALUES (20, '2024-01-02');",
+    "truncated"
+)]
+#[case::bad_value_then_rollback_to_savepoint(
+    "INSERT INTO rv_st VALUES (10, '2024-01-01'), (11, 'infinity');",
+    "could not be applied"
+)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn rolled_back_savepoint_keeps_the_failures_of_its_streamed_transaction(
+    #[case] changes: &str,
+    #[case] reason: &str,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_st, rv_fill;
+         CREATE TABLE rv_st (id BIGINT PRIMARY KEY, ts TIMESTAMP);
+         CREATE TABLE rv_fill (id BIGINT PRIMARY KEY, v TEXT);
+         INSERT INTO rv_st VALUES (1, '2023-01-01'), (2, '2023-01-02');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_st_mc", "public.rv_st", &uri).await;
+    mirror(&backend, &tmp, "rv_fill_mc", "public.rv_fill", &uri).await;
+    stream_large_transactions(&client, true).await;
+    let result = client
+        .simple_query(&format!(
+            "BEGIN;
+             INSERT INTO rv_fill SELECT i, repeat('f', 500) FROM generate_series(1, 400) i;
+             {changes}
+             SAVEPOINT s;
+             INSERT INTO rv_st VALUES (30, '2024-01-03');
+             ROLLBACK TO SAVEPOINT s;
+             INSERT INTO rv_fill SELECT i, repeat('g', 500) FROM generate_series(401, 800) i;
+             COMMIT;"
+        ))
+        .await;
+    stream_large_transactions(&client, false).await;
+    result.unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_st_mc", lsn)
+        .await
+        .expect("mirror must be errored");
+    assert!(err.contains(reason), "{err}");
+    let source: BTreeMap<i64, Option<String>> = client
+        .query("SELECT id, v FROM rv_fill", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(snapshot_error(&backend, "rv_fill_mc", lsn).await, None);
+    assert_eq!(
+        scan_rows(&backend, "rv_fill_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source)
+    );
+}
