@@ -15,24 +15,29 @@ use std::sync::Arc;
 use tokio_postgres::types::{Kind, Type};
 use tracing::warn;
 
-fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
+/// Declared (precision, scale) of a numeric typmod, untruncated: postgres allows precision up to
+/// 1000 and scale from -1000 to 1000.
+fn numeric_precision_scale(modifier: i32) -> Option<(i32, i32)> {
     const VARHDRSZ: i32 = 4;
     if modifier < VARHDRSZ {
         return None;
     }
     let typmod = modifier - VARHDRSZ;
     // Derived from: [https://github.com/postgres/postgres/blob/4fbb46f61271f4b7f46ecad3de608fc2f4d7d80f/src/backend/utils/adt/numeric.c#L929v]
-    let precision = ((typmod >> 16) & 0xffff) as u8;
+    let precision = (typmod >> 16) & 0xffff;
     // Derived from: [https://github.com/postgres/postgres/blob/4fbb46f61271f4b7f46ecad3de608fc2f4d7d80f/src/backend/utils/adt/numeric.c#L944]
     let raw_scale = (typmod & 0x7ff);
-    let scale = ((raw_scale ^ 1024) - 1024) as i8;
+    let scale = (raw_scale ^ 1024) - 1024;
     Some((precision, scale))
 }
 
 /// The decimal (precision, scale) a numeric column is stored with: its declared ones, or
 /// Decimal128's maximum precision with arrow's default scale for unconstrained `numeric`.
-fn numeric_storage_precision_scale(modifier: i32) -> (u8, i8) {
-    numeric_precision_scale(modifier).unwrap_or((DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE))
+fn numeric_storage_precision_scale(modifier: i32) -> (i32, i32) {
+    numeric_precision_scale(modifier).unwrap_or((
+        DECIMAL128_MAX_PRECISION as i32,
+        DECIMAL_DEFAULT_SCALE as i32,
+    ))
 }
 
 /// Bring a decoded numeric value to the exact decimal it is stored as, or explain why it cannot be
@@ -54,7 +59,7 @@ fn normalize_numeric(value: PgNumeric, modifier: i32) -> Result<PgNumeric, Strin
         ));
     }
     let (digits, _) = rescaled.as_bigint_and_exponent();
-    let max_precision = precision.min(DECIMAL128_MAX_PRECISION) as u32;
+    let max_precision = precision.clamp(0, DECIMAL128_MAX_PRECISION as i32) as u32;
     if digits
         .to_i128()
         .is_none_or(|d| d.unsigned_abs() >= 10u128.pow(max_precision))
@@ -147,9 +152,9 @@ fn postgres_primitive_to_arrow_type(
             // Postgres also accepts numeric(p, s) with s > p or s < 0 (PG15+) and p > 38, which
             // Decimal128 cannot represent.
             if precision == 0
-                || precision > DECIMAL128_MAX_PRECISION
+                || precision > DECIMAL128_MAX_PRECISION as i32
                 || scale < 0
-                || scale as u8 > precision
+                || scale > precision
             {
                 return Err(UnsupportedColumn {
                     column: name.to_string(),
@@ -157,7 +162,8 @@ fn postgres_primitive_to_arrow_type(
                     type_name: format!("numeric({precision},{scale})"),
                 });
             }
-            (DataType::Decimal128(precision, scale), None)
+            // Validated above to fit Decimal128.
+            (DataType::Decimal128(precision as u8, scale as i8), None)
         }
         Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::CHAR | Type::NAME => {
             (DataType::Utf8, None)

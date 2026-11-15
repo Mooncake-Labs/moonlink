@@ -1277,6 +1277,7 @@ async fn arrays_that_are_not_one_dimensional_error_the_mirror(
 #[rstest::rstest]
 #[case::scale_above_precision("NUMERIC(3, 6)", "0.000123")]
 #[case::negative_scale("NUMERIC(3, -3)", "12000")]
+#[case::precision_above_255("NUMERIC(260, 2)", "1.5")]
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[case] value: &str) {
