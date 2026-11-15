@@ -4198,9 +4198,10 @@ async fn changes_of_a_published_table_without_a_mirror_are_ignored() {
     );
 }
 
-/// Dates and timestamps replicate exactly whatever TimeZone and DateStyle the mirror's role or
-/// database defaults to: a local zone prints old timestamptz values with second-precision (LMT)
-/// offsets, and a non-ISO DateStyle prints dates as DD/MM/YYYY.
+/// Dates and timestamps (and arrays of them, with BC and five-digit years) replicate exactly
+/// whatever TimeZone and DateStyle the mirror's role or database defaults to: a local zone prints
+/// old timestamptz values with second-precision (LMT) offsets, and a non-ISO DateStyle prints
+/// dates as DD/MM/YYYY.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
@@ -4215,11 +4216,15 @@ async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
          CREATE ROLE rv_tz_role LOGIN SUPERUSER PASSWORD 'pwtz';
          ALTER ROLE rv_tz_role SET TimeZone = 'America/Los_Angeles';
          ALTER ROLE rv_tz_role SET DateStyle = 'SQL, DMY';
-         CREATE TABLE rv_tz (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ);
+         CREATE TABLE rv_tz (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ,
+             da DATE[], tza TIMESTAMPTZ[]);
          INSERT INTO rv_tz VALUES
-             (1, '0044-03-15 BC', '0044-03-15 12:00:00 BC', '0044-03-15 12:00:00+00 BC'),
-             (2, '1800-01-01', '1800-01-01 00:00:00', '1800-01-01 00:00:00+00'),
-             (3, '2020-06-30', '2020-06-30 23:59:59.5', '2020-06-30 23:59:59.5+00');",
+             (1, '0044-03-15 BC', '0044-03-15 12:00:00 BC', '0044-03-15 12:00:00+00 BC',
+              '{\"0044-03-15 BC\",12345-06-07,NULL}',
+              '{\"0044-03-15 12:00:00+00 BC\",\"12345-06-07 00:00:00+00\"}'),
+             (2, '1800-01-01', '1800-01-01 00:00:00', '1800-01-01 00:00:00+00', '{}', NULL),
+             (3, '2020-06-30', '2020-06-30 23:59:59.5', '2020-06-30 23:59:59.5+00',
+              '{2020-06-30}', '{\"1850-01-01 00:00:00+00\"}');",
     )
     .await;
     let role_uri = uri_for_user(&uri, "rv_tz_role", "pwtz");
@@ -4227,8 +4232,10 @@ async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
     client
         .simple_query(
             "INSERT INTO rv_tz VALUES
-                 (4, '1883-11-18', '1883-11-18 12:00:00', '1883-11-18 12:00:00+00'),
-                 (5, '0001-01-01 BC', '0001-01-01 00:00:00 BC', '1909-06-01 00:00:00+00');
+                 (4, '1883-11-18', '1883-11-18 12:00:00', '1883-11-18 12:00:00+00',
+                  '{\"0001-01-01 BC\",10000-01-01}', '{\"1909-06-01 00:00:00+00\",NULL}'),
+                 (5, '0001-01-01 BC', '0001-01-01 00:00:00 BC', '1909-06-01 00:00:00+00',
+                  NULL, '{\"0001-12-31 23:59:59+00 BC\"}');
              UPDATE rv_tz SET tz = tz + interval '1 second' WHERE id = 2;",
         )
         .await
@@ -4239,7 +4246,24 @@ async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
         ("d", "(d - DATE '1970-01-01')::bigint"),
         ("ts", "(extract(epoch FROM ts) * 1000000)::bigint"),
         ("tz", "(extract(epoch FROM tz) * 1000000)::bigint"),
+        (
+            "da",
+            "CASE WHEN da IS NOT NULL THEN '[' || array_to_string(ARRAY(SELECT (x - DATE '1970-01-01')::text FROM unnest(da) x), ', ', '') || ']' END",
+        ),
+        (
+            "tza",
+            "CASE WHEN tza IS NOT NULL THEN '[' || array_to_string(ARRAY(SELECT (extract(epoch FROM x) * 1000000)::bigint::text FROM unnest(tza) x), ', ', '') || ']' END",
+        ),
     ] {
+        let as_type = if column.ends_with('a') && column.len() > 1 {
+            DataType::List(Arc::new(arrow::datatypes::Field::new(
+                "item",
+                DataType::Int64,
+                true,
+            )))
+        } else {
+            DataType::Int64
+        };
         let source: BTreeMap<i64, Option<String>> = client
             .query(&format!("SELECT id, {epoch}::text FROM rv_tz"), &[])
             .await
@@ -4254,7 +4278,7 @@ async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
                 lsn,
                 column,
                 Duration::from_secs(30),
-                Some(DataType::Int64)
+                Some(as_type)
             )
             .await,
             Some(source),
