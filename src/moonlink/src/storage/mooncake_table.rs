@@ -249,6 +249,82 @@ const FLUSH_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_s
 const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 #[cfg(test)]
 const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// While flushes wait for disk space, the changes they hold stay in memory and replication keeps
+/// adding to them. Past this many bytes, the waiting flushes give up (which errors the table)
+/// rather than growing the Postgres backend until it is killed for memory.
+const FULL_DISK_MAX_WAITING_FLUSH_BYTES: u64 = 512 << 20;
+
+/// In-memory bytes of a table's flushes that are waiting for disk space.
+#[derive(Debug)]
+pub(crate) struct FullDiskFlushWait {
+    waiting_bytes: std::sync::atomic::AtomicU64,
+    limit: std::sync::atomic::AtomicU64,
+    /// Set once the limit was exceeded: every waiting flush gives up.
+    gave_up: std::sync::atomic::AtomicBool,
+}
+
+impl Default for FullDiskFlushWait {
+    fn default() -> Self {
+        Self {
+            waiting_bytes: std::sync::atomic::AtomicU64::new(0),
+            limit: std::sync::atomic::AtomicU64::new(FULL_DISK_MAX_WAITING_FLUSH_BYTES),
+            gave_up: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl FullDiskFlushWait {
+    fn start_waiting(self: &Arc<Self>, bytes: u64) -> FullDiskFlushWaitGuard {
+        self.waiting_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+        FullDiskFlushWaitGuard {
+            wait: self.clone(),
+            bytes,
+        }
+    }
+
+    /// Whether waiting flushes hold more memory than allowed (from then on, until none waits).
+    fn over_limit(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.waiting_bytes.load(Ordering::SeqCst) > self.limit.load(Ordering::SeqCst) {
+            self.gave_up.store(true, Ordering::SeqCst);
+        }
+        self.gave_up.load(Ordering::SeqCst)
+    }
+
+    fn limit_mib(&self) -> u64 {
+        self.limit.load(std::sync::atomic::Ordering::SeqCst) >> 20
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiting_bytes(&self) -> u64 {
+        self.waiting_bytes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_limit_for_test(&self, bytes: u64) {
+        self.limit.store(bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct FullDiskFlushWaitGuard {
+    wait: Arc<FullDiskFlushWait>,
+    bytes: u64,
+}
+
+impl Drop for FullDiskFlushWaitGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self
+            .wait
+            .waiting_bytes
+            .fetch_sub(self.bytes, Ordering::SeqCst)
+            == self.bytes
+        {
+            self.wait.gave_up.store(false, Ordering::SeqCst);
+        }
+    }
+}
 
 struct RecordBatchWithDeletionVector {
     batch_id: u64,
@@ -560,6 +636,9 @@ pub struct MooncakeTable {
     /// Shared with the iceberg table manager for garbage collection.
     gc_context: Option<Arc<IcebergGcContext>>,
 
+    /// Memory held by flushes waiting for disk space.
+    pub(crate) full_disk_flush_wait: Arc<FullDiskFlushWait>,
+
     #[cfg(test)]
     pub(crate) flush_failure_injector: Arc<disk_slice::FlushFailureInjector>,
 }
@@ -834,6 +913,7 @@ impl MooncakeTable {
             snapshot_seq,
             gc_context: None,
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
+            full_disk_flush_wait: Arc::default(),
             #[cfg(test)]
             flush_failure_injector: Arc::default(),
         };
@@ -1272,6 +1352,7 @@ impl MooncakeTable {
         let pristine_disk_slice = disk_slice.clone();
         let supervisor_notify = table_notify_tx.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
+        let full_disk_flush_wait = self.full_disk_flush_wait.clone();
         spawn_supervised("flush", supervisor_notify, async move {
             // Transient IO errors are retried from the unwritten slice, under new file names (the
             // failed attempt's files are deleted first). A full disk is waited out for longer and
@@ -1279,12 +1360,33 @@ impl MooncakeTable {
             let mut attempt = 1;
             let mut full_disk_retries = 0;
             let full_disk_deadline = std::time::Instant::now() + FLUSH_FULL_DISK_RETRY_LIMIT;
+            let mut disk_space_wait = None;
             let flush_result = loop {
                 let mut candidate = pristine_disk_slice.clone();
                 match candidate.write().await {
                     Ok(()) => break Ok(candidate),
                     Err(e) => {
                         candidate.remove_partial_outputs().await;
+                        if e.is_storage_full() {
+                            disk_space_wait.get_or_insert_with(|| {
+                                full_disk_flush_wait
+                                    .start_waiting(pristine_disk_slice.in_memory_bytes())
+                            });
+                            if full_disk_flush_wait.over_limit() {
+                                let message = format!(
+                                    "the disk is full and more than {} MiB of changes are waiting in memory for disk space",
+                                    full_disk_flush_wait.limit_mib()
+                                );
+                                tracing::error!(error = ?e, "{message}; giving up the flush");
+                                break Err(crate::Error::Io(
+                                    moonlink_error::ErrorStruct::new(
+                                        message,
+                                        moonlink_error::ErrorStatus::Permanent,
+                                    )
+                                    .with_source(e),
+                                ));
+                            }
+                        }
                         if e.is_storage_full() && std::time::Instant::now() < full_disk_deadline {
                             full_disk_retries += 1;
                             tracing::warn!(error = ?e, full_disk_retries, "disk full while flushing table data, retrying");

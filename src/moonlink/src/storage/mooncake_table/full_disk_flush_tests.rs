@@ -89,3 +89,64 @@ async fn test_flush_failing_on_full_disk_leaves_no_partial_files() {
         "failed flush left files: {new_files:?}"
     );
 }
+
+async fn next_flush_error(rx: &mut mpsc::Receiver<TableEvent>) -> crate::Error {
+    let TableEvent::FlushResult { flush_result, .. } = rx.recv().await.unwrap() else {
+        panic!("expected a flush result");
+    };
+    flush_result.unwrap().expect_err("the flush should fail")
+}
+
+/// Waiting out a full disk keeps the flushed changes in memory while replication goes on. Past
+/// the memory limit the flush gives up (the table handler then errors the table) instead of
+/// waiting for the whole retry period.
+#[tokio::test]
+async fn test_flush_over_the_memory_limit_gives_up_at_once() {
+    let context = TestContext::new("full_disk");
+    let (mut table, mut rx) = table_with_committed_rows(&context, 10).await;
+    table.full_disk_flush_wait.set_limit_for_test(1);
+    table.flush_failure_injector.fail_next_writes(usize::MAX);
+
+    let started = std::time::Instant::now();
+    table.flush(10, uuid::Uuid::new_v4()).unwrap();
+    let err = next_flush_error(&mut rx).await;
+    assert!(
+        started.elapsed() < FLUSH_FULL_DISK_RETRY_LIMIT,
+        "waited although over the limit"
+    );
+    assert!(format!("{err:?}").contains("waiting in memory"), "{err:?}");
+    assert_eq!(table.full_disk_flush_wait.waiting_bytes(), 0);
+}
+
+/// A flush under the limit waits; one more waiting flush that crosses it makes both give up.
+#[tokio::test]
+async fn test_waiting_flushes_give_up_together_past_the_memory_limit() {
+    let context = TestContext::new("full_disk");
+    let (mut table, mut rx) = table_with_committed_rows(&context, 10).await;
+    table.flush_failure_injector.fail_next_writes(usize::MAX);
+
+    let started = std::time::Instant::now();
+    table.flush(10, uuid::Uuid::new_v4()).unwrap();
+    while table.full_disk_flush_wait.waiting_bytes() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let first = table.full_disk_flush_wait.waiting_bytes();
+    table
+        .full_disk_flush_wait
+        .set_limit_for_test(first + first / 2);
+
+    for i in 10..20 {
+        table.append(test_row(i, "row", i)).unwrap();
+    }
+    table.commit(20);
+    table.flush(20, uuid::Uuid::new_v4()).unwrap();
+    for _ in 0..2 {
+        let err = next_flush_error(&mut rx).await;
+        assert!(format!("{err:?}").contains("waiting in memory"), "{err:?}");
+    }
+    assert!(
+        started.elapsed() < FLUSH_FULL_DISK_RETRY_LIMIT,
+        "the flushes waited for the whole retry period"
+    );
+    assert_eq!(table.full_disk_flush_wait.waiting_bytes(), 0);
+}

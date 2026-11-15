@@ -181,6 +181,15 @@ impl DiskSliceWriter {
         }
     }
 
+    /// Memory held by the batches to write.
+    pub(super) fn in_memory_bytes(&self) -> u64 {
+        self.batches
+            .iter()
+            .filter_map(|entry| entry.batch.data.as_ref())
+            .map(|batch| batch.get_array_memory_size() as u64)
+            .sum()
+    }
+
     pub(super) fn input_batches(&self) -> &Vec<BatchEntry> {
         &self.batches
     }
