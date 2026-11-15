@@ -90,6 +90,8 @@ pub struct IcebergTableManager {
     /// Files the current version referenced at the last garbage collection, i.e. what its
     /// successor's predecessor references.
     pub(crate) gc_previous_referenced: Option<std::collections::HashSet<String>>,
+    /// Paths a dry run of garbage collection already reported (nothing is deleted then).
+    pub(crate) gc_dry_run_reported: std::collections::HashSet<String>,
 }
 
 impl IcebergTableManager {
@@ -119,6 +121,7 @@ impl IcebergTableManager {
             gc_context: None,
             gc_unreferenced_since: HashMap::new(),
             gc_previous_referenced: None,
+            gc_dry_run_reported: std::collections::HashSet::new(),
         })
     }
 
@@ -152,6 +155,7 @@ impl IcebergTableManager {
             gc_context: None,
             gc_unreferenced_since: HashMap::new(),
             gc_previous_referenced: None,
+            gc_dry_run_reported: std::collections::HashSet::new(),
         })
     }
 

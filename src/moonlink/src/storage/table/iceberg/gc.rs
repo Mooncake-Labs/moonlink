@@ -188,6 +188,20 @@ fn metadata_version(name: &str) -> Option<u32> {
         .ok()
 }
 
+/// The candidates of a dry run not reported before. Reported paths that are gone from the
+/// listing (`listed` holds file names) are forgotten.
+fn new_dry_run_candidates(
+    reported: &mut HashSet<String>,
+    listed: &HashSet<&str>,
+    candidates: Vec<String>,
+) -> Vec<String> {
+    reported.retain(|path| listed.contains(basename(path)));
+    candidates
+        .into_iter()
+        .filter(|path| reported.insert(path.clone()))
+        .collect()
+}
+
 impl IcebergTableManager {
     /// File names (unique per table) the current snapshot of `metadata` references. Index block
     /// files are referenced from inside the file index puffin blobs, which are only read with
@@ -370,6 +384,15 @@ impl IcebergTableManager {
         }
         self.gc_previous_referenced = Some(current_referenced);
 
+        if mode == GcMode::DryRun {
+            // Nothing is deleted, so every run would find all earlier candidates again.
+            let listed: HashSet<&str> = metadata_files
+                .iter()
+                .chain(data_files.iter())
+                .map(String::as_str)
+                .collect();
+            to_delete = new_dry_run_candidates(&mut self.gc_dry_run_reported, &listed, to_delete);
+        }
         if to_delete.is_empty() {
             return Ok(());
         }
@@ -384,9 +407,9 @@ impl IcebergTableManager {
                 table = self.config.table_name,
                 files = to_delete.len(),
                 bytes,
-                paths = ?to_delete,
                 "dry run: would delete unreferenced iceberg files"
             );
+            tracing::debug!(table = self.config.table_name, paths = ?to_delete, "dry run candidates");
             return Ok(());
         }
         tracing::info!(
@@ -433,6 +456,29 @@ impl IcebergTableManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dry_run_reports_each_candidate_once() {
+        let mut reported = HashSet::new();
+        let paths = |names: &[&str]| names.iter().map(|n| format!("t/data/{n}")).collect();
+        let listed: HashSet<&str> = ["a", "b", "c"].into_iter().collect();
+        assert_eq!(
+            new_dry_run_candidates(&mut reported, &listed, paths(&["a", "b"])),
+            paths(&["a", "b"]) as Vec<String>
+        );
+        assert_eq!(
+            new_dry_run_candidates(&mut reported, &listed, paths(&["a", "b", "c"])),
+            paths(&["c"]) as Vec<String>
+        );
+        // A file deleted by hand and written again under the same name is reported again.
+        let listed: HashSet<&str> = ["b", "c"].into_iter().collect();
+        assert!(new_dry_run_candidates(&mut reported, &listed, vec![]).is_empty());
+        let listed: HashSet<&str> = ["a", "b", "c"].into_iter().collect();
+        assert_eq!(
+            new_dry_run_candidates(&mut reported, &listed, paths(&["a"])),
+            paths(&["a"]) as Vec<String>
+        );
+    }
 
     #[test]
     fn test_deletable_needs_applied_commit_and_no_older_reader() {
