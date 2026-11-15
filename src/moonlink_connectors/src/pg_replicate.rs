@@ -1337,7 +1337,7 @@ fn next_backoff(current: Duration) -> Duration {
 
 /// Apply a table command while no replication stream is open; the schemas are handed to the next
 /// stream. Returns false when the loop must stop.
-fn apply_command_without_stream(
+async fn apply_command_without_stream(
     cmd: Option<PostgresReplicationCommand>,
     sink: &mut Sink,
     flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
@@ -1384,7 +1384,8 @@ fn apply_command_without_stream(
             boundary_lsn,
             rows_copied,
         }) => {
-            sink.finish_initial_copy(src_table_id, boundary_lsn, rows_copied);
+            sink.finish_initial_copy(src_table_id, boundary_lsn, rows_copied)
+                .await;
             true
         }
         Some(PostgresReplicationCommand::Shutdown) | None => false,
@@ -1407,7 +1408,7 @@ async fn wait_applying_commands(
         tokio::select! {
             _ = &mut sleep => return true,
             cmd = cmd_rx.recv() => {
-                if !apply_command_without_stream(cmd, sink, flush_lsn_rxs, table_status_rxs, saved_schemas) {
+                if !apply_command_without_stream(cmd, sink, flush_lsn_rxs, table_status_rxs, saved_schemas).await {
                     return false;
                 }
             }
@@ -1443,7 +1444,9 @@ pub async fn run_event_loop(
                 &mut flush_lsn_rxs,
                 &mut table_status_rxs,
                 &mut saved_schemas,
-            ) {
+            )
+            .await
+            {
                 break 'outer;
             }
         }
@@ -1586,7 +1589,8 @@ pub async fn run_event_loop(
                         stream.as_mut().remove_table_schema(src_table_id);
                     }
                     PostgresReplicationCommand::FinishInitialCopy { src_table_id, boundary_lsn, rows_copied } => {
-                        sink.finish_initial_copy(src_table_id, boundary_lsn, rows_copied);
+                        sink.finish_initial_copy(src_table_id, boundary_lsn, rows_copied)
+                .await;
                     }
                     PostgresReplicationCommand::Shutdown => {
                         debug!("received shutdown command");
@@ -1619,7 +1623,7 @@ pub async fn run_event_loop(
                             // table only; never skip it and carry on as if it had been applied.
                             Err(CdcStreamError::CdcEventConversion(e)) if e.src_table_id().is_some() => {
                                 let src_table_id = e.src_table_id().unwrap();
-                                sink.fail_table(src_table_id, format!("a change from the source table could not be applied: {e}")).await;
+                                sink.fail_table_for_change(src_table_id, format!("a change from the source table could not be applied: {e}")).await;
                                 continue;
                             }
                             Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {

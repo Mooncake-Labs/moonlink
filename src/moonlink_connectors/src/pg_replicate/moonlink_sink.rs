@@ -34,8 +34,10 @@ pub struct Sink {
     replication_state: Arc<ReplicationState>,
     /// Source table names, for logs.
     table_names: HashMap<SrcTableId, String>,
-    /// Tables truncated inside a streamed transaction that has not committed yet.
-    pending_stream_truncates: HashMap<u32, Vec<SrcTableId>>,
+    /// Table failures inside a streamed transaction that has not committed yet (it can abort).
+    pending_stream_failures: HashMap<u32, Vec<(SrcTableId, String)>>,
+    /// Streamed transaction whose changes are being received (between StreamStart and StreamStop).
+    current_stream_xid: Option<u32>,
     /// Cached sender for the last table used on the hot path.
     /// Avoids a HashMap lookup when consecutive rows target the same table.
     cached_event_sender: Option<(SrcTableId, Sender<TableEvent>)>,
@@ -52,6 +54,11 @@ pub struct Sink {
     /// Commit LSNs (copy boundaries) to publish once the replication LSN reaches them: a reader
     /// must never see a commit LSN the replication LSN does not cover yet.
     deferred_commit_marks: HashMap<SrcTableId, u64>,
+    /// Copy boundaries of copied tables: transactions committed before it are in the copy.
+    copy_boundaries: HashMap<SrcTableId, u64>,
+    /// Failures of copying tables with their transaction's final LSN, judged against the copy's
+    /// boundary once it is known.
+    copy_failures: HashMap<SrcTableId, Vec<(u64, String)>>,
 }
 
 impl Sink {
@@ -85,19 +92,71 @@ impl Sink {
             },
             replication_state,
             table_names: HashMap::new(),
-            pending_stream_truncates: HashMap::new(),
+            pending_stream_failures: HashMap::new(),
+            current_stream_xid: None,
             cached_event_sender: None,
             streaming_last_key: None,
             max_keepalive_lsn_seen: 0,
             copying_tables: HashMap::new(),
             deferred_commit_marks: HashMap::new(),
+            copy_boundaries: HashMap::new(),
+            copy_failures: HashMap::new(),
         }
+    }
+
+    /// Transactions whose final LSN is below this are already in the table (copied or applied);
+    /// their changes are replay, which the table handler skips.
+    fn table_floor(&self, table_id: SrcTableId) -> u64 {
+        let applied = self
+            .commit_lsn_txs
+            .get(&table_id)
+            .map_or(0, |commit_lsn| commit_lsn.now());
+        applied.max(self.copy_boundaries.get(&table_id).copied().unwrap_or(0))
+    }
+
+    /// Put `table_id` in the errored state for a change of the transaction being received, unless
+    /// that transaction is replay of history the table already holds: a re-created or recovered
+    /// mirror must not be failed by an old TRUNCATE or schema change the slot replays. Decided at
+    /// commit for a streamed transaction, at the boundary for a copying table.
+    pub async fn fail_table_for_change(&mut self, table_id: SrcTableId, reason: String) {
+        if let Some(xact_id) = self.current_stream_xid {
+            self.pending_stream_failures
+                .entry(xact_id)
+                .or_default()
+                .push((table_id, reason));
+            return;
+        }
+        let final_lsn = self.transaction_state.final_lsn;
+        self.fail_table_at(table_id, final_lsn, reason).await;
+    }
+
+    async fn fail_table_at(&mut self, table_id: SrcTableId, final_lsn: u64, reason: String) {
+        if self.copying_tables.contains_key(&table_id) {
+            self.copy_failures
+                .entry(table_id)
+                .or_default()
+                .push((final_lsn, reason));
+            return;
+        }
+        if final_lsn < self.table_floor(table_id) {
+            debug!(table_id, final_lsn, %reason, "ignoring a failure in replayed history");
+            return;
+        }
+        self.fail_table(table_id, reason).await;
     }
 
     /// Publish that `table_id` committed at `lsn`; held back while its initial copy runs.
     fn mark_table_commit(&mut self, table_id: SrcTableId, lsn: u64) {
         if let Some(highest) = self.copying_tables.get_mut(&table_id) {
             *highest = (*highest).max(lsn);
+            return;
+        }
+        // Streamed after the copy finished but dropped by its boundary (the stream lagged).
+        if self
+            .copy_boundaries
+            .get(&table_id)
+            .is_some_and(|boundary| lsn <= *boundary)
+        {
             return;
         }
         if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(&table_id) {
@@ -128,7 +187,7 @@ impl Sink {
     /// The initial copy of `table_id` finished at `boundary_lsn`. Its commit LSN becomes the
     /// boundary if rows were copied (an empty copy creates no snapshot to read at it), or the
     /// latest commit streamed after the boundary; never a commit the boundary dropped.
-    pub fn finish_initial_copy(
+    pub async fn finish_initial_copy(
         &mut self,
         table_id: SrcTableId,
         boundary_lsn: u64,
@@ -137,6 +196,14 @@ impl Sink {
         let Some(highest_streamed) = self.copying_tables.remove(&table_id) else {
             return;
         };
+        self.copy_boundaries.insert(table_id, boundary_lsn);
+        // Failures of transactions in the copy are history; later ones stand.
+        for (final_lsn, reason) in self.copy_failures.remove(&table_id).unwrap_or_default() {
+            if final_lsn >= boundary_lsn {
+                self.fail_table(table_id, reason).await;
+                return;
+            }
+        }
         let mut commit_lsn = if rows_copied { boundary_lsn } else { 0 };
         if highest_streamed > boundary_lsn {
             commit_lsn = commit_lsn.max(highest_streamed);
@@ -173,8 +240,9 @@ impl Sink {
     /// Postgres re-sends transactions that were still streaming when replication reconnects, so
     /// their partially received rows are dropped.
     pub async fn abort_in_progress_streams(&mut self) {
-        // Postgres re-sends these transactions from the start, truncates included.
-        self.pending_stream_truncates.clear();
+        // Postgres re-sends these transactions from the start, failures included.
+        self.pending_stream_failures.clear();
+        self.current_stream_xid = None;
         for (xact_id, state) in std::mem::take(&mut self.streaming_transactions_state) {
             for table_id in state.touched_tables {
                 if let Some(event_sender) = self.event_senders.get(&table_id) {
@@ -222,6 +290,8 @@ impl Sink {
         self.commit_lsn_txs.remove(&src_table_id);
         self.copying_tables.remove(&src_table_id);
         self.deferred_commit_marks.remove(&src_table_id);
+        self.copy_boundaries.remove(&src_table_id);
+        self.copy_failures.remove(&src_table_id);
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;
@@ -239,7 +309,7 @@ impl Sink {
                 .get(&src_table_id)
                 .cloned()
                 .unwrap_or_else(|| src_table_id.to_string());
-            self.fail_table(
+            self.fail_table_for_change(
                 src_table_id,
                 format!("source table {table_name} was truncated"),
             )
@@ -326,6 +396,7 @@ impl Sink {
             }
             CdcEvent::StreamStart(stream_start_body) => {
                 debug!(stream_id = stream_start_body.xid(), "stream start");
+                self.current_stream_xid = Some(stream_start_body.xid());
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
@@ -383,8 +454,13 @@ impl Sink {
                     }
                 }
                 self.streaming_last_key = None;
-                if let Some(truncated) = self.pending_stream_truncates.remove(&xact_id) {
-                    self.fail_truncated_tables(truncated).await;
+                for (table_id, reason) in self
+                    .pending_stream_failures
+                    .remove(&xact_id)
+                    .unwrap_or_default()
+                {
+                    self.fail_table_at(table_id, stream_commit_body.commit_lsn(), reason)
+                        .await;
                 }
                 let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
                 self.mark_replication(pg_lsn.into());
@@ -466,7 +542,7 @@ impl Sink {
                 src_table_id,
                 reason,
             } => {
-                self.fail_table(src_table_id, reason).await;
+                self.fail_table_for_change(src_table_id, reason).await;
             }
             // Checked by the replication loop, which has a connection to the source.
             CdcEvent::RelationSeen { .. } => {}
@@ -475,11 +551,11 @@ impl Sink {
                 xact_id,
             } => match xact_id {
                 // A streamed transaction can still abort; act on its truncates at commit.
-                Some(xact_id) => self
-                    .pending_stream_truncates
-                    .entry(xact_id)
-                    .or_default()
-                    .extend(src_table_ids),
+                Some(xact_id) => {
+                    let previous = self.current_stream_xid.replace(xact_id);
+                    self.fail_truncated_tables(src_table_ids).await;
+                    self.current_stream_xid = previous;
+                }
                 None => self.fail_truncated_tables(src_table_ids).await,
             },
             CdcEvent::Type(type_body) => {
@@ -501,6 +577,7 @@ impl Sink {
             }
             CdcEvent::StreamStop(_stream_stop_body) => {
                 debug!("Stream stop");
+                self.current_stream_xid = None;
             }
             CdcEvent::StreamAbort(stream_abort_body) => {
                 let xact_id = stream_abort_body.xid();
@@ -520,7 +597,7 @@ impl Sink {
                     }
                 }
                 self.streaming_transactions_state.remove(&xact_id);
-                self.pending_stream_truncates.remove(&xact_id);
+                self.pending_stream_failures.remove(&xact_id);
                 self.streaming_last_key = None;
             }
         }
@@ -567,12 +644,13 @@ mod tests {
         (sink, commit)
     }
 
-    #[test]
-    fn copy_boundary_ahead_of_the_stream_is_published_when_the_stream_reaches_it() {
+    #[tokio::test]
+    async fn copy_boundary_ahead_of_the_stream_is_published_when_the_stream_reaches_it() {
         let replication = ReplicationState::new();
         let (mut sink, commit) = copying_sink(&replication);
         sink.mark_replication(50);
-        sink.finish_initial_copy(1, 100, /*rows_copied=*/ true);
+        sink.finish_initial_copy(1, 100, /*rows_copied=*/ true)
+            .await;
         // Never ahead of the replication LSN, which the copy path no longer touches.
         assert_eq!((commit.now(), replication.now()), (0, 50));
         sink.mark_replication(99);
@@ -581,15 +659,16 @@ mod tests {
         assert_eq!((commit.now(), replication.now()), (100, 120));
     }
 
-    #[test]
-    fn commits_dropped_by_the_copy_boundary_are_never_published() {
+    #[tokio::test]
+    async fn commits_dropped_by_the_copy_boundary_are_never_published() {
         let replication = ReplicationState::new();
         let (mut sink, commit) = copying_sink(&replication);
         sink.mark_table_commit(1, 80);
         sink.mark_replication(80);
         assert_eq!(commit.now(), 0);
         // An empty copy has no snapshot at the boundary to read.
-        sink.finish_initial_copy(1, 100, /*rows_copied=*/ false);
+        sink.finish_initial_copy(1, 100, /*rows_copied=*/ false)
+            .await;
         sink.mark_replication(200);
         assert_eq!(commit.now(), 0);
         // Later commits are published as usual.
@@ -597,14 +676,81 @@ mod tests {
         assert_eq!(commit.now(), 210);
     }
 
-    #[test]
-    fn commits_after_the_boundary_streamed_during_the_copy_are_published() {
+    #[tokio::test]
+    async fn commits_after_the_boundary_streamed_during_the_copy_are_published() {
         let replication = ReplicationState::new();
         let (mut sink, commit) = copying_sink(&replication);
         sink.mark_table_commit(1, 150);
         sink.mark_replication(150);
-        sink.finish_initial_copy(1, 100, /*rows_copied=*/ false);
+        sink.finish_initial_copy(1, 100, /*rows_copied=*/ false)
+            .await;
         assert_eq!(commit.now(), 150);
+    }
+
+    /// The stream can still lag behind the boundary when the copy finishes; a commit at or below
+    /// the boundary streamed afterwards is in the copy (the handler drops it) and must not become
+    /// the table's commit LSN.
+    #[tokio::test]
+    async fn commits_dropped_by_the_boundary_streamed_after_the_copy_are_never_published() {
+        for rows_copied in [false, true] {
+            let replication = ReplicationState::new();
+            let (mut sink, commit) = copying_sink(&replication);
+            sink.mark_replication(50);
+            sink.finish_initial_copy(1, 100, rows_copied).await;
+            sink.mark_table_commit(1, 80);
+            sink.mark_replication(80);
+            assert_eq!(commit.now(), 0, "rows_copied={rows_copied}");
+            sink.mark_replication(120);
+            assert_eq!(commit.now(), if rows_copied { 100 } else { 0 });
+        }
+    }
+
+    fn errored(rx: &mut mpsc::Receiver<TableEvent>) -> bool {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, TableEvent::EnterErrored { .. }))
+    }
+
+    /// A failing change (TRUNCATE, schema change, bad value) in a transaction the table already
+    /// holds is replay (WAL older than the mirror, re-sent by the slot) and must not error it.
+    #[tokio::test]
+    async fn failures_in_replayed_history_are_ignored() {
+        let replication = ReplicationState::new();
+        let mut sink = Sink::new(replication.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        let commit = CommitState::new();
+        // A recovered table starts at its persisted LSN.
+        commit.mark(100);
+        sink.add_table(
+            1,
+            tx,
+            commit,
+            &make_table_schema(1),
+            /*initial_copy=*/ false,
+        );
+        sink.transaction_state.final_lsn = 60;
+        sink.fail_table_for_change(1, "replayed".to_string()).await;
+        assert!(!errored(&mut rx));
+        sink.transaction_state.final_lsn = 150;
+        sink.fail_table_for_change(1, "new".to_string()).await;
+        assert!(errored(&mut rx));
+    }
+
+    /// While copying, failures wait for the boundary: transactions committed before it are in the
+    /// copy.
+    #[tokio::test]
+    async fn failures_during_the_copy_are_judged_at_the_boundary() {
+        for (final_lsn, expect_errored) in [(60, false), (120, true)] {
+            let replication = ReplicationState::new();
+            let mut sink = Sink::new(replication.clone());
+            let (tx, mut rx) = mpsc::channel(8);
+            sink.add_table(1, tx, CommitState::new(), &make_table_schema(1), true);
+            sink.transaction_state.final_lsn = final_lsn;
+            sink.fail_table_for_change(1, "truncated".to_string()).await;
+            assert!(!errored(&mut rx));
+            sink.finish_initial_copy(1, 100, /*rows_copied=*/ true)
+                .await;
+            assert_eq!(errored(&mut rx), expect_errored, "final_lsn={final_lsn}");
+        }
     }
 
     #[tokio::test]

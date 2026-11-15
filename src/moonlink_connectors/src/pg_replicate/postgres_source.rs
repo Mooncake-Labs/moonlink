@@ -334,6 +334,7 @@ impl PostgresSource {
             postgres_epoch,
             message_scratch: Vec::new(),
             skip_before_end_lsn: None,
+            mismatched_tables: HashMap::new(),
         })
     }
 
@@ -537,6 +538,10 @@ pin_project! {
         postgres_epoch: SystemTime,
         message_scratch: Vec<Result<ReplicationMessage<LogicalReplicationMessage>, Error>>,
         skip_before_end_lsn: Option<PgLsn>,
+        // Tables whose last Relation message did not match their schema, with the reason. Their
+        // tuples are reported, not decoded, until a matching Relation message: the mismatch can be
+        // replayed history (WAL older than the mirror), which the sink then ignores.
+        mismatched_tables: HashMap<SrcTableId, String>,
     }
 }
 
@@ -603,6 +608,7 @@ impl CdcStream {
     pub fn remove_table_schema(self: Pin<&mut Self>, src_table_id: SrcTableId) {
         let this = self.project();
         this.table_schemas.remove(&src_table_id);
+        this.mismatched_tables.remove(&src_table_id);
     }
 
     pub async fn next_batch_msgs(
@@ -647,21 +653,33 @@ impl CdcStream {
                 // table's definition. Check it here, in stream order, so no later tuple of the table
                 // is decoded against a stale schema.
                 if let LogicalReplicationMessage::Relation(relation) = body.data() {
+                    let src_table_id = relation.rel_id();
                     if let Some(reason) = unsupported_relation_change(relation, this.table_schemas)
                     {
-                        let src_table_id = relation.rel_id();
-                        this.table_schemas.remove(&src_table_id);
+                        this.mismatched_tables.insert(src_table_id, reason.clone());
                         out.push(Ok(CdcEvent::TableUnsupported {
                             src_table_id,
                             reason,
                         }));
                         continue;
                     }
-                    if this.table_schemas.contains_key(&relation.rel_id()) {
-                        out.push(Ok(CdcEvent::RelationSeen {
-                            src_table_id: relation.rel_id(),
-                        }));
+                    this.mismatched_tables.remove(&src_table_id);
+                    if this.table_schemas.contains_key(&src_table_id) {
+                        out.push(Ok(CdcEvent::RelationSeen { src_table_id }));
                     }
+                }
+                let tuple_table = match body.data() {
+                    LogicalReplicationMessage::Insert(b) => Some(b.rel_id()),
+                    LogicalReplicationMessage::Update(b) => Some(b.rel_id()),
+                    LogicalReplicationMessage::Delete(b) => Some(b.rel_id()),
+                    _ => None,
+                };
+                if let Some(reason) = tuple_table.and_then(|id| this.mismatched_tables.get(&id)) {
+                    out.push(Ok(CdcEvent::TableUnsupported {
+                        src_table_id: tuple_table.unwrap(),
+                        reason: reason.clone(),
+                    }));
+                    continue;
                 }
             }
             match f {

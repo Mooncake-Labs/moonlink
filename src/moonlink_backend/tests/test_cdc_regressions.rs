@@ -2590,3 +2590,145 @@ async fn mirror_registered_late_at_startup_keeps_changes_made_while_down(#[case]
         let _ = backend.drop_table(DB.to_string(), t.to_string()).await;
     }
 }
+
+async fn count_copy_slots(client: &Client) -> i64 {
+    client
+        .query_one(
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_copy_%'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// The documented remedy for a schema change is drop + re-create. The re-created mirror
+/// must stay healthy across a restart, although the slot (held back by another, idle mirror of
+/// the database) still replays the WAL from before the ALTER.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn recreated_mirror_survives_replay_of_an_older_schema_change() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_sc, rv_idle;
+         CREATE TABLE rv_sc (id BIGINT PRIMARY KEY, a INT);
+         CREATE TABLE rv_idle (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_idle VALUES (1);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_idle_mc", "public.rv_idle", &uri).await;
+    mirror(&backend, &tmp, "rv_sc_mc", "public.rv_sc", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_idle_mc", lsn).await, None);
+    client
+        .simple_query("INSERT INTO rv_sc VALUES (1, 1); ALTER TABLE rv_sc ADD COLUMN b INT; INSERT INTO rv_sc VALUES (2, 2, 2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_sc_mc", lsn).await.is_some());
+    backend
+        .drop_table(DB.to_string(), "rv_sc_mc".to_string())
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_sc_mc", "public.rv_sc", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_sc_mc", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_sc_mc", lsn).await, Some(vec![1, 2]));
+    let confirmed = confirmed_flush(&client).await;
+    eprintln!("rv9 slot confirmed {confirmed} vs current {lsn} before restart");
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    let backend = new_backend(&tmp).await.unwrap();
+    client
+        .simple_query("INSERT INTO rv_sc VALUES (3, 3, 3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_sc_mc", lsn).await;
+    eprintln!("rv9 re-created mirror after restart: {err:?}");
+    assert_eq!(
+        err, None,
+        "re-created mirror errored by replay of the old schema change"
+    );
+}
+
+/// An empty copy with the main stream lagging behind the copy boundary when the copy finishes (a
+/// large transaction of another mirror precedes the commits in WAL). Commits that the boundary
+/// drops then reach the sink after it stopped holding the table's commit LSN back.
+#[rstest::rstest]
+#[case::lagging_stream(1_000_000)]
+#[case::control_no_lag(0)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn empty_copy_with_a_lagging_stream_stays_readable(#[case] lag_rows: i64) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_lag_q, rv_lag_big;
+         CREATE TABLE rv_lag_q (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_lag_big (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_lag_big_mc", "public.rv_lag_big", &uri).await;
+    let (blocker, _) = connect_to_postgres(&uri).await;
+    blocker
+        .simple_query("BEGIN; SELECT txid_current();")
+        .await
+        .unwrap();
+
+    let backend = Arc::new(backend);
+    let b2 = backend.clone();
+    let cfg = table_config(&tmp);
+    let uri2 = uri.clone();
+    let create = tokio::spawn(async move {
+        b2.create_table(
+            DB.to_string(),
+            "rv_lag_q_mc".to_string(),
+            "public.rv_lag_q".to_string(),
+            uri2,
+            cfg,
+            None,
+        )
+        .await
+    });
+    let mut waiting = false;
+    for _ in 0..100 {
+        if count_copy_slots(&client).await > 0 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(waiting, "copy slot creation never started");
+    if lag_rows > 0 {
+        client
+            .simple_query(&format!(
+                "INSERT INTO rv_lag_big SELECT g FROM generate_series(1, {lag_rows}) g;"
+            ))
+            .await
+            .unwrap();
+    }
+    client
+        .simple_query("INSERT INTO rv_lag_q VALUES (1); DELETE FROM rv_lag_q;")
+        .await
+        .unwrap();
+    blocker.simple_query("COMMIT;").await.unwrap();
+    create.await.unwrap().unwrap();
+
+    let lsn = current_wal_lsn(&client).await;
+    let big = scan_rows(
+        &backend,
+        "rv_lag_big_mc",
+        lsn,
+        "id",
+        Duration::from_secs(300),
+    )
+    .await;
+    assert_eq!(big.map(|m| m.len() as i64), Some(lag_rows));
+    let q = scan_rows(&backend, "rv_lag_q_mc", lsn, "id", Duration::from_secs(20)).await;
+    assert_eq!(
+        q,
+        Some(BTreeMap::new()),
+        "scan of the idle empty mirror did not complete"
+    );
+}
