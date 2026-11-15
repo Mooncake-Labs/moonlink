@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, v0.3-dev]
   pull_request:
-    branches: [main]
+    branches: [main, v0.3-dev, 'slim/**']
 
 # Cancel superseded runs for the same branch / PR
 concurrency:
