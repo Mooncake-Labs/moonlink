@@ -1,15 +1,19 @@
 use crate::{error::Error, Result};
 use arrow_ipc::writer::StreamWriter;
+use arrow_schema::Schema;
 use moonlink_backend::MoonlinkBackend;
 use moonlink_error::{ErrorStatus, ErrorStruct};
-use moonlink_rpc::{read, write, Request, RpcResult, Table};
+use moonlink_rpc::{
+    read, write, CreateSnapshotResponse, CreateTableResponse, DropTableResponse,
+    GetParquetMetadatasResponse, GetTableSchemaResponse, ListTablesResponse, LoadFilesResponse,
+    OptimizeTableResponse, Request, RpcResult, ScanTableBeginResponse, ScanTableEndResponse, Table,
+};
 use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::UnixListener;
 use tracing::info;
 
 fn is_disconnect(io: &std::io::Error) -> bool {
@@ -72,22 +76,17 @@ pub async fn start_unix_server(
     }
 }
 
-/// Start the TCP socket RPC server and serve requests until the task is aborted.
-pub async fn start_tcp_server(backend: Arc<MoonlinkBackend>, addr: SocketAddr) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    info!("Moonlink RPC server listening on TCP: {}", addr);
+fn unsupported(rpc: &str) -> ErrorStruct {
+    ErrorStruct::new(
+        format!("{rpc} is not supported by this moonlink build"),
+        ErrorStatus::Permanent,
+    )
+}
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let backend = Arc::clone(&backend);
-        tokio::spawn(async move {
-            match handle_stream(backend, stream).await {
-                Err(e) if is_closed_connection(&e) => {}
-                Err(e) => panic!("Unexpected TCP RPC server error: {e}"),
-                Ok(()) => {}
-            }
-        });
-    }
+/// Arrow IPC stream (schema message + end-of-stream marker) returned by GetTableSchema; duckdb_mooncake decodes it with nanoarrow.
+pub(crate) fn encode_table_schema(schema: &Schema) -> anyhow::Result<Vec<u8>> {
+    let writer = StreamWriter::try_new(Vec::new(), schema)?;
+    Ok(writer.into_inner()?)
 }
 
 fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
@@ -107,7 +106,7 @@ where
                 table,
                 lsn,
             } => {
-                let res: RpcResult<()> = backend
+                let res: RpcResult<CreateSnapshotResponse> = backend
                     .create_snapshot(database, table, lsn)
                     .await
                     .map_err(into_error_struct);
@@ -121,7 +120,7 @@ where
                 table_config,
             } => {
                 // Use default mooncake config, and local filesystem for storage layer.
-                let res: RpcResult<()> = backend
+                let res: RpcResult<CreateTableResponse> = backend
                     .create_table(
                         database,
                         table,
@@ -135,33 +134,31 @@ where
                 write(&mut stream, &res).await?;
             }
             Request::DropTable { database, table } => {
-                let res: RpcResult<()> = backend
+                let res: RpcResult<DropTableResponse> = backend
                     .drop_table(database, table)
                     .await
                     .map_err(into_error_struct);
 
                 write(&mut stream, &res).await?;
             }
-            Request::GetParquetMetadatas { data_files } => {
-                let metadata_res: RpcResult<Vec<Vec<u8>>> = backend
-                    .get_parquet_metadatas(data_files)
-                    .await
-                    .map_err(into_error_struct);
-                write(&mut stream, &metadata_res).await?;
+            // Kept for wire compatibility; no client uses it.
+            Request::GetParquetMetadatas { .. } => {
+                let res: RpcResult<GetParquetMetadatasResponse> =
+                    Err(unsupported("get_parquet_metadatas"));
+                write(&mut stream, &res).await?;
             }
             Request::GetTableSchema { database, table } => {
                 let result: anyhow::Result<Vec<u8>> = async {
                     let schema = backend.get_table_schema(database, table).await?;
-                    let writer = StreamWriter::try_new(Vec::new(), &schema)?;
-                    Ok(writer.into_inner()?)
+                    encode_table_schema(&schema)
                 }
                 .await;
-                let res: RpcResult<Vec<u8>> = result.map_err(into_error_struct);
+                let res: RpcResult<GetTableSchemaResponse> = result.map_err(into_error_struct);
                 write(&mut stream, &res).await?;
             }
             Request::ListTables {} => {
                 let tables_res = backend.list_tables().await;
-                let tables_res: RpcResult<Vec<Table>> = tables_res
+                let tables_res: RpcResult<ListTablesResponse> = tables_res
                     .map(|tables| {
                         tables
                             .into_iter()
@@ -183,7 +180,7 @@ where
                 table,
                 mode,
             } => {
-                let res: RpcResult<()> = backend
+                let res: RpcResult<OptimizeTableResponse> = backend
                     .optimize_table(database, table, &mode)
                     .await
                     .map_err(into_error_struct);
@@ -200,29 +197,23 @@ where
                     .map_err(into_error_struct)
                 {
                     Ok(state) => {
-                        let res: RpcResult<Vec<u8>> = Ok(state.data.clone());
+                        let res: RpcResult<ScanTableBeginResponse> = Ok(state.data.clone());
                         write(&mut stream, &res).await?;
                         assert!(map.insert((database, table), state).is_none());
                     }
                     Err(err) => {
-                        let res: RpcResult<Vec<u8>> = Err(err);
+                        let res: RpcResult<ScanTableBeginResponse> = Err(err);
                         write(&mut stream, &res).await?;
                     }
                 }
             }
             Request::ScanTableEnd { database, table } => {
                 assert!(map.remove(&(database, table)).is_some());
-                write(&mut stream, &RpcResult::<()>::Ok(())).await?;
+                write(&mut stream, &RpcResult::<ScanTableEndResponse>::Ok(())).await?;
             }
-            Request::LoadFiles {
-                database,
-                table,
-                files,
-            } => {
-                let res: RpcResult<()> = backend
-                    .load_files(database, table, files)
-                    .await
-                    .map_err(into_error_struct);
+            // Kept for wire compatibility (pg_mooncake mooncake.load_files); loading files is not implemented.
+            Request::LoadFiles { .. } => {
+                let res: RpcResult<LoadFilesResponse> = Err(unsupported("load_files"));
                 write(&mut stream, &res).await?;
             }
         }

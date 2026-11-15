@@ -3,7 +3,6 @@ use deltalake::DeltaTableError;
 use iceberg::Error as IcebergError;
 use moonlink_error::io_error_utils::get_io_error_status;
 use moonlink_error::{ErrorStatus, ErrorStruct};
-use opentelemetry_otlp::ExporterBuildError as OtelExporterBuildError;
 use parquet::errors::ParquetError;
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -43,9 +42,6 @@ pub enum Error {
 
     #[error("{0}")]
     PbToMoonlinkRowError(ErrorStruct),
-
-    #[error("{0}")]
-    OtelExporterBuildError(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -58,16 +54,6 @@ impl Error {
     #[track_caller]
     pub fn delta_generic_error(message: String) -> Self {
         Self::DeltaLakeError(ErrorStruct::new(message, ErrorStatus::Permanent))
-    }
-}
-
-impl From<OtelExporterBuildError> for Error {
-    #[track_caller]
-    fn from(source: OtelExporterBuildError) -> Self {
-        Error::OtelExporterBuildError(
-            ErrorStruct::new("exporter build error".to_string(), ErrorStatus::Permanent)
-                .with_source(source),
-        )
     }
 }
 
@@ -224,7 +210,6 @@ impl Error {
             | Error::OpenDal(err)
             | Error::JoinError(err)
             | Error::PbToMoonlinkRowError(err)
-            | Error::OtelExporterBuildError(err)
             | Error::Json(err) => err.status,
         }
     }
@@ -233,6 +218,9 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Line of the `?` in [`create_source_error`], where the error location must point.
+    const SOURCE_ERROR_LINE: u32 = line!() + 4;
 
     /// Test util functions to create error.
     fn create_source_error() -> Result<()> {
@@ -254,9 +242,10 @@ mod tests {
         let io_error = another_propagate_error().unwrap_err();
         if let Error::Io(ref inner) = io_error {
             let loc = inner.location.as_ref().unwrap();
-            assert!(loc.contains("src/moonlink/src/error.rs"));
-            assert!(loc.contains("239"));
-            assert!(loc.contains("9"));
+            assert!(
+                loc.contains(&format!("src/moonlink/src/error.rs:{SOURCE_ERROR_LINE}:9")),
+                "unexpected location {loc}"
+            );
         }
     }
 }

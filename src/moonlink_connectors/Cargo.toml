@@ -12,22 +12,17 @@ connector-pg = []
 test-tls = []
 
 [dependencies]
-anyhow = { workspace = true }
-apache-avro = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-async-stream = "0.3"
 async-trait = { workspace = true }
 bigdecimal = { version = "0.4", default-features = false, features = ["std"] }
 byteorder = "1.5"
 bytes = { workspace = true }
 chrono = { workspace = true }
-chrono-tz = "0.10"
 futures = { workspace = true }
 moonlink = { workspace = true }
 moonlink_error = { workspace = true }
-moonlink_proto = { workspace = true }
 more-asserts = { workspace = true }
 native-tls = { workspace = true }
 num-traits = { workspace = true }
@@ -36,7 +31,6 @@ pg_escape = "0.1"
 pin-project-lite = "0.2"
 postgres-native-tls = { workspace = true }
 postgres-replication = { workspace = true }
-prost = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

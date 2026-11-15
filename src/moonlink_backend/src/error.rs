@@ -136,8 +136,6 @@ impl From<MoonlinkConnectorError> for Error {
             | MoonlinkConnectorError::MoonlinkError(es)
             | MoonlinkConnectorError::Io(es)
             | MoonlinkConnectorError::MpscChannelSendError(es)
-            | MoonlinkConnectorError::RestSource(es)
-            | MoonlinkConnectorError::RestPayloadConversion(es)
             | MoonlinkConnectorError::ParquetError(es) => es.status,
             _ => ErrorStatus::Permanent,
         };

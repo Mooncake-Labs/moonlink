@@ -6,21 +6,13 @@ mod recovery_utils;
 pub mod table_config;
 pub mod table_status;
 
-use apache_avro::schema::Schema as AvroSchema;
 use arrow_schema::Schema;
 pub use error::{Error, Result};
 use futures::{stream, StreamExt, TryStreamExt};
 pub use moonlink::ReadState;
 use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
-pub use moonlink_connectors::rest_ingest::event_request::{
-    EventRequest, FileEventOperation, FileEventRequest, FlushRequest, IngestRequestPayload,
-    RowEventOperation, RowEventRequest, SnapshotRequest,
-};
-pub use moonlink_connectors::rest_ingest::rest_event::RestEvent;
-pub use moonlink_connectors::rest_ingest::rest_source::RestSource;
 use moonlink_connectors::ReplicationManager;
-pub use moonlink_connectors::REST_API_URI;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -47,8 +39,6 @@ pub struct MoonlinkBackend {
     metadata_store_accessor: Box<dyn MetadataStoreTrait>,
 
     replication_manager: RwLock<ReplicationManager>,
-
-    event_api_sender: Option<tokio::sync::mpsc::Sender<EventRequest>>,
 }
 
 impl MoonlinkBackend {
@@ -119,7 +109,6 @@ impl MoonlinkBackend {
 
         let backend_attributes = BackendAttributes {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
-            base_path: base_path.to_str().unwrap().to_string(),
         };
         recovery_utils::recover_all_tables(
             backend_attributes,
@@ -136,7 +125,6 @@ impl MoonlinkBackend {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager: RwLock::new(replication_manager),
             metadata_store_accessor,
-            event_api_sender: None,
         })
     }
 
@@ -176,6 +164,12 @@ impl MoonlinkBackend {
     ) -> Result<()> {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
+        if input_schema.is_some() {
+            return Err(Error::invalid_argument(
+                "input schema is only supported for event ingestion, which has been removed"
+                    .to_string(),
+            ));
+        }
 
         let mooncake_table_id = MooncakeTableId {
             database: database.clone(),
@@ -185,45 +179,24 @@ impl MoonlinkBackend {
         // Add mooncake table to replication, and create corresponding mooncake table.
         let moonlink_table_config: Result<MoonlinkTableConfig> = {
             let mut manager = self.replication_manager.write().await;
-            if src_uri == REST_API_URI {
-                let cur_moonlink_table_config = config_utils::parse_event_table_config(
-                    &table_config,
-                    &mooncake_table_id,
-                    &self.base_path,
-                    &self.temp_files_dir,
-                )?;
-                manager
-                    .add_rest_table(
-                        &src_uri,
-                        mooncake_table_id,
-                        &src_table_name,
-                        input_schema.expect("arrow_schema is required for REST API"),
-                        cur_moonlink_table_config.clone(),
-                        self.read_state_filepath_remap.clone(),
-                        /*flush_lsn=*/ None,
-                    )
-                    .await?;
-                Ok(cur_moonlink_table_config)
-            } else {
-                let mut cur_moonlink_table_config = config_utils::parse_replication_table_config(
-                    &table_config,
-                    &mooncake_table_id,
-                    &self.base_path,
-                    &self.temp_files_dir,
-                )?;
-                // Moonlink table config will get updated later at replication manager.
-                manager
-                    .add_table(
-                        &src_uri,
-                        mooncake_table_id,
-                        &src_table_name,
-                        &mut cur_moonlink_table_config,
-                        self.read_state_filepath_remap.clone(),
-                        /*is_recovery=*/ false,
-                    )
-                    .await?;
-                Ok(cur_moonlink_table_config)
-            }
+            let mut cur_moonlink_table_config = config_utils::parse_replication_table_config(
+                &table_config,
+                &mooncake_table_id,
+                &self.base_path,
+                &self.temp_files_dir,
+            )?;
+            // Moonlink table config will get updated later at replication manager.
+            manager
+                .add_table(
+                    &src_uri,
+                    mooncake_table_id,
+                    &src_table_name,
+                    &mut cur_moonlink_table_config,
+                    self.read_state_filepath_remap.clone(),
+                    /*is_recovery=*/ false,
+                )
+                .await?;
+            Ok(cur_moonlink_table_config)
         };
 
         // Create metadata store entry.
@@ -236,26 +209,6 @@ impl MoonlinkBackend {
                 moonlink_table_config?,
             )
             .await?;
-
-        Ok(())
-    }
-
-    /// Set Avro schema for an existing table
-    ///
-    /// # Arguments
-    ///
-    /// * src_table_name: Source table name (typically matches the table name used in create_table)
-    /// * avro_schema: Avro schema for parsing data
-    pub async fn set_avro_schema(
-        &self,
-        src_table_name: String,
-        avro_schema: AvroSchema,
-    ) -> Result<()> {
-        validate_not_empty(&src_table_name, "src_table_name")?;
-
-        let mut manager = self.replication_manager.write().await;
-        // Set Avro schema on the existing REST table
-        manager.set_avro_schema(src_table_name, avro_schema).await?;
 
         Ok(())
     }
@@ -431,29 +384,6 @@ impl MoonlinkBackend {
     pub async fn shutdown_connection(&self, uri: &str, postgres_drop_all: bool) {
         let mut manager = self.replication_manager.write().await;
         manager.shutdown_connection(uri, postgres_drop_all);
-    }
-
-    /// Initialize event API connection for data ingestion.
-    /// This should be called during service startup to ensure event API is ready.
-    pub async fn initialize_event_api(&mut self) -> Result<()> {
-        let event_api_sender = {
-            let mut manager = self.replication_manager.write().await;
-            manager
-                .initialize_event_api_for_once(&self.base_path)
-                .await?
-        };
-
-        self.event_api_sender = Some(event_api_sender);
-        Ok(())
-    }
-
-    pub async fn send_event_request(&self, request: EventRequest) -> Result<()> {
-        self.event_api_sender
-            .as_ref()
-            .expect("event api sender not initialized")
-            .send(request)
-            .await?;
-        Ok(())
     }
 }
 
