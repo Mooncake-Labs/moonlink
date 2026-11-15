@@ -163,11 +163,10 @@ impl ReplicationManager {
                 // source's WAL forever (unless a mirror waiting to be restored needs it).
                 let connection = self.connections.get(&key).unwrap();
                 if connection.table_count() == 0 && !is_recovery {
-                    let still_needed = self
-                        .pending_recoveries
-                        .values()
-                        .any(|uri| self.uri_matches_key(uri, &key));
-                    self.shutdown_connection_by_key(&key, !still_needed);
+                    // Keep every slot while a mirror waits to be restored (see
+                    // release_errored_source).
+                    let drop_all = self.pending_recoveries.is_empty();
+                    self.shutdown_connection_by_key(&key, drop_all);
                 }
                 return Err(e);
             }
@@ -381,12 +380,9 @@ impl ReplicationManager {
             }
             return;
         }
-        // Another mirror of the database still waits to be restored from the slot.
-        if self
-            .pending_recoveries
-            .values()
-            .any(|uri| uri == &errored.src_uri)
-        {
+        // A mirror waiting to be restored replays from its slot; which connection string reaches
+        // which database is not known for every one of them, so keep every slot meanwhile.
+        if !self.pending_recoveries.is_empty() {
             return;
         }
         let cleanup = async {

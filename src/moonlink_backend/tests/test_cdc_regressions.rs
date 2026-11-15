@@ -3127,3 +3127,90 @@ async fn stream_txns(client: &Client) -> i64 {
         .unwrap()
         .get(0)
 }
+
+/// Dropping an errored placeholder never drops a slot while a mirror is pending, whatever
+/// connection string that mirror uses (here: same database, another role that cannot log in for
+/// now): once restored, it replays everything written while it was pending.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dropping_a_placeholder_keeps_the_slot_of_a_pending_mirror() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_pa, rv_pb;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_role2') THEN
+             EXECUTE 'DROP OWNED BY rv_role2'; DROP ROLE rv_role2;
+           END IF;
+         END $$;
+         CREATE ROLE rv_role2 LOGIN SUPERUSER PASSWORD 'pw2';
+         CREATE TABLE rv_pa (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_pb (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_pa VALUES (1); INSERT INTO rv_pb VALUES (1);",
+    )
+    .await;
+    let uri2 = uri_for_user(&uri, "rv_role2", "pw2");
+    mirror(&backend, &tmp, "rv_s1_pa", "public.rv_pa", &uri).await;
+    mirror(&backend, &tmp, "rv_s2_pb", "public.rv_pb", &uri2).await;
+    client.simple_query("TRUNCATE rv_pa;").await.unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_s1_pa", lsn).await.is_some());
+    assert_eq!(snapshot_error(&backend, "rv_s2_pb", lsn).await, None);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    client
+        .simple_query("ALTER ROLE rv_role2 NOLOGIN;")
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_pb VALUES (2);")
+        .await
+        .unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    let pending = scan_error(&backend, "rv_s2_pb").await;
+    eprintln!("rv10 pb while role cannot log in: {pending:?}");
+    assert!(
+        pending
+            .as_deref()
+            .is_some_and(|e| e.contains("not available yet")),
+        "expected a pending mirror: {pending:?}"
+    );
+    backend
+        .drop_table(DB.to_string(), "rv_s1_pa".to_string())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let slots_after_drop = slot_count(&client).await;
+    eprintln!("rv10 slots after dropping the placeholder: {slots_after_drop}");
+
+    client
+        .simple_query("ALTER ROLE rv_role2 LOGIN;")
+        .await
+        .unwrap();
+    let mut restored = false;
+    for _ in 0..90 {
+        if scan_error(&backend, "rv_s2_pb").await.is_none() {
+            restored = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(restored, "pending mirror was never restored");
+    client
+        .simple_query("INSERT INTO rv_pb VALUES (3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let rows = scan_ids(&backend, "rv_s2_pb", lsn).await;
+    eprintln!("rv10 pb after restore: {rows:?}");
+    let _ = backend
+        .drop_table(DB.to_string(), "rv_s2_pb".to_string())
+        .await;
+    assert_eq!(
+        (slots_after_drop, rows),
+        (1, Some(vec![1, 2, 3])),
+        "placeholder drop released the slot a pending mirror of the same database waited for"
+    );
+}
