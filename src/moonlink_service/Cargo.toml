@@ -10,7 +10,6 @@ profiling = ["console-subscriber"]
 default = ["storage-fs"]
 rest_api_demo = []
 standalone-test = []
-otel-integration = []
 postgres-integration = []
 log-rotation-test = []
 # make sure the tests are also named with stress_test prefix
@@ -36,14 +35,6 @@ moonlink_error = { workspace = true }
 moonlink_metadata_store = { workspace = true }
 moonlink_proto = { workspace = true }
 moonlink_rpc = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-opentelemetry-proto = { version = "0.31", default-features = false, features = [
-  "gen-tonic",
-  "metrics",
-] }
-opentelemetry-stdout = { workspace = true }
-opentelemetry_sdk = { workspace = true }
 prost = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

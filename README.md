@@ -14,7 +14,7 @@ managed ingestion engine for Apache Iceberg
 
 Moonlink is an Iceberg-native ingestion engine bringing streaming inserts and upserts to your lakehouse.
 
-Ingest Postgres CDC, event streams (Kafka), and OTEL into Iceberg **without** complex maintenance and compaction. 
+Ingest Postgres CDC and event streams (Kafka) into Iceberg **without** complex maintenance and compaction. 
 
 Moonlink buffers, caches, and indexes data so Iceberg tables stay read-optimized.
 
@@ -79,7 +79,6 @@ Moonlink supports multiple input sources for ingest:
 1. **PostgreSQL CDC** — ingest via logical replication with millisecond-level latency  
 2. **REST API** — simple HTTP endpoint for direct event ingestion  
 3. **Kafka** — sink support coming soon  
-4. **OTEL** — sink support on the roadmap  
 
 ## Read Path
 

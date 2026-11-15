@@ -1,4 +1,3 @@
-#![cfg_attr(feature = "otel-integration", allow(dead_code))]
 use crate::rest_api::{FileUploadResponse, IngestResponse, ListTablesResponse};
 use crate::{ServiceConfig, READINESS_PROBE_PORT};
 use arrow::datatypes::Schema as ArrowSchema;
@@ -41,8 +40,6 @@ pub(crate) fn get_nginx_addr() -> String {
 
 /// REST API port.
 pub(crate) const REST_API_PORT: u16 = 3030;
-/// OTEL API port.
-pub(crate) const OTEL_API_PORT: u16 = 3435;
 /// TCP port.
 pub(crate) const TCP_PORT: u16 = 3031;
 /// Local nginx server IP/port address.
@@ -64,10 +61,8 @@ pub(crate) fn get_service_config() -> ServiceConfig {
         base_path: moonlink_backend_dir.clone(),
         data_server_uri: Some(nginx_addr),
         rest_api_port: Some(REST_API_PORT),
-        otel_ingestion_api_port: Some(OTEL_API_PORT),
         tcp_port: Some(TCP_PORT),
         log_directory: None,
-        otel_export_target: None,
     }
 }
 

@@ -65,24 +65,6 @@ nix = { version = "0.30", default-features = false, features = ["fs"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 opendal = { version = "0.54", default-features = false, features = ["layers-throttle"] }
-opentelemetry = { version = "0.31", default-features = false, features = [
-  "trace",
-  "metrics",
-] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = [
-  "reqwest-blocking-client",
-  "http-proto",
-  "trace",
-  "metrics",
-] }
-opentelemetry-stdout = { version = "0.31", default-features = false, features = [
-    "trace",
-    "metrics",
-] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = [
-  "trace",
-  "metrics",
-] }
 parquet = { version = "56", default-features = false, features = [
   "arrow",
   "async",

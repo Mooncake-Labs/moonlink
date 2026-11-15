@@ -5,8 +5,6 @@ use moonlink_service::{start_with_config, Result, ServiceConfig};
 const DEFAULT_REST_PORT: u16 = 3030;
 /// Default moonlink TCP API port.
 const DEFAULT_TCP_PORT: u16 = 3031;
-/// Default otel API port.
-const DEFAULT_OTEL_PORT: u16 = 3435;
 
 #[derive(Parser)]
 #[command(name = "moonlink-service")]
@@ -29,13 +27,6 @@ struct Cli {
     #[arg(long)]
     no_tcp_api: bool,
 
-    /// Port for otel API server (optional, defaults to 3435).
-    #[arg(long)]
-    otel_ingestion_port: Option<u16>,
-    /// Disable standalone deployment.
-    #[arg(long)]
-    no_otel_api: bool,
-
     /// IP/port for data server.
     /// For example: http://34.19.1.175:8080.
     #[arg(long)]
@@ -44,10 +35,6 @@ struct Cli {
     /// Log directory, stream to stdout/stderr if unspecified.
     #[arg(long)]
     log_dir: Option<String>,
-
-    /// Otel collector endpoint: "stdout", "otel", or None (default).
-    #[arg(long)]
-    otel_export_target: Option<String>,
 }
 
 #[tokio::main]
@@ -69,13 +56,7 @@ pub async fn main() -> Result<()> {
         } else {
             Some(cli.tcp_port.unwrap_or(DEFAULT_TCP_PORT))
         },
-        otel_ingestion_api_port: if cli.no_otel_api {
-            None
-        } else {
-            Some(cli.otel_ingestion_port.unwrap_or(DEFAULT_OTEL_PORT))
-        },
         log_directory: None,
-        otel_export_target: cli.otel_export_target,
     };
 
     start_with_config(config).await

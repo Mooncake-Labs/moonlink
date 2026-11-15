@@ -379,35 +379,6 @@ jobs:
         run: |
           ${{ matrix.cmd }}
   
-  # ──────────────────────── 5 · Otel test (feature) ─────────────────
-  otel_test:
-    name: Opentelemetry tests (feature)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v5
-
-      # ────────────────────── Toolchain + Test Tools ─────────────────────────
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-        with:
-          components: llvm-tools-preview
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      - name: Opentelemetry feature test
-        env:
-            MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
-        run: |
-          RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features otel-integration --features standalone-test -- otel::test
-
   # ──────────────────────── 6 · Rest catalog test (feature) ─────────────────
   rest_catalog_test:
     name: Rest catalog tests (feature)
