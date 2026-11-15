@@ -197,19 +197,24 @@ pub async fn copy_table_stream(
         files_written.len()
     );
 
-    // Send LoadFiles event to batch ingest the Parquet files
-    if let Err(e) = event_sender
-        .send(TableEvent::LoadFiles {
-            files: files_written,
-            storage_config: StorageConfig::FileSystem {
-                root_directory: output_dir.to_str().unwrap().to_string(),
-                atomic_write_dir: None,
-            },
-            lsn: u64::from(snapshot_start_lsn),
-        })
-        .await
-    {
-        tracing::warn!(error = ?e, "failed to send LoadFiles event");
+    // An empty table writes no files. Batch-ingesting an empty file list is invalid (it breaks
+    // the persistence buffer's data file / file index invariant); the copy boundary is still sent by
+    // the caller.
+    if !files_written.is_empty() {
+        // Send LoadFiles event to batch ingest the Parquet files
+        if let Err(e) = event_sender
+            .send(TableEvent::LoadFiles {
+                files: files_written,
+                storage_config: StorageConfig::FileSystem {
+                    root_directory: output_dir.to_str().unwrap().to_string(),
+                    atomic_write_dir: None,
+                },
+                lsn: u64::from(snapshot_start_lsn),
+            })
+            .await
+        {
+            tracing::warn!(error = ?e, "failed to send LoadFiles event");
+        }
     }
 
     Ok(CopyProgress {

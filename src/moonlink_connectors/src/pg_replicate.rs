@@ -88,6 +88,25 @@ pub struct PostgresConnection {
     pub retry_handles: Vec<JoinHandle<Result<()>>>,
 }
 
+/// Something that tracks an LSN watermark (`CommitState` and `ReplicationState` are both `LsnState`).
+trait LsnMark {
+    fn mark_lsn(&self, lsn: u64);
+}
+
+impl LsnMark for CommitState {
+    fn mark_lsn(&self, lsn: u64) {
+        self.mark(lsn);
+    }
+}
+
+/// Publish the initial copy boundary. The table's commit LSN must be marked before the replication
+/// LSN, the same order the sink uses for commits: readers rely on never observing a replication
+/// LSN that is ahead of the commit LSN it covers.
+fn mark_copy_boundary(commit_state: &impl LsnMark, replication_state: &impl LsnMark, lsn: u64) {
+    commit_state.mark_lsn(lsn);
+    replication_state.mark_lsn(lsn);
+}
+
 /// Identifies the database a connection string points at, independent of how it is spelled
 /// (user, host alias, options). One replication slot and publication exist per database, so every
 /// connection string for the same database must share one replication connection.
@@ -355,9 +374,13 @@ impl PostgresConnection {
         Ok(())
     }
 
-    #[must_use]
-    /// Perform initial copy of existing table data
-    /// Returns true if initial copy was performed, false otherwise.
+    /// Add the table to the publication and, for a new mirror, copy its current contents.
+    ///
+    /// The table joins the publication before the copy snapshot is taken, so every change after the
+    /// snapshot's boundary LSN is streamed; the table handler drops streamed changes up to the
+    /// boundary, which the copy already contains. This runs for empty tables too: changes streamed
+    /// between joining the publication and the snapshot must still be dropped.
+    /// Returns whether an initial copy was performed.
     pub async fn perform_initial_copy(
         &self,
         schema: &TableSchema,
@@ -365,64 +388,54 @@ impl PostgresConnection {
         is_recovery: bool,
         commit_lsn_tx: Arc<CommitState>,
         table_base_path: &str,
-    ) -> Result<(bool)> {
+    ) -> Result<bool> {
         let src_table_id = schema.src_table_id;
-        // Create a dedicated source for the copy
-        let mut copy_source = PostgresSource::new(&self.uri, None, None, false).await?;
-
-        // Check if there are existing rows
-        let row_count = copy_source.get_row_count(&schema.table_name).await?;
-
-        // Only perform initial copy for new tables, not during recovery.
-        // Early return if there are no rows to copy.
-        if !is_recovery && row_count > 0 {
-            if let Err(e) = event_sender.send(TableEvent::StartInitialCopy).await {
-                error!(error = ?e, "failed to send StartInitialCopy event");
-            }
-
-            // Alter the publication to add the table.
-            // Add table to publication first to begin accumulating any cdc events.
-            // We can check where our initial copy started from and discard any rows we have already seen.
-            copy_source
+        let mut publication_source = PostgresSource::new(&self.uri, None, None, false).await?;
+        if is_recovery {
+            publication_source
                 .add_table_to_publication(&schema.table_name)
                 .await?;
-
-            let ic_config = InitialCopyConfig {
-                reader: InitialCopyReaderConfig {
-                    uri: self.uri.clone(),
-                    shard_count: 4,
-                },
-                writer: Default::default(),
-            };
-            let progress =
-                copy_table_stream(schema.clone(), &event_sender, table_base_path, ic_config)
-                    .await
-                    .expect(&format!(
-                        "failed to copy table for src_table_id: {}",
-                        src_table_id
-                    ));
-
-            if let Err(e) = event_sender
-                .send(TableEvent::FinishInitialCopy {
-                    start_lsn: progress.boundary_lsn.into(),
-                })
-                .await
-            {
-                error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
-            }
-
-            // Notify read state manager with the commit LSN for the initial copy boundary.
-            commit_lsn_tx.mark(progress.boundary_lsn.into());
-            self.replication_state.mark(progress.boundary_lsn.into());
-
-            Ok(true)
-        } else {
-            // If there are no rows to copy, we still need to add the table to publication.
-            copy_source
-                .add_table_to_publication(&schema.table_name)
-                .await?;
-            Ok(false)
+            return Ok(false);
         }
+
+        if let Err(e) = event_sender.send(TableEvent::StartInitialCopy).await {
+            error!(error = ?e, "failed to send StartInitialCopy event");
+        }
+        publication_source
+            .add_table_to_publication(&schema.table_name)
+            .await?;
+
+        let ic_config = InitialCopyConfig {
+            reader: InitialCopyReaderConfig {
+                uri: self.uri.clone(),
+                shard_count: 4,
+            },
+            writer: Default::default(),
+        };
+        let progress = copy_table_stream(schema.clone(), &event_sender, table_base_path, ic_config)
+            .await
+            .expect(&format!(
+                "failed to copy table for src_table_id: {}",
+                src_table_id
+            ));
+
+        if let Err(e) = event_sender
+            .send(TableEvent::FinishInitialCopy {
+                start_lsn: progress.boundary_lsn.into(),
+            })
+            .await
+        {
+            error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
+        }
+
+        // Notify read state manager with the commit LSN for the initial copy boundary.
+        mark_copy_boundary(
+            commit_lsn_tx.as_ref(),
+            self.replication_state.as_ref(),
+            progress.boundary_lsn.into(),
+        );
+
+        Ok(true)
     }
 
     pub fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
@@ -968,6 +981,41 @@ pub async fn run_event_loop(
 
     debug!("replication event loop stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod copy_boundary_tests {
+    use super::{mark_copy_boundary, LsnMark};
+    use std::sync::Mutex;
+
+    struct Recorder<'a> {
+        name: &'static str,
+        log: &'a Mutex<Vec<(&'static str, u64)>>,
+    }
+
+    impl LsnMark for Recorder<'_> {
+        fn mark_lsn(&self, lsn: u64) {
+            self.log.lock().unwrap().push((self.name, lsn));
+        }
+    }
+
+    #[test]
+    fn copy_boundary_marks_commit_before_replication() {
+        let log = Mutex::new(Vec::new());
+        let commit = Recorder {
+            name: "commit",
+            log: &log,
+        };
+        let replication = Recorder {
+            name: "replication",
+            log: &log,
+        };
+        mark_copy_boundary(&commit, &replication, 42);
+        assert_eq!(
+            log.into_inner().unwrap(),
+            vec![("commit", 42), ("replication", 42)]
+        );
+    }
 }
 
 #[cfg(test)]

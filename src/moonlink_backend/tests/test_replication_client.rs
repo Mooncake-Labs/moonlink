@@ -113,7 +113,7 @@ mod tests {
             }
         });
         let (snapshot_id, lsn_at_export) = coord
-            .export_snapshot_and_lsn()
+            .export_snapshot_and_lsn(&uri)
             .await
             .expect("export snapshot");
 
@@ -217,7 +217,7 @@ mod tests {
             }
         });
         let (snapshot_id, _lsn_at_export) = coord
-            .export_snapshot_and_lsn()
+            .export_snapshot_and_lsn(&uri)
             .await
             .expect("export snapshot");
 

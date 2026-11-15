@@ -255,7 +255,7 @@ impl PostgresSource {
         &mut self,
     ) -> Result<(String, PgLsn), PostgresSourceError> {
         self.replication_client
-            .export_snapshot_and_lsn()
+            .export_snapshot_and_lsn(&self.uri)
             .await
             .map_err(PostgresSourceError::ReplicationClient)
     }

@@ -27,6 +27,10 @@ pub struct SlotInfo {
 pub struct ReplicationClient {
     postgres_client: PostgresClient,
     in_txn: bool,
+    /// Replication session that exported the current snapshot from a temporary slot. Kept open
+    /// until the transaction ends: the snapshot stays importable only while it is idle, and closing
+    /// it drops the temporary slot.
+    snapshot_exporter: Option<(PostgresClient, tokio::task::JoinHandle<()>)>,
 }
 
 #[derive(Debug, Error)]
@@ -90,6 +94,7 @@ impl ReplicationClient {
             ReplicationClient {
                 postgres_client,
                 in_txn: false,
+                snapshot_exporter: None,
             },
             connection,
         ))
@@ -122,6 +127,7 @@ impl ReplicationClient {
         ReplicationClient {
             postgres_client,
             in_txn: false,
+            snapshot_exporter: None,
         }
     }
 
@@ -149,7 +155,15 @@ impl ReplicationClient {
             self.postgres_client.simple_query("commit;").await?;
             self.in_txn = false;
         }
+        self.release_snapshot_exporter();
         Ok(())
+    }
+
+    fn release_snapshot_exporter(&mut self) {
+        if let Some((client, task)) = self.snapshot_exporter.take() {
+            drop(client);
+            task.abort();
+        }
     }
 
     pub async fn rollback_txn(&mut self) -> Result<(), ReplicationClientError> {
@@ -157,6 +171,7 @@ impl ReplicationClient {
             self.postgres_client.simple_query("rollback;").await?;
             self.in_txn = false;
         }
+        self.release_snapshot_exporter();
         Ok(())
     }
 
@@ -235,23 +250,69 @@ impl ReplicationClient {
         Ok((stream, current_wal_lsn))
     }
 
-    /// Export a snapshot and capture the current WAL LSN. Keeps the transaction open.
+    /// Export a snapshot for the initial copy together with its exact replication position, and
+    /// open a read-only transaction on it. Keeps the transaction open.
+    ///
+    /// The snapshot comes from a temporary logical slot, so the returned LSN is the slot's
+    /// consistent point: transactions whose commit record starts before it are in the snapshot,
+    /// all later ones are not. `pg_current_wal_lsn()` next to `pg_export_snapshot()` is not such a
+    /// boundary (asynchronous commits become visible before their commit record is written, so they
+    /// ended up both copied and replayed). Creating the slot waits for transactions running at that
+    /// moment to finish.
     pub async fn export_snapshot_and_lsn(
         &mut self,
+        uri: &str,
     ) -> Result<(String, PgLsn), ReplicationClientError> {
-        // Begin a repeatable read, read-only transaction
-        self.postgres_client
-            .simple_query("begin read only isolation level repeatable read;")
-            .await?;
-        self.in_txn = true;
-
-        let lsn = self.get_current_wal_lsn().await?;
-        let row = self
-            .postgres_client
-            .query_one("SELECT pg_export_snapshot();", &[])
-            .await?;
-        let snapshot_id: String = row.get(0);
-        Ok((snapshot_id, lsn))
+        let (exporter, connection) = ReplicationClient::connect(uri, true).await?;
+        let connection_task = tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                debug!("snapshot exporter connection closed: {}", e);
+            }
+        });
+        let slot_name = format!("moonlink_copy_{}", uuid::Uuid::new_v4().simple());
+        let query = format!(
+            "CREATE_REPLICATION_SLOT {} TEMPORARY LOGICAL pgoutput EXPORT_SNAPSHOT",
+            quote_identifier(&slot_name)
+        );
+        let created = exporter.postgres_client.simple_query(&query).await;
+        let rows = match created {
+            Ok(rows) => rows,
+            Err(e) => {
+                connection_task.abort();
+                return Err(e.into());
+            }
+        };
+        let mut exported = None;
+        for message in rows {
+            if let SimpleQueryMessage::Row(row) = message {
+                let consistent_point: PgLsn = row
+                    .get("consistent_point")
+                    .ok_or(ReplicationClientError::MissingColumn(
+                        "consistent_point".to_string(),
+                        "create_replication_slot".to_string(),
+                    ))?
+                    .parse()
+                    .map_err(|_| ReplicationClientError::InvalidPgLsn)?;
+                let snapshot_name = row
+                    .get("snapshot_name")
+                    .ok_or(ReplicationClientError::MissingColumn(
+                        "snapshot_name".to_string(),
+                        "create_replication_slot".to_string(),
+                    ))?
+                    .to_string();
+                exported = Some((snapshot_name, consistent_point));
+            }
+        }
+        let Some((snapshot_name, consistent_point)) = exported else {
+            connection_task.abort();
+            return Err(ReplicationClientError::FailedToCreateSlot);
+        };
+        self.snapshot_exporter = Some((exporter.postgres_client, connection_task));
+        if let Err(e) = self.begin_with_snapshot(&snapshot_name).await {
+            self.release_snapshot_exporter();
+            return Err(e);
+        }
+        Ok((snapshot_name, consistent_point))
     }
 
     /// Begin a repeatable read, read-only transaction and import a snapshot.

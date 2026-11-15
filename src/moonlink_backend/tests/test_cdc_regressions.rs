@@ -16,6 +16,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serial_test::serial;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio_postgres::Client;
@@ -333,4 +334,94 @@ async fn database_name_that_is_not_a_valid_slot_name_can_be_mirrored() {
         .simple_query(r#"DROP DATABASE IF EXISTS "my-app" WITH (FORCE);"#)
         .await
         .unwrap();
+}
+
+/// The initial copy and the replication stream must meet at an exact boundary: with a concurrent
+/// writer using asynchronous commit, every row is in the mirror exactly once, whether or not the
+/// table had rows when the mirror was created.
+#[rstest::rstest]
+#[case::populated_table(20000)]
+#[case::empty_table(0)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn initial_copy_and_stream_apply_each_row_exactly_once(#[case] initial_rows: i64) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_copy; CREATE TABLE rv_copy (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_copy SELECT generate_series(1, {initial_rows});"
+    ))
+    .await;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (stop, uri) = (stop.clone(), uri.clone());
+        tokio::spawn(async move {
+            let (w, _) = connect_to_postgres(&uri).await;
+            w.simple_query("SET synchronous_commit = off;")
+                .await
+                .unwrap();
+            let mut id = 1_000_000i64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                w.simple_query(&format!("INSERT INTO rv_copy VALUES ({id});"))
+                    .await
+                    .unwrap();
+                id += 1;
+            }
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    mirror(&backend, &tmp, "rv_copy_mc", "public.rv_copy", &uri).await;
+    let copy_slots: i64 = client
+        .query_one(
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_copy_%'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        copy_slots, 0,
+        "temporary copy slot outlived the initial copy"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.await.unwrap();
+    // Let ingestion settle before scanning (see the read-path LSN ordering work).
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    client
+        .simple_query("INSERT INTO rv_copy VALUES (-1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let state = backend
+        .scan_table(DB.to_string(), "rv_copy_mc".to_string(), Some(lsn))
+        .await
+        .unwrap();
+    let counts = common::nonunique_ids_from_state(&state);
+    let source_ids: HashSet<i64> = client
+        .query("SELECT id FROM rv_copy", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<_, i64>(0))
+        .collect();
+    let duplicated: Vec<i64> = counts
+        .iter()
+        .filter(|(_, c)| **c > 1)
+        .map(|(i, _)| *i)
+        .collect();
+    let missing: Vec<i64> = source_ids
+        .iter()
+        .filter(|i| !counts.contains_key(i))
+        .copied()
+        .collect();
+    assert!(
+        duplicated.is_empty() && missing.is_empty() && counts.len() == source_ids.len(),
+        "{} duplicated (e.g. {:?}), {} missing (e.g. {:?}), mirror {} ids, source {} ids",
+        duplicated.len(),
+        &duplicated[..duplicated.len().min(5)],
+        missing.len(),
+        &missing[..missing.len().min(5)],
+        counts.len(),
+        source_ids.len()
+    );
 }

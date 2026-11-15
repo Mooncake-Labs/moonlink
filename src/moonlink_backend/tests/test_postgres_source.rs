@@ -516,14 +516,11 @@ mod tests {
             .await
             .expect("copy_table_stream");
 
-        if let Some(TableEvent::LoadFiles { files, .. }) = rx.recv().await {
-            assert!(
-                files.is_empty(),
-                "empty table should yield empty files list"
-            );
-        } else {
-            panic!("expected LoadFiles event");
-        }
+        // Nothing to load: an empty table must not produce a LoadFiles event.
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "empty table should not yield a LoadFiles event"
+        );
 
         ddl.simple_query(&format!("DROP TABLE IF EXISTS {fqtn};"))
             .await
