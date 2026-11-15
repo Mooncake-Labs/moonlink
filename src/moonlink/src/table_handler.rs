@@ -1019,8 +1019,26 @@ impl TableHandler {
             return;
         }
 
+        // A streamed transaction is never discarded above (its rows arrive before its LSN); one
+        // committed at or below the persisted/copy boundary is aborted when its commit is
+        // processed, so it must not move the LSNs either.
+        let streamed_below_boundary = match &event {
+            TableEvent::Commit {
+                lsn,
+                xact_id: Some(_),
+            }
+            | TableEvent::CommitFlush {
+                lsn,
+                xact_id: Some(_),
+            } => table_handler_state
+                .initial_persistence_lsn
+                .is_some_and(|boundary| *lsn <= boundary),
+            _ => false,
+        };
         // Don't update the lsn if the event is not processed yet.
-        table_handler_state.update_table_lsns(&event);
+        if !streamed_below_boundary {
+            table_handler_state.update_table_lsns(&event);
+        }
 
         match event {
             TableEvent::Append { row, xact_id, .. } => {

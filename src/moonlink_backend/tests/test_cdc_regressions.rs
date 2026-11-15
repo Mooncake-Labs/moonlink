@@ -3006,3 +3006,124 @@ async fn mirror_created_on_a_lagging_slot_does_not_apply_replayed_history() {
         .await
         .unwrap();
 }
+
+/// A streamed transaction (larger than logical_decoding_work_mem) committed inside an empty
+/// copy's boundary is dropped; it must not become the table's consistent view either, or
+/// create_snapshot of the idle mirror never completes.
+#[rstest::rstest]
+#[case::streamed(true)]
+#[case::control_not_streamed(false)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn empty_copy_with_a_streamed_boundary_commit_can_snapshot(#[case] streamed: bool) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_st, rv_st_by;
+         CREATE TABLE rv_st (id BIGINT PRIMARY KEY, pad TEXT);
+         CREATE TABLE rv_st_by (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    let work_mem = if streamed { "'64kB'" } else { "DEFAULT" };
+    // ALTER SYSTEM cannot run in the implicit transaction of a multi-statement query.
+    client
+        .simple_query(&format!(
+            "ALTER SYSTEM SET logical_decoding_work_mem = {work_mem};"
+        ))
+        .await
+        .unwrap();
+    client
+        .simple_query("SELECT pg_reload_conf();")
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_st_by_mc", "public.rv_st_by", &uri).await;
+    let (blocker, _) = connect_to_postgres(&uri).await;
+    blocker
+        .simple_query("BEGIN; SELECT txid_current();")
+        .await
+        .unwrap();
+
+    let backend = Arc::new(backend);
+    let b2 = backend.clone();
+    let cfg = table_config(&tmp);
+    let uri2 = uri.clone();
+    let create = tokio::spawn(async move {
+        b2.create_table(
+            DB.to_string(),
+            "rv_st_mc".to_string(),
+            "public.rv_st".to_string(),
+            uri2,
+            cfg,
+            None,
+        )
+        .await
+    });
+    let mut waiting = false;
+    for _ in 0..100 {
+        if count_copy_slots(&client).await > 0 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(waiting, "copy slot creation never started");
+    let streamed_before = stream_txns(&client).await;
+    client
+        .simple_query(
+            "BEGIN; INSERT INTO rv_st SELECT g, repeat('x', 100) FROM generate_series(1, 5000) g;
+             DELETE FROM rv_st; COMMIT;",
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    blocker.simple_query("COMMIT;").await.unwrap();
+    create.await.unwrap().unwrap();
+
+    client
+        .simple_query("INSERT INTO rv_st_by VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_st_by_mc", lsn).await, Some(vec![1]));
+    let streamed_after = stream_txns(&client).await;
+    client
+        .simple_query("ALTER SYSTEM RESET logical_decoding_work_mem;")
+        .await
+        .unwrap();
+    client
+        .simple_query("SELECT pg_reload_conf();")
+        .await
+        .unwrap();
+    eprintln!("rv11 streamed={streamed} stream_txns {streamed_before} -> {streamed_after}");
+    if streamed {
+        assert!(
+            streamed_after > streamed_before,
+            "the transaction was not streamed"
+        );
+    }
+    let scan = scan_rows(&backend, "rv_st_mc", lsn, "id", Duration::from_secs(20)).await;
+    assert_eq!(
+        scan,
+        Some(BTreeMap::new()),
+        "scan of the idle empty mirror did not complete"
+    );
+    let snapshot = tokio::time::timeout(
+        Duration::from_secs(30),
+        backend.create_snapshot(DB.to_string(), "rv_st_mc".to_string(), lsn),
+    )
+    .await;
+    assert!(
+        matches!(snapshot, Ok(Ok(_))),
+        "create_snapshot of the idle empty mirror did not complete: {snapshot:?}"
+    );
+}
+
+async fn stream_txns(client: &Client) -> i64 {
+    client
+        .query_one(
+            "SELECT coalesce(sum(stream_txns), 0)::bigint FROM pg_stat_replication_slots WHERE slot_name LIKE 'moonlink_slot%'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
