@@ -46,8 +46,9 @@ impl ListBuilderHelper {
     }
 
     pub fn append_null(&mut self) {
-        let cur = *self.offsets.last().unwrap_or(&0);
-        self.offsets.push(cur); // keeps child length unchanged
+        // A NULL list is an empty range starting where the values end now; pushing the previous
+        // row's start instead would leave that row empty.
+        self.offsets.push(self.inner.len() as i32);
         self.nulls.append_null();
         self.len += 1;
     }
@@ -587,6 +588,46 @@ mod tests {
         assert_eq!(second_int_array.len(), 2);
         assert_eq!(second_int_array.value(0), 4);
         assert_eq!(second_int_array.value(1), 5);
+    }
+
+    #[test]
+    fn test_column_array_builder_list_with_nulls() {
+        let list_type = DataType::List(Arc::new(arrow::datatypes::Field::new(
+            "item",
+            DataType::Int32,
+            /*nullable=*/ true,
+        )));
+        let mut builder = ColumnArrayBuilder::new(&list_type, /*capacity=*/ 5);
+        let ints = |v: &[i32]| RowValue::Array(v.iter().map(|i| RowValue::Int32(*i)).collect());
+        builder.append_value(&ints(&[1, 2, 3])).unwrap();
+        builder.append_value(&RowValue::Null).unwrap();
+        builder.append_value(&RowValue::Null).unwrap();
+        builder.append_value(&ints(&[4])).unwrap();
+        builder.append_value(&ints(&[])).unwrap();
+        builder.append_value(&RowValue::Null).unwrap();
+        let array = builder.finish(&list_type);
+
+        let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
+        let rows: Vec<Option<Vec<i32>>> = (0..list_array.len())
+            .map(|i| {
+                (!list_array.is_null(i)).then(|| {
+                    let values = list_array.value(i);
+                    let values = values.as_any().downcast_ref::<Int32Array>().unwrap();
+                    values.values().to_vec()
+                })
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                Some(vec![1, 2, 3]),
+                None,
+                None,
+                Some(vec![4]),
+                Some(vec![]),
+                None
+            ]
+        );
     }
 
     #[test]

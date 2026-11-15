@@ -3,9 +3,10 @@
 //! cargo test -p moonlink_backend --features test-utils --test test_cdc_regressions -- --test-threads=1
 mod common;
 
-use arrow::array::{Array, Int64Array, StringArray};
+use arrow::array::{Array, ArrayRef, Int64Array, StringArray};
 use arrow::compute::cast;
 use arrow::datatypes::DataType;
+use arrow::util::display::array_value_to_string;
 use common::{connect_to_postgres, current_wal_lsn, get_database_uri};
 use moonlink::decode_read_state_for_testing;
 use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
@@ -131,7 +132,19 @@ async fn scan_rows(
                 .downcast_ref::<Int64Array>()
                 .unwrap()
                 .clone();
-            let vals = cast(batch.column_by_name(col).unwrap(), &DataType::Utf8).unwrap();
+            let column = batch.column_by_name(col).unwrap();
+            // Nested values (lists, structs) have no cast to text; display them instead.
+            let vals = match column.data_type() {
+                DataType::List(_) | DataType::Struct(_) => {
+                    let text: Vec<Option<String>> = (0..column.len())
+                        .map(|i| {
+                            (!column.is_null(i)).then(|| array_value_to_string(column, i).unwrap())
+                        })
+                        .collect();
+                    Arc::new(StringArray::from(text)) as ArrayRef
+                }
+                _ => cast(column, &DataType::Utf8).unwrap(),
+            };
             let vals = vals.as_any().downcast_ref::<StringArray>().unwrap();
             for i in 0..batch.num_rows() {
                 if !deleted.contains(&(file_no as u32, row_no)) {
@@ -1393,4 +1406,53 @@ async fn startup_survives_a_dropped_source_database() {
         .await
         .unwrap()
         .contains("not found"));
+}
+
+/// Array values survive when NULL arrays follow them in the same batch, on the initial copy and
+/// via CDC.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn arrays_followed_by_null_keep_their_elements() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_arrays;
+         CREATE TABLE rv_arrays (id BIGINT PRIMARY KEY, a INT[], t TEXT[]);
+         INSERT INTO rv_arrays VALUES (1, '{1,2,3}', '{a,b}'), (2, NULL, NULL);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_arrays_mc", "public.rv_arrays", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_arrays VALUES (3, '{4,5}', '{c}'), (4, NULL, NULL), (5, '{}', '{}');",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let timeout = Duration::from_secs(30);
+    let expected = |values: [Option<&str>; 5]| -> BTreeMap<i64, Option<String>> {
+        (1..=5)
+            .zip(values)
+            .map(|(id, v)| (id, v.map(str::to_string)))
+            .collect()
+    };
+    assert_eq!(
+        scan_rows(&backend, "rv_arrays_mc", lsn, "a", timeout).await,
+        Some(expected([
+            Some("[1, 2, 3]"),
+            None,
+            Some("[4, 5]"),
+            None,
+            Some("[]")
+        ]))
+    );
+    assert_eq!(
+        scan_rows(&backend, "rv_arrays_mc", lsn, "t", timeout).await,
+        Some(expected([
+            Some("[a, b]"),
+            None,
+            Some("[c]"),
+            None,
+            Some("[]")
+        ]))
+    );
 }
