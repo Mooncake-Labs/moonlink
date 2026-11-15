@@ -62,6 +62,10 @@ pub enum ArrayParseError {
 
     #[error("missing braces")]
     MissingBraces,
+
+    /// Mirrors store one-dimensional arrays with default bounds only.
+    #[error("multi-dimensional arrays and arrays with explicit bounds are not supported")]
+    NotOneDimensional,
 }
 
 #[derive(Debug, Error)]
@@ -313,6 +317,10 @@ impl TextFormatConverter {
             return Err(ArrayParseError::InputTooShort.into());
         }
 
+        // Postgres prefixes arrays with non-default bounds with their dimensions: '[0:1]={1,2}'.
+        if str.starts_with('[') {
+            return Err(ArrayParseError::NotOneDimensional.into());
+        }
         if !str.starts_with('{') || !str.ends_with('}') {
             return Err(ArrayParseError::MissingBraces.into());
         }
@@ -353,6 +361,11 @@ impl TextFormatConverter {
                         '\\' => in_escape = true,
                         ',' if !in_quotes => {
                             break;
+                        }
+                        // Element values containing braces are quoted, so an unquoted brace
+                        // opens or closes a nested dimension ('{{1,2},{3,4}}').
+                        '{' | '}' if !in_quotes => {
+                            return Err(ArrayParseError::NotOneDimensional.into());
                         }
                         c => {
                             val_str.push(c);
@@ -507,6 +520,33 @@ impl TextFormatConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrays_that_are_not_one_dimensional_are_rejected() {
+        for (typ, text) in [
+            (Type::INT4_ARRAY, "{{1,2},{3,4}}"),
+            (Type::TEXT_ARRAY, "{{a,b},{c,d}}"),
+            (Type::INT4_ARRAY, "[0:1]={1,2}"),
+            (Type::TEXT_ARRAY, "[2:2]={x}"),
+        ] {
+            assert!(
+                matches!(
+                    TextFormatConverter::try_from_str(&typ, text),
+                    Err(FromTextError::InvalidArray(
+                        ArrayParseError::NotOneDimensional
+                    ))
+                ),
+                "{typ} {text}"
+            );
+        }
+        // Braces inside quoted elements are data, not dimensions.
+        match TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, r#"{"{a","b}"}"#).unwrap() {
+            Cell::Array(ArrayCell::String(values)) => {
+                assert_eq!(values, vec![Some("{a".to_string()), Some("b}".to_string())])
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {

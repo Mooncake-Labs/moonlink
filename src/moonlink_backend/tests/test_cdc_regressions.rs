@@ -1195,3 +1195,66 @@ async fn numeric_values_are_exact_or_error_the_mirror() {
         .expect("1e39 must error");
     assert!(big.contains("does not fit"), "{big}");
 }
+
+/// Arrays that are not one-dimensional with default bounds cannot be mirrored: a mirror that
+/// receives one is errored (never silently mangled or dropped together with its transaction),
+/// and creating a mirror of a table that holds one fails cleanly.
+#[rstest::rstest]
+#[case::int_array_2d("a", "'{{1,2},{3,4}}'")]
+#[case::text_array_2d("t", "'{{x,y},{z,w}}'")]
+#[case::explicit_bounds("a", "'[0:1]={1,2}'")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn arrays_that_are_not_one_dimensional_error_the_mirror(
+    #[case] column: &str,
+    #[case] value: &str,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_arr, rv_arr_copy, rv_bystander;
+         CREATE TABLE rv_arr (id BIGINT PRIMARY KEY, a INT[], t TEXT[]);
+         CREATE TABLE rv_arr_copy (id BIGINT PRIMARY KEY, a INT[], t TEXT[]);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_arr_mc", "public.rv_arr", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query(&format!(
+            "BEGIN;
+             INSERT INTO rv_arr (id, {column}) VALUES (1, {value});
+             INSERT INTO rv_arr VALUES (2, '{{5}}', '{{y}}');
+             INSERT INTO rv_bystander VALUES (1);
+             COMMIT;"
+        ))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    let err = snapshot_error(&backend, "rv_arr_mc", lsn)
+        .await
+        .expect("mirror must be errored");
+    assert!(err.contains("not supported"), "{err}");
+
+    client
+        .simple_query(&format!(
+            "INSERT INTO rv_arr_copy (id, {column}) VALUES (1, {value});"
+        ))
+        .await
+        .unwrap();
+    let err = try_mirror(&backend, &tmp, "rv_arr_copy_mc", "public.rv_arr_copy", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("not supported"), "{err}");
+}
