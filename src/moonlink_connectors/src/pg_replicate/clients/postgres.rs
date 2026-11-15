@@ -73,9 +73,11 @@ pub enum ReplicationClientError {
     FailedToCreateSlot,
 }
 
-/// Session settings for every copy and replication connection: one canonical text form for
-/// dates and timestamps.
-const CANONICAL_TEXT_OPTIONS: &str = "-c TimeZone=UTC -c DateStyle=ISO";
+/// Session settings for every copy and replication connection: one canonical, exact text form
+/// for dates and timestamps, floats (shortest exact output), intervals and bytea (hex), whatever
+/// the database or role defaults to. Postgres' own logical-replication worker pins the same.
+const CANONICAL_TEXT_OPTIONS: &str = "-c TimeZone=UTC -c DateStyle=ISO -c IntervalStyle=postgres \
+     -c extra_float_digits=3 -c bytea_output=hex";
 
 impl ReplicationClient {
     /// Connect to a postgres database in logical replication mode without TLS
@@ -91,9 +93,9 @@ impl ReplicationClient {
         if replication_mode {
             config.replication_mode(ReplicationMode::Logical);
         }
-        // Values are parsed from Postgres' text output (COPY and pgoutput), which follows the
-        // session's TimeZone and DateStyle: fix both, whatever the database or role defaults to
-        // (a local zone prints old timestamptz values with second-precision LMT offsets).
+        // Values are parsed from Postgres' text output (COPY and pgoutput), which follows session
+        // settings: a local zone prints old timestamptz values with LMT offsets, and
+        // extra_float_digits <= 0 rounds every float.
         let options = match config.get_options() {
             Some(existing) if !existing.is_empty() => {
                 format!("{existing} {CANONICAL_TEXT_OPTIONS}")

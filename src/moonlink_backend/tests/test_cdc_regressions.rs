@@ -4529,3 +4529,65 @@ async fn recreated_mirror_starts_from_the_source_alone(
         "after a restart"
     );
 }
+
+/// Floats and bytea replicate exactly whatever extra_float_digits and bytea_output the mirror's
+/// role or database defaults to (extra_float_digits <= 0 would print rounded floats, escape
+/// output would print bytea in another format).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn floats_and_bytea_replicate_whatever_the_session_output_settings() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_out;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_out_role') THEN
+             EXECUTE 'DROP OWNED BY rv_out_role'; DROP ROLE rv_out_role;
+           END IF;
+         END $$;
+         CREATE ROLE rv_out_role LOGIN SUPERUSER PASSWORD 'pwout';
+         ALTER ROLE rv_out_role SET extra_float_digits = 0;
+         ALTER ROLE rv_out_role SET bytea_output = 'escape';
+         ALTER ROLE rv_out_role SET IntervalStyle = 'sql_standard';
+         CREATE TABLE rv_out (id BIGINT PRIMARY KEY, f8 DOUBLE PRECISION, f4 REAL,
+             fa DOUBLE PRECISION[], b BYTEA);
+         INSERT INTO rv_out VALUES
+             (1, 3.141592653589793, 3.1415927, '{1.0000000000000002,0.30000000000000004}',
+              '\\xdeadbeef00ff'),
+             (2, 123456.78901234567, 0.1, '{}', '\\x');",
+    )
+    .await;
+    let role_uri = uri_for_user(&uri, "rv_out_role", "pwout");
+    mirror(&backend, &tmp, "rv_out_mc", "public.rv_out", &role_uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_out VALUES (3, 2.718281828459045, 2.7182817,
+                 '{12345678.123456789,NULL}', '\\x5c6e2700');
+             UPDATE rv_out SET f8 = 1.0000000000000002, b = '\\x01' WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_out_mc", lsn).await, None);
+    for (column, expected) in [
+        ("f8", "f8::text"),
+        ("f4", "f4::text"),
+        (
+            "fa",
+            "'[' || array_to_string(ARRAY(SELECT x::text FROM unnest(fa) x), ', ', '') || ']'",
+        ),
+        ("b", "encode(b, 'hex')"),
+    ] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {expected} FROM rv_out"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            scan_rows(&backend, "rv_out_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "column {column}"
+        );
+    }
+}
