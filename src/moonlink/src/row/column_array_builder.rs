@@ -46,8 +46,8 @@ impl ListBuilderHelper {
     }
 
     pub fn append_null(&mut self) {
-        // A NULL list is an empty range starting where the values end now; pushing the previous
-        // row's start instead would leave that row empty.
+        // A null list starts (and ends) where the child values end; reusing the previous list's
+        // start offset would empty that list.
         self.offsets.push(self.inner.len() as i32);
         self.nulls.append_null();
         self.len += 1;
@@ -1453,5 +1453,38 @@ mod tests {
         assert_eq!(map_array.len(), 2);
         assert_eq!(map_array.value(0).len(), 1);
         assert_eq!(map_array.value(1).len(), 2);
+    }
+
+    #[test]
+    fn test_null_list_keeps_previous_list() {
+        let dt = DataType::List(Arc::new(arrow::datatypes::Field::new(
+            "item",
+            DataType::Int32,
+            true,
+        )));
+        let mut builder = ColumnArrayBuilder::new(&dt, 3);
+        builder
+            .append_value(&RowValue::Array(vec![
+                RowValue::Int32(1),
+                RowValue::Int32(2),
+            ]))
+            .unwrap();
+        builder.append_value(&RowValue::Null).unwrap();
+        builder
+            .append_value(&RowValue::Array(vec![RowValue::Int32(3)]))
+            .unwrap();
+        let array = builder.finish(&dt);
+        let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+        let values = |i: usize| {
+            list.value(i)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+        assert_eq!(values(0), vec![1, 2]);
+        assert!(list.is_null(1));
+        assert_eq!(values(2), vec![3]);
     }
 }
