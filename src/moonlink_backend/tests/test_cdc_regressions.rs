@@ -1625,3 +1625,33 @@ async fn json_values_are_stored_as_postgres_prints_them() {
         );
     }
 }
+
+/// Elements of numeric(p,s) arrays keep their value, on the copy and via CDC.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn numeric_array_elements_keep_their_value() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_num_arr;
+         CREATE TABLE rv_num_arr (id BIGINT PRIMARY KEY, a NUMERIC(5, 2)[], u NUMERIC[]);
+         INSERT INTO rv_num_arr VALUES (1, '{1.50,-0.01,NULL}', '{1.5,42}');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_num_arr_mc", "public.rv_num_arr", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_num_arr VALUES (2, '{999.99}', '{-0.0000000001}');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let timeout = Duration::from_secs(30);
+    let a = scan_rows(&backend, "rv_num_arr_mc", lsn, "a", timeout)
+        .await
+        .unwrap();
+    let u = scan_rows(&backend, "rv_num_arr_mc", lsn, "u", timeout)
+        .await
+        .unwrap();
+    assert_eq!(a[&1].as_deref(), Some("[1.5000000000, -0.0100000000, ]"));
+    assert_eq!(a[&2].as_deref(), Some("[999.9900000000]"));
+    assert_eq!(u[&1].as_deref(), Some("[1.5000000000, 42.0000000000]"));
+    assert_eq!(u[&2].as_deref(), Some("[-0.0000000001]"));
+}

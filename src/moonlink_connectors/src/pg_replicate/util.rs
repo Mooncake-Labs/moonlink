@@ -73,10 +73,12 @@ pub(crate) fn normalize_numeric_cell(
 ) -> Result<Cell, String> {
     Ok(match cell {
         Cell::Numeric(value) => Cell::Numeric(normalize_numeric(value, modifier)?),
+        // The list item field is built without the column's typmod (unconstrained), so elements
+        // are scaled to that, not to the declared scale.
         Cell::Array(ArrayCell::Numeric(values)) => Cell::Array(ArrayCell::Numeric(
             values
                 .into_iter()
-                .map(|v| v.map(|v| normalize_numeric(v, modifier)).transpose())
+                .map(|v| v.map(|v| normalize_numeric(v, -1)).transpose())
                 .collect::<Result<_, _>>()?,
         )),
         Cell::Composite(values) => Cell::Composite(normalize_composite_fields(typ, values)?),
@@ -542,9 +544,29 @@ mod tests {
         // Declared precision and scale.
         assert_eq!(decimal("12.5", typmod(20, 5)), Ok(1_250_000));
         assert!(decimal("1.000001", typmod(20, 5)).is_err());
-        // Arrays are normalized element by element.
-        let array = Cell::Array(ArrayCell::Numeric(vec![Some("2.5".parse().unwrap()), None]));
-        assert!(normalize_numeric_cell(&Type::NUMERIC_ARRAY, typmod(10, 2), array).is_ok());
+        // Array elements are scaled to the list item field, decimal(38, 10), whatever the
+        // column's typmod.
+        let array = Cell::Array(ArrayCell::Numeric(vec![
+            Some("2.50".parse().unwrap()),
+            None,
+        ]));
+        match normalize_numeric_cell(&Type::NUMERIC_ARRAY, typmod(10, 2), array).unwrap() {
+            Cell::Array(ArrayCell::Numeric(values)) => match &values[..] {
+                [Some(PgNumeric::Value(v)), None] => {
+                    assert_eq!(v.as_bigint_and_exponent(), (25_000_000_000i64.into(), 10))
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+        let item =
+            postgres_type_to_arrow_type(&Type::NUMERIC_ARRAY, typmod(10, 2), "a", true, &mut 0)
+                .ok()
+                .unwrap();
+        match item.data_type() {
+            DataType::List(item) => assert_eq!(item.data_type(), &DataType::Decimal128(38, 10)),
+            other => panic!("unexpected {other:?}"),
+        }
         let bad = Cell::Array(ArrayCell::Numeric(vec![Some("NaN".parse().unwrap())]));
         assert!(normalize_numeric_cell(&Type::NUMERIC_ARRAY, -1, bad).is_err());
     }
