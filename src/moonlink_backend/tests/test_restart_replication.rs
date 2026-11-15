@@ -6,7 +6,8 @@ mod common;
 mod tests {
     use super::common::{
         confirmed_flush_lsn, connect_to_postgres, create_backend_from_base_path, current_wal_lsn,
-        get_database_uri, get_serialized_table_config, scan_id_counts, setup_backend, DATABASE,
+        get_database_uri, get_serialized_table_config, id_counts_from_state_with_deletes,
+        scan_id_counts, setup_backend, DATABASE,
     };
     use moonlink_backend::MoonlinkBackend;
     use serial_test::serial;
@@ -358,6 +359,81 @@ mod tests {
     #[serial]
     async fn reconnect_mid_streamed_transaction_applies_it_once() {
         reconnect_mid_transaction(true).await;
+    }
+
+    /// Large streamed UPDATEs of persisted rows, each followed by a replication reconnect while it
+    /// may still be delivered (`reconnect`) or not: postgres re-sends an interrupted one under the
+    /// same xid after the first attempt is aborted, and every row must end up updated exactly once
+    /// (a lost delete leaves a duplicate, a lost insert a gap).
+    async fn streamed_updates(reconnect: bool) {
+        let (ctl, _h) = connect_to_postgres(&get_database_uri()).await;
+        ctl.simple_query("ALTER SYSTEM SET logical_decoding_work_mem = '64kB'")
+            .await
+            .unwrap();
+        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        client
+            .simple_query(
+                "DROP TABLE IF EXISTS rr_pk; CREATE TABLE rr_pk (id BIGINT PRIMARY KEY, name TEXT);",
+            )
+            .await
+            .unwrap();
+        create_mirror(&backend, &tmp, TABLE_A, "rr_pk").await;
+        const N: i64 = 100_000;
+        let lsn = insert_range(&client, "rr_pk", 1, N).await;
+        persist(&backend, TABLE_A, lsn).await;
+
+        let mut failures = Vec::new();
+        for (round, delay_ms) in [0u64, 50, 150, 400].into_iter().enumerate() {
+            client
+                .simple_query(&format!("UPDATE rr_pk SET name = 'round {round}';"))
+                .await
+                .unwrap();
+            let lsn = current_wal_lsn(&client).await;
+            if reconnect {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                terminate_walsender(&client).await;
+            }
+            // The table task dies on a lost stream state, and the scan would wait forever.
+            let state = tokio::time::timeout(
+                Duration::from_secs(120),
+                backend.scan_table(DATABASE.to_string(), TABLE_A.to_string(), Some(lsn)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: the mirror stopped applying changes"))
+            .unwrap();
+            let got = id_counts_from_state_with_deletes(&state).await;
+            let dups = got.values().filter(|c| **c > 1).count();
+            let missing = (1..=N).filter(|id| !got.contains_key(id)).count();
+            if dups > 0 || missing > 0 {
+                failures.push(format!(
+                    "delay {delay_ms}ms: {dups} duplicated ids, {missing} missing ids"
+                ));
+            }
+        }
+        cleanup(&backend, &[TABLE_A]).await;
+        ctl.simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
+            .await
+            .unwrap();
+        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+        assert!(
+            failures.is_empty(),
+            "reconnect={reconnect}, ids 1..={N}: {failures:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn reconnect_mid_streamed_update_applies_it_once() {
+        streamed_updates(true).await;
+    }
+
+    /// Control: the same streamed UPDATEs without a reconnect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn streamed_update_applies_it_once() {
+        streamed_updates(false).await;
     }
 
     /// After a restart, an errored mirror is restored as a placeholder and named by the periodic

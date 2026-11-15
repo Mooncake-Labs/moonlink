@@ -344,8 +344,16 @@ pub async fn crash_and_recover_backend(
 /// Extract primary-key IDs from `read_state` **after applying deletion vectors and position deletes**.
 #[allow(dead_code)]
 pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64> {
+    id_counts_from_state_with_deletes(read_state)
+        .await
+        .into_keys()
+        .collect()
+}
+
+/// Count the rows per primary-key ID in `read_state` after applying its deletions.
+#[allow(dead_code)]
+pub async fn id_counts_from_state_with_deletes(read_state: &ReadState) -> HashMap<i64, u64> {
     let (data_files, position_deletes) = data_files_and_deleted_rows(read_state).await;
-    // Apply position deletes to get final set of IDs
     apply_position_deletes_to_files(&data_files, &position_deletes)
 }
 
@@ -414,7 +422,7 @@ fn parse_deletion_vector_blob(blob_data: &[u8]) -> Vec<u64> {
 fn apply_position_deletes_to_files(
     data_files: &[String],
     position_deletes: &[PositionDelete],
-) -> HashSet<i64> {
+) -> HashMap<i64, u64> {
     // Group deletes by file index
     let mut deletes_by_file: std::collections::HashMap<u32, HashSet<u32>> =
         std::collections::HashMap::new();
@@ -439,7 +447,7 @@ fn apply_position_deletes_to_files(
             .insert(*row_index);
     }
 
-    let mut result = HashSet::new();
+    let mut result = HashMap::new();
     for (file_index, file_path) in data_files.iter().enumerate() {
         let ids = read_ids_from_parquet(file_path);
         let deletes = deletes_by_file.get(&(file_index as u32));
@@ -448,7 +456,7 @@ fn apply_position_deletes_to_files(
             if let Some(id) = id_opt {
                 // Only include the ID if it's not in the delete set for this file
                 if deletes.is_none_or(|d| !d.contains(&(row_index as u32))) {
-                    result.insert(id);
+                    *result.entry(id).or_insert(0) += 1;
                 }
             }
         }
