@@ -235,6 +235,11 @@ impl ReplicationConnection {
         Ok(src_table_id)
     }
 
+    /// The oid of a source table, if it exists.
+    pub async fn source_table_oid(&mut self, src_table_name: &str) -> Result<Option<SrcTableId>> {
+        self.source.source_table_oid(src_table_name).await
+    }
+
     /// Whether a mirror served by this connection replicates the source table `src_table_name`.
     pub async fn mirrors_source_table(&mut self, src_table_name: &str) -> Result<bool> {
         let Some(oid) = self.source.source_table_oid(src_table_name).await? else {

@@ -135,30 +135,39 @@ impl ReplicationManager {
         self.get_or_create_connection(src_uri).await?;
         // Before replication can confirm anything for a new connection.
         self.refresh_slot_holds();
-        let replication_connection = self.connections.get_mut(&key).unwrap();
-        if replication_connection.uri() != src_uri {
-            crate::pg_replicate::check_role_can_read_table(src_uri, table_name).await?;
-        }
-        if !replication_connection.replication_started() {
-            replication_connection.start_replication().await?;
-        }
-
-        let added = replication_connection
-            .add_table_replication(
-                table_name,
-                &mooncake_table_id,
-                moonlink_table_config,
-                read_state_filepath_remap,
-                is_recovery,
-            )
-            .await;
+        let added = match self
+            .check_can_add(&key, src_uri, table_name, is_recovery)
+            .await
+        {
+            Ok(()) => {
+                let replication_connection = self.connections.get_mut(&key).unwrap();
+                if !replication_connection.replication_started() {
+                    replication_connection.start_replication().await?;
+                }
+                replication_connection
+                    .add_table_replication(
+                        table_name,
+                        &mooncake_table_id,
+                        moonlink_table_config,
+                        read_state_filepath_remap,
+                        is_recovery,
+                    )
+                    .await
+            }
+            Err(e) => Err(e),
+        };
         let src_table_id = match added {
             Ok(src_table_id) => src_table_id,
             Err(e) => {
                 // A failed first mirror must not leave a replication slot behind that holds the
-                // source's WAL forever.
-                if replication_connection.table_count() == 0 && !is_recovery {
-                    self.shutdown_connection_by_key(&key, true);
+                // source's WAL forever (unless a mirror waiting to be restored needs it).
+                let connection = self.connections.get(&key).unwrap();
+                if connection.table_count() == 0 && !is_recovery {
+                    let still_needed = self
+                        .pending_recoveries
+                        .values()
+                        .any(|uri| self.uri_matches_key(uri, &key));
+                    self.shutdown_connection_by_key(&key, !still_needed);
                 }
                 return Err(e);
             }
@@ -171,6 +180,51 @@ impl ReplicationManager {
 
         debug!(src_table_id, "table added through manager");
 
+        Ok(())
+    }
+
+    /// Checks before adding a table through the connection of `key`: a second connection string
+    /// must be able to read the table itself, and a source table whose old mirror is still an
+    /// errored (or pending) placeholder must have that dropped first: a new mirror next to it
+    /// could re-apply history the slot replays for the old one.
+    async fn check_can_add(
+        &mut self,
+        key: &str,
+        src_uri: &str,
+        table_name: &str,
+        is_recovery: bool,
+    ) -> Result<()> {
+        let connection_uri = self.connections.get(key).unwrap().uri().to_string();
+        if connection_uri != src_uri {
+            crate::pg_replicate::check_role_can_read_table(src_uri, table_name).await?;
+        }
+        if is_recovery {
+            return Ok(());
+        }
+        let placeholders: Vec<(MooncakeTableId, String)> = self
+            .errored_tables
+            .iter()
+            .filter(|(_, errored)| self.uri_matches_key(&errored.src_uri, key))
+            .map(|(id, errored)| (id.clone(), errored.src_table_name.clone()))
+            .collect();
+        if placeholders.is_empty() {
+            return Ok(());
+        }
+        let connection = self.connections.get_mut(key).unwrap();
+        let Some(oid) = connection.source_table_oid(table_name).await? else {
+            return Ok(());
+        };
+        for (old_mirror, old_table) in placeholders {
+            if connection.source_table_oid(&old_table).await? == Some(oid) {
+                return Err(Error::unsupported_source_table(
+                    table_name,
+                    &format!(
+                        "its earlier mirror {old_mirror} is errored; drop that mirror first, then \
+                         create the new one"
+                    ),
+                ));
+            }
+        }
         Ok(())
     }
 
