@@ -344,6 +344,17 @@ pub async fn crash_and_recover_backend(
 /// Extract primary-key IDs from `read_state` **after applying deletion vectors and position deletes**.
 #[allow(dead_code)]
 pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64> {
+    let (data_files, position_deletes) = data_files_and_deleted_rows(read_state).await;
+    // Apply position deletes to get final set of IDs
+    apply_position_deletes_to_files(&data_files, &position_deletes)
+}
+
+/// The data files of `read_state` and every deleted row in them: its position deletes plus the
+/// rows of its deletion vectors (puffin blobs).
+#[allow(dead_code)]
+pub async fn data_files_and_deleted_rows(
+    read_state: &ReadState,
+) -> (Vec<String>, Vec<PositionDelete>) {
     use iceberg::io::FileIOBuilder;
     use iceberg::puffin::PuffinReader;
 
@@ -376,9 +387,7 @@ pub async fn ids_from_state_with_deletes(read_state: &ReadState) -> HashSet<i64>
             }));
         }
     }
-
-    // Apply position deletes to get final set of IDs
-    apply_position_deletes_to_files(&data_files, &position_deletes)
+    (data_files, position_deletes)
 }
 
 /// Parse deletion vector blob data to extract deleted row indices.

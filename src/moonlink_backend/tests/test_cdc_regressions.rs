@@ -8,7 +8,6 @@ use arrow::compute::cast;
 use arrow::datatypes::DataType;
 use arrow::util::display::array_value_to_string;
 use common::{connect_to_postgres, current_wal_lsn, get_database_uri};
-use moonlink::decode_read_state_for_testing;
 use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_backend::MoonlinkBackend;
 use moonlink_connectors::pg_replicate::PostgresConnection;
@@ -91,8 +90,8 @@ async fn mirror(backend: &MoonlinkBackend, tmp: &TempDir, dst: &str, src: &str, 
         .unwrap();
 }
 
-/// Visible rows of the mirror as id -> value of `col` (cast to string), applying in-memory
-/// position deletes. Returns None if the scan does not complete within `timeout`.
+/// Visible rows of the mirror as id -> value of `col` (cast to string), applying position deletes
+/// and deletion vectors. Returns None if the scan does not complete within `timeout`.
 async fn scan_rows(
     backend: &MoonlinkBackend,
     dst: &str,
@@ -107,11 +106,7 @@ async fn scan_rows(
     .await
     .ok()?
     .unwrap();
-    let (files, puffins, _dvs, pos_deletes) = decode_read_state_for_testing(&state);
-    assert!(
-        puffins.is_empty(),
-        "test helper does not decode deletion vectors"
-    );
+    let (files, pos_deletes) = common::data_files_and_deleted_rows(&state).await;
     let deleted: HashSet<(u32, u32)> = pos_deletes
         .iter()
         .map(|d| (d.data_file_number, d.data_file_row_number))
