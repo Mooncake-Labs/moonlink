@@ -20,8 +20,8 @@ impl MoonlinkRow {
         Self { values }
     }
 
-    /// Convert an arrow RecordBatch into moonlink rows.
-    pub fn from_record_batch(batch: &RecordBatch) -> Vec<MoonlinkRow> {
+    /// Convert an arrow RecordBatch into moonlink rows; fails on column types rows cannot hold.
+    pub fn from_record_batch(batch: &RecordBatch) -> crate::Result<Vec<MoonlinkRow>> {
         arrow_converter::record_batch_to_moonlink_row(batch)
     }
 

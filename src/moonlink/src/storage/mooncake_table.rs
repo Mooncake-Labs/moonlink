@@ -788,13 +788,22 @@ impl MooncakeTable {
         for data_file in snapshot.disk_files.keys() {
             let index_file_id = *next_file_id as u64;
             *next_file_id += 1;
-            let index = Self::build_index_for_files(
-                vec![data_file.clone()],
-                identity.clone(),
-                table_metadata.path.clone(),
-                index_file_id,
-            )
+            // A panic here would abort the whole service start, not just this table.
+            let index = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                Self::build_index_for_files(
+                    vec![data_file.clone()],
+                    identity.clone(),
+                    table_metadata.path.clone(),
+                    index_file_id,
+                ),
+            ))
             .await
+            .unwrap_or_else(|payload| {
+                Err(crate::Error::from(std::io::Error::other(format!(
+                    "panic: {}",
+                    crate::storage::task_supervisor::panic_message(payload.as_ref())
+                ))))
+            })
             .map_err(|e| {
                 crate::Error::table_errored(&crate::Error::errored_table_message(
                     &table_metadata.mooncake_table_id,
