@@ -398,8 +398,9 @@ mod postgres {
     }
 
     /// Two overlapping scans of one table on one connection (two transactions of a catalog
-    /// connection) across a snapshot change: neither Begin nor the first End releases the files
-    /// of the scan that is still open, and the last End releases everything.
+    /// connection) across a snapshot change: neither the second Begin nor the first End releases
+    /// any of their files (the server cannot tell which scan an End is for), and the last End
+    /// releases them.
     #[tokio::test]
     #[serial]
     async fn test_overlapping_scans_of_one_table_keep_their_files() {
@@ -461,8 +462,8 @@ mod postgres {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
-            all_exist(&first_files) || all_exist(&payload_files(&second)),
-            "one ScanTableEnd released both open scans"
+            all_exist(&first_files) && all_exist(&payload_files(&second)),
+            "the first ScanTableEnd released files of a scan that may still be open"
         );
         moonlink_rpc::scan_table_end(&mut stream, DATABASE.to_string(), table.to_string())
             .await

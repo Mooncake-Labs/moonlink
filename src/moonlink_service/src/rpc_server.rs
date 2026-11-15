@@ -80,6 +80,62 @@ pub async fn start_unix_server(
 /// Bound on concurrently open scans of one table per connection.
 const MAX_OPEN_SCANS_PER_TABLE: usize = 64;
 
+/// Open scans of one connection.
+///
+/// The protocol has no scan id: a ScanTableEnd cannot say which of several open scans of a table
+/// it ends, and releasing the wrong one deletes files a query is still reading. So every read
+/// state of a table stays alive until as many Ends as Begins arrived for it (or the connection
+/// closes). The bound refuses further Begins instead of releasing an open scan.
+#[derive(Default)]
+struct OpenScans {
+    tables: HashMap<(String, String), TableScans>,
+}
+
+struct TableScans {
+    /// Begins without a matching End.
+    open: usize,
+    /// Distinct read states handed out since the table had no open scan.
+    states: Vec<Arc<moonlink::ReadState>>,
+}
+
+impl OpenScans {
+    /// Register a scan whose payload is about to be sent. Fails, keeping every open scan, if the
+    /// table already has [`MAX_OPEN_SCANS_PER_TABLE`] open scans on this connection.
+    fn begin(&mut self, key: (String, String), state: Arc<moonlink::ReadState>) -> bool {
+        let scans = self.tables.entry(key).or_insert_with(|| TableScans {
+            open: 0,
+            states: Vec::new(),
+        });
+        if scans.open >= MAX_OPEN_SCANS_PER_TABLE {
+            return false;
+        }
+        scans.open += 1;
+        if !scans.states.iter().any(|s| Arc::ptr_eq(s, &state)) {
+            scans.states.push(state);
+        }
+        true
+    }
+
+    /// End one scan of the table; returns false if it had none open.
+    fn end(&mut self, key: &(String, String)) -> bool {
+        let Some(scans) = self.tables.get_mut(key) else {
+            return false;
+        };
+        scans.open -= 1;
+        if scans.open == 0 {
+            self.tables.remove(key);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn held(&self, key: &(String, String)) -> (usize, usize) {
+        self.tables
+            .get(key)
+            .map_or((0, 0), |scans| (scans.open, scans.states.len()))
+    }
+}
+
 /// Largest request frame accepted. Real requests are a few hundred bytes; the cap stops a
 /// garbage length prefix from allocating up to 4 GiB.
 const MAX_REQUEST_FRAME_BYTES: usize = 64 << 20;
@@ -177,9 +233,7 @@ where
 {
     // Split so a pending ScanTableBegin can notice the peer closing while it waits for an LSN.
     let (mut reader, mut stream) = tokio::io::split(stream);
-    // Open scans per table. A client may overlap scans of one table (two transactions on one
-    // connection); each ScanTableEnd releases one of them, which one does not matter.
-    let mut open_scans: HashMap<(String, String), Vec<_>> = HashMap::new();
+    let mut open_scans = OpenScans::default();
     loop {
         let request = match read_request(&mut reader).await? {
             Incoming::Request(request) => request,
@@ -306,17 +360,21 @@ where
                 };
                 match scan_result.map_err(into_error_struct) {
                     Ok(state) => {
-                        let res: RpcResult<ScanTableBeginResponse> = Ok(state.data.clone());
+                        let payload = state.data.clone();
                         // Register before replying so the files stay pinned while the client reads them.
-                        let scans = open_scans
-                            .entry((database.clone(), table.clone()))
-                            .or_default();
-                        if scans.len() >= MAX_OPEN_SCANS_PER_TABLE {
-                            // A client that never ends its scans would otherwise pin files forever.
-                            warn!("more than {MAX_OPEN_SCANS_PER_TABLE} open scans of {database}.{table} on one connection; releasing the oldest");
-                            scans.remove(0);
-                        }
-                        scans.push(state);
+                        let res: RpcResult<ScanTableBeginResponse> = if open_scans
+                            .begin((database.clone(), table.clone()), state)
+                        {
+                            Ok(payload)
+                        } else {
+                            warn!("{MAX_OPEN_SCANS_PER_TABLE} scans of {database}.{table} are open on one connection; refusing another");
+                            Err(ErrorStruct::new(
+                                    format!(
+                                        "too many open scans of {database}.{table} on this connection (at most {MAX_OPEN_SCANS_PER_TABLE}); end some first"
+                                    ),
+                                    ErrorStatus::Permanent,
+                                ))
+                        };
                         write(&mut stream, &res).await?;
                     }
                     Err(err) => {
@@ -327,18 +385,8 @@ where
             }
             Request::ScanTableEnd { database, table } => {
                 // Idempotent: duckdb_mooncake ignores ScanTableEnd errors anyway.
-                let key = (database, table);
-                match open_scans.get_mut(&key) {
-                    Some(scans) => {
-                        scans.pop();
-                        if scans.is_empty() {
-                            open_scans.remove(&key);
-                        }
-                    }
-                    None => debug!(
-                        "ScanTableEnd for {}.{} without a matching ScanTableBegin",
-                        key.0, key.1
-                    ),
+                if !open_scans.end(&(database.clone(), table.clone())) {
+                    debug!("ScanTableEnd for {database}.{table} without a matching ScanTableBegin");
                 }
                 write(&mut stream, &RpcResult::<ScanTableEndResponse>::Ok(())).await?;
             }
@@ -648,6 +696,85 @@ mod tests {
             .await
             .unwrap();
         pg::drop_source_table(&pg_client, table).await;
+    }
+}
+
+#[cfg(test)]
+mod open_scans_tests {
+    use super::{OpenScans, MAX_OPEN_SCANS_PER_TABLE};
+    use std::sync::Arc;
+
+    fn read_state() -> Arc<moonlink::ReadState> {
+        Arc::new(moonlink::ReadState::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            Arc::new(|path| path),
+        ))
+    }
+
+    fn key() -> (String, String) {
+        ("db".to_string(), "t".to_string())
+    }
+
+    /// Ending one of two overlapping scans keeps both read states; the last End releases them.
+    #[tokio::test]
+    async fn read_states_live_until_the_last_end() {
+        let mut scans = OpenScans::default();
+        let (first, second) = (read_state(), read_state());
+        assert!(scans.begin(key(), first.clone()));
+        assert!(scans.begin(key(), second.clone()));
+        assert!(scans.end(&key()));
+        assert_eq!(scans.held(&key()), (1, 2), "one End released an open scan");
+        assert_eq!(Arc::strong_count(&first), 2);
+        assert_eq!(Arc::strong_count(&second), 2);
+        assert!(scans.end(&key()));
+        assert_eq!(scans.held(&key()), (0, 0));
+        assert_eq!(
+            Arc::strong_count(&first),
+            1,
+            "the last End must release every scan"
+        );
+        assert_eq!(Arc::strong_count(&second), 1);
+        assert!(!scans.end(&key()), "End without Begin");
+    }
+
+    /// Begins that got the same cached read state store it once.
+    #[tokio::test]
+    async fn a_shared_read_state_is_held_once() {
+        let mut scans = OpenScans::default();
+        let state = read_state();
+        assert!(scans.begin(key(), state.clone()));
+        assert!(scans.begin(key(), state.clone()));
+        assert_eq!(scans.held(&key()), (2, 1));
+        assert!(scans.end(&key()));
+        assert_eq!(scans.held(&key()), (1, 1));
+    }
+
+    /// At the bound, a further Begin is refused and no open scan is released.
+    #[tokio::test]
+    async fn the_bound_refuses_begins_instead_of_releasing_scans() {
+        let mut scans = OpenScans::default();
+        let states: Vec<_> = (0..MAX_OPEN_SCANS_PER_TABLE)
+            .map(|_| read_state())
+            .collect();
+        for state in &states {
+            assert!(scans.begin(key(), state.clone()));
+        }
+        assert!(!scans.begin(key(), read_state()));
+        assert_eq!(
+            scans.held(&key()),
+            (MAX_OPEN_SCANS_PER_TABLE, MAX_OPEN_SCANS_PER_TABLE)
+        );
+        assert!(states.iter().all(|s| Arc::strong_count(s) == 2));
+        assert!(scans.end(&key()));
+        assert!(
+            scans.begin(key(), read_state()),
+            "a slot frees up after an End"
+        );
     }
 }
 
