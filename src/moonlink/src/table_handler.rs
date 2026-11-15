@@ -254,6 +254,11 @@ impl TableHandler {
                         storage_config,
                         lsn,
                     } => {
+                        if table_handler_state.special_table_state == SpecialTableState::InitialCopy
+                            && !files.is_empty()
+                        {
+                            table_handler_state.initial_copy_loaded_files = true;
+                        }
                         table.batch_ingest(files, storage_config, lsn).await;
                     }
 

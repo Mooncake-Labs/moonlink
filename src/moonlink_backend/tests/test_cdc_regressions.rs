@@ -1035,3 +1035,42 @@ async fn partitioned_source_replicates_updates_and_deletes(#[case] columns: &str
         Some(vec![7])
     );
 }
+
+/// A mirror whose source never changes after creation (here: still empty) must be readable at
+/// any later LSN, e.g. the reader's own last commit to another table.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn idle_empty_mirror_is_readable_at_later_lsn() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_empty, rv_bystander;
+         CREATE TABLE rv_empty (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_empty_mc", "public.rv_empty", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query("INSERT INTO rv_bystander VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    let empty = scan_rows(&backend, "rv_empty_mc", lsn, "id", Duration::from_secs(20)).await;
+    assert_eq!(
+        empty,
+        Some(BTreeMap::new()),
+        "scan of the idle mirror did not complete"
+    );
+    assert_eq!(snapshot_error(&backend, "rv_empty_mc", lsn).await, None);
+}

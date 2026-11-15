@@ -453,12 +453,16 @@ impl PostgresConnection {
             error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
         }
 
-        // Notify read state manager with the commit LSN for the initial copy boundary.
-        mark_copy_boundary(
-            commit_lsn_tx.as_ref(),
-            self.replication_state.as_ref(),
-            progress.boundary_lsn.into(),
-        );
+        // Readers may treat the boundary as the table's commit LSN only once the copied rows are in
+        // a snapshot at that LSN. An empty copy loads nothing, so no such snapshot is ever created;
+        // publishing the boundary would make every later read wait for the table's next write.
+        if progress.rows_copied > 0 {
+            mark_copy_boundary(
+                commit_lsn_tx.as_ref(),
+                self.replication_state.as_ref(),
+                progress.boundary_lsn.into(),
+            );
+        }
 
         Ok(true)
     }
