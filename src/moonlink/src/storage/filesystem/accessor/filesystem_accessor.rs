@@ -454,6 +454,8 @@ impl BaseFileSystemAccess for FileSystemAccessor {
 
         // Wait for reader task to finish.
         reader_task_handle.await??;
+        // Make the new directory entry durable before metadata referencing the file is written.
+        self.sync_parent_directory(dst).await?;
 
         Ok(ObjectMetadata { size: total_size })
     }
