@@ -10,6 +10,8 @@
 //!    (without reader information: once a grace period has passed).
 use crate::storage::table::iceberg::file_catalog::VERSION_HINT_FILENAME;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
+use crate::storage::table::iceberg::index::FileIndexBlob;
+use crate::storage::table::iceberg::utils;
 use crate::Result;
 
 use iceberg::spec::TableMetadata;
@@ -187,10 +189,13 @@ fn metadata_version(name: &str) -> Option<u32> {
 }
 
 impl IcebergTableManager {
-    /// File names (unique per table) the current snapshot of `metadata` references.
+    /// File names (unique per table) the current snapshot of `metadata` references. Index block
+    /// files are referenced from inside the file index puffin blobs, which are only read with
+    /// `with_index_blocks` (the loaded version's blocks are known without reading them).
     async fn referenced_files(
         metadata: &TableMetadata,
         file_io: &iceberg::io::FileIO,
+        with_index_blocks: bool,
     ) -> Result<HashSet<String>> {
         let mut referenced = HashSet::new();
         let Some(snapshot) = metadata.current_snapshot() else {
@@ -203,27 +208,38 @@ impl IcebergTableManager {
             let manifest = manifest_file.load_manifest(file_io).await?;
             for entry in manifest.entries() {
                 referenced.insert(basename(entry.data_file().file_path()).to_string());
+                if with_index_blocks && utils::is_file_index(entry) {
+                    let blob =
+                        FileIndexBlob::load_from_index_blob(file_io.clone(), entry.data_file())
+                            .await?;
+                    for block in blob.file_index.index_block_files.iter() {
+                        referenced.insert(basename(&block.filepath).to_string());
+                    }
+                }
             }
         }
         Ok(referenced)
     }
 
     /// Files the predecessor of the current metadata version references, read from its metadata
-    /// file; empty if it cannot be read (then it is no usable fallback anyway).
+    /// file: empty if it does not parse (then it is no usable fallback anyway), None if what it
+    /// references could not be read completely.
     async fn referenced_by_metadata_file(
         &self,
         path: &str,
         file_io: &iceberg::io::FileIO,
-    ) -> HashSet<String> {
-        let Ok(bytes) = self.filesystem_accessor.read_object(path).await else {
-            return HashSet::new();
-        };
+    ) -> Option<HashSet<String>> {
+        let bytes = self.filesystem_accessor.read_object(path).await.ok()?;
         let Ok(metadata) = serde_json::from_slice::<TableMetadata>(&bytes) else {
-            return HashSet::new();
+            return Some(HashSet::new());
         };
-        Self::referenced_files(&metadata, file_io)
-            .await
-            .unwrap_or_default()
+        match Self::referenced_files(&metadata, file_io, /*with_index_blocks=*/ true).await {
+            Ok(referenced) => Some(referenced),
+            Err(e) => {
+                tracing::warn!(error = ?e, path, "cannot read the files the previous iceberg version references");
+                None
+            }
+        }
     }
 
     /// Delete files of this table that are no longer referenced (see the module comment).
@@ -264,7 +280,8 @@ impl IcebergTableManager {
         let file_io = table.file_io().clone();
 
         // Everything the current version references, by file name (names are unique).
-        let current_referenced = Self::referenced_files(metadata, &file_io).await?;
+        let current_referenced =
+            Self::referenced_files(metadata, &file_io, /*with_index_blocks=*/ false).await?;
         // The predecessor version stays loadable as a fallback, so its files are kept too. After a
         // commit they are what the current version referenced at the previous run; at load, read
         // them from its metadata file.
@@ -281,13 +298,17 @@ impl IcebergTableManager {
         let last_referenced = self.gc_previous_referenced.take();
         let previous_referenced = match (last_referenced.clone(), previous_version) {
             // After a commit, its predecessor is the version the last run saw as current.
-            (Some(previous), _) if trigger == GcTrigger::Commit => previous,
+            (Some(previous), _) if trigger == GcTrigger::Commit => Some(previous),
             (_, Some(version)) => {
                 let path = format!("{metadata_dir}/v{version}.metadata.json");
                 self.referenced_by_metadata_file(&path, &file_io).await
             }
-            (_, None) => HashSet::new(),
+            (_, None) => Some(HashSet::new()),
         };
+        // Without the complete set, no manifest or data file can be told apart from one the
+        // predecessor uses, so none is deleted.
+        let previous_unknown = previous_referenced.is_none();
+        let previous_referenced = previous_referenced.unwrap_or_default();
         let mut current_referenced = current_referenced;
         // Index block files are referenced from inside the index puffin blobs.
         for block_paths in self.persisted_index_block_files.values() {
@@ -305,7 +326,7 @@ impl IcebergTableManager {
         for name in metadata_files.iter() {
             let garbage = match metadata_version(name) {
                 Some(v) => v != current_version && Some(v) != previous_version,
-                None => name.ends_with(".avro") && !referenced(name.as_str()),
+                None => name.ends_with(".avro") && !previous_unknown && !referenced(name.as_str()),
             };
             if garbage {
                 to_delete.push(format!("{metadata_dir}/{name}"));
@@ -333,7 +354,7 @@ impl IcebergTableManager {
                 .gc_unreferenced_since
                 .entry(name.clone())
                 .or_insert((now, current_commit));
-            if previous_referenced.contains(name.as_str()) {
+            if previous_unknown || previous_referenced.contains(name.as_str()) {
                 continue;
             }
             // Neither referenced at the last run nor tracked since: written by the failed commit.

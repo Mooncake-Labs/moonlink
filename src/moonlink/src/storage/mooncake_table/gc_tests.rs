@@ -393,3 +393,65 @@ async fn test_load_sweeps_unreferenced_files() {
     assert!(!metadata_dir.join("orphan-m0.avro").exists());
     assert_eq!(live_rows(&table).await, 2);
 }
+
+/// The version before the current one stays loadable (the fallback when the hint is unusable),
+/// also after a restart: load-time garbage collection keeps its data, deletion-vector and index
+/// block files, although only the current version's index blocks are known without reading the
+/// index blobs.
+#[tokio::test]
+async fn test_previous_version_loadable_after_restart() {
+    let context = TestContext::new("gc");
+    {
+        let (mut table, mut rx) = open_gc_table(&context).await;
+        write_files(&mut table, &mut rx, 4).await;
+        table.delete(test_row(1, "r", 1), 45).await;
+        table.commit(50);
+        flush_table_and_sync(&mut table, &mut rx, 50).await.unwrap();
+        create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+        create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+        // Replaces every data file, deletion vector and file index.
+        compact_everything(&mut table, &mut rx).await;
+    }
+    // Restart: garbage collection at load.
+    drop(open_gc_table(&context).await);
+
+    let metadata_dir = table_dir(&context).join("metadata");
+    let hint_path = metadata_dir.join("version-hint.text");
+    let hint: u32 = std::fs::read_to_string(&hint_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    std::fs::write(&hint_path, (hint - 1).to_string()).unwrap();
+
+    let iceberg_table_config = test_iceberg_table_config(&context, "gc");
+    let mut table_config = test_mooncake_table_config(&context);
+    table_config.row_identity = IdentityProp::FullRow;
+    let cache_dir = tempfile::tempdir().unwrap();
+    let previous = MooncakeTable::new_without_gc(
+        (*create_test_arrow_schema()).clone(),
+        "gc".to_string(),
+        1,
+        context.path(),
+        iceberg_table_config.clone(),
+        table_config,
+        create_test_object_storage_cache(&cache_dir),
+        create_test_filesystem_accessor(&iceberg_table_config),
+    )
+    .await
+    .expect("the previous version no longer loads");
+    let guard = previous.snapshot.read().await;
+    assert_eq!(guard.current_snapshot.disk_files.len(), 4);
+    let mut missing = vec![];
+    for file in guard.current_snapshot.disk_files.keys() {
+        if !std::path::Path::new(file.file_path()).exists() {
+            missing.push(file.file_path().clone());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "previous version lost files: {missing:?}"
+    );
+    drop(guard);
+    assert_eq!(live_rows(&previous).await, 3);
+}
