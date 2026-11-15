@@ -30,6 +30,27 @@ type HttpFilepathRemap = std::sync::Arc<dyn Fn(String) -> String + Send + Sync>;
 /// cancel) for this long.
 const DEFAULT_LSN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Environment variable overriding [`DEFAULT_LSN_WAIT_TIMEOUT`], in whole seconds.
+pub const LSN_WAIT_TIMEOUT_ENV: &str = "MOONLINK_LSN_WAIT_TIMEOUT_SECS";
+
+/// The LSN wait timeout for a value of [`LSN_WAIT_TIMEOUT_ENV`]; unset or invalid gives the default.
+fn parse_lsn_wait_timeout(value: Option<&str>) -> Duration {
+    let Some(value) = value else {
+        return DEFAULT_LSN_WAIT_TIMEOUT;
+    };
+    match value.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Duration::from_secs(secs),
+        _ => {
+            tracing::warn!(
+                value,
+                "invalid {LSN_WAIT_TIMEOUT_ENV} (expected a positive number of seconds), using {}s",
+                DEFAULT_LSN_WAIT_TIMEOUT.as_secs()
+            );
+            DEFAULT_LSN_WAIT_TIMEOUT
+        }
+    }
+}
+
 /// Max concurrency to fetch parquet metadata in parallel.
 const DEFAULT_PARQUET_METADATA_FETCH_PARALLELISM: usize = 128;
 
@@ -144,7 +165,10 @@ impl MoonlinkBackend {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager,
             metadata_store_accessor,
-            lsn_wait_timeout_ms: AtomicU64::new(DEFAULT_LSN_WAIT_TIMEOUT.as_millis() as u64),
+            lsn_wait_timeout_ms: AtomicU64::new(
+                parse_lsn_wait_timeout(std::env::var(LSN_WAIT_TIMEOUT_ENV).ok().as_deref())
+                    .as_millis() as u64,
+            ),
         })
     }
 
@@ -532,5 +556,27 @@ mod tests {
             msg.contains("field_name cannot be empty"),
             "Error message does not contain expected string, got: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lsn_wait_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn lsn_wait_timeout_env_value() {
+        assert_eq!(parse_lsn_wait_timeout(None), DEFAULT_LSN_WAIT_TIMEOUT);
+        assert_eq!(
+            parse_lsn_wait_timeout(Some("120")),
+            Duration::from_secs(120)
+        );
+        assert_eq!(parse_lsn_wait_timeout(Some(" 5 ")), Duration::from_secs(5));
+        for invalid in ["0", "-1", "30s", ""] {
+            assert_eq!(
+                parse_lsn_wait_timeout(Some(invalid)),
+                DEFAULT_LSN_WAIT_TIMEOUT,
+                "{invalid:?}"
+            );
+        }
     }
 }

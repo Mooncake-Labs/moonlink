@@ -118,6 +118,10 @@ cargo test -p moonlink_backend --test '*'
 cargo test -p moonlink_service --lib --features postgres-integration
 ```
 
+## Waiting for replication
+
+A query at an LSN (and `mooncake.create_snapshot`) first waits until replication reaches that LSN. The Postgres backend cannot be cancelled while it waits, so the wait is bounded: after 30 seconds the query fails with a retryable error that names the requested and replicated LSNs. If your replication is often slower than that, raise the bound by setting `MOONLINK_LSN_WAIT_TIMEOUT_SECS` (whole seconds) in the environment Postgres is started with.
+
 ## Durability and Recovery
 
 > **Before upgrading from pg_mooncake 0.2 (Moonlink with its own WAL), snapshot every mirror, or re-create every mirror after the upgrade.** That version acknowledged changes to Postgres once they were in its `_wal` directory. The new version does not read that directory, and Postgres does not send those changes again, so a mirror silently misses every change that had not reached Iceberg yet. Before upgrading:

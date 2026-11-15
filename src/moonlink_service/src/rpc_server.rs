@@ -162,6 +162,12 @@ fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
     {
         return ErrorStruct::new(errored.message.clone(), errored.status).with_source(e);
     }
+    // So is an LSN-wait timeout's (it names the LSNs and likely causes), and it is retryable.
+    if let Some(moonlink_backend::Error::LsnWaitTimeout(timeout)) =
+        e.downcast_ref::<moonlink_backend::Error>()
+    {
+        return ErrorStruct::new(timeout.message.clone(), timeout.status).with_source(e);
+    }
     ErrorStruct::new("backend error".to_string(), ErrorStatus::Permanent).with_source(e)
 }
 
@@ -477,6 +483,87 @@ mod tests {
                 });
             assert!(res.unwrap().is_ok());
         }
+
+        backend
+            .drop_table("postgres".to_string(), table.to_string())
+            .await
+            .unwrap();
+        pg::drop_source_table(&pg_client, table).await;
+    }
+    /// An LSN-wait timeout reaches the client with its message at top level and its Temporary
+    /// status, and the connection stays usable.
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn lsn_wait_timeout_reaches_the_client_as_a_temporary_error() {
+        use crate::test_utils::pg;
+        use moonlink_error::ErrorStatus;
+        use std::time::Duration;
+
+        let table = "rpc_lsn_timeout_test";
+        let pg_client = pg::connect().await;
+        pg::create_source_table(&pg_client, table, 1).await;
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(
+            MoonlinkBackend::new(base_path, None, Box::new(sqlite_store))
+                .await
+                .unwrap(),
+        );
+        backend.set_lsn_wait_timeout(Duration::from_millis(300));
+        backend
+            .create_table(
+                "postgres".to_string(),
+                table.to_string(),
+                format!("public.{table}"),
+                pg::database_uri(),
+                "{}".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        let far_lsn = pg::current_wal_lsn(&pg_client).await + (1u64 << 40);
+
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        let connection = tokio::spawn(super::handle_stream(backend.clone(), server));
+        let requests = [
+            moonlink_rpc::Request::ScanTableBegin {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+            moonlink_rpc::Request::CreateSnapshot {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+        ];
+        for request in requests {
+            moonlink_rpc::write(&mut client, &request).await.unwrap();
+            // Both responses encode `Err` identically.
+            let res: moonlink_rpc::RpcResult<()> =
+                tokio::time::timeout(Duration::from_secs(10), moonlink_rpc::read(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let err = res.expect_err("waiting for an LSN replication never reaches must time out");
+            assert_eq!(err.status, ErrorStatus::Temporary, "{request:?}: {err:?}");
+            assert!(
+                err.message.contains(&far_lsn.to_string()) && err.message != "backend error",
+                "{request:?}: the timeout message must be the top-level message: {err:?}"
+            );
+        }
+        moonlink_rpc::write(&mut client, &moonlink_rpc::Request::ListTables {})
+            .await
+            .unwrap();
+        let tables: moonlink_rpc::RpcResult<Vec<moonlink_rpc::Table>> =
+            moonlink_rpc::read(&mut client).await.unwrap();
+        assert_eq!(tables.unwrap().len(), 1);
+        drop(client);
+        let _ = connection.await;
 
         backend
             .drop_table("postgres".to_string(), table.to_string())
