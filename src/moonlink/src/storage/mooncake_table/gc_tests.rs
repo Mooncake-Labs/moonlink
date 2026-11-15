@@ -562,3 +562,223 @@ async fn test_index_merge_keeps_its_inputs_while_running() {
     index_merge_result.unwrap();
     assert_eq!(gc_context.maintenance_reader_count(), 0);
 }
+
+/// Builds: 4 data files, one deletion vector, then a compaction commit that replaces every data
+/// file, deletion vector and file index. Returns the file index puffins of the version before
+/// the compaction.
+async fn build_compacted_table(
+    table: &mut MooncakeTable,
+    rx: &mut mpsc::Receiver<TableEvent>,
+    context: &TestContext,
+) -> Vec<String> {
+    write_files(table, rx, 4).await;
+    table.delete(test_row(1, "r", 1), 45).await;
+    table.commit(50);
+    flush_table_and_sync(table, rx, 50).await.unwrap();
+    create_mooncake_and_persist_for_test(table, rx).await;
+    create_mooncake_and_persist_for_test(table, rx).await;
+    let index_puffins_before: Vec<String> = names_in(&table_dir(context).join("data"))
+        .into_iter()
+        .filter(|n| n.ends_with("puffin.bin") && !n.contains("deletion-vector"))
+        .collect();
+    assert!(!index_puffins_before.is_empty());
+    compact_everything(table, rx).await;
+    index_puffins_before
+}
+
+/// Points the hint at the previous version and loads it without gc; checks every file exists.
+async fn assert_previous_version_loads(context: &TestContext, expected_rows: usize) {
+    let metadata_dir = table_dir(context).join("metadata");
+    let hint_path = metadata_dir.join("version-hint.text");
+    let hint: u32 = std::fs::read_to_string(&hint_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    std::fs::write(&hint_path, (hint - 1).to_string()).unwrap();
+
+    let iceberg_table_config = test_iceberg_table_config(context, "gc");
+    let mut table_config = test_mooncake_table_config(context);
+    table_config.row_identity = IdentityProp::FullRow;
+    let cache_dir = tempfile::tempdir().unwrap();
+    let previous = MooncakeTable::new_without_gc(
+        (*create_test_arrow_schema()).clone(),
+        "gc".to_string(),
+        1,
+        context.path(),
+        iceberg_table_config.clone(),
+        table_config,
+        create_test_object_storage_cache(&cache_dir),
+        create_test_filesystem_accessor(&iceberg_table_config),
+    )
+    .await
+    .expect("the previous version no longer loads");
+    let guard = previous.snapshot.read().await;
+    let mut missing = vec![];
+    for file in guard.current_snapshot.disk_files.keys() {
+        if !std::path::Path::new(file.file_path()).exists() {
+            missing.push(file.file_path().clone());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "previous version lost files: {missing:?}"
+    );
+    drop(guard);
+    assert_eq!(live_rows(&previous).await, expected_rows);
+}
+
+fn set_dir_mode(dir: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// The previous version also stays loadable after a failed commit (garbage collection then reads
+/// its references from its metadata file, as at load).
+#[tokio::test]
+async fn test_previous_version_loadable_after_failed_commit() {
+    let context = TestContext::new("gc");
+    let (mut table, mut rx) = open_gc_table(&context).await;
+    build_compacted_table(&mut table, &mut rx, &context).await;
+
+    // One more row, flushed. This mooncake snapshot applies the compaction commit.
+    table.append(test_row(100, "r", 100)).unwrap();
+    table.commit(1000);
+    flush_table_and_sync(&mut table, &mut rx, 1000)
+        .await
+        .unwrap();
+    let (_, payload, _, _, _) = create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    assert!(payload.is_some());
+
+    let metadata_dir = table_dir(&context).join("metadata");
+    let data_before = names_in(&table_dir(&context).join("data"));
+    let hint_before = std::fs::read_to_string(metadata_dir.join("version-hint.text")).unwrap();
+    // The commit cannot write any metadata file: it fails before its commit point.
+    set_dir_mode(&metadata_dir, 0o555);
+    if std::fs::write(metadata_dir.join("probe"), b"").is_ok() {
+        // Running as root: permissions do not stop writes.
+        std::fs::remove_file(metadata_dir.join("probe")).unwrap();
+        set_dir_mode(&metadata_dir, 0o755);
+        return;
+    }
+    let res = create_iceberg_snapshot(&mut table, payload, &mut rx).await;
+    set_dir_mode(&metadata_dir, 0o755);
+    let err = res.expect_err("the commit should fail");
+    assert!(
+        !matches!(err, crate::Error::IcebergCommitOutcomeUnknown(_)),
+        "{err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(metadata_dir.join("version-hint.text")).unwrap(),
+        hint_before
+    );
+    let data_after = names_in(&table_dir(&context).join("data"));
+    let lost: Vec<_> = data_before
+        .iter()
+        .filter(|n| !data_after.contains(n))
+        .collect();
+    assert!(
+        lost.iter().all(|n| !n.contains("index_block")),
+        "index blocks deleted: {lost:?}"
+    );
+
+    assert_previous_version_loads(&context, 3).await;
+}
+
+/// If what the previous version references cannot be read completely (here its manifest list),
+/// load-time garbage collection deletes no manifest or data file; later commits collect them.
+#[tokio::test]
+async fn test_unreadable_previous_manifest_list_blocks_gc_at_load() {
+    let context = TestContext::new("gc");
+    {
+        let (mut table, mut rx) = open_gc_table(&context).await;
+        build_compacted_table(&mut table, &mut rx, &context).await;
+    }
+    let metadata_dir = table_dir(&context).join("metadata");
+    let data_dir = table_dir(&context).join("data");
+    let hint: u32 = std::fs::read_to_string(metadata_dir.join("version-hint.text"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let previous: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(metadata_dir.join(format!("v{}.metadata.json", hint - 1))).unwrap(),
+    )
+    .unwrap();
+    let current_snapshot_id = previous["current-snapshot-id"].as_i64().unwrap();
+    let manifest_list = previous["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["snapshot-id"].as_i64() == Some(current_snapshot_id))
+        .unwrap()["manifest-list"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let manifest_list_name = manifest_list.rsplit('/').next().unwrap().to_string();
+    std::fs::write(metadata_dir.join(&manifest_list_name), b"").unwrap();
+    std::fs::write(data_dir.join("orphan.parquet"), b"x").unwrap();
+    std::fs::write(metadata_dir.join("orphan-m0.avro"), b"x").unwrap();
+    let data_before = names_in(&data_dir);
+    let metadata_before = names_in(&metadata_dir);
+
+    // Restart: garbage collection at load must not guess.
+    let (mut table, mut rx) = open_gc_table(&context).await;
+    let data_after = names_in(&data_dir);
+    let metadata_after = names_in(&metadata_dir);
+    let lost_data: Vec<_> = data_before
+        .iter()
+        .filter(|n| !data_after.contains(n))
+        .collect();
+    let lost_avro: Vec<_> = metadata_before
+        .iter()
+        .filter(|n| n.ends_with(".avro") && !metadata_after.contains(n))
+        .collect();
+    assert!(lost_data.is_empty(), "data files deleted: {lost_data:?}");
+    assert!(lost_avro.is_empty(), "manifests deleted: {lost_avro:?}");
+    assert_eq!(live_rows(&table).await, 3);
+
+    // Nothing leaks for good: the next commits collect the leftovers.
+    commit_row(&mut table, &mut rx, 200).await;
+    commit_row(&mut table, &mut rx, 201).await;
+    commit_row(&mut table, &mut rx, 202).await;
+    assert!(
+        !data_dir.join("orphan.parquet").exists(),
+        "orphan data file is never collected"
+    );
+    assert!(
+        !metadata_dir.join("orphan-m0.avro").exists(),
+        "orphan manifest is never collected"
+    );
+    assert_eq!(live_rows(&table).await, 6);
+    assert!(missing_files_in_read(&table).await.is_empty());
+}
+
+/// A corrupt file index puffin of the previous version neither fails the load nor lets garbage
+/// collection delete data files.
+#[tokio::test]
+async fn test_corrupt_previous_index_puffin_blocks_gc_at_load() {
+    let context = TestContext::new("gc");
+    let index_puffins_before = {
+        let (mut table, mut rx) = open_gc_table(&context).await;
+        build_compacted_table(&mut table, &mut rx, &context).await
+    };
+    let data_dir = table_dir(&context).join("data");
+    // Only the previous version references these (the compaction replaced every file index).
+    let victim = index_puffins_before
+        .iter()
+        .find(|n| data_dir.join(n).exists())
+        .expect("previous version's index puffins are gone before the restart");
+    std::fs::write(data_dir.join(victim), b"").unwrap();
+    std::fs::write(data_dir.join("orphan.parquet"), b"x").unwrap();
+    let data_before = names_in(&data_dir);
+
+    let (table, _rx) = open_gc_table(&context).await;
+    let data_after = names_in(&data_dir);
+    let lost_data: Vec<_> = data_before
+        .iter()
+        .filter(|n| !data_after.contains(n))
+        .collect();
+    assert!(lost_data.is_empty(), "data files deleted: {lost_data:?}");
+    assert_eq!(live_rows(&table).await, 3);
+}

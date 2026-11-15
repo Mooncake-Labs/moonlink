@@ -127,9 +127,13 @@ async fn test_waiting_flushes_give_up_together_past_the_memory_limit() {
 
     let started = std::time::Instant::now();
     table.flush(10, uuid::Uuid::new_v4()).unwrap();
-    while table.full_disk_flush_wait.waiting_bytes() == 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while table.full_disk_flush_wait.waiting_bytes() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the flush never waited for disk space");
     let first = table.full_disk_flush_wait.waiting_bytes();
     table
         .full_disk_flush_wait

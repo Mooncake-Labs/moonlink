@@ -250,6 +250,11 @@ impl TableHandler {
                     errored_drop.background_task_wait = wait;
                     continue;
                 }
+                #[cfg(test)]
+                if let TableEvent::SetGcGraceForTest { grace } = event {
+                    table.set_gc_grace_for_test(grace);
+                    continue;
+                }
 
                 // ==============================
                 // Errored state

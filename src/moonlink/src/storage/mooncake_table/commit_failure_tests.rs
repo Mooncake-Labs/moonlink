@@ -29,6 +29,9 @@ enum FailWrite {
 struct FailingAccessor {
     inner: Arc<dyn BaseFileSystemAccess>,
     rule: Mutex<Option<(String, FailWrite, u32)>>,
+    stats_calls: std::sync::atomic::AtomicUsize,
+    /// Run garbage collection of a table opened on this accessor in dry-run mode.
+    dry_run_gc: bool,
 }
 
 impl FailingAccessor {
@@ -75,6 +78,8 @@ impl BaseFileSystemAccess for FailingAccessor {
         self.inner.object_exists(object).await
     }
     async fn stats_object(&self, object: &str) -> Result<opendal::Metadata> {
+        self.stats_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.stats_object(object).await
     }
     async fn read_object(&self, object: &str) -> Result<Vec<u8>> {
@@ -179,9 +184,11 @@ async fn open_with_cache(
                 failing.clone(),
                 iceberg_table_config,
             )?;
-            manager.gc_context = Some(Arc::new(
-                crate::storage::table::iceberg::gc::IcebergGcContext::default(),
-            ));
+            let gc_context = crate::storage::table::iceberg::gc::IcebergGcContext::default();
+            if failing.dry_run_gc {
+                gc_context.set_dry_run_for_test();
+            }
+            manager.gc_context = Some(Arc::new(gc_context));
             MooncakeTable::new_with_table_manager(metadata, Box::new(manager), cache, failing)
                 .await?
         }
@@ -209,6 +216,8 @@ fn failing_accessor(context: &TestContext) -> Arc<FailingAccessor> {
     Arc::new(FailingAccessor {
         inner: create_test_filesystem_accessor(&iceberg_table_config),
         rule: Mutex::new(None),
+        stats_calls: std::sync::atomic::AtomicUsize::new(0),
+        dry_run_gc: false,
     })
 }
 
@@ -397,4 +406,49 @@ async fn test_failed_commit_releases_deletion_vector_cache_pins() {
         .into_iter()
         .collect();
     assert_eq!(pinned_after, pinned_before);
+}
+
+/// A dry run of garbage collection deletes nothing and stats every candidate once, rather than
+/// every candidate found so far on every commit.
+#[tokio::test]
+async fn test_gc_dry_run_stats_each_candidate_once() {
+    let context = TestContext::new("commit");
+    let iceberg_table_config = test_iceberg_table_config(&context, "commit");
+    let failing = Arc::new(FailingAccessor {
+        inner: create_test_filesystem_accessor(&iceberg_table_config),
+        rule: Mutex::new(None),
+        stats_calls: std::sync::atomic::AtomicUsize::new(0),
+        dry_run_gc: true,
+    });
+    let (mut table, mut rx) = open(&context, Some(failing.clone())).await.unwrap();
+    let commits = 30;
+    for i in 0..commits {
+        let lsn = (i as u64 + 1) * 10;
+        table.append(test_row(i, "r", i)).unwrap();
+        table.commit(lsn);
+        flush_table_and_sync(&mut table, &mut rx, lsn)
+            .await
+            .unwrap();
+        create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+    }
+    let table_dir = context.path().join("default").join("commit");
+    let count = |dir: &str| {
+        std::fs::read_dir(table_dir.join(dir))
+            .map(|d| d.flatten().count())
+            .unwrap_or(0)
+    };
+    let versions = std::fs::read_dir(table_dir.join("metadata"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".metadata.json"))
+        .count();
+    assert!(
+        versions >= commits as usize,
+        "the dry run deleted metadata files"
+    );
+    let files = count("metadata") + count("data");
+    let stats = failing
+        .stats_calls
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(stats <= files, "{stats} stat calls for {files} files");
 }

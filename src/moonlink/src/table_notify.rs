@@ -151,6 +151,10 @@ pub enum TableEvent {
     /// Test-only: how long an errored table waits for background tasks before dropping.
     #[cfg(test)]
     SetErroredDropWaitForTest { wait: std::time::Duration },
+    /// Test-only: how long garbage collection keeps superseded files when no read path reports
+    /// live readers (harnesses that drive a table handler without a ReadStateManager).
+    #[cfg(test)]
+    SetGcGraceForTest { grace: std::time::Duration },
     /// Alter table,
     AlterTable { columns_to_drop: Vec<String> },
     /// Start initial table copy.

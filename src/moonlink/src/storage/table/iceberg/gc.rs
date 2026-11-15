@@ -89,6 +89,9 @@ pub(crate) struct IcebergGcContext {
     /// Snapshot sequences in-flight compactions and index merges read their inputs from.
     maintenance_read_seqs: Mutex<Vec<u64>>,
     grace_without_reader_info: Mutex<Duration>,
+    /// Test-only: the mode otherwise comes from the process environment, read once.
+    #[cfg(test)]
+    mode_override: Mutex<Option<GcMode>>,
 }
 
 impl Default for IcebergGcContext {
@@ -100,6 +103,8 @@ impl Default for IcebergGcContext {
             applied: Mutex::new((0, 0)),
             maintenance_read_seqs: Mutex::new(Vec::new()),
             grace_without_reader_info: Mutex::new(GC_GRACE_WITHOUT_READER_INFO),
+            #[cfg(test)]
+            mode_override: Mutex::new(None),
         }
     }
 }
@@ -147,6 +152,19 @@ impl IcebergGcContext {
             gc_context: self.clone(),
             seq,
         }
+    }
+
+    fn mode(&self) -> GcMode {
+        #[cfg(test)]
+        if let Some(mode) = *self.mode_override.lock().unwrap() {
+            return mode;
+        }
+        gc_mode()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_dry_run_for_test(&self) {
+        *self.mode_override.lock().unwrap() = Some(GcMode::DryRun);
     }
 
     #[cfg(test)]
@@ -264,13 +282,13 @@ impl IcebergTableManager {
     /// Delete files of this table that are no longer referenced (see the module comment).
     pub(crate) async fn collect_garbage(&mut self, trigger: GcTrigger) -> Result<()> {
         let at_load = trigger == GcTrigger::Load;
-        let mode = gc_mode();
-        if mode == GcMode::Off {
-            return Ok(());
-        }
         let Some(gc_context) = self.gc_context.clone() else {
             return Ok(());
         };
+        let mode = gc_context.mode();
+        if mode == GcMode::Off {
+            return Ok(());
+        }
         let Some(table) = self.iceberg_table.as_ref() else {
             return Ok(());
         };

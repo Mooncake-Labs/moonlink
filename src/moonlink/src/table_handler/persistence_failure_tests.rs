@@ -16,7 +16,6 @@ use crate::table_handler::table_handler_state::MAX_CONSECUTIVE_PERSISTENCE_FAILU
 use crate::{Error, TableEventManager};
 
 use iceberg::{Error as IcebergError, ErrorKind};
-use mockall::Sequence;
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -100,16 +99,20 @@ async fn wait_errored(env: &TestEnvironment) -> String {
 /// One transient failure (think ENOSPC): the next attempt succeeds and the table keeps working.
 #[tokio::test]
 async fn test_table_survives_one_failed_iceberg_persistence() {
-    let mut env = env_with_mock(|mock| {
-        let mut seq = Sequence::new();
-        mock.expect_sync_snapshot()
-            .times(1)
-            .in_sequence(&mut seq)
-            .returning(|_, _| Box::pin(async move { Err(transient_error()) }));
-        mock.expect_sync_snapshot()
-            .times(1)
-            .in_sequence(&mut seq)
-            .returning(|payload, _| Box::pin(async move { ok_result(payload) }));
+    // The handler may retry on its own before the next request arrives, so the persistence of
+    // LSN 20 can be the second or the third call: only the first one fails.
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut env = env_with_mock(move |mock| {
+        mock.expect_sync_snapshot().returning(move |payload, _| {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    Err(transient_error())
+                } else {
+                    ok_result(payload)
+                }
+            })
+        });
     })
     .await;
 

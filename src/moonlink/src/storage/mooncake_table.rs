@@ -250,11 +250,27 @@ const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::fr
 #[cfg(test)]
 const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// While flushes wait for disk space, the changes they hold stay in memory and replication keeps
-/// adding to them. Past this many bytes, the waiting flushes give up (which errors the table)
-/// rather than growing the Postgres backend until it is killed for memory.
+/// adding to them. Past this many bytes, summed over all tables of the process (they share one
+/// backend), the waiting flushes give up (which errors their tables) rather than growing the
+/// Postgres backend until it is killed for memory.
 const FULL_DISK_MAX_WAITING_FLUSH_BYTES: u64 = 512 << 20;
 
-/// In-memory bytes of a table's flushes that are waiting for disk space.
+/// The process-wide accounting in production; each test table gets its own so tests running in
+/// parallel do not interfere.
+fn full_disk_flush_wait_for_new_table() -> Arc<FullDiskFlushWait> {
+    #[cfg(not(test))]
+    {
+        static PROCESS_WIDE: std::sync::OnceLock<Arc<FullDiskFlushWait>> =
+            std::sync::OnceLock::new();
+        PROCESS_WIDE.get_or_init(Arc::default).clone()
+    }
+    #[cfg(test)]
+    {
+        Arc::default()
+    }
+}
+
+/// In-memory bytes of the flushes that are waiting for disk space.
 #[derive(Debug)]
 pub(crate) struct FullDiskFlushWait {
     waiting_bytes: std::sync::atomic::AtomicU64,
@@ -916,7 +932,7 @@ impl MooncakeTable {
             snapshot_seq,
             gc_context: None,
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
-            full_disk_flush_wait: Arc::default(),
+            full_disk_flush_wait: full_disk_flush_wait_for_new_table(),
             #[cfg(test)]
             flush_failure_injector: Arc::default(),
             #[cfg(test)]
@@ -1379,7 +1395,7 @@ impl MooncakeTable {
                             });
                             if full_disk_flush_wait.over_limit() {
                                 let message = format!(
-                                    "the disk is full and more than {} MiB of changes are waiting in memory for disk space",
+                                    "the disk is full and more than {} MiB of changes (of all mirrors) are waiting in memory for disk space",
                                     full_disk_flush_wait.limit_mib()
                                 );
                                 tracing::error!(error = ?e, "{message}; giving up the flush");
