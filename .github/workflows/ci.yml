@@ -460,7 +460,8 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: target/nextest/ci/junit.xml
-          fail_ci_if_error: true
+          # Codecov availability must not decide whether tests pass.
+          fail_ci_if_error: false
 
       # ---------- Upload coverage report to Codecov ----------
       - name: Upload coverage (lcov)
@@ -470,7 +471,8 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: lcov.info
-          fail_ci_if_error: true
+          # Codecov availability must not decide whether tests pass.
+          fail_ci_if_error: false
 
   # ────────────────────────8 · Chaos test ────────────────────────────
   chaos_test:
