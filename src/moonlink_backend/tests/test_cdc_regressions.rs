@@ -1703,3 +1703,48 @@ async fn character_and_bytea_values_are_exact() {
         );
     }
 }
+
+/// Arrays and composites whose element or field type cannot be converted are refused when the
+/// mirror is created, even for an empty table, instead of erroring it at the first row.
+#[rstest::rstest]
+#[case::enum_array("rv_mood[]")]
+#[case::interval_array("INTERVAL[]")]
+#[case::composite_with_interval("rv_span")]
+#[case::array_of_composite_with_interval("rv_span[]")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_nested;
+         DROP TYPE IF EXISTS rv_mood, rv_span;
+         CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
+         CREATE TYPE rv_span AS (n INT, d INTERVAL);
+         CREATE TABLE rv_nested (id BIGINT PRIMARY KEY, v {column_type});"
+    ))
+    .await;
+    let backend = Arc::new(backend);
+    let err = try_mirror(&backend, &tmp, "rv_nested_mc", "public.rv_nested", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("is not supported"), "{err}");
+    wait_for_no_slots(&client).await;
+
+    // Arrays of supported types (and of supported composites) are still accepted.
+    client
+        .simple_query(
+            "DROP TABLE rv_nested; DROP TYPE rv_span; CREATE TYPE rv_span AS (n INT, t TEXT);
+             CREATE TABLE rv_nested (id BIGINT PRIMARY KEY, a INT[], t TEXT[], s rv_span[]);",
+        )
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_nested_mc", "public.rv_nested", &uri).await;
+    backend
+        .drop_table(DB.to_string(), "rv_nested_mc".to_string())
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE rv_nested; DROP TYPE rv_mood, rv_span;")
+        .await
+        .unwrap();
+}

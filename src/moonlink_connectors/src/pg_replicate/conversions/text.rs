@@ -128,8 +128,11 @@ impl TextFormatConverter {
                     | Type::OID
                     | Type::OID_ARRAY
             ),
-            Kind::Array(_) => true,
-            Kind::Composite(_) => true,
+            // Arrays (all Kind::Array, so not matched above) are parsed when their element type
+            // is: the types above each have an array arm, composites are parsed element-wise.
+            // Composites need every field to be supported.
+            Kind::Array(inner) => Self::is_supported_type(inner),
+            Kind::Composite(fields) => fields.iter().all(|f| Self::is_supported_type(f.type_())),
             _ => false,
         }
     }
