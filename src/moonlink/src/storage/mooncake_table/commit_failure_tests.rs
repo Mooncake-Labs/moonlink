@@ -23,24 +23,31 @@ enum FailWrite {
     After,
 }
 
-/// Delegates to a real accessor; fails the next write of a path ending in the armed suffix.
+/// Delegates to a real accessor; fails the next writes of a path ending in the armed suffix.
 #[derive(Debug)]
 struct FailingAccessor {
     inner: Arc<dyn BaseFileSystemAccess>,
-    rule: Mutex<Option<(String, FailWrite)>>,
+    rule: Mutex<Option<(String, FailWrite, u32)>>,
 }
 
 impl FailingAccessor {
     fn arm(&self, path_suffix: &str, when: FailWrite) {
-        *self.rule.lock().unwrap() = Some((path_suffix.to_string(), when));
+        self.arm_times(path_suffix, when, 1);
+    }
+
+    fn arm_times(&self, path_suffix: &str, when: FailWrite, times: u32) {
+        *self.rule.lock().unwrap() = Some((path_suffix.to_string(), when, times));
     }
 
     fn take_rule(&self, path: &str) -> Option<FailWrite> {
         let mut rule = self.rule.lock().unwrap();
-        match rule.as_ref() {
-            Some((suffix, when)) if path.ends_with(suffix.as_str()) => {
+        match rule.as_mut() {
+            Some((suffix, when, times)) if path.ends_with(suffix.as_str()) => {
                 let when = *when;
-                *rule = None;
+                *times -= 1;
+                if *times == 0 {
+                    *rule = None;
+                }
                 Some(when)
             }
             _ => None,
@@ -153,12 +160,15 @@ async fn open(
                 config: table_config,
                 path: context.path(),
             });
-            let manager = IcebergTableManager::new_with_filesystem_accessor(
+            let mut manager = IcebergTableManager::new_with_filesystem_accessor(
                 metadata.clone(),
                 cache.clone(),
                 failing.clone(),
                 iceberg_table_config,
             )?;
+            manager.gc_context = Some(Arc::new(
+                crate::storage::table::iceberg::gc::IcebergGcContext::default(),
+            ));
             MooncakeTable::new_with_table_manager(metadata, Box::new(manager), cache, failing)
                 .await?
         }
@@ -296,4 +306,41 @@ async fn test_interrupted_table_creation_leaves_a_loadable_table() {
         .await
         .expect("table must load after an interrupted creation");
     assert_eq!(table.get_persistence_snapshot_lsn(), None);
+}
+
+/// A commit that failed without changing the table frees the files it already wrote (e.g. data
+/// files copied into the iceberg data directory), so a full disk gets its space back.
+#[tokio::test]
+async fn test_failed_commit_removes_the_files_it_wrote() {
+    let context = TestContext::new("commit");
+    let failing = failing_accessor(&context);
+    let (mut table, mut rx) = open(&context, Some(failing.clone())).await.unwrap();
+    let payload = table_with_pending_commit(&mut table, &mut rx).await;
+    let data_dir = context.path().join("default").join("commit").join("data");
+    let committed: Vec<_> = std::fs::read_dir(&data_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+
+    // Every metadata write fails: the commit fails before its commit point, after copying row 2's
+    // data file.
+    failing.arm_times(".metadata.json", FailWrite::Before, 100);
+    let err = create_iceberg_snapshot(&mut table, payload, &mut rx)
+        .await
+        .expect_err("injected failure");
+    assert!(
+        !matches!(err, crate::Error::IcebergCommitOutcomeUnknown(_)),
+        "{err:?}"
+    );
+    *failing.rule.lock().unwrap() = None;
+    let mut left: Vec<_> = std::fs::read_dir(&data_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    left.sort();
+    let mut committed = committed;
+    committed.sort();
+    assert_eq!(left, committed, "files of the failed commit left behind");
 }

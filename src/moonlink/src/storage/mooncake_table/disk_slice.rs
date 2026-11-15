@@ -54,6 +54,9 @@ pub struct DiskSliceWriter {
 
     /// Records already flushed data files.
     files: Vec<(MooncakeDataFileRef, DiskFileAttrs)>,
+
+    /// Every parquet file this write created, complete or not.
+    created_files: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for DiskSliceWriter {
@@ -89,6 +92,7 @@ impl DiskSliceWriter {
             dir_path,
             batches,
             files: vec![],
+            created_files: vec![],
             batch_id_to_idx: HashMap::new(),
             writer_lsn,
             table_auto_incr_id,
@@ -134,6 +138,17 @@ impl DiskSliceWriter {
 
     pub fn lsn(&self) -> Option<u64> {
         self.writer_lsn
+    }
+
+    /// Delete the files a failed [`Self::write`] created; a retry writes new ones.
+    pub(super) async fn remove_partial_outputs(&mut self) {
+        for path in self.created_files.drain(..) {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(error = ?e, path = ?path, "failed to delete partial flush output");
+                }
+            }
+        }
     }
 
     pub(super) fn input_batches(&self) -> &Vec<BatchEntry> {
@@ -201,10 +216,11 @@ impl DiskSliceWriter {
                 );
                 let file_path = get_random_file_name_in_dir(dir_path);
                 data_file = Some(create_data_file(file_id, file_path));
-                let file =
-                    tokio::fs::File::create(dir_path.join(data_file.as_ref().unwrap().file_path()))
-                        .await
-                        .map_err(Into::<Error>::into)?;
+                let created_path = dir_path.join(data_file.as_ref().unwrap().file_path());
+                let file = tokio::fs::File::create(&created_path)
+                    .await
+                    .map_err(Into::<Error>::into)?;
+                self.created_files.push(created_path);
                 let properties = parquet_utils::get_default_parquet_properties();
                 writer = Some(AsyncArrowWriter::try_new(
                     file,

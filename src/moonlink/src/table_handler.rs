@@ -750,7 +750,11 @@ impl TableHandler {
                                 let manager_recovered = table.on_persistence_failed();
                                 let outcome_unknown = !manager_recovered
                                     || matches!(e, crate::Error::IcebergCommitOutcomeUnknown(_));
-                                let failures = table_handler_state.record_persistence_failure();
+                                let failures = if e.is_storage_full() {
+                                    table_handler_state.record_persistence_failure_on_full_disk()
+                                } else {
+                                    table_handler_state.record_persistence_failure()
+                                };
                                 error!(
                                     error = ?e,
                                     table = table.mooncake_table_id(),

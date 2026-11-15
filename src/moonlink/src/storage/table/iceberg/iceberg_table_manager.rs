@@ -13,6 +13,7 @@ use crate::storage::table::common::table_manager::{
     PersistenceFileParams, PersistenceResult, TableManager,
 };
 use crate::storage::table::iceberg::catalog_utils;
+use crate::storage::table::iceberg::gc::GcTrigger;
 use crate::storage::table::iceberg::moonlink_catalog::MoonlinkCatalog;
 use crate::storage::table::iceberg::utils;
 use crate::IcebergTableConfig;
@@ -229,12 +230,22 @@ impl TableManager for IcebergTableManager {
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 // Best effort: a failed cleanup only leaves files behind for the next run.
-                if let Err(e) = self.collect_garbage(/*at_load=*/ false).await {
+                if let Err(e) = self.collect_garbage(GcTrigger::Commit).await {
                     tracing::warn!(error = ?e, "iceberg garbage collection failed");
                 }
                 Ok(result)
             }
-            Err(err) => Err(self.recover_after_failed_sync(backup, err).await),
+            Err(err) => {
+                let err = self.recover_after_failed_sync(backup, err).await;
+                // Free what the failed commit wrote (e.g. on a full disk), unless it may have
+                // committed after all.
+                if !matches!(err, Error::IcebergCommitOutcomeUnknown(_)) {
+                    if let Err(e) = self.collect_garbage(GcTrigger::FailedCommit).await {
+                        tracing::warn!(error = ?e, "iceberg garbage collection after a failed commit failed");
+                    }
+                }
+                Err(err)
+            }
         }
     }
 
@@ -245,7 +256,7 @@ impl TableManager for IcebergTableManager {
         let _guard = recovery_stats.start();
         let snapshot = self.load_snapshot_from_table_impl().await?;
         // No reader exists yet: remove everything left over by earlier runs.
-        if let Err(e) = self.collect_garbage(/*at_load=*/ true).await {
+        if let Err(e) = self.collect_garbage(GcTrigger::Load).await {
             tracing::warn!(error = ?e, "iceberg garbage collection at load failed");
         }
         Ok(snapshot)

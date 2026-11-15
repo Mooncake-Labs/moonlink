@@ -157,6 +157,8 @@ pub(crate) struct TableHandlerState {
     //
     /// Consecutive failed iceberg persistence attempts.
     pub(crate) consecutive_persistence_failures: u32,
+    /// Consecutive persistence failures caused by a full disk (not counted above).
+    pub(crate) consecutive_full_disk_persistence_failures: u32,
     /// Do not start another iceberg persistence before this instant.
     pub(crate) persistence_retry_after: Option<std::time::Instant>,
     /// A persistence failed and must be retried even without new writes.
@@ -201,6 +203,7 @@ impl TableHandlerState {
             initial_copy_loaded_files: false,
             table_status_tx: None,
             consecutive_persistence_failures: 0,
+            consecutive_full_disk_persistence_failures: 0,
             persistence_retry_after: None,
             persistence_retry_pending: false,
         }
@@ -225,7 +228,23 @@ impl TableHandlerState {
         self.consecutive_persistence_failures
     }
 
+    /// Record a persistence that failed because the disk is full: retried with a capped backoff
+    /// but not counted towards erroring the table, since freeing space fixes it. Returns the
+    /// number of consecutive (counted) failures.
+    pub(crate) fn record_persistence_failure_on_full_disk(&mut self) -> u32 {
+        self.consecutive_full_disk_persistence_failures += 1;
+        let exponent = std::cmp::min(self.consecutive_full_disk_persistence_failures - 1, 6);
+        let backoff = std::cmp::min(
+            PERSISTENCE_RETRY_BASE_BACKOFF.saturating_mul(1 << exponent),
+            PERSISTENCE_RETRY_MAX_BACKOFF,
+        );
+        self.persistence_retry_after = Some(std::time::Instant::now() + backoff);
+        self.persistence_retry_pending = true;
+        self.consecutive_persistence_failures
+    }
+
     pub(crate) fn record_persistence_success(&mut self) {
+        self.consecutive_full_disk_persistence_failures = 0;
         self.consecutive_persistence_failures = 0;
         self.persistence_retry_after = None;
         self.persistence_retry_pending = false;

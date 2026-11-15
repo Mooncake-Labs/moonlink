@@ -141,6 +141,44 @@ async fn test_repeated_persistence_failures_error_the_table() {
     env.drop_table().await.unwrap();
 }
 
+/// A full disk is waited out: failures caused by it are retried but never error the table, which
+/// keeps working once space is available again.
+#[tokio::test]
+async fn test_full_disk_persistence_failures_do_not_error_the_table() {
+    let full_disk_failures = MAX_CONSECUTIVE_PERSISTENCE_FAILURES as usize + 2;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut env = env_with_mock(|mock| {
+        mock.expect_sync_snapshot().returning(move |payload, _| {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if call < full_disk_failures {
+                    Err(Error::from(std::io::Error::from(
+                        std::io::ErrorKind::StorageFull,
+                    )))
+                } else {
+                    ok_result(payload)
+                }
+            })
+        });
+    })
+    .await;
+    env.append_row(1, "Alice", 10, 5, None).await;
+    env.commit(10).await;
+    let mut lsn = 10;
+    let started = std::time::Instant::now();
+    while snapshot(&mut env, lsn).await.is_err() {
+        assert_eq!(env.table_event_manager.table_status(), TableStatus::Healthy);
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "never recovered"
+        );
+        lsn += 10;
+        env.append_row(lsn as i32, "Bob", 20, lsn - 5, None).await;
+        env.commit(lsn).await;
+    }
+    assert_eq!(env.table_event_manager.table_status(), TableStatus::Healthy);
+}
+
 /// A failure whose effect on the committed table is unknown errors the table at once.
 #[tokio::test]
 async fn test_unknown_commit_outcome_errors_the_table() {

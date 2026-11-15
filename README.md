@@ -163,6 +163,8 @@ On the first start after upgrading, every existing mirror rebuilds its lookup in
 
 This version also deletes Iceberg files that neither the current version nor the one before it references (old snapshots, metadata files, manifests, deletion vectors, files replaced by compaction), which earlier versions kept forever. A replaced data or deletion-vector file is kept for an hour after it left the table, so running scans can finish. On the first start after upgrading, each table's leftover files are removed when the table loads. Set `MOONLINK_ICEBERG_GC=dry-run` to only log what would be deleted, or `MOONLINK_ICEBERG_GC=off` to keep every file.
 
+If the disk fills up, mirrors stop advancing instead of failing: flushes and Iceberg commits are retried (at most every minute) until space is available, and files of failed attempts are removed. A flush that cannot be written for 30 minutes marks its mirror out of sync. Postgres keeps the unconfirmed changes in `pg_wal` meanwhile.
+
 ## Contributing
 
 We’re grateful for our contributors. If you'd like to help improve Moonlink, join our [community](https://join.slack.com/t/mooncake-devs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA).

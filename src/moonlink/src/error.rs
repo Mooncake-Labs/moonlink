@@ -243,6 +243,10 @@ impl From<url::ParseError> for Error {
 
 impl Error {
     pub fn get_status(&self) -> ErrorStatus {
+        self.error_struct().status
+    }
+
+    fn error_struct(&self) -> &ErrorStruct {
         match self {
             Error::Arrow(err)
             | Error::Io(err)
@@ -256,8 +260,26 @@ impl Error {
             | Error::Json(err)
             | Error::TableErrored(err)
             | Error::TableHandlerStopped(err)
-            | Error::IcebergCommitOutcomeUnknown(err) => err.status,
+            | Error::IcebergCommitOutcomeUnknown(err) => err,
         }
+    }
+
+    /// Whether the error was caused by a full disk (ENOSPC), which goes away once space is freed.
+    pub(crate) fn is_storage_full(&self) -> bool {
+        let mut source = self.error_struct().source();
+        while let Some(err) = source {
+            if let Some(io_err) = err.downcast_ref::<io::Error>() {
+                if io_err.kind() == io::ErrorKind::StorageFull || io_err.raw_os_error() == Some(28)
+                {
+                    return true;
+                }
+            }
+            source = match err.downcast_ref::<Error>() {
+                Some(inner) => inner.error_struct().source(),
+                None => err.source(),
+            };
+        }
+        false
     }
 }
 

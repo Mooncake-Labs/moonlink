@@ -28,6 +28,19 @@ pub(crate) type LiveReadSeqProvider = Arc<dyn Fn() -> Option<u64> + Send + Sync>
 /// left the table, so in-flight scans can finish.
 const GC_GRACE_WITHOUT_READER_INFO: Duration = Duration::from_secs(3600);
 
+/// When garbage collection runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GcTrigger {
+    /// At table load: no read state exists yet, so unreferenced files go immediately (this also
+    /// removes leftovers of crashes and failed commits).
+    Load,
+    /// After a successful commit.
+    Commit,
+    /// After a commit that failed without changing the table: files that commit wrote were never
+    /// visible to anyone and go immediately, so a full disk gets its space back.
+    FailedCommit,
+}
+
 /// Environment variable to switch garbage collection `off`, to `dry-run` (only log what would be
 /// deleted) or `on` (default).
 pub(crate) const GC_MODE_ENV: &str = "MOONLINK_ICEBERG_GC";
@@ -214,9 +227,8 @@ impl IcebergTableManager {
     }
 
     /// Delete files of this table that are no longer referenced (see the module comment).
-    /// `at_load`: no read state exists yet, so unreferenced files go immediately (this also
-    /// removes leftovers of crashes and failed commits).
-    pub(crate) async fn collect_garbage(&mut self, at_load: bool) -> Result<()> {
+    pub(crate) async fn collect_garbage(&mut self, trigger: GcTrigger) -> Result<()> {
+        let at_load = trigger == GcTrigger::Load;
         let mode = gc_mode();
         if mode == GcMode::Off {
             return Ok(());
@@ -265,8 +277,11 @@ impl IcebergTableManager {
             .filter_map(|n| metadata_version(n))
             .filter(|v| *v < current_version)
             .max();
-        let previous_referenced = match (self.gc_previous_referenced.take(), previous_version) {
-            (Some(previous), _) if !at_load => previous,
+        // Files the current version referenced at the last run (None if nothing ran since load).
+        let last_referenced = self.gc_previous_referenced.take();
+        let previous_referenced = match (last_referenced.clone(), previous_version) {
+            // After a commit, its predecessor is the version the last run saw as current.
+            (Some(previous), _) if trigger == GcTrigger::Commit => previous,
             (_, Some(version)) => {
                 let path = format!("{metadata_dir}/v{version}.metadata.json");
                 self.referenced_by_metadata_file(&path, &file_io).await
@@ -313,6 +328,7 @@ impl IcebergTableManager {
         self.gc_unreferenced_since
             .retain(|name, _| removed.contains(name));
         for name in removed {
+            let newly_removed = !self.gc_unreferenced_since.contains_key(name.as_str());
             let (since, since_commit) = *self
                 .gc_unreferenced_since
                 .entry(name.clone())
@@ -320,7 +336,13 @@ impl IcebergTableManager {
             if previous_referenced.contains(name.as_str()) {
                 continue;
             }
-            if at_load || gc_context.deletable(since_commit, since, now) {
+            // Neither referenced at the last run nor tracked since: written by the failed commit.
+            let never_committed = trigger == GcTrigger::FailedCommit
+                && newly_removed
+                && last_referenced
+                    .as_ref()
+                    .is_some_and(|last| !last.contains(name.as_str()));
+            if at_load || never_committed || gc_context.deletable(since_commit, since, now) {
                 to_delete.push(format!("{data_dir}/{name}"));
                 self.gc_unreferenced_since.remove(name);
             }

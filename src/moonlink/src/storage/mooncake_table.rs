@@ -243,6 +243,12 @@ const FLUSH_WRITE_ATTEMPTS: u32 = 5;
 const FLUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(test)]
 const FLUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+const FLUSH_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a flush waits for disk space before the table is errored.
+#[cfg(not(test))]
+const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+#[cfg(test)]
+const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct RecordBatchWithDeletionVector {
     batch_id: u64,
@@ -1240,19 +1246,34 @@ impl MooncakeTable {
         let supervisor_notify = table_notify_tx.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
         spawn_supervised("flush", supervisor_notify, async move {
-            // Transient IO errors (e.g. a briefly full disk) are retried from the unwritten slice;
-            // each attempt rewrites the same file names.
+            // Transient IO errors are retried from the unwritten slice, under new file names (the
+            // failed attempt's files are deleted first). A full disk is waited out for longer and
+            // does not count as a failed attempt: it is fixed by freeing space.
             let mut attempt = 1;
+            let mut full_disk_retries = 0;
+            let full_disk_deadline = std::time::Instant::now() + FLUSH_FULL_DISK_RETRY_LIMIT;
             let flush_result = loop {
                 let mut candidate = pristine_disk_slice.clone();
                 match candidate.write().await {
                     Ok(()) => break Ok(candidate),
-                    Err(e) if attempt < FLUSH_WRITE_ATTEMPTS => {
-                        tracing::warn!(error = ?e, attempt, "disk slice write failed, retrying");
-                        tokio::time::sleep(FLUSH_RETRY_BACKOFF * attempt).await;
-                        attempt += 1;
+                    Err(e) => {
+                        candidate.remove_partial_outputs().await;
+                        if e.is_storage_full() && std::time::Instant::now() < full_disk_deadline {
+                            full_disk_retries += 1;
+                            tracing::warn!(error = ?e, full_disk_retries, "disk full while flushing table data, retrying");
+                            tokio::time::sleep(std::cmp::min(
+                                FLUSH_RETRY_BACKOFF * full_disk_retries,
+                                FLUSH_RETRY_MAX_BACKOFF,
+                            ))
+                            .await;
+                        } else if attempt < FLUSH_WRITE_ATTEMPTS {
+                            tracing::warn!(error = ?e, attempt, "disk slice write failed, retrying");
+                            tokio::time::sleep(FLUSH_RETRY_BACKOFF * attempt).await;
+                            attempt += 1;
+                        } else {
+                            break Err(e);
+                        }
                     }
-                    Err(e) => break Err(e),
                 }
             };
             match flush_result {
