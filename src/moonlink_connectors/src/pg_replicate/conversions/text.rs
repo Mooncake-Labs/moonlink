@@ -142,14 +142,18 @@ impl TextFormatConverter {
                 |str| Ok(Some(parse_bool(str)?)),
                 ArrayCell::Bool,
             ),
-            Type::CHAR | Type::BPCHAR => Ok(Cell::String(str.trim_end().to_string())),
-            Type::VARCHAR | Type::NAME | Type::TEXT => Ok(Cell::String(str.to_string())),
-            Type::CHAR_ARRAY | Type::BPCHAR_ARRAY => TextFormatConverter::parse_array(
+            // character(n) pads with spaces, which (as in its cast to text) are not part of the
+            // value; any other trailing character is.
+            Type::BPCHAR => Ok(Cell::String(str.trim_end_matches(' ').to_string())),
+            Type::CHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+                Ok(Cell::String(str.to_string()))
+            }
+            Type::BPCHAR_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(str.trim_end().to_string())),
+                |str| Ok(Some(str.trim_end_matches(' ').to_string())),
                 ArrayCell::String,
             ),
-            Type::VARCHAR_ARRAY | Type::NAME_ARRAY | Type::TEXT_ARRAY => {
+            Type::CHAR_ARRAY | Type::VARCHAR_ARRAY | Type::NAME_ARRAY | Type::TEXT_ARRAY => {
                 TextFormatConverter::parse_array(
                     str,
                     |str| Ok(Some(str.to_string())),
@@ -570,16 +574,22 @@ mod tests {
 
     #[test]
     fn parse_char_vs_varchar_trailing_spaces() {
-        // CHAR/BPCHAR should trim trailing spaces
-        let char_cell = TextFormatConverter::try_from_str(&Type::CHAR, "hello   ").unwrap();
+        // Type::CHAR is the one-byte "char" type, which is never padded: a space is its value.
+        let char_cell = TextFormatConverter::try_from_str(&Type::CHAR, " ").unwrap();
         match char_cell {
-            Cell::String(s) => assert_eq!(s, "hello"),
+            Cell::String(s) => assert_eq!(s, " "),
             _ => panic!("expected string cell, got: {char_cell:?}"),
         }
 
+        // character(n) (BPCHAR) drops its space padding, but nothing else.
         let bpchar_cell = TextFormatConverter::try_from_str(&Type::BPCHAR, "world   ").unwrap();
         match bpchar_cell {
             Cell::String(s) => assert_eq!(s, "world"),
+            _ => panic!("expected string cell, got: {bpchar_cell:?}"),
+        }
+        let bpchar_cell = TextFormatConverter::try_from_str(&Type::BPCHAR, "a\t  ").unwrap();
+        match bpchar_cell {
+            Cell::String(s) => assert_eq!(s, "a\t"),
             _ => panic!("expected string cell, got: {bpchar_cell:?}"),
         }
 
@@ -599,9 +609,9 @@ mod tests {
 
     #[test]
     fn parse_char_array_vs_varchar_array_trailing_spaces() {
-        // CHAR_ARRAY/BPCHAR_ARRAY should trim trailing spaces
+        // character(n)[] (BPCHAR_ARRAY) drops the elements' space padding
         let char_array_cell =
-            TextFormatConverter::try_from_str(&Type::CHAR_ARRAY, "{\"hello   \",\"world   \"}")
+            TextFormatConverter::try_from_str(&Type::BPCHAR_ARRAY, "{\"hello   \",\"world   \"}")
                 .unwrap();
         match char_array_cell {
             Cell::Array(ArrayCell::String(v)) => {
@@ -609,6 +619,16 @@ mod tests {
                     v,
                     vec![Some("hello".to_string()), Some("world".to_string())]
                 );
+            }
+            _ => panic!("expected string array cell, got: {char_array_cell:?}"),
+        }
+
+        // \"char\"[] elements are single characters, a space included
+        let char_array_cell =
+            TextFormatConverter::try_from_str(&Type::CHAR_ARRAY, "{\" \",a}").unwrap();
+        match char_array_cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![Some(" ".to_string()), Some("a".to_string())]);
             }
             _ => panic!("expected string array cell, got: {char_array_cell:?}"),
         }

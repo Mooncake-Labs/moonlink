@@ -133,9 +133,10 @@ async fn scan_rows(
                 .unwrap()
                 .clone();
             let column = batch.column_by_name(col).unwrap();
-            // Nested values (lists, structs) have no cast to text; display them instead.
+            // Nested values (lists, structs) have no cast to text and bytes may not be utf-8;
+            // display them instead (bytes as hex).
             let vals = match column.data_type() {
-                DataType::List(_) | DataType::Struct(_) => {
+                DataType::List(_) | DataType::Struct(_) | DataType::Binary => {
                     let text: Vec<Option<String>> = (0..column.len())
                         .map(|i| {
                             (!column.is_null(i)).then(|| array_value_to_string(column, i).unwrap())
@@ -1654,4 +1655,51 @@ async fn numeric_array_elements_keep_their_value() {
     assert_eq!(a[&2].as_deref(), Some("[999.9900000000]"));
     assert_eq!(u[&1].as_deref(), Some("[1.5000000000, 42.0000000000]"));
     assert_eq!(u[&2].as_deref(), Some("[-0.0000000001]"));
+}
+
+/// character(n) loses only its space padding and "char" nothing; bytea keeps its bytes. Compared
+/// with postgres's own text form, on the copy and via CDC.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn character_and_bytea_values_are_exact() {
+    let uri = get_database_uri();
+    let values = "('a\t', ' ', '\\x00ff'), ('ab', 'x', '\\x'), (' b', '\"', '\\x6162')";
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_chars;
+         CREATE TABLE rv_chars (id BIGSERIAL PRIMARY KEY, c CHAR(4), ch \"char\", b BYTEA);
+         INSERT INTO rv_chars (c, ch, b) VALUES {values};"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_chars_mc", "public.rv_chars", &uri).await;
+    client
+        .simple_query(&format!("INSERT INTO rv_chars (c, ch, b) VALUES {values};"))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    for (column, source_text) in [
+        ("c", "c::text"),
+        ("ch", "ch::text"),
+        ("b", "encode(b, 'hex')"),
+    ] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {source_text} FROM rv_chars"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(source.len(), 6);
+        assert_eq!(
+            scan_rows(
+                &backend,
+                "rv_chars_mc",
+                lsn,
+                column,
+                Duration::from_secs(30)
+            )
+            .await,
+            Some(source),
+            "{column}"
+        );
+    }
 }
