@@ -45,6 +45,13 @@ pub struct Sink {
     /// Tracks the maximum LSN observed from primary keepalive messages.
     /// Used to assert that subsequent LSN-bearing CDC events are not older.
     max_keepalive_lsn_seen: u64,
+    /// Tables whose initial copy is running, with the highest commit LSN streamed for them
+    /// meanwhile. Commits up to the copy's boundary are in the copy and dropped by the table
+    /// handler, so the table's commit LSN is only published once the boundary is known.
+    copying_tables: HashMap<SrcTableId, u64>,
+    /// Commit LSNs (copy boundaries) to publish once the replication LSN reaches them: a reader
+    /// must never see a commit LSN the replication LSN does not cover yet.
+    deferred_commit_marks: HashMap<SrcTableId, u64>,
 }
 
 impl Sink {
@@ -82,6 +89,62 @@ impl Sink {
             cached_event_sender: None,
             streaming_last_key: None,
             max_keepalive_lsn_seen: 0,
+            copying_tables: HashMap::new(),
+            deferred_commit_marks: HashMap::new(),
+        }
+    }
+
+    /// Publish that `table_id` committed at `lsn`; held back while its initial copy runs.
+    fn mark_table_commit(&mut self, table_id: SrcTableId, lsn: u64) {
+        if let Some(highest) = self.copying_tables.get_mut(&table_id) {
+            *highest = (*highest).max(lsn);
+            return;
+        }
+        if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(&table_id) {
+            commit_lsn_tx.mark(lsn);
+        }
+    }
+
+    /// Advance the replication LSN, first publishing the deferred commit LSNs it now covers.
+    fn mark_replication(&mut self, lsn: u64) {
+        let commit_lsn_txs = &self.commit_lsn_txs;
+        self.deferred_commit_marks.retain(|table_id, commit_lsn| {
+            if *commit_lsn > lsn {
+                return true;
+            }
+            if let Some(commit_lsn_tx) = commit_lsn_txs.get(table_id) {
+                commit_lsn_tx.mark(*commit_lsn);
+            }
+            false
+        });
+        self.replication_state.mark(lsn);
+    }
+
+    /// The initial copy of `table_id` finished at `boundary_lsn`. Its commit LSN becomes the
+    /// boundary if rows were copied (an empty copy creates no snapshot to read at it), or the
+    /// latest commit streamed after the boundary; never a commit the boundary dropped.
+    pub fn finish_initial_copy(
+        &mut self,
+        table_id: SrcTableId,
+        boundary_lsn: u64,
+        rows_copied: bool,
+    ) {
+        let Some(highest_streamed) = self.copying_tables.remove(&table_id) else {
+            return;
+        };
+        let mut commit_lsn = if rows_copied { boundary_lsn } else { 0 };
+        if highest_streamed > boundary_lsn {
+            commit_lsn = commit_lsn.max(highest_streamed);
+        }
+        if commit_lsn == 0 {
+            return;
+        }
+        if commit_lsn <= self.replication_state.now() {
+            if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(&table_id) {
+                commit_lsn_tx.mark(commit_lsn);
+            }
+        } else {
+            self.deferred_commit_marks.insert(table_id, commit_lsn);
         }
     }
 
@@ -125,13 +188,19 @@ impl Sink {
 }
 
 impl Sink {
+    /// Register a table; with `initial_copy`, its commit LSN is held back until
+    /// [`Self::finish_initial_copy`].
     pub fn add_table(
         &mut self,
         src_table_id: SrcTableId,
         event_sender: Sender<TableEvent>,
         commit_lsn_tx: Arc<CommitState>,
         table_schema: &TableSchema,
+        initial_copy: bool,
     ) {
+        if initial_copy {
+            self.copying_tables.insert(src_table_id, 0);
+        }
         self.event_senders.insert(src_table_id, event_sender);
         self.commit_lsn_txs.insert(src_table_id, commit_lsn_tx);
         self.table_names
@@ -146,6 +215,8 @@ impl Sink {
 
     fn detach_table(&mut self, src_table_id: SrcTableId) -> Option<Sender<TableEvent>> {
         self.commit_lsn_txs.remove(&src_table_id);
+        self.copying_tables.remove(&src_table_id);
+        self.deferred_commit_marks.remove(&src_table_id);
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;
@@ -255,11 +326,9 @@ impl Sink {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 self.warn_if_before_keepalive(commit_body.end_lsn(), "commit");
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
-                for table_id in &self.transaction_state.touched_tables {
-                    let event_sender = self.event_senders.get(table_id);
-                    if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id) {
-                        commit_lsn_tx.mark(commit_body.end_lsn());
-                    }
+                for table_id in self.transaction_state.touched_tables.clone() {
+                    self.mark_table_commit(table_id, commit_body.end_lsn());
+                    let event_sender = self.event_senders.get(&table_id);
                     if let Some(event_sender) = event_sender {
                         if let Err(e) = Self::send_table_event(
                             event_sender,
@@ -278,7 +347,7 @@ impl Sink {
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
                 let pg_lsn = PgLsn::from(commit_body.end_lsn());
-                self.replication_state.mark(pg_lsn.into());
+                self.mark_replication(pg_lsn.into());
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
@@ -289,12 +358,10 @@ impl Sink {
                 );
                 self.warn_if_before_keepalive(stream_commit_body.end_lsn(), "stream commit");
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
-                if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
-                    for table_id in &tables_in_txn.touched_tables {
-                        let event_sender = self.event_senders.get(table_id);
-                        if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id) {
-                            commit_lsn_tx.mark(stream_commit_body.end_lsn());
-                        }
+                if let Some(tables_in_txn) = self.streaming_transactions_state.remove(&xact_id) {
+                    for table_id in tables_in_txn.touched_tables {
+                        self.mark_table_commit(table_id, stream_commit_body.end_lsn());
+                        let event_sender = self.event_senders.get(&table_id);
                         if let Some(event_sender) = event_sender {
                             if let Err(e) = Self::send_table_event(
                                 event_sender,
@@ -309,14 +376,13 @@ impl Sink {
                             }
                         }
                     }
-                    self.streaming_transactions_state.remove(&xact_id);
                 }
                 self.streaming_last_key = None;
                 if let Some(truncated) = self.pending_stream_truncates.remove(&xact_id) {
                     self.fail_truncated_tables(truncated).await;
                 }
                 let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
-                self.replication_state.mark(pg_lsn.into());
+                self.mark_replication(pg_lsn.into());
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
@@ -426,7 +492,7 @@ impl Sink {
                 if wal_end > self.max_keepalive_lsn_seen {
                     self.max_keepalive_lsn_seen = wal_end;
                 }
-                self.replication_state.mark(pg_lsn.into());
+                self.mark_replication(pg_lsn.into());
             }
             CdcEvent::StreamStop(_stream_stop_body) => {
                 debug!("Stream stop");
@@ -482,6 +548,60 @@ mod tests {
         }
     }
 
+    fn copying_sink(replication: &Arc<ReplicationState>) -> (Sink, Arc<CommitState>) {
+        let mut sink = Sink::new(replication.clone());
+        let (tx, _rx) = mpsc::channel(8);
+        let commit = CommitState::new();
+        sink.add_table(
+            1,
+            tx,
+            commit.clone(),
+            &make_table_schema(1),
+            /*initial_copy=*/ true,
+        );
+        (sink, commit)
+    }
+
+    #[test]
+    fn copy_boundary_ahead_of_the_stream_is_published_when_the_stream_reaches_it() {
+        let replication = ReplicationState::new();
+        let (mut sink, commit) = copying_sink(&replication);
+        sink.mark_replication(50);
+        sink.finish_initial_copy(1, 100, /*rows_copied=*/ true);
+        // Never ahead of the replication LSN, which the copy path no longer touches.
+        assert_eq!((commit.now(), replication.now()), (0, 50));
+        sink.mark_replication(99);
+        assert_eq!(commit.now(), 0);
+        sink.mark_replication(120);
+        assert_eq!((commit.now(), replication.now()), (100, 120));
+    }
+
+    #[test]
+    fn commits_dropped_by_the_copy_boundary_are_never_published() {
+        let replication = ReplicationState::new();
+        let (mut sink, commit) = copying_sink(&replication);
+        sink.mark_table_commit(1, 80);
+        sink.mark_replication(80);
+        assert_eq!(commit.now(), 0);
+        // An empty copy has no snapshot at the boundary to read.
+        sink.finish_initial_copy(1, 100, /*rows_copied=*/ false);
+        sink.mark_replication(200);
+        assert_eq!(commit.now(), 0);
+        // Later commits are published as usual.
+        sink.mark_table_commit(1, 210);
+        assert_eq!(commit.now(), 210);
+    }
+
+    #[test]
+    fn commits_after_the_boundary_streamed_during_the_copy_are_published() {
+        let replication = ReplicationState::new();
+        let (mut sink, commit) = copying_sink(&replication);
+        sink.mark_table_commit(1, 150);
+        sink.mark_replication(150);
+        sink.finish_initial_copy(1, 100, /*rows_copied=*/ false);
+        assert_eq!(commit.now(), 150);
+    }
+
     #[tokio::test]
     async fn hot_path_streaming_caches_and_dedupes() {
         let replication_state = ReplicationState::new();
@@ -492,7 +612,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TableEvent>(64);
         let commit_state = CommitState::new();
         let schema = make_table_schema(table_id);
-        sink.add_table(table_id, tx, commit_state, &schema);
+        sink.add_table(table_id, tx, commit_state, &schema, false);
 
         // Many inserts for the same (xid, table) pair
         let xid = Some(42u32);
@@ -542,8 +662,20 @@ mod tests {
         let (tx_b, mut rx_b) = mpsc::channel::<TableEvent>(8);
         let commit_state_a = CommitState::new();
         let commit_state_b = CommitState::new();
-        sink.add_table(a, tx_a, commit_state_a.clone(), &make_table_schema(a));
-        sink.add_table(b, tx_b, commit_state_b.clone(), &make_table_schema(b));
+        sink.add_table(
+            a,
+            tx_a,
+            commit_state_a.clone(),
+            &make_table_schema(a),
+            false,
+        );
+        sink.add_table(
+            b,
+            tx_b,
+            commit_state_b.clone(),
+            &make_table_schema(b),
+            false,
+        );
 
         // Many inserts into A then into B within the same non-streaming transaction
         for _ in 0..5 {
@@ -585,6 +717,7 @@ mod tests {
             tx,
             commit_state.clone(),
             &make_table_schema(table_id),
+            false,
         );
 
         // Populate sender cache
@@ -610,6 +743,7 @@ mod tests {
             tx,
             commit_state.clone(),
             &make_table_schema(table_id),
+            false,
         );
 
         let xid1 = Some(100u32);
@@ -678,8 +812,20 @@ mod tests {
         let (tx_b, mut rx_b) = mpsc::channel::<TableEvent>(8);
         let commit_state_a = CommitState::new();
         let commit_state_b = CommitState::new();
-        sink.add_table(a, tx_a, commit_state_a.clone(), &make_table_schema(a));
-        sink.add_table(b, tx_b, commit_state_b.clone(), &make_table_schema(b));
+        sink.add_table(
+            a,
+            tx_a,
+            commit_state_a.clone(),
+            &make_table_schema(a),
+            false,
+        );
+        sink.add_table(
+            b,
+            tx_b,
+            commit_state_b.clone(),
+            &make_table_schema(b),
+            false,
+        );
 
         let xid = Some(777u32);
         // A then B under same xid
@@ -720,6 +866,7 @@ mod tests {
             tx,
             commit_state.clone(),
             &make_table_schema(table_id),
+            false,
         );
 
         let xid1 = Some(1u32);
@@ -766,6 +913,7 @@ mod tests {
             tx,
             commit_state.clone(),
             &make_table_schema(table_id),
+            false,
         );
 
         // First transaction: several inserts (non-streaming)

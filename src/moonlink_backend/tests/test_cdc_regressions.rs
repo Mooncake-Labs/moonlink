@@ -2196,3 +2196,93 @@ async fn keyless_mirror_from_an_older_version_is_errored() {
         Some(vec![1, 2])
     );
 }
+
+/// Commits on an empty source table between joining the publication and the copy's boundary are
+/// in the copy and dropped; they must not become the table's commit LSN (nothing would ever be
+/// readable at it), so the idle mirror stays readable at later LSNs.
+#[rstest::rstest]
+#[case::with_discarded_commits(true)]
+#[case::control_no_writes(false)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn empty_copy_with_commits_at_the_boundary_stays_readable(#[case] write: bool) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_q, rv_bystander;
+         CREATE TABLE rv_q (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    // Keep a transaction with an xid open so creating the temporary copy slot has to wait.
+    let (blocker, _) = connect_to_postgres(&uri).await;
+    blocker
+        .simple_query("BEGIN; SELECT txid_current();")
+        .await
+        .unwrap();
+
+    let backend = Arc::new(backend);
+    let b2 = backend.clone();
+    let cfg = table_config(&tmp);
+    let uri2 = uri.clone();
+    let create = tokio::spawn(async move {
+        b2.create_table(
+            DB.to_string(),
+            "rv_q_mc".to_string(),
+            "public.rv_q".to_string(),
+            uri2,
+            cfg,
+            None,
+        )
+        .await
+    });
+    let mut waiting = false;
+    for _ in 0..100 {
+        let n: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_copy_%'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if n > 0 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(waiting, "copy slot creation never started");
+    if write {
+        client
+            .simple_query("INSERT INTO rv_q VALUES (1); DELETE FROM rv_q;")
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    blocker.simple_query("COMMIT;").await.unwrap();
+    create.await.unwrap().unwrap();
+
+    client
+        .simple_query("INSERT INTO rv_bystander VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    let q = scan_rows(&backend, "rv_q_mc", lsn, "id", Duration::from_secs(20)).await;
+    assert_eq!(
+        q,
+        Some(BTreeMap::new()),
+        "scan of the idle empty mirror did not complete"
+    );
+}

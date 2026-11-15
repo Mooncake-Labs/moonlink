@@ -78,6 +78,12 @@ pub enum PostgresReplicationCommand {
     DropTable {
         src_table_id: SrcTableId,
     },
+    /// The table's initial copy finished at `boundary_lsn` (see [`Sink::finish_initial_copy`]).
+    FinishInitialCopy {
+        src_table_id: SrcTableId,
+        boundary_lsn: u64,
+        rows_copied: bool,
+    },
     Shutdown,
 }
 
@@ -113,25 +119,6 @@ type WatchedTables = Arc<std::sync::Mutex<HashMap<SrcTableId, WatchedTable>>>;
 
 /// How often replicated tables are checked for source changes the stream does not show.
 const FINGERPRINT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Something that tracks an LSN watermark (`CommitState` and `ReplicationState` are both `LsnState`).
-trait LsnMark {
-    fn mark_lsn(&self, lsn: u64);
-}
-
-impl LsnMark for CommitState {
-    fn mark_lsn(&self, lsn: u64) {
-        self.mark(lsn);
-    }
-}
-
-/// Publish the initial copy boundary. The table's commit LSN must be marked before the replication
-/// LSN, the same order the sink uses for commits: readers rely on never observing a replication
-/// LSN that is ahead of the commit LSN it covers.
-fn mark_copy_boundary(commit_state: &impl LsnMark, replication_state: &impl LsnMark, lsn: u64) {
-    commit_state.mark_lsn(lsn);
-    replication_state.mark_lsn(lsn);
-}
 
 /// Identifies the database a connection string points at, independent of how it is spelled
 /// (user, host alias, options). One replication slot and publication exist per database, so every
@@ -549,7 +536,6 @@ impl PostgresConnection {
         schema: &TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
-        commit_lsn_tx: Arc<CommitState>,
         table_base_path: &str,
     ) -> Result<bool> {
         let src_table_id = schema.src_table_id;
@@ -587,16 +573,16 @@ impl PostgresConnection {
             error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
         }
 
-        // Readers may treat the boundary as the table's commit LSN only once the copied rows are in
-        // a snapshot at that LSN. An empty copy loads nothing, so no such snapshot is ever created;
-        // publishing the boundary would make every later read wait for the table's next write.
-        if progress.rows_copied > 0 {
-            mark_copy_boundary(
-                commit_lsn_tx.as_ref(),
-                self.replication_state.as_ref(),
-                progress.boundary_lsn.into(),
-            );
-        }
+        // The sink publishes the table's commit LSN from here on, in order with the stream: the
+        // boundary is usually ahead of what the stream has applied, and the replication LSN is
+        // shared by every mirror of the database.
+        self.cmd_tx
+            .send(PostgresReplicationCommand::FinishInitialCopy {
+                src_table_id,
+                boundary_lsn: progress.boundary_lsn.into(),
+                rows_copied: progress.rows_copied > 0,
+            })
+            .await?;
 
         Ok(true)
     }
@@ -892,7 +878,6 @@ impl PostgresConnection {
             .commit_state
             .take()
             .expect("commit_lsn_tx is None");
-        let commit_lsn_tx_for_copy = commit_lsn_tx.clone();
         let ready_rx = self
             .add_table_to_replication(
                 table_schema.src_table_id,
@@ -922,7 +907,6 @@ impl PostgresConnection {
                 &table_schema,
                 table_resources.event_sender.clone(),
                 is_recovery,
-                commit_lsn_tx_for_copy,
                 table_base_path,
             )
             .await
@@ -1311,11 +1295,17 @@ fn apply_command_without_stream(
             commit_state,
             flush_lsn_rx,
             table_status_rx,
-            // The next stream starts from the slot anyway.
-            replay_from_slot: _,
+            replay_from_slot,
             ready_tx,
         }) => {
-            sink.add_table(src_table_id, event_sender, commit_state, &schema);
+            // The next stream starts from the slot anyway.
+            sink.add_table(
+                src_table_id,
+                event_sender,
+                commit_state,
+                &schema,
+                /*initial_copy=*/ !replay_from_slot,
+            );
             flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
             table_status_rxs.insert(src_table_id, table_status_rx);
             saved_schemas.retain(|s| s.src_table_id != src_table_id);
@@ -1330,6 +1320,14 @@ fn apply_command_without_stream(
             flush_lsn_rxs.remove(&src_table_id);
             table_status_rxs.remove(&src_table_id);
             saved_schemas.retain(|s| s.src_table_id != src_table_id);
+            true
+        }
+        Some(PostgresReplicationCommand::FinishInitialCopy {
+            src_table_id,
+            boundary_lsn,
+            rows_copied,
+        }) => {
+            sink.finish_initial_copy(src_table_id, boundary_lsn, rows_copied);
             true
         }
         Some(PostgresReplicationCommand::Shutdown) | None => false,
@@ -1500,7 +1498,7 @@ pub async fn run_event_loop(
                 },
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, table_status_rx, replay_from_slot, ready_tx } => {
-                        sink.add_table(src_table_id, event_sender, commit_state, &schema);
+                        sink.add_table(src_table_id, event_sender, commit_state, &schema, /*initial_copy=*/ !replay_from_slot);
                         flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                         table_status_rxs.insert(src_table_id, table_status_rx);
                         stream.as_mut().add_table_schema(schema);
@@ -1518,6 +1516,9 @@ pub async fn run_event_loop(
                         flush_lsn_rxs.remove(&src_table_id);
                         table_status_rxs.remove(&src_table_id);
                         stream.as_mut().remove_table_schema(src_table_id);
+                    }
+                    PostgresReplicationCommand::FinishInitialCopy { src_table_id, boundary_lsn, rows_copied } => {
+                        sink.finish_initial_copy(src_table_id, boundary_lsn, rows_copied);
                     }
                     PostgresReplicationCommand::Shutdown => {
                         debug!("received shutdown command");
@@ -1621,41 +1622,6 @@ pub async fn run_event_loop(
 
     debug!("replication event loop stopped");
     Ok(())
-}
-
-#[cfg(test)]
-mod copy_boundary_tests {
-    use super::{mark_copy_boundary, LsnMark};
-    use std::sync::Mutex;
-
-    struct Recorder<'a> {
-        name: &'static str,
-        log: &'a Mutex<Vec<(&'static str, u64)>>,
-    }
-
-    impl LsnMark for Recorder<'_> {
-        fn mark_lsn(&self, lsn: u64) {
-            self.log.lock().unwrap().push((self.name, lsn));
-        }
-    }
-
-    #[test]
-    fn copy_boundary_marks_commit_before_replication() {
-        let log = Mutex::new(Vec::new());
-        let commit = Recorder {
-            name: "commit",
-            log: &log,
-        };
-        let replication = Recorder {
-            name: "replication",
-            log: &log,
-        };
-        mark_copy_boundary(&commit, &replication, 42);
-        assert_eq!(
-            log.into_inner().unwrap(),
-            vec![("commit", 42), ("replication", 42)]
-        );
-    }
 }
 
 #[cfg(test)]
