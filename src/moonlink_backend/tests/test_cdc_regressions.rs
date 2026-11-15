@@ -1284,3 +1284,48 @@ async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[
     );
     wait_for_no_slots(&client).await;
 }
+
+/// Inheritance parents cannot be mirrored faithfully (children's changes are not replicated with
+/// the parent): creating such a mirror is refused, and a mirror whose table gained a child is
+/// errored at the next start rather than silently diverging.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn inheritance_parent_is_refused() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_parent, rv_later_parent CASCADE;
+         CREATE TABLE rv_parent (id BIGINT, v TEXT);
+         CREATE TABLE rv_child (extra INT) INHERITS (rv_parent);
+         CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    let err = try_mirror(&backend, &tmp, "rv_parent_mc", "public.rv_parent", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("inheritance children"), "{err}");
+
+    mirror(
+        &backend,
+        &tmp,
+        "rv_later_parent_mc",
+        "public.rv_later_parent",
+        &uri,
+    )
+    .await;
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    client
+        .simple_query("CREATE TABLE rv_later_child () INHERITS (rv_later_parent);")
+        .await
+        .unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    let err = scan_error(&backend, "rv_later_parent_mc")
+        .await
+        .expect("must be errored after a child appeared");
+    assert!(err.contains("inheritance children"), "{err}");
+    client
+        .simple_query("DROP TABLE rv_parent, rv_later_parent CASCADE;")
+        .await
+        .unwrap();
+}

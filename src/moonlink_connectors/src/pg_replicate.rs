@@ -403,6 +403,37 @@ impl PostgresConnection {
         Ok(())
     }
 
+    /// Refuse regular tables with inheritance children: the copy would include the children's rows
+    /// (like SELECT from the parent does), but their changes are never published with the parent's,
+    /// so the mirror would silently diverge. (Partitions are published through their root.)
+    /// Checked at creation and at every recovery; a child added while running is only detected at
+    /// the next start.
+    async fn check_not_inheritance_parent(&mut self, table_name: &str) -> Result<()> {
+        let ident = match TableName::parse_schema_name(table_name) {
+            Ok((schema, name)) => {
+                format!("{}.{}", quote_identifier(&schema), quote_identifier(&name))
+            }
+            Err(_) => quote_identifier(table_name).into_owned(),
+        };
+        let query = format!(
+            "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \
+             WHERE i.inhparent = {}::regclass AND c.relkind = 'r' LIMIT 1;",
+            quote_literal(&ident)
+        );
+        let has_children = self
+            .run_control_query(&query)
+            .await?
+            .iter()
+            .any(|m| matches!(m, SimpleQueryMessage::Row(_)));
+        if has_children {
+            return Err(crate::Error::unsupported_source_table(
+                table_name,
+                "it has inheritance children, whose changes are not replicated with it",
+            ));
+        }
+        Ok(())
+    }
+
     /// Add the table to the publication and, for a new mirror, copy its current contents.
     ///
     /// The table joins the publication before the copy snapshot is taken, so every change after the
@@ -666,6 +697,7 @@ impl PostgresConnection {
         object_storage_cache: ObjectStorageCache,
     ) -> Result<(SrcTableId, crate::pg_replicate::table_init::TableResources)> {
         debug!(table_name, "adding table");
+        self.check_not_inheritance_parent(table_name).await?;
         // TODO: We should not naively alter the replica identity of a table. We should only do this if we are sure that the table does not already have a FULL replica identity. [https://github.com/Mooncake-Labs/moonlink/issues/104]
         self.alter_table_replica_identity(table_name).await?;
         let table_schema = self

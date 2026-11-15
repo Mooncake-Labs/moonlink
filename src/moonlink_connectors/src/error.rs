@@ -51,6 +51,9 @@ pub enum Error {
     // The mirror is in the errored state; the message tells the user what to do.
     #[error("{0}")]
     TableErrored(ErrorStruct),
+    // The source table cannot be mirrored faithfully.
+    #[error("{0}")]
+    UnsupportedSourceTable(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -71,6 +74,16 @@ impl Error {
     pub fn table_errored(message: &str) -> Self {
         Error::TableErrored(ErrorStruct {
             message: message.to_string(),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
+    #[track_caller]
+    pub fn unsupported_source_table(src_table_name: &str, reason: &str) -> Self {
+        Error::UnsupportedSourceTable(ErrorStruct {
+            message: format!("source table {src_table_name} cannot be mirrored: {reason}"),
             status: ErrorStatus::Permanent,
             source: None,
             location: Some(Location::caller().to_string()),
