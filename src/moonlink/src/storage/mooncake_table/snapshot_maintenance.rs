@@ -90,6 +90,7 @@ impl SnapshotTableState {
         let unpersisted_data_files = self.unpersisted_records.get_unpersisted_data_files_set();
         let unpersisted_file_indices = self.unpersisted_records.get_unpersisted_file_indices_set();
         let mut reject_by_unpersistence = 0;
+        let mut never_compacted_files = 0;
         let mut eligible_groups = Vec::new();
         for group in self.build_compaction_groups() {
             // To simplify state management, only compact data files which have been persisted into iceberg table.
@@ -112,8 +113,25 @@ impl SnapshotTableState {
                         && f.deletion_percentage >= data_file_deletion_percentage_threshold)
             });
             if all_files_eligible {
+                if group.files.len() > max_data_compaction_file_num_threshold {
+                    never_compacted_files += group.files.len();
+                }
                 eligible_groups.push(group);
+            } else if group.files.len() > 1 {
+                // Small files sharing an index with a large one are only compacted together.
+                never_compacted_files += group.files.len();
             }
+        }
+        if never_compacted_files > 0
+            && !self
+                .logged_uncompactable_groups
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::info!(
+                table = self.mooncake_table_metadata.mooncake_table_id,
+                files = never_compacted_files,
+                "some data files share a file index with files too large to rewrite together, so data compaction skips them"
+            );
         }
 
         let chosen_groups = choose_compaction_groups(

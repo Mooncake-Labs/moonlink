@@ -97,6 +97,9 @@ pub(crate) struct SnapshotTableState {
     /// the owning table (and its garbage collection) through an `Arc`.
     pub(crate) snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
 
+    /// Whether data compaction already logged groups it can never compact.
+    pub(super) logged_uncompactable_groups: std::sync::atomic::AtomicBool,
+
     /// Garbage collection of the owning table's iceberg files, if enabled.
     pub(crate) gc_context: Option<Arc<crate::storage::table::iceberg::gc::IcebergGcContext>>,
 }
@@ -190,6 +193,7 @@ impl SnapshotTableState {
         let table_config = metadata.config.clone();
         Ok(Self {
             snapshot_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            logged_uncompactable_groups: std::sync::atomic::AtomicBool::new(false),
             gc_context: None,
             iceberg_warehouse_location,
             table_instance_id: uuid::Uuid::new_v4(),
