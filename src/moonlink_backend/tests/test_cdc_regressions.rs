@@ -452,8 +452,9 @@ async fn initial_copy_and_stream_apply_each_row_exactly_once(#[case] initial_row
 /// Request a snapshot to probe a mirror's state: errored mirrors reject it with the user-facing
 /// "drop and re-create" message.
 async fn snapshot_error(backend: &MoonlinkBackend, dst: &str, lsn: u64) -> Option<String> {
+    // Generous: a snapshot on a loaded CI runner can take well over 30 s.
     tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         backend.create_snapshot(DB.to_string(), dst.to_string(), lsn),
     )
     .await
