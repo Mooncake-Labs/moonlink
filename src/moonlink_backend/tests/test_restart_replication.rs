@@ -359,4 +359,87 @@ mod tests {
     async fn reconnect_mid_streamed_transaction_applies_it_once() {
         reconnect_mid_transaction(true).await;
     }
+
+    /// Restart dedup: a multi-table transaction persisted in only one of its tables, and two
+    /// interleaved transactions whose second commit record starts at the persisted LSN of the first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn restart_dedup_multi_table_and_boundary() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+        let (s1, _h1) = connect_to_postgres(&get_database_uri()).await;
+        let (s2, _h2) = connect_to_postgres(&get_database_uri()).await;
+
+        // X touches both tables; only A persists it.
+        client
+            .simple_query("BEGIN; INSERT INTO rr_a SELECT g, g::text FROM generate_series(1,5) g; INSERT INTO rr_b SELECT g, g::text FROM generate_series(1,5) g; COMMIT;")
+            .await
+            .unwrap();
+        let lx = current_wal_lsn(&client).await;
+        persist(&backend, TABLE_A, lx).await;
+
+        // Interleaved T1/T2 on A; A persisted exactly at T1's end.
+        s1.simple_query("BEGIN; INSERT INTO rr_a SELECT g, g::text FROM generate_series(6,10) g;")
+            .await
+            .unwrap();
+        s2.simple_query("BEGIN; INSERT INTO rr_a SELECT g, g::text FROM generate_series(11,15) g;")
+            .await
+            .unwrap();
+        s1.simple_query("COMMIT").await.unwrap();
+        let e1 = current_wal_lsn(&client).await;
+        persist(&backend, TABLE_A, e1).await;
+        s2.simple_query("COMMIT").await.unwrap();
+        let e2 = current_wal_lsn(&client).await;
+        for t in [TABLE_A, TABLE_B] {
+            backend
+                .scan_table(DATABASE.to_string(), t.to_string(), Some(e2))
+                .await
+                .unwrap();
+        }
+
+        backend
+            .shutdown_connection(&get_database_uri(), false)
+            .await;
+        drop(backend);
+        let base_path = tmp.path().to_str().unwrap().to_string();
+        let backend = create_backend_from_base_path(base_path).await;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let a = scan_id_counts(&backend, DATABASE.to_string(), TABLE_A.to_string(), e2).await;
+        let b = scan_id_counts(&backend, DATABASE.to_string(), TABLE_B.to_string(), e2).await;
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        assert_eq!(a, counts(1, 15), "table A after restart");
+        assert_eq!(b, counts(1, 5), "table B after restart");
+    }
+
+    /// A crash before the table has any Iceberg snapshot: every change is still in the slot, and
+    /// after recovery each row is there exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn crash_before_first_snapshot_recovers_every_row_once() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        insert_range(&client, "rr_a", 1, 10).await;
+        let lsn = insert_range(&client, "rr_a", 11, 20).await;
+        backend
+            .scan_table(DATABASE.to_string(), TABLE_A.to_string(), Some(lsn))
+            .await
+            .unwrap();
+
+        backend
+            .shutdown_connection(&get_database_uri(), false)
+            .await;
+        drop(backend);
+        let base_path = tmp.path().to_str().unwrap().to_string();
+        let backend = create_backend_from_base_path(base_path).await;
+        let after = scan_id_counts(&backend, DATABASE.to_string(), TABLE_A.to_string(), lsn).await;
+        let lsn = insert_range(&client, "rr_a", 21, 25).await;
+        let later = scan_id_counts(&backend, DATABASE.to_string(), TABLE_A.to_string(), lsn).await;
+        cleanup(&backend, &[TABLE_A]).await;
+        assert_eq!(after, counts(1, 20), "after recovery");
+        assert_eq!(later, counts(1, 25), "replication after recovery");
+    }
 }
