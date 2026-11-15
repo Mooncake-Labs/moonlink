@@ -157,7 +157,6 @@ jobs:
             name: S3 chaos test
             timeout-minutes: 20
             cmd: |
-              RUST_BACKTRACE=1 cargo test storage::filesystem::accessor -p moonlink --features=chaos-test
               RUST_BACKTRACE=1 cargo test test_s3_chaos --features=chaos-test,storage-s3 -p moonlink -- --nocapture
     steps:
       - uses: actions/checkout@v5
@@ -175,23 +174,55 @@ jobs:
           make-default: true
 
       # ─────────────────────── Start Fake S3 Server ──────────────────────────
-      - name: Start Fake S3 Server
-        timeout-minutes: 2
+      # Filesystem accessor chaos does not need S3; it runs before, and regardless of, the emulator.
+      - name: Run filesystem accessor chaos test
+        if: matrix.type == 'chaos'
+        timeout-minutes: 20
         run: |
+          RUST_BACKTRACE=1 cargo test storage::filesystem::accessor -p moonlink --features=chaos-test
+
+      - name: Start Fake S3 Server
+        id: fake_s3
+        timeout-minutes: 5
+        run: |
+          # minio/minio (Docker Hub) and quay.io/minio/minio are no longer publicly pullable. Until a
+          # maintained S3 emulator image is pinned here (then remove this skip), skip the tests that need
+          # S3 when the image is gone, but fail on any other pull error (rate limit, network).
+          image=minio/minio:latest
+          for attempt in 1 2 3; do
+            if err=$(docker pull "$image" 2>&1); then
+              break
+            fi
+            if grep -qiE 'pull access denied|repository does not exist|manifest unknown|manifest for .* not found' <<<"$err"; then
+              msg="$image is not available ($(tail -n 1 <<<"$err")); skipping the steps that need an S3 emulator."
+              echo "::warning title=S3 emulator unavailable::$msg"
+              echo "**${{ github.job }} (${{ matrix.type }}): S3 tests skipped.** $msg" >> "$GITHUB_STEP_SUMMARY"
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "docker pull failed (attempt $attempt/3): $err"
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 15
+          done
           docker run -d \
             --name minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            "$image" server /data
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
       - name: Add s3.local to /etc/hosts
+        if: steps.fake_s3.outputs.available == 'true'
         run: |
           echo "127.0.0.1 s3.local" | sudo tee -a /etc/hosts
 
       # ───────────────────── Wait for Fake S3 to be ready ───────────────────
       - name: Wait for Fake S3
+        if: steps.fake_s3.outputs.available == 'true'
         timeout-minutes: 2
         run: |
           set -euo pipefail
@@ -208,6 +239,7 @@ jobs:
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
       - name: Run ${{ matrix.name }}
+        if: steps.fake_s3.outputs.available == 'true'
         timeout-minutes: ${{ matrix.timeout-minutes }}
         run: |
           ${{ matrix.cmd }}
@@ -252,22 +284,47 @@ jobs:
 
       # ─────────────────────── Start Fake S3 Server ──────────────────────────
       - name: Start Fake S3 Server
-        timeout-minutes: 2
+        id: fake_s3
+        timeout-minutes: 5
         run: |
+          # minio/minio (Docker Hub) and quay.io/minio/minio are no longer publicly pullable. Until a
+          # maintained S3 emulator image is pinned here (then remove this skip), skip the tests that need
+          # S3 when the image is gone, but fail on any other pull error (rate limit, network).
+          image=minio/minio:latest
+          for attempt in 1 2 3; do
+            if err=$(docker pull "$image" 2>&1); then
+              break
+            fi
+            if grep -qiE 'pull access denied|repository does not exist|manifest unknown|manifest for .* not found' <<<"$err"; then
+              msg="$image is not available ($(tail -n 1 <<<"$err")); skipping the steps that need an S3 emulator."
+              echo "::warning title=S3 emulator unavailable::$msg"
+              echo "**${{ github.job }} (${{ matrix.type }}): S3 tests skipped.** $msg" >> "$GITHUB_STEP_SUMMARY"
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "docker pull failed (attempt $attempt/3): $err"
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 15
+          done
           docker run -d \
             --name minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            "$image" server /data
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
       - name: Add s3.local to /etc/hosts
+        if: steps.fake_s3.outputs.available == 'true'
         run: |
           echo "127.0.0.1 s3.local" | sudo tee -a /etc/hosts
 
       # ───────────────────── Wait for Fake S3 to be ready ───────────────────
       - name: Wait for Fake S3
+        if: steps.fake_s3.outputs.available == 'true'
         timeout-minutes: 2
         run: |
           set -euo pipefail
@@ -284,6 +341,7 @@ jobs:
 
       # ─────────────────────── Start Moto Glue ──────────────────────────
       - name: Start Moto Glue
+        if: steps.fake_s3.outputs.available == 'true'
         run: |
           docker run -d \
             --name moto-glue \
@@ -293,11 +351,13 @@ jobs:
 
       # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
       - name: Add iceberg-rest.local and moto-glue.local to /etc/hosts
+        if: steps.fake_s3.outputs.available == 'true'
         run: |
           echo "127.0.0.1 moto-glue.local" | sudo tee -a /etc/hosts
 
       # ───────────────────── Wait for motoserver to be ready ───────────────────
       - name: Wait for Moto Glue ready
+        if: steps.fake_s3.outputs.available == 'true'
         timeout-minutes: 2
         run: |
           set -euo pipefail
@@ -314,6 +374,7 @@ jobs:
 
       # ────────────────────── Toolchain + Test Tools ─────────────────────────
       - name: Run ${{ matrix.name }}
+        if: steps.fake_s3.outputs.available == 'true'
         timeout-minutes: ${{ matrix.timeout-minutes }}
         run: |
           ${{ matrix.cmd }}
