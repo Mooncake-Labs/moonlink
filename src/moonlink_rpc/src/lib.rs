@@ -18,6 +18,11 @@ macro_rules! rpcs {
                 },)*
             }
 
+            $(
+                #[doc = concat!("Response payload of [`Request::", stringify!([<$func:camel>]), "`]; servers must reply with `RpcResult<", stringify!([<$func:camel Response>]), ">`.")]
+                pub type [<$func:camel Response>] = $res;
+            )*
+
             $(pub async fn $func<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, $($name: $type),*) -> Result<$res> {
                 write(stream, &Request::[<$func:camel>] { $($name),* }).await?;
                 let result: RpcResult<$res> = read(stream).await?;

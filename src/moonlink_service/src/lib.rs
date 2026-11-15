@@ -53,6 +53,9 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
 }
 
 #[cfg(test)]
+mod schema_wire_golden;
+
+#[cfg(test)]
 mod test_utils;
 
 #[cfg(test)]

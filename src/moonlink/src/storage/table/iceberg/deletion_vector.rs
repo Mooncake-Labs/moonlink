@@ -296,4 +296,32 @@ mod tests {
         let batch_deletion_vector = deserialized_dv.take_as_batch_delete_vector();
         assert_eq!(batch_deletion_vector.collect_deleted_rows(), deleted_rows);
     }
+
+    /// duckdb_mooncake reads a puffin deletion vector blob directly: `size - 24` bytes at
+    /// `offset + 20` must be one portable 32-bit roaring bitmap (the single treemap key 0). Golden
+    /// generated from upstream main 401c1d1; set `WIRE_GOLDEN_PRINT=1` to print the actual hex.
+    #[test]
+    fn test_deletion_vector_blob_wire_format() {
+        const GOLDEN: &str = "00000034d1d339640100000000000000000000003a30000002000000000004000100000018000000220000000100030005000700e8037011e4a2d10b";
+        let deleted_rows: Vec<u64> = vec![1, 3, 5, 7, 1000, 70000];
+        let mut dv = DeletionVector::new();
+        dv.mark_rows_deleted(deleted_rows.clone());
+        let blob = dv.serialize(create_test_blob_properties(deleted_rows.len()));
+        let data = blob.data();
+        let actual: String = data.iter().map(|b| format!("{b:02x}")).collect();
+        if std::env::var_os("WIRE_GOLDEN_PRINT").is_some() {
+            println!("{actual}");
+        }
+        assert_eq!(actual, GOLDEN, "deletion vector blob drift");
+
+        // | combined length (u32 BE) | magic | #treemap keys (u64 LE) = 1 | key (u32 LE) = 0 | bitmap | crc32c (u32 BE) |
+        let combined_length = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+        assert_eq!(combined_length + 8, data.len());
+        assert_eq!(&data[4..8], &DELETION_VECTOR_MAGIC_BYTES);
+        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(data[16..20].try_into().unwrap()), 0);
+        let bitmap = roaring::RoaringBitmap::deserialize_from(&data[20..data.len() - 4]).unwrap();
+        let expected: Vec<u32> = deleted_rows.iter().map(|r| *r as u32).collect();
+        assert_eq!(bitmap.iter().collect::<Vec<_>>(), expected);
+    }
 }

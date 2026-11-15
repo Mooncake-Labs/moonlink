@@ -32,17 +32,28 @@ async fn unframe<D: DeserializeOwned>(bytes: &[u8]) -> D {
     value
 }
 
-fn check(cases: &[(&str, Vec<u8>, &str)]) {
+/// Compare each case with its golden by position, requiring matching labels.
+fn check(cases: &[(&str, Vec<u8>)], goldens: &[(&str, &str)]) {
     let print = std::env::var_os("WIRE_GOLDEN_PRINT").is_some();
     let mut mismatches = Vec::new();
-    for (name, actual, golden) in cases {
+    for (i, (name, actual)) in cases.iter().enumerate() {
         let actual = to_hex(actual);
         if print {
             println!("(\"{name}\", \"{actual}\"),");
         }
-        if actual != *golden {
-            mismatches.push(format!("{name}:\n  golden {golden}\n  actual {actual}"));
+        match goldens.get(i) {
+            Some((label, golden)) if label == name && actual == *golden => {}
+            Some((label, golden)) => mismatches.push(format!(
+                "{name} (golden label {label}):\n  golden {golden}\n  actual {actual}"
+            )),
+            None => mismatches.push(format!("{name}: no golden\n  actual {actual}")),
         }
+    }
+    if goldens.len() > cases.len() {
+        mismatches.push(format!(
+            "{} goldens without a case",
+            goldens.len() - cases.len()
+        ));
     }
     assert!(
         mismatches.is_empty(),
@@ -58,6 +69,23 @@ const LSN: u64 = 0x1_6B3A_0F28;
 
 fn s(value: &str) -> String {
     value.to_string()
+}
+
+/// Wire index and name of a request. Exhaustive on purpose: a new variant does not compile until
+/// it gets a label here, a sample in [`sample_requests`] and a golden in [`REQUEST_GOLDENS`].
+fn request_label(request: &Request) -> &'static str {
+    match request {
+        Request::CreateSnapshot { .. } => "0 CreateSnapshot",
+        Request::CreateTable { .. } => "1 CreateTable",
+        Request::DropTable { .. } => "2 DropTable",
+        Request::GetParquetMetadatas { .. } => "3 GetParquetMetadatas",
+        Request::GetTableSchema { .. } => "4 GetTableSchema",
+        Request::ListTables { .. } => "5 ListTables",
+        Request::LoadFiles { .. } => "6 LoadFiles",
+        Request::OptimizeTable { .. } => "7 OptimizeTable",
+        Request::ScanTableBegin { .. } => "8 ScanTableBegin",
+        Request::ScanTableEnd { .. } => "9 ScanTableEnd",
+    }
 }
 
 /// One sample per variant, in declaration order. The discriminant on the wire is the variant index.
@@ -152,21 +180,24 @@ const REQUEST_GOLDENS: &[(&str, &str)] = &[
 #[tokio::test]
 async fn test_request_wire_format() {
     let requests = sample_requests();
-    assert_eq!(
-        requests.len(),
-        10,
-        "Request is append-only; add a golden for new variants"
-    );
     let mut cases = Vec::new();
-    for (i, (name, request)) in requests.iter().enumerate() {
+    for (name, request) in requests.iter() {
+        assert_eq!(*name, request_label(request), "sample label mismatch");
         let bytes = frame(request).await;
         // Round trip through the real decode path.
         let decoded: Request = unframe(&bytes).await;
         assert_eq!(format!("{decoded:?}"), format!("{request:?}"));
-        let golden = REQUEST_GOLDENS.get(i).map(|(_, g)| *g).unwrap_or("");
-        cases.push((*name, bytes, golden));
+        cases.push((*name, bytes));
     }
-    check(&cases);
+    // One sample per variant, in wire order.
+    let labels: Vec<&str> = cases.iter().map(|(name, _)| *name).collect();
+    for (i, label) in labels.iter().enumerate() {
+        assert!(
+            label.starts_with(&format!("{i} ")),
+            "sample {label} out of order"
+        );
+    }
+    check(&cases, REQUEST_GOLDENS);
 }
 
 fn sample_error(status: ErrorStatus) -> ErrorStruct {
@@ -207,6 +238,7 @@ const RESPONSE_GOLDENS: &[(&str, &str)] = &[
     ("Ok(Vec<u8>)", "07000000000500017f80ff"),
     ("Ok(Vec<Vec<u8>>)", "0700000000020301020300"),
     ("Ok(Vec<Table>)", "6e000000000208706f7374677265730d7075626c69632e6f7264657273fc40420f00fd280f3a6b0100000001fd270f3a6b010000002270675f6d6f6f6e63616b652f706f7374677265732f7075626c69632e6f726465727308706f7374677265730c7075626c69632e656d70747900000000"),
+    ("Ok(Vec<u8> 300 bytes)", "3001000000fb2c01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
 ];
 
 #[tokio::test]
@@ -257,13 +289,16 @@ async fn test_response_wire_format() {
         format!("{:?}", sample_tables())
     );
 
-    let cases: Vec<(&str, Vec<u8>, &str)> = cases
-        .into_iter()
-        .enumerate()
-        .map(|(i, (name, bytes))| {
-            let golden = RESPONSE_GOLDENS.get(i).map(|(_, g)| *g).unwrap_or("");
-            (name, bytes, golden)
-        })
-        .collect();
-    check(&cases);
+    // Real ScanTableBegin/GetTableSchema payloads are usually 251..=65535 bytes: bincode's 0xfb + u16 length tier.
+    let large_ok: RpcResult<Vec<u8>> = Ok((0..300u32).map(|i| (i % 251) as u8).collect());
+    let bytes = frame(&large_ok).await;
+    assert_eq!(
+        &bytes[..8],
+        &[0x30, 0x01, 0x00, 0x00, 0x00, 0xfb, 0x2c, 0x01]
+    );
+    let decoded: RpcResult<Vec<u8>> = unframe(&bytes).await;
+    assert_eq!(decoded.unwrap(), large_ok.clone().unwrap());
+    cases.push(("Ok(Vec<u8> 300 bytes)", bytes));
+
+    check(&cases, RESPONSE_GOLDENS);
 }
