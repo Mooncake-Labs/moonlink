@@ -643,7 +643,6 @@ pub async fn connect_to_postgres(uri: &str) -> (Client, tokio::task::JoinHandle<
     (client, connection_handle)
 }
 
-/// Util function to get database URI.
 /// Sets `logical_decoding_work_mem` on the test Postgres while alive and resets it when dropped,
 /// also when the test fails, so that later tests do not run with it.
 #[allow(dead_code)]
@@ -687,6 +686,7 @@ impl Drop for LogicalDecodingWorkMem {
     }
 }
 
+/// Util function to get database URI.
 pub fn get_database_uri() -> String {
     env::var("DATABASE_URL").unwrap_or_else(|_| SRC_URI.to_string())
 }
