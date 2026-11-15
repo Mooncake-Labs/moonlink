@@ -147,7 +147,9 @@ pub async fn fetch(
 }
 
 /// A partition whose changes logical decoding never sees (unlogged, or a foreign table), as a
-/// user-facing description; None if every partition is a regular permanent table.
+/// user-facing description; None if every partition is a regular permanent table. Partitioned
+/// members have no storage (their rows are in their leaves, checked themselves), so their own
+/// persistence does not matter.
 pub async fn unreplicated_partition(
     client: &Client,
     relid: SrcTableId,
@@ -158,7 +160,7 @@ pub async fn unreplicated_partition(
                 "SELECT c.oid::regclass::text, c.relkind = 'f' FROM \
                  pg_partition_tree({relid}::oid::regclass) t JOIN pg_class c ON c.oid = t.relid \
                  WHERE t.relid <> {relid}::oid::regclass \
-                 AND (c.relpersistence <> 'p' OR c.relkind = 'f') ORDER BY 1 LIMIT 1;"
+                 AND ((c.relpersistence <> 'p' AND c.relkind <> 'p') OR c.relkind = 'f') ORDER BY 1 LIMIT 1;"
             ))
             .await?,
     );

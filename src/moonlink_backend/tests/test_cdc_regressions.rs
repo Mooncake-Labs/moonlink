@@ -3685,3 +3685,58 @@ async fn unlogged_partition_errors_the_mirror(#[case] ddl: &str) {
         .await
         .unwrap();
 }
+
+/// Only partitions that hold rows matter: an unlogged sub-partitioned member (allowed before
+/// Postgres 18) whose leaves are regular tables is mirrored and replicates.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn unlogged_partitioned_member_with_logged_leaves_replicates() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part;
+         CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);",
+    )
+    .await;
+    if let Err(e) = client
+        .simple_query(
+            "CREATE UNLOGGED TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100) PARTITION BY RANGE (id);",
+        )
+        .await
+    {
+        eprintln!("skipped: this Postgres has no unlogged partitioned tables ({e})");
+        return;
+    }
+    client
+        .simple_query(
+            "CREATE TABLE rv_part_1a PARTITION OF rv_part_1 FOR VALUES FROM (0) TO (50);
+             INSERT INTO rv_part VALUES (1, 'a');",
+        )
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_part VALUES (2, 'b');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_part_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+    // Also after the poll compared the source again.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    client
+        .simple_query("INSERT INTO rv_part VALUES (3, 'c');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_part_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_part_mc", lsn).await,
+        Some(vec![1, 2, 3])
+    );
+    client
+        .simple_query("DROP TABLE IF EXISTS rv_part;")
+        .await
+        .unwrap();
+}
