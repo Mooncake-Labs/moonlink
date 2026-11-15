@@ -717,10 +717,17 @@ fn unsupported_relation_change(
             )
         })
         .collect();
+    // pgoutput sends a domain column's own modifier (always -1); the schema holds the domain's.
     let old_columns: Vec<(&str, u32, i32)> = schema
         .column_schemas
         .iter()
-        .map(|c| (c.name.as_str(), c.typ.oid(), c.modifier))
+        .map(|c| {
+            let modifier = match c.typ.kind() {
+                tokio_postgres::types::Kind::Domain(_) => -1,
+                _ => c.modifier,
+            };
+            (c.name.as_str(), c.typ.oid(), modifier)
+        })
         .collect();
     if new_columns == old_columns {
         return None;

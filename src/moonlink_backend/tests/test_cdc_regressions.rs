@@ -1321,7 +1321,7 @@ async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[
         .await
         .unwrap_err();
     assert!(
-        err.contains("not supported") && err.contains("numeric("),
+        err.contains("has a type mirrors cannot store") && err.contains("numeric("),
         "{err}"
     );
     wait_for_no_slots(&client).await;
@@ -1774,8 +1774,8 @@ async fn character_and_bytea_values_are_exact() {
 /// Arrays and composites whose element or field type cannot be converted are refused when the
 /// mirror is created, even for an empty table, instead of erroring it at the first row.
 #[rstest::rstest]
-#[case::enum_array("rv_mood[]")]
 #[case::interval_array("INTERVAL[]")]
+#[case::domain_over_interval("rv_dspan")]
 #[case::composite_with_interval("rv_span")]
 #[case::array_of_composite_with_interval("rv_span[]")]
 #[tokio::test(flavor = "multi_thread")]
@@ -1785,8 +1785,10 @@ async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
     let (tmp, backend, client) = setup(&format!(
         "DROP TABLE IF EXISTS rv_nested;
          DROP TYPE IF EXISTS rv_mood, rv_span;
+         DROP DOMAIN IF EXISTS rv_dspan;
          CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
          CREATE TYPE rv_span AS (n INT, d INTERVAL);
+         CREATE DOMAIN rv_dspan AS INTERVAL;
          CREATE TABLE rv_nested (id BIGINT PRIMARY KEY, v {column_type});"
     ))
     .await;
@@ -1794,7 +1796,11 @@ async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
     let err = try_mirror(&backend, &tmp, "rv_nested_mc", "public.rv_nested", &uri)
         .await
         .unwrap_err();
-    assert!(err.contains("is not supported"), "{err}");
+    assert!(
+        err.contains("cannot be mirrored: column v (")
+            && err.contains(") has a type mirrors cannot store"),
+        "{err}"
+    );
     wait_for_no_slots(&client).await;
 
     // Arrays of supported types (and of supported composites) are still accepted.
@@ -3973,4 +3979,85 @@ async fn dates_beyond_years_1_to_9999_replicate_and_infinity_errors() {
         .await
         .expect("an infinite date must error the mirror");
     assert!(err.contains("infinite date or timestamp"), "{err}");
+}
+
+/// The mirror of rv_dom matches the source in every column (Postgres text, with arrays printed
+/// like the mirror's lists).
+async fn check_rv_dom(backend: &MoonlinkBackend, client: &Client, lsn: u64, step: &str) {
+    assert_eq!(
+        snapshot_error(backend, "rv_dom_mc", lsn).await,
+        None,
+        "{step}"
+    );
+    for column in ["d", "t", "n", "dd", "e", "ea", "da", "ad"] {
+        let expected = if ["ea", "da", "ad"].contains(&column) {
+            format!("'[' || array_to_string({column}, ', ', '') || ']'")
+        } else {
+            format!("{column}::text")
+        };
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {expected} FROM rv_dom"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            scan_rows(backend, "rv_dom_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "{step}: column {column}"
+        );
+    }
+}
+
+/// Domains are mirrored as their base type (with the domain's modifier, e.g. numeric(10,2)), also
+/// a domain over a domain or over an array, and arrays of domains; enums (and arrays of them) as
+/// their labels. Values replicate exactly in the copy, through CDC and after a restart.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn domains_and_enums_replicate() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_dom;
+         DROP DOMAIN IF EXISTS rv_dposint, rv_dposint2, rv_dtext, rv_dnum, rv_dints CASCADE;
+         DROP TYPE IF EXISTS rv_rainbow CASCADE;
+         CREATE DOMAIN rv_dposint AS INT CHECK (VALUE > 0);
+         CREATE DOMAIN rv_dposint2 AS rv_dposint;
+         CREATE DOMAIN rv_dtext AS VARCHAR(10);
+         CREATE DOMAIN rv_dnum AS NUMERIC(10, 2);
+         CREATE DOMAIN rv_dints AS INT[];
+         CREATE TYPE rv_rainbow AS ENUM ('red', 'green', 'blue');
+         CREATE TABLE rv_dom (id BIGINT PRIMARY KEY, d rv_dposint, t rv_dtext, n rv_dnum,
+             dd rv_dposint2, e rv_rainbow, ea rv_rainbow[], da rv_dposint[], ad rv_dints);
+         INSERT INTO rv_dom VALUES
+             (1, 5, 'abc', 1.25, 7, 'green', '{red,blue}', '{1,2}', '{3,NULL}'),
+             (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_dom_mc", "public.rv_dom", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_dom VALUES (3, 9, 'xyz', 12345678.9, 1, 'blue', '{}', '{4}', '{5,6}');
+             UPDATE rv_dom SET n = 0.5, e = 'red', ea = '{green}' WHERE id = 1;
+             DELETE FROM rv_dom WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    check_rv_dom(&backend, &client, lsn, "copy and CDC").await;
+
+    let backend = restart_with(
+        backend,
+        &tmp,
+        &client,
+        &uri,
+        "INSERT INTO rv_dom VALUES (4, 2, 'q', 3.5, 2, 'green', '{blue}', '{7}', '{8}');",
+    )
+    .await;
+    client
+        .simple_query("UPDATE rv_dom SET t = 'after' WHERE id = 3;")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    check_rv_dom(&backend, &client, lsn, "after a restart").await;
 }

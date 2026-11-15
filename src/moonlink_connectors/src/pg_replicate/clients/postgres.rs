@@ -56,7 +56,8 @@ pub enum ReplicationClientError {
     #[error("type modifier column is not a valid u32")]
     TypeModifierColumnNotI32,
 
-    #[error("column {0}'s type with oid {1} in relation {2} is not supported")]
+    /// `{0}` is the column name with its type, e.g. `d (interval)`.
+    #[error("column {0} of {2} has a type mirrors cannot store (type oid {1})")]
     UnsupportedType(String, u32, String),
 
     #[error("table {0} doesn't exist")]
@@ -389,6 +390,7 @@ impl ReplicationClient {
             "{}
             select a.attname,
                 a.atttypid,
+                format_type(a.atttypid, a.atttypmod) as type_name,
                 a.atttypmod,
                 a.attnotnull,
                 a.attndims,
@@ -433,24 +435,26 @@ impl ReplicationClient {
                     .parse()
                     .map_err(|_| ReplicationClientError::OidColumnNotU32)?;
 
-                // Get the Type from OID, handling composite types and arrays recursively
-                let typ = self.resolve_type(type_oid).await.map_err(|_| {
+                let unsupported = || {
+                    let type_name = row.get("type_name").unwrap_or("unknown type");
                     ReplicationClientError::UnsupportedType(
-                        name.clone(),
+                        format!("{name} ({type_name})"),
                         type_oid,
                         table_name.to_string(),
                     )
-                })?;
+                };
+                // Get the Type from OID, handling composite types, arrays, domains and enums
+                // recursively.
+                let typ = self
+                    .resolve_type(type_oid)
+                    .await
+                    .map_err(|_| unsupported())?;
 
                 if !TextFormatConverter::is_supported_type(&typ) {
-                    return Err(ReplicationClientError::UnsupportedType(
-                        name.clone(),
-                        type_oid,
-                        table_name.to_string(),
-                    ));
+                    return Err(unsupported());
                 }
 
-                let modifier = row
+                let modifier: i32 = row
                     .try_get("atttypmod")?
                     .ok_or(ReplicationClientError::MissingColumn(
                         "atttypmod".to_string(),
@@ -458,6 +462,13 @@ impl ReplicationClient {
                     ))?
                     .parse()
                     .map_err(|_| ReplicationClientError::TypeModifierColumnNotI32)?;
+                // A domain column has no modifier of its own; its values follow the domain's
+                // (e.g. numeric(10,2)), which is what the mirror stores.
+                let modifier = if matches!(typ.kind(), Kind::Domain(_)) {
+                    self.domain_type_modifier(type_oid).await?
+                } else {
+                    modifier
+                };
 
                 let attndims: i32 = row
                     .try_get("attndims")?
@@ -469,11 +480,7 @@ impl ReplicationClient {
                     .map_err(|_| ReplicationClientError::TypeModifierColumnNotI32)?;
 
                 if matches!(typ.kind(), Kind::Array(_)) && attndims > 1 {
-                    return Err(ReplicationClientError::UnsupportedType(
-                        name.clone(),
-                        type_oid,
-                        table_name.to_string(),
-                    ));
+                    return Err(unsupported());
                 }
 
                 let nullable =
@@ -511,8 +518,27 @@ impl ReplicationClient {
             }
 
             // Query the database for the type information
-            let (type_name, type_relid, schema_name, type_type, type_elem) =
+            let (type_name, type_relid, schema_name, type_type, type_elem, type_base) =
                 self.get_type_info(type_oid).await?;
+
+            // A domain is stored as its base type; an enum as its label.
+            if type_type == "d" {
+                let base = self.resolve_type(type_base).await?;
+                return Ok(Type::new(
+                    type_name,
+                    type_oid,
+                    Kind::Domain(base),
+                    schema_name,
+                ));
+            }
+            if type_type == "e" {
+                return Ok(Type::new(
+                    type_name,
+                    type_oid,
+                    Kind::Enum(Vec::new()),
+                    schema_name,
+                ));
+            }
 
             // https://www.postgresql.org/docs/current/catalog-pg-type.html
             // composite type (type_type == "c")
@@ -554,13 +580,41 @@ impl ReplicationClient {
         })
     }
 
+    /// The type modifier a domain imposes on its values (the first one along its chain of base
+    /// domains), or -1.
+    async fn domain_type_modifier(&self, type_oid: u32) -> Result<i32, ReplicationClientError> {
+        let mut type_oid = type_oid;
+        loop {
+            let query = format!(
+                "SELECT typtypmod, typbasetype, typtype FROM pg_type WHERE oid = {type_oid}"
+            );
+            let row = self
+                .postgres_client
+                .simple_query(&query)
+                .await?
+                .into_iter()
+                .find_map(|m| match m {
+                    SimpleQueryMessage::Row(row) => Some(row),
+                    _ => None,
+                });
+            let Some(row) = row else {
+                return Ok(-1);
+            };
+            let typmod: i32 = row.get(0).unwrap_or("-1").parse().unwrap_or(-1);
+            if typmod != -1 || row.get(2) != Some("d") {
+                return Ok(typmod);
+            }
+            type_oid = row.get(1).unwrap_or("0").parse().unwrap_or(0);
+        }
+    }
+
     /// Query PostgreSQL type information by OID
     async fn get_type_info(
         &self,
         type_oid: u32,
-    ) -> Result<(String, u32, String, String, u32), ReplicationClientError> {
+    ) -> Result<(String, u32, String, String, u32, u32), ReplicationClientError> {
         let type_query = format!(
-            "SELECT t.typname, t.typrelid, n.nspname, t.typtype, t.typelem
+            "SELECT t.typname, t.typrelid, n.nspname, t.typtype, t.typelem, t.typbasetype
          FROM pg_type t
          JOIN pg_namespace n ON t.typnamespace = n.oid
          WHERE t.oid = {}",
@@ -572,6 +626,7 @@ impl ReplicationClient {
         let mut schema_name = String::new();
         let mut type_type = String::new();
         let mut type_elem = 0;
+        let mut type_base = 0;
 
         // Query should return exactly one row since we're querying by OID which is unique
         let mut row_count = 0;
@@ -582,6 +637,7 @@ impl ReplicationClient {
                 schema_name = row.get("nspname").unwrap().to_string();
                 type_type = row.get("typtype").unwrap().to_string();
                 type_elem = row.get("typelem").unwrap().parse().unwrap_or(0);
+                type_base = row.get("typbasetype").unwrap().parse().unwrap_or(0);
                 row_count += 1;
             }
         }
@@ -591,7 +647,14 @@ impl ReplicationClient {
             type_oid
         );
 
-        Ok((type_name, type_relid, schema_name, type_type, type_elem))
+        Ok((
+            type_name,
+            type_relid,
+            schema_name,
+            type_type,
+            type_elem,
+            type_base,
+        ))
     }
 
     /// Query composite type fields by relation ID

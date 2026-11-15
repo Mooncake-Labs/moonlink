@@ -180,10 +180,53 @@ impl TextFormatConverter {
             // Arrays (all Kind::Array, so not matched above) are parsed when their element type
             // is: the types above each have an array arm, composites are parsed element-wise.
             // Composites need every field to be supported.
-            Kind::Array(inner) => Self::is_supported_type(inner),
+            Kind::Array(inner) => match inner.kind() {
+                // Parsed as an array of the base type (or of text), which needs one built in.
+                Kind::Domain(_) | Kind::Enum(_) => Self::array_of_element(inner)
+                    .is_some_and(|array| Self::is_supported_type(&array)),
+                _ => Self::is_supported_type(inner),
+            },
             Kind::Composite(fields) => fields.iter().all(|f| Self::is_supported_type(f.type_())),
+            Kind::Domain(base) => Self::is_supported_type(base),
+            Kind::Enum(_) => true,
             _ => false,
         }
+    }
+
+    /// The built-in array type to parse an array of domain or enum values with: an array of the
+    /// domain's base type, or of text for an enum.
+    fn array_of_element(element: &Type) -> Option<Type> {
+        let mut element = element;
+        while let Kind::Domain(base) = element.kind() {
+            element = base;
+        }
+        if matches!(element.kind(), Kind::Enum(_)) {
+            return Some(Type::TEXT_ARRAY);
+        }
+        Some(match *element {
+            Type::BOOL => Type::BOOL_ARRAY,
+            Type::CHAR => Type::CHAR_ARRAY,
+            Type::BPCHAR => Type::BPCHAR_ARRAY,
+            Type::VARCHAR => Type::VARCHAR_ARRAY,
+            Type::NAME => Type::NAME_ARRAY,
+            Type::TEXT => Type::TEXT_ARRAY,
+            Type::INT2 => Type::INT2_ARRAY,
+            Type::INT4 => Type::INT4_ARRAY,
+            Type::INT8 => Type::INT8_ARRAY,
+            Type::FLOAT4 => Type::FLOAT4_ARRAY,
+            Type::FLOAT8 => Type::FLOAT8_ARRAY,
+            Type::NUMERIC => Type::NUMERIC_ARRAY,
+            Type::BYTEA => Type::BYTEA_ARRAY,
+            Type::DATE => Type::DATE_ARRAY,
+            Type::TIME => Type::TIME_ARRAY,
+            Type::TIMESTAMP => Type::TIMESTAMP_ARRAY,
+            Type::TIMESTAMPTZ => Type::TIMESTAMPTZ_ARRAY,
+            Type::UUID => Type::UUID_ARRAY,
+            Type::JSON => Type::JSON_ARRAY,
+            Type::JSONB => Type::JSONB_ARRAY,
+            Type::OID => Type::OID_ARRAY,
+            _ => return None,
+        })
     }
 
     pub fn try_from_str(typ: &Type, str: &str) -> Result<Cell, FromTextError> {
@@ -294,7 +337,17 @@ impl TextFormatConverter {
                 TextFormatConverter::parse_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
             }
             _ => match typ.kind() {
+                Kind::Domain(base) => TextFormatConverter::try_from_str(base, str),
+                Kind::Enum(_) => Ok(Cell::String(str.to_string())),
                 Kind::Composite(fields) => TextFormatConverter::parse_composite(str, fields),
+                Kind::Array(inner_type)
+                    if matches!(inner_type.kind(), Kind::Domain(_) | Kind::Enum(_)) =>
+                {
+                    match TextFormatConverter::array_of_element(inner_type) {
+                        Some(array) => TextFormatConverter::try_from_str(&array, str),
+                        None => Err(FromTextError::InvalidConversion(typ.to_string())),
+                    }
+                }
                 Kind::Array(inner_type) => {
                     // Check if the array contains composite types.
                     // PostgreSQL supports multi-dimensional arrays (e.g., int[][], text[][]),

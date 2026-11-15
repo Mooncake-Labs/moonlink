@@ -205,6 +205,23 @@ fn stable_hash32(input: &str) -> u32 {
     })
 }
 
+/// A column type mirrors cannot store refuses the table, saying which column and type.
+fn refuse_unsupported_column(table_name: &str, error: PostgresSourceError) -> crate::Error {
+    match error {
+        PostgresSourceError::ReplicationClient(
+            crate::pg_replicate::clients::postgres::ReplicationClientError::UnsupportedType(
+                column,
+                _,
+                _,
+            ),
+        ) => crate::Error::unsupported_source_table(
+            table_name,
+            &format!("column {column} has a type mirrors cannot store"),
+        ),
+        error => error.into(),
+    }
+}
+
 /// `table_name` ("schema.table" or "table") as a quoted literal to cast to regclass.
 fn regclass_literal(table_name: &str) -> String {
     let ident = match TableName::parse_schema_name(table_name) {
@@ -840,7 +857,8 @@ impl PostgresConnection {
         let table_schema = self
             .source
             .fetch_table_schema(None, Some(table_name), None)
-            .await?;
+            .await
+            .map_err(|e| refuse_unsupported_column(table_name, e))?;
         if is_recovery {
             match &recorded_fingerprint {
                 Some(recorded) if recorded.relid != table_schema.src_table_id => {
@@ -907,7 +925,7 @@ impl PostgresConnection {
 
         let (arrow_schema, identity) =
             crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema)
-                .map_err(PostgresSourceError::from)?;
+                .map_err(|e| refuse_unsupported_column(table_name, e.into()))?;
         moonlink_table_config.mooncake_table_config.row_identity = identity;
         let table_components = TableComponents {
             read_state_filepath_remap,

@@ -76,6 +76,10 @@ pub(crate) fn normalize_numeric_cell(
     modifier: i32,
     cell: Cell,
 ) -> Result<Cell, String> {
+    // A domain's values are those of its base type.
+    if let Kind::Domain(base) = typ.kind() {
+        return normalize_numeric_cell(base, modifier, cell);
+    }
     Ok(match cell {
         Cell::Numeric(value) => Cell::Numeric(normalize_numeric(value, modifier)?),
         // The list item field is built without the column's typmod (unconstrained), so elements
@@ -256,7 +260,14 @@ fn postgres_type_to_arrow_type(
             *field_id += 1;
             field.with_metadata(metadata)
         }
-        Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
+        // Stored as its label, like text.
+        Kind::Enum(_) => {
+            postgres_primitive_to_arrow_type(&Type::TEXT, modifier, name, nullable, field_id)?
+        }
+        // Stored as its base type, with the domain's modifier (the column's, see the schema).
+        Kind::Domain(base) => {
+            return postgres_type_to_arrow_type(base, modifier, name, nullable, field_id)
+        }
         // Rejected when the mirror is created; never panic on one that slips through.
         _ => {
             return Err(UnsupportedColumn {
