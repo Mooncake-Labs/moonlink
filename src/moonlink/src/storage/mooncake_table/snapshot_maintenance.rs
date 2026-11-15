@@ -303,6 +303,19 @@ impl SnapshotTableState {
         if *index_merge_option == MaintenanceOption::Skip {
             return IndexMergeMaintenanceStatus::Unknown;
         }
+        // Background compaction rewrites the index of every file it may merge, and the indices of
+        // larger files are never merged (see below): merging them in the background as well would
+        // only rewrite them twice, and would glue an earlier output to new small files, so that
+        // compaction rewrites it with them.
+        if matches!(index_merge_option, MaintenanceOption::BestEffort(_))
+            && self
+                .mooncake_table_metadata
+                .config
+                .data_compaction_config
+                .is_enabled()
+        {
+            return IndexMergeMaintenanceStatus::Nothing;
+        }
         let max_index_merge_file_num_threshold = self
             .mooncake_table_metadata
             .config

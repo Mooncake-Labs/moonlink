@@ -328,6 +328,54 @@ async fn test_background_index_merge_does_not_rewrite_large_index_with_small_one
     assert_eq!(payload.file_indices.len(), 4);
 }
 
+/// With both kinds of background maintenance enabled, index merge doesn't glue an earlier output
+/// to new small files (compaction would then have to rewrite it with them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_background_index_merge_leaves_compaction_outputs_alone() {
+    let context = TestContext::new("tiered_both_maintenance");
+    let index_merge = FileIndexMergeConfig {
+        min_file_indices_to_merge: 4,
+        max_file_indices_to_merge: 8,
+        index_block_final_size: u64::MAX,
+    };
+    let (mut table, mut rx) =
+        create_table_with(&context, compaction_config(8, 0), index_merge).await;
+
+    flush_wide_files(&mut table, &mut rx, 1..9).await;
+    let (_, compaction) =
+        snapshot_with_maintenance(&mut table, &mut rx, best_effort(), best_effort()).await;
+    let payload = compaction
+        .take_payload()
+        .expect("eight similar files are compacted");
+    perform_data_compaction_for_test(&mut table, &mut rx, payload).await;
+    snapshot_and_persist(&mut table, &mut rx, MaintenanceOption::Skip).await;
+    let large_size = *data_file_sizes(&table).await.values().next().unwrap();
+
+    // Three small files and the output: four indices, all tiny, but none is merged.
+    flush_wide_files(&mut table, &mut rx, 9..12).await;
+    let (merge, compaction) =
+        snapshot_with_maintenance(&mut table, &mut rx, best_effort(), best_effort()).await;
+    assert!(merge.take_payload().is_none());
+    assert!(compaction.take_payload().is_none());
+
+    // The fourth small file completes a size tier without the output.
+    flush_wide_files(&mut table, &mut rx, 12..13).await;
+    let sizes = data_file_sizes(&table).await;
+    let large_file = sizes
+        .iter()
+        .find(|(_, &s)| s == large_size)
+        .unwrap()
+        .0
+        .clone();
+    let (_, compaction) =
+        snapshot_with_maintenance(&mut table, &mut rx, best_effort(), best_effort()).await;
+    let payload = compaction
+        .take_payload()
+        .expect("four small files are compacted");
+    assert_eq!(payload.disk_files.len(), 4);
+    assert!(payload.disk_files.iter().all(|f| f.filepath != large_file));
+}
+
 /// Selection of compaction groups, on synthetic groups of one file each.
 mod group_selection {
     use super::super::snapshot_maintenance::{

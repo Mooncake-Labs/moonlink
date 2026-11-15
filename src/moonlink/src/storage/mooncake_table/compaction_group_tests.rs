@@ -82,12 +82,14 @@ async fn flush_files(table: &mut MooncakeTable, rx: &mut mpsc::Receiver<TableEve
     }
 }
 
+/// Background index merge is off while data compaction is enabled, so merge explicitly, as an
+/// optimize request does.
 async fn merge_all_indices(table: &mut MooncakeTable, rx: &mut mpsc::Receiver<TableEvent>) {
     let (merge, _) = snapshot_and_persist(
         table,
         rx,
         opt(
-            MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+            MaintenanceOption::ForceRegular(uuid::Uuid::new_v4()),
             MaintenanceOption::Skip,
         ),
     )
@@ -216,7 +218,7 @@ async fn test_index_merge_skips_large_files() {
         &mut table,
         &mut rx,
         opt(
-            MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+            MaintenanceOption::ForceRegular(uuid::Uuid::new_v4()),
             MaintenanceOption::Skip,
         ),
     )
