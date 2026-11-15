@@ -155,29 +155,33 @@ async fn test_repin_evictable_entry_while_over_budget() {
     check_file_content(local_2.to_str().unwrap()).await;
 }
 
-/// While pinned entries alone exceed the budget, a lookup that can't be cached leaves the
-/// evictable entries alone (evicting them would not make room) and deletes its own download.
-#[tokio::test]
-async fn test_unpinned_lookup_over_budget_keeps_evictable_entries() {
+/// A lookup that can't be cached because the pinned entries and the new file exceed the budget
+/// evicts least recently used entries back down to the budget (never further, and never the
+/// pinned ones), then deletes its own download.
+async fn check_unpinned_lookup_over_budget(
+    max_bytes: u64,
+    pinned: usize,
+    unpinned: usize,
+    expected_cached: usize,
+) {
     let remote_dir = tempdir().unwrap();
     let cache_dir = tempdir().unwrap();
     let filesystem_accessor = FileSystemAccessor::default_for_test(&remote_dir);
     let mut cache = ObjectStorageCache::new(ObjectStorageCacheConfig {
-        max_bytes: 2 * CONTENT.len() as u64,
+        max_bytes,
         cache_directory: cache_dir.path().to_str().unwrap().to_string(),
         optimize_local_filesystem: false,
     });
+    let cached = pinned + unpinned;
     let mut remote_files = vec![];
-    for id in 0..5 {
+    for id in 0..=cached {
         let name = format!("remote-{id}.parquet");
         remote_files.push(create_test_file(remote_dir.path(), &name).await);
     }
     let remote = |id: usize| remote_files[id].to_str().unwrap().to_string();
 
-    // Four pinned entries put the cache over budget; unpinning one leaves three pinned and one
-    // evictable.
     let mut handles = vec![];
-    for id in 0..4 {
+    for id in 0..cached {
         let (handle, _) = cache
             .get_cache_entry_pinned(
                 get_table_unique_file_id(id as u64),
@@ -188,24 +192,62 @@ async fn test_unpinned_lookup_over_budget_keeps_evictable_entries() {
             .unwrap();
         handles.push(handle);
     }
-    let evictable_file = handles[0].get_cache_filepath().to_string();
-    assert!(handles.remove(0).unreference().await.is_empty());
-    assert_evictable_cache_size(&mut cache, 1).await;
-    assert_cache_bytes_size(&mut cache, 4 * CONTENT.len() as u64).await;
+    let mut unpinned_files = vec![];
+    for handle in handles.drain(..unpinned) {
+        unpinned_files.push(handle.get_cache_filepath().to_string());
+        assert!(handle.unreference().await.is_empty());
+    }
+    assert_evictable_cache_size(&mut cache, unpinned).await;
+    assert_cache_bytes_size(&mut cache, (cached * CONTENT.len()) as u64).await;
 
     let (handle, evicted) = cache
         .get_cache_entry(
-            get_table_unique_file_id(4),
-            &remote(4),
+            get_table_unique_file_id(cached as u64),
+            &remote(cached),
             filesystem_accessor.as_ref(),
         )
         .await
         .unwrap();
     assert!(handle.is_none());
-    assert_evictable_cache_size(&mut cache, 1).await;
-    assert_cache_bytes_size(&mut cache, 4 * CONTENT.len() as u64).await;
-    assert!(evicted.is_empty());
-    check_file_content(&evictable_file).await;
-    // The download that could not be cached is deleted, leaving only the four cached files.
-    assert_eq!(std::fs::read_dir(cache_dir.path()).unwrap().count(), 4);
+    assert_cache_bytes_size(&mut cache, (expected_cached * CONTENT.len()) as u64).await;
+    assert_evictable_cache_size(&mut cache, expected_cached - pinned).await;
+    // Least recently used first.
+    assert_eq!(
+        evicted.into_vec(),
+        unpinned_files[..cached - expected_cached].to_vec()
+    );
+    for file in &unpinned_files[..cached - expected_cached] {
+        std::fs::remove_file(file).unwrap();
+    }
+    // The download that could not be cached is deleted, leaving only the cached files.
+    assert_eq!(
+        std::fs::read_dir(cache_dir.path()).unwrap().count(),
+        expected_cached
+    );
+}
+
+/// Pinned entries alone exceed the budget: every evictable entry goes, the pinned excess stays.
+#[tokio::test]
+async fn test_unpinned_lookup_with_pinned_entries_over_budget() {
+    let file = CONTENT.len() as u64;
+    check_unpinned_lookup_over_budget(
+        2 * file,
+        /*pinned=*/ 3,
+        /*unpinned=*/ 1,
+        /*expected_cached=*/ 3,
+    )
+    .await;
+}
+
+/// The pinned entries fit, the new file doesn't: evictable entries go until the cache fits.
+#[tokio::test]
+async fn test_unpinned_lookup_that_does_not_fit_trims_to_budget() {
+    let file = CONTENT.len() as u64;
+    check_unpinned_lookup_over_budget(
+        file * 5 / 2,
+        /*pinned=*/ 2,
+        /*unpinned=*/ 2,
+        /*expected_cached=*/ 2,
+    )
+    .await;
 }
