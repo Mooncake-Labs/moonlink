@@ -63,6 +63,11 @@ impl CachedRead {
     }
 }
 
+/// Orders snapshot watch values; [`NO_SNAPSHOT_LSN`] is older than any published snapshot.
+fn snapshot_lsn_is_newer(lsn: u64, than: u64) -> bool {
+    lsn != NO_SNAPSHOT_LSN && (than == NO_SNAPSHOT_LSN || lsn > than)
+}
+
 /// One consistent observation of the table's LSN watches.
 ///
 /// Producers publish in a fixed order: moonlink_sink marks a table's commit LSN before the
@@ -319,12 +324,20 @@ impl ReadStateManager {
     #[tracing::instrument(name = "update_read_state", skip_all)]
     async fn read_from_snapshot_and_update_cache(&self, view: LsnView) -> Result<Arc<ReadState>> {
         let mut cache = self.cache.write().await;
-        if cache.snapshot_key == Some(view.snapshot)
-            && cache.snapshot_seq == self.snapshot_seq.load(Ordering::SeqCst)
-        {
-            // Same snapshot already materialized; only the label can grow.
-            cache.valid_upto = cache.valid_upto.max(view.valid_upto());
-            return Ok(cache.state.clone());
+        // A reader whose view went stale while it waited for the lock: the cached state is newer
+        // than its view, so it covers every LSN the view could satisfy.
+        let cache_is_newer = cache
+            .snapshot_key
+            .is_some_and(|key| snapshot_lsn_is_newer(key, view.snapshot));
+        if cache.snapshot_seq == self.snapshot_seq.load(Ordering::SeqCst) {
+            if cache.snapshot_key == Some(view.snapshot) {
+                // Same snapshot already materialized; only the label can grow.
+                cache.valid_upto = cache.valid_upto.max(view.valid_upto());
+                return Ok(cache.state.clone());
+            }
+            if cache_is_newer {
+                return Ok(cache.state.clone());
+            }
         }
         // Only collection happens under the snapshot lock; the temp parquet is written after it is
         // released. The cache write guard still serializes materialization per table.
@@ -343,10 +356,16 @@ impl ReadStateManager {
             .take_as_read_state(self.read_state_filepath_remap.clone())
             .await?;
         state.attach_live_read_guard(live_read_guard);
+        // The current snapshot is at least as new as both keys; keep the newer key and its label.
+        let (snapshot_key, valid_upto) = if cache_is_newer {
+            (cache.snapshot_key, cache.valid_upto)
+        } else {
+            (Some(view.snapshot), view.valid_upto())
+        };
         // Publish only after the read state was built, so a failure keeps the previous key.
         *cache = CachedRead {
-            snapshot_key: Some(view.snapshot),
-            valid_upto: view.valid_upto(),
+            snapshot_key,
+            valid_upto,
             snapshot_seq,
             state: state.clone(),
         };
@@ -534,5 +553,41 @@ mod tests {
         assert!(!mk(Some(100), 100).reusable(&dirty_at_100, 7, None));
         // A maintenance-only snapshot (same LSN, new sequence) also forces a refresh.
         assert!(!mk(Some(100), 150).reusable(&clean_at_100, 8, Some(100)));
+    }
+
+    #[test]
+    fn snapshot_lsn_order_treats_no_snapshot_as_oldest() {
+        assert!(snapshot_lsn_is_newer(100, 50));
+        assert!(!snapshot_lsn_is_newer(50, 100));
+        assert!(!snapshot_lsn_is_newer(100, 100));
+        assert!(snapshot_lsn_is_newer(0, NO_SNAPSHOT_LSN));
+        assert!(!snapshot_lsn_is_newer(NO_SNAPSHOT_LSN, 100));
+        assert!(!snapshot_lsn_is_newer(NO_SNAPSHOT_LSN, NO_SNAPSHOT_LSN));
+    }
+
+    #[tokio::test]
+    async fn stale_view_reuses_newer_cached_read_state() {
+        use crate::union_read::read_state_manager_tests::{assert_rows, Env};
+
+        let mut env = Env::new("stale_view_reuses_newer_cached_read_state").await;
+        env.commit_and_snapshot(&[1], 50, /*flush=*/ false).await;
+        env.publish(50, 50, 50);
+        // Reader A observes snapshot 50, then is delayed before taking the cache lock.
+        let stale_view = LsnView::normalize(50, 50, 50);
+        env.commit_and_snapshot(&[2], 100, /*flush=*/ false).await;
+        env.publish(100, 100, 100);
+        // Reader B materializes snapshot 100.
+        let b = env.rsm.try_read(Some(100)).await.unwrap();
+        assert_rows(&b, &[1, 2]).await;
+
+        let a = env
+            .rsm
+            .read_from_snapshot_and_update_cache(stale_view)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "stale reader re-materialized");
+        assert_eq!(env.rsm.cache.read().await.snapshot_key, Some(100));
+        let next = env.rsm.try_read(Some(100)).await.unwrap();
+        assert!(Arc::ptr_eq(&next, &b), "newer cache key was downgraded");
     }
 }
