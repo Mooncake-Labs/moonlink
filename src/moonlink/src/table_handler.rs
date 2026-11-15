@@ -1012,13 +1012,15 @@ impl TableHandler {
             return;
         }
 
-        // Don't update the lsn if the event is not processed yet.
-        table_handler_state.update_table_lsns(&event);
-
-        // Discard events that we have already processed.
+        // Discard events that we have already processed (persisted, or in the initial copy). They
+        // must not move the table's LSNs either: an empty copy claims no commit LSN, and a dropped
+        // commit would otherwise become one that no snapshot ever reaches.
         if table_handler_state.should_discard_event(&event) {
             return;
         }
+
+        // Don't update the lsn if the event is not processed yet.
+        table_handler_state.update_table_lsns(&event);
 
         match event {
             TableEvent::Append { row, xact_id, .. } => {

@@ -2295,6 +2295,8 @@ async fn empty_copy_with_commits_at_the_boundary_stays_readable(#[case] write: b
         Some(BTreeMap::new()),
         "scan of the idle empty mirror did not complete"
     );
+    // Forcing a snapshot at a later LSN completes too (a dropped commit is not its commit LSN).
+    assert_eq!(snapshot_error(&backend, "rv_q_mc", lsn).await, None);
 }
 
 /// While every mirror of a database is errored, nothing needs the WAL the stream has received:
