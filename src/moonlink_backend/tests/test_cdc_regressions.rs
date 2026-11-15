@@ -2732,3 +2732,76 @@ async fn empty_copy_with_a_lagging_stream_stays_readable(#[case] lag_rows: i64) 
         "scan of the idle empty mirror did not complete"
     );
 }
+
+/// after a restart, an errored mirror is a placeholder that is not registered with the
+/// replication loop, so the same source table can be mirrored again under another name. Dropping
+/// the placeholder must not take the source table out of the publication the new mirror uses.
+#[rstest::rstest]
+#[case::slot_still_before_truncate(false)]
+#[case::slot_advanced_past_truncate(true)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dropping_a_placeholder_keeps_the_live_mirror_of_its_source(#[case] advance_slot: bool) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_dup;
+         CREATE TABLE rv_dup (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_dup_old", "public.rv_dup", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_dup VALUES (1); TRUNCATE rv_dup; INSERT INTO rv_dup VALUES (2);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_dup_old", lsn).await.is_some());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    if advance_slot {
+        let confirmed = wait_confirmed_at_least(&client, lsn).await;
+        assert!(confirmed >= lsn, "slot did not advance past the TRUNCATE");
+    }
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    let backend = new_backend(&tmp).await.unwrap();
+    assert!(scan_error(&backend, "rv_dup_old").await.is_some());
+    mirror(&backend, &tmp, "rv_dup_new", "public.rv_dup", &uri).await;
+    // The re-created mirror's copy already reflects the TRUNCATE; a replay of that TRUNCATE
+    // from the slot (it precedes the copy boundary) must not error it.
+    let lsn = current_wal_lsn(&client).await;
+    let new_err = snapshot_error(&backend, "rv_dup_new", lsn).await;
+
+    assert_eq!(
+        new_err, None,
+        "re-created mirror errored by a TRUNCATE older than its copy"
+    );
+    assert_eq!(scan_ids(&backend, "rv_dup_new", lsn).await, Some(vec![2]));
+
+    backend
+        .drop_table(DB.to_string(), "rv_dup_old".to_string())
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_dup VALUES (3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let members: i64 = client
+        .query_one(
+            "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'moonlink_pub' AND tablename = 'rv_dup'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let rows = scan_rows(&backend, "rv_dup_new", lsn, "id", Duration::from_secs(20))
+        .await
+        .map(|m| m.into_keys().collect::<Vec<_>>());
+    assert_eq!(
+        (members, rows),
+        (1, Some(vec![2, 3])),
+        "live mirror lost its publication membership when the placeholder was dropped"
+    );
+}

@@ -306,6 +306,19 @@ impl ReplicationManager {
             }
         };
         if let Some(connection) = live_connection {
+            // The same source table can be mirrored again (re-created) while the placeholder
+            // exists; that mirror still needs it published.
+            match connection
+                .mirrors_source_table(&errored.src_table_name)
+                .await
+            {
+                Ok(false) => {}
+                Ok(true) => return,
+                Err(e) => {
+                    warn!(error = ?e, "cannot tell whether a live mirror uses the dropped mirror's table; keeping it published");
+                    return;
+                }
+            }
             if let Err(e) = connection
                 .remove_table_from_publication(&errored.src_table_name)
                 .await

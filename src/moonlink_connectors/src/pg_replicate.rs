@@ -1076,6 +1076,22 @@ impl PostgresConnection {
         )
     }
 
+    /// The oid of a source table, if it exists.
+    pub async fn source_table_oid(&mut self, table_name: &str) -> Result<Option<SrcTableId>> {
+        let query = format!(
+            "SELECT c.oid FROM pg_class c WHERE c.oid = to_regclass({});",
+            regclass_literal(table_name)
+        );
+        Ok(self
+            .run_control_query(&query)
+            .await?
+            .iter()
+            .find_map(|m| match m {
+                SimpleQueryMessage::Row(row) => row.get(0).and_then(|oid| oid.parse().ok()),
+                _ => None,
+            }))
+    }
+
     /// Hold the slot where it is (see [`PostgresConnection::slot_hold`]) or release it.
     pub fn set_slot_hold(&self, hold: bool) {
         self.slot_hold.store(hold, Ordering::SeqCst);
