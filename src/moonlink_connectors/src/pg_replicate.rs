@@ -935,6 +935,14 @@ impl PostgresConnection {
             moonlink_table_config: moonlink_table_config.clone(),
         };
 
+        // A new mirror starts from the source alone: an iceberg table left at its path (by a
+        // mirror of the same name whose drop could not finish) must not be loaded.
+        if !is_recovery {
+            crate::errored_tables::drop_iceberg_table_files(
+                &moonlink_table_config.iceberg_table_config,
+            )
+            .await?;
+        }
         let mut table_resources = build_table_components(
             mooncake_table_id.to_string(),
             arrow_schema,

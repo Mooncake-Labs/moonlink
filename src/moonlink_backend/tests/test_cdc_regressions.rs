@@ -4387,3 +4387,145 @@ async fn renamed_enum_value_errors_the_mirror(#[case] column_type: &str, #[case]
         .await
         .unwrap();
 }
+
+/// Make a mirror's table handler task die (needs the test-utils feature).
+#[cfg(feature = "test-utils")]
+async fn kill_table_handler(backend: &MoonlinkBackend, dst: &str) {
+    backend
+        .kill_table_handler_for_testing(DB.to_string(), dst.to_string())
+        .await
+        .unwrap();
+}
+
+#[cfg(not(feature = "test-utils"))]
+async fn kill_table_handler(_backend: &MoonlinkBackend, _dst: &str) {
+    panic!("killing a table handler needs --features test-utils");
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The source table's rows as id -> v.
+async fn source_rows_of(client: &Client, table: &str) -> BTreeMap<i64, Option<String>> {
+    client
+        .query(&format!("SELECT id, v FROM {table}"), &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// Drop + re-create (the remedy for every errored mirror) starts from the source alone: a mirror
+/// re-created under the same name never sees the dropped one's Iceberg snapshot or data files,
+/// whether the dropped mirror was healthy or its table task had died; also after a restart.
+#[rstest::rstest]
+#[case::healthy(false, false)]
+#[case::dead_table_task(true, false)]
+#[case::iceberg_table_left_by_an_interrupted_drop(false, true)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn recreated_mirror_starts_from_the_source_alone(
+    #[case] kill: bool,
+    #[case] leave_iceberg_table: bool,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_rc;
+         CREATE TABLE rv_rc (id BIGINT PRIMARY KEY, v TEXT);
+         INSERT INTO rv_rc SELECT i, 'old' FROM generate_series(1, 5) i;",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_rc_mc", "public.rv_rc", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_rc VALUES (6, 'old'); UPDATE rv_rc SET v = 'old2' WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    // Persisted to Iceberg (data files, deletion vectors, snapshot).
+    assert_eq!(snapshot_error(&backend, "rv_rc_mc", lsn).await, None);
+    if kill {
+        kill_table_handler(&backend, "rv_rc_mc").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // The mirror's iceberg table: <root>/<database>/<mirror>.
+    let iceberg_table = tmp.path().join(DB).join("rv_rc_mc");
+    let saved = tmp.path().join("saved_iceberg_table");
+    if leave_iceberg_table {
+        copy_dir(&iceberg_table, &saved);
+    }
+    backend
+        .drop_table(DB.to_string(), "rv_rc_mc".to_string())
+        .await
+        .unwrap();
+    // Nothing of the dropped mirror is left (its iceberg table and local files).
+    let mut leftovers = Vec::new();
+    let mut dirs = vec![tmp.path().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.to_string_lossy().contains("rv_rc_mc") {
+                leftovers.push(path.clone());
+            }
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    if leave_iceberg_table {
+        // As if the drop had been interrupted before deleting it.
+        copy_dir(&saved, &iceberg_table);
+    }
+
+    client
+        .simple_query(
+            "DELETE FROM rv_rc WHERE id IN (1, 3); UPDATE rv_rc SET v = 'new' WHERE id = 4;
+             INSERT INTO rv_rc VALUES (7, 'new');",
+        )
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_rc_mc", "public.rv_rc", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_rc VALUES (8, 'new');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_rows(&backend, "rv_rc_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source_rows_of(&client, "rv_rc").await),
+        "after re-create"
+    );
+    // Persist the re-created mirror, then restart: recovery must load its own snapshot only.
+    assert_eq!(snapshot_error(&backend, "rv_rc_mc", lsn).await, None);
+    let backend = restart_with(
+        backend,
+        &tmp,
+        &client,
+        &uri,
+        "INSERT INTO rv_rc VALUES (9, 'new');",
+    )
+    .await;
+    client
+        .simple_query("UPDATE rv_rc SET v = 'newer' WHERE id = 5;")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_rows(&backend, "rv_rc_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source_rows_of(&client, "rv_rc").await),
+        "after a restart"
+    );
+}

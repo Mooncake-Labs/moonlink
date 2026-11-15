@@ -245,6 +245,11 @@ impl TableHandler {
                     replay_tx.send(event.clone()).unwrap();
                 }
 
+                #[cfg(any(test, feature = "test-utils"))]
+                if matches!(event, TableEvent::KillForTest) {
+                    panic!("table handler killed for testing");
+                }
+
                 #[cfg(test)]
                 if let TableEvent::SetErroredDropWaitForTest { wait } = event {
                     errored_drop.background_task_wait = wait;
