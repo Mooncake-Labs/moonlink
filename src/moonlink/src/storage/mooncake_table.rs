@@ -900,12 +900,15 @@ impl MooncakeTable {
     ) -> Result<Self> {
         table_metadata.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
-        let (mut next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
-        let rebuilt_file_indices = Self::rebuild_legacy_file_indices(
+        // Loading (with its garbage collection) and the index rebuild are large futures; boxed so
+        // every caller up the recovery chain does not carry them on its stack.
+        let (mut next_file_id, current_snapshot) =
+            Box::pin(table_manager.load_snapshot_from_table()).await?;
+        let rebuilt_file_indices = Box::pin(Self::rebuild_legacy_file_indices(
             &table_metadata,
             &current_snapshot,
             &mut next_file_id,
-        )
+        ))
         .await?;
         let last_persistence_snapshot_lsn = current_snapshot.flush_lsn;
         if let Some(last_persistence_snapshot_lsn) = last_persistence_snapshot_lsn {
@@ -2463,3 +2466,6 @@ mod gc_tests;
 
 #[cfg(test)]
 mod full_disk_flush_tests;
+
+#[cfg(test)]
+mod open_future_size_tests;

@@ -234,7 +234,7 @@ impl TableManager for IcebergTableManager {
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 // Best effort: a failed cleanup only leaves files behind for the next run.
-                if let Err(e) = self.collect_garbage(GcTrigger::Commit).await {
+                if let Err(e) = Box::pin(self.collect_garbage(GcTrigger::Commit)).await {
                     tracing::warn!(error = ?e, "iceberg garbage collection failed");
                 }
                 Ok(result)
@@ -244,7 +244,7 @@ impl TableManager for IcebergTableManager {
                 // Free what the failed commit wrote (e.g. on a full disk), unless it may have
                 // committed after all.
                 if !matches!(err, Error::IcebergCommitOutcomeUnknown(_)) {
-                    if let Err(e) = self.collect_garbage(GcTrigger::FailedCommit).await {
+                    if let Err(e) = Box::pin(self.collect_garbage(GcTrigger::FailedCommit)).await {
                         tracing::warn!(error = ?e, "iceberg garbage collection after a failed commit failed");
                     }
                 }
@@ -258,9 +258,9 @@ impl TableManager for IcebergTableManager {
         let recovery_stats =
             IcebergTableRecoveryStats::new(self.mooncake_table_metadata.mooncake_table_id.clone());
         let _guard = recovery_stats.start();
-        let snapshot = self.load_snapshot_from_table_impl().await?;
+        let snapshot = Box::pin(self.load_snapshot_from_table_impl()).await?;
         // No reader exists yet: remove everything left over by earlier runs.
-        if let Err(e) = self.collect_garbage(GcTrigger::Load).await {
+        if let Err(e) = Box::pin(self.collect_garbage(GcTrigger::Load)).await {
             tracing::warn!(error = ?e, "iceberg garbage collection at load failed");
         }
         Ok(snapshot)
