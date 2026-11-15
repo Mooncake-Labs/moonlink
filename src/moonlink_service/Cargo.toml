@@ -15,7 +15,6 @@ storage-fs = ["moonlink/storage-fs"]
 [dependencies]
 anyhow = { workspace = true }
 arrow-ipc = { workspace = true }
-arrow-schema = { workspace = true }
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
 moonlink_error = { workspace = true }

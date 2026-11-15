@@ -3616,7 +3616,6 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "arrow-ipc",
- "arrow-schema",
  "moonlink",
  "moonlink_backend",
  "moonlink_error",
