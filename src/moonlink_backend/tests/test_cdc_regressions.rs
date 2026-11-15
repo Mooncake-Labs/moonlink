@@ -688,3 +688,74 @@ async fn update_keeps_unchanged_toasted_values() {
         .unwrap();
     assert!(len(raw).unwrap_or(0) >= 20000, "bytea value lost");
 }
+
+/// The test connection string with other credentials.
+fn uri_for_user(uri: &str, user: &str, password: &str) -> String {
+    let (scheme, rest) = uri.split_once("://").unwrap();
+    let host_part = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
+    format!("{scheme}://{user}:{password}@{host_part}")
+}
+
+/// Replication must survive the source refusing connections for a while (restart, network,
+/// failover): it keeps retrying, applies everything committed meanwhile once it is back, and the
+/// mirror can still be dropped, including its slot.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn replication_resumes_after_source_refuses_connections() {
+    let admin_uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_outage;
+         CREATE TABLE rv_outage (id BIGINT PRIMARY KEY);
+         DROP ROLE IF EXISTS rv_outage_user;
+         CREATE ROLE rv_outage_user SUPERUSER LOGIN PASSWORD 'rv_outage';",
+    )
+    .await;
+    let uri = uri_for_user(&admin_uri, "rv_outage_user", "rv_outage");
+    mirror(&backend, &tmp, "rv_outage_mc", "public.rv_outage", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_outage VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_outage_mc", lsn).await, Some(vec![1]));
+
+    // Refuse new connections from moonlink's role and cut the stream.
+    client
+        .simple_query(
+            "ALTER ROLE rv_outage_user NOLOGIN;
+             SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots
+              WHERE slot_name LIKE 'moonlink_slot%' AND active_pid IS NOT NULL;",
+        )
+        .await
+        .unwrap();
+    for id in 2..=4 {
+        client
+            .simple_query(&format!("INSERT INTO rv_outage VALUES ({id});"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    client
+        .simple_query("ALTER ROLE rv_outage_user LOGIN;")
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_outage VALUES (5);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let ids = scan_rows(&backend, "rv_outage_mc", lsn, "id", Duration::from_secs(90))
+        .await
+        .map(|rows| rows.into_keys().collect::<Vec<_>>());
+    assert_eq!(ids, Some(vec![1, 2, 3, 4, 5]));
+
+    backend
+        .drop_table(DB.to_string(), "rv_outage_mc".to_string())
+        .await
+        .unwrap();
+    wait_for_no_slots(&client).await;
+    client
+        .simple_query("DROP OWNED BY rv_outage_user; DROP ROLE rv_outage_user;")
+        .await
+        .unwrap();
+}

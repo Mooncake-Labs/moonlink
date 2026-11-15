@@ -185,7 +185,7 @@ impl CdcEventConverter {
 
         Ok(CdcEvent::Update((
             src_table_id,
-            Some(old_row),
+            old_row,
             new_row,
             update_body.xid(),
         )))
@@ -294,7 +294,7 @@ pub enum CdcEvent {
     Begin(BeginBody),
     Commit(CommitBody),
     Insert((SrcTableId, TableRow, Option<u32>)),
-    Update((SrcTableId, Option<TableRow>, TableRow, Option<u32>)),
+    Update((SrcTableId, TableRow, TableRow, Option<u32>)),
     Delete((SrcTableId, TableRow, Option<u32>)),
     Relation(RelationBody),
     Type(TypeBody),

@@ -87,7 +87,12 @@ pub struct PostgresConnection {
     pub cmd_rx: Option<mpsc::Receiver<PostgresReplicationCommand>>,
     pub replication_state: Arc<ReplicationState>,
     pub retry_handles: Vec<JoinHandle<Result<()>>>,
+    /// Event senders of the tables registered with the replication loop, so they can be put in
+    /// the errored state if the loop ever stops unexpectedly.
+    registered_tables: RegisteredTables,
 }
+
+type RegisteredTables = Arc<std::sync::Mutex<HashMap<SrcTableId, mpsc::Sender<TableEvent>>>>;
 
 /// Something that tracks an LSN watermark (`CommitState` and `ReplicationState` are both `LsnState`).
 trait LsnMark {
@@ -292,6 +297,7 @@ impl PostgresConnection {
             cmd_rx: Some(cmd_rx),
             replication_state: ReplicationState::new(),
             retry_handles: Vec::new(),
+            registered_tables: Arc::default(),
         })
     }
 
@@ -493,13 +499,24 @@ impl PostgresConnection {
         );
         self.run_control_query(&terminate_query).await?;
 
-        // Then drop the replication slot
+        // Then drop the replication slot. The terminated walsender may still hold it for a moment.
         let drop_query = format!(
-            "SELECT pg_drop_replication_slot({});",
+            "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = {};",
             quote_literal(&self.slot_name)
         );
-        self.run_control_query(&drop_query).await?;
-
+        const MAX_ATTEMPTS: u32 = 20;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.postgres_client.simple_query(&drop_query).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.code() == Some(&SqlState::OBJECT_IN_USE) && attempt < MAX_ATTEMPTS => {
+                    sleep(Duration::from_millis(250)).await;
+                }
+                Err(_) => {
+                    self.run_control_query(&drop_query).await?;
+                    return Ok(());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -532,6 +549,10 @@ impl PostgresConnection {
         replay_from_slot: bool,
     ) -> Result<oneshot::Receiver<()>> {
         let (ready_tx, ready_rx) = oneshot::channel();
+        self.registered_tables
+            .lock()
+            .unwrap()
+            .insert(src_table_id, event_sender.clone());
         let cmd = PostgresReplicationCommand::AddTable {
             src_table_id,
             schema,
@@ -548,6 +569,7 @@ impl PostgresConnection {
 
     /// Drop table from PostgreSQL replication
     pub async fn drop_table_from_replication(&self, src_table_id: SrcTableId) -> Result<()> {
+        self.registered_tables.lock().unwrap().remove(&src_table_id);
         let cmd = PostgresReplicationCommand::DropTable { src_table_id };
         self.cmd_tx.send(cmd).await?;
         Ok(())
@@ -706,8 +728,11 @@ impl PostgresConnection {
         // Remove table from publication as the first step, to prevent further events.
         self.remove_table_from_publication(table_name).await?;
 
-        // Send command to drop table from replication
-        self.drop_table_from_replication(src_table_id).await?;
+        // Send command to drop table from replication. If the loop is gone there is nothing to
+        // unregister, and the drop must still succeed.
+        if let Err(e) = self.drop_table_from_replication(src_table_id).await {
+            warn!(error = ?e, src_table_id, "replication loop already stopped while dropping table");
+        }
 
         debug!(src_table_id, "table dropped");
         Ok(())
@@ -747,18 +772,11 @@ impl PostgresConnection {
         let sink = Sink::new(self.replication_state.clone());
         let receiver = self.cmd_rx.take().unwrap();
 
-        let uri = self.uri.clone();
         let cfg = self.source.get_cdc_stream_config().unwrap();
         let source = self.source.clone();
 
-        tokio::spawn(async move {
-            run_event_loop(cfg, sink, receiver, source)
-                .await
-                .map_err(|err| {
-                    error!("Postgres replication eventloop failed: {:?}", err);
-                    err
-                })
-        })
+        let event_loop = tokio::spawn(run_event_loop(cfg, sink, receiver, source));
+        supervise_replication(event_loop, self.registered_tables.clone())
     }
 }
 
@@ -783,6 +801,122 @@ fn compute_confirmed_flush_lsn(
         .map(PgLsn::from)
 }
 
+/// Wait for the replication loop. It only returns on shutdown; if it fails or panics instead, no
+/// table of this database would ever receive changes again, so put every registered table in the
+/// errored state rather than letting their mirrors silently go stale.
+fn supervise_replication(
+    event_loop: JoinHandle<Result<()>>,
+    registered_tables: RegisteredTables,
+) -> JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let (reason, result) = match event_loop.await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => (format!("replication from the source stopped: {e}"), Err(e)),
+            Err(join_error) => {
+                let message = if join_error.is_panic() {
+                    let payload = join_error.into_panic();
+                    payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown panic".to_string())
+                } else {
+                    "cancelled".to_string()
+                };
+                let reason = format!("replication from the source stopped unexpectedly: {message}");
+                let err = PostgresSourceError::Io(Error::new(ErrorKind::Other, reason.clone()));
+                (reason, Err(err.into()))
+            }
+        };
+        error!(%reason, "replication event loop stopped");
+        let senders: Vec<_> = registered_tables
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for sender in senders {
+            let _ = sender
+                .send(TableEvent::EnterErrored {
+                    reason: reason.clone(),
+                })
+                .await;
+        }
+        result
+    })
+}
+
+/// Linear reconnect backoff, 1 s steps up to one minute.
+fn next_backoff(current: Duration) -> Duration {
+    (current + Duration::from_secs(1)).min(Duration::from_secs(60))
+}
+
+/// Apply a table command while no replication stream is open; the schemas are handed to the next
+/// stream. Returns false when the loop must stop.
+fn apply_command_without_stream(
+    cmd: Option<PostgresReplicationCommand>,
+    sink: &mut Sink,
+    flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
+    table_status_rxs: &mut HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    saved_schemas: &mut Vec<TableSchema>,
+) -> bool {
+    match cmd {
+        Some(PostgresReplicationCommand::AddTable {
+            src_table_id,
+            schema,
+            event_sender,
+            commit_state,
+            flush_lsn_rx,
+            table_status_rx,
+            // The next stream starts from the slot anyway.
+            replay_from_slot: _,
+            ready_tx,
+        }) => {
+            sink.add_table(src_table_id, event_sender, commit_state, &schema);
+            flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+            table_status_rxs.insert(src_table_id, table_status_rx);
+            saved_schemas.retain(|s| s.src_table_id != src_table_id);
+            saved_schemas.push(schema);
+            if let Err(e) = ready_tx.send(()) {
+                error!(error = ?e, "failed to send ready signal");
+            }
+            true
+        }
+        Some(PostgresReplicationCommand::DropTable { src_table_id }) => {
+            sink.drop_table(src_table_id);
+            flush_lsn_rxs.remove(&src_table_id);
+            table_status_rxs.remove(&src_table_id);
+            saved_schemas.retain(|s| s.src_table_id != src_table_id);
+            true
+        }
+        Some(PostgresReplicationCommand::Shutdown) | None => false,
+    }
+}
+
+/// Sleep for `delay` while still applying table commands, so tables can be added, dropped or the
+/// connection shut down while the source is unreachable. Returns false when the loop must stop.
+async fn wait_applying_commands(
+    delay: Duration,
+    cmd_rx: &mut mpsc::Receiver<PostgresReplicationCommand>,
+    sink: &mut Sink,
+    flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
+    table_status_rxs: &mut HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    saved_schemas: &mut Vec<TableSchema>,
+) -> bool {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return true,
+            cmd = cmd_rx.recv() => {
+                if !apply_command_without_stream(cmd, sink, flush_lsn_rxs, table_status_rxs, saved_schemas) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 #[tracing::instrument(name = "replication_event_loop", skip_all)]
 pub async fn run_event_loop(
     cfg: CdcStreamConfig,
@@ -796,36 +930,21 @@ pub async fn run_event_loop(
     let mut table_status_rxs: HashMap<SrcTableId, watch::Receiver<TableStatus>> = HashMap::new();
     let mut last_seen_end_lsn: Option<PgLsn> = None;
 
-    // Linear backoff parameters
-    let backoff_step = Duration::from_secs(1);
-    let backoff_cap = Duration::from_secs(60);
     let mut current_backoff = Duration::from_secs(0);
 
     'outer: loop {
         // With no table registered every change would be dropped, including what a recovering
         // table needs replayed from the slot, so wait for the first table before streaming.
         while flush_lsn_rxs.is_empty() {
-            match cmd_rx.recv().await {
-                Some(PostgresReplicationCommand::AddTable {
-                    src_table_id,
-                    schema,
-                    event_sender,
-                    commit_state,
-                    flush_lsn_rx,
-                    table_status_rx,
-                    replay_from_slot: _,
-                    ready_tx,
-                }) => {
-                    sink.add_table(src_table_id, event_sender, commit_state, &schema);
-                    flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
-                    table_status_rxs.insert(src_table_id, table_status_rx);
-                    saved_schemas.push(schema);
-                    if let Err(e) = ready_tx.send(()) {
-                        error!(error = ?e, "failed to send ready signal");
-                    }
-                }
-                Some(PostgresReplicationCommand::DropTable { .. }) => {}
-                Some(PostgresReplicationCommand::Shutdown) | None => break 'outer,
+            let cmd = cmd_rx.recv().await;
+            if !apply_command_without_stream(
+                cmd,
+                &mut sink,
+                &mut flush_lsn_rxs,
+                &mut table_status_rxs,
+                &mut saved_schemas,
+            ) {
+                break 'outer;
             }
         }
 
@@ -833,7 +952,28 @@ pub async fn run_event_loop(
         let confirmed_flush_lsn = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs)
             .unwrap_or(PgLsn::from(0));
 
-        let (client, mut connection) = postgres_source.connect_replication().await?;
+        // Transient source errors (restarts, network, slot briefly still active) must never end
+        // replication: retry with backoff while still applying table commands.
+        let (client, mut connection) = match postgres_source.connect_replication().await {
+            Ok(connected) => connected,
+            Err(e) => {
+                current_backoff = next_backoff(current_backoff);
+                error!(error = ?e, backoff_ms = current_backoff.as_millis(), "failed to connect for replication, retrying");
+                if !wait_applying_commands(
+                    current_backoff,
+                    &mut cmd_rx,
+                    &mut sink,
+                    &mut flush_lsn_rxs,
+                    &mut table_status_rxs,
+                    &mut saved_schemas,
+                )
+                .await
+                {
+                    break 'outer;
+                }
+                continue 'outer;
+            }
+        };
 
         // We should explicitly set the confirmed flush lsn here, because we may not have completed `send_status_update` before reconnecting.
         let mut cfg = cfg.clone();
@@ -842,10 +982,28 @@ pub async fn run_event_loop(
         let mut connection_pin = Box::pin(connection);
 
         // Create stream while driving connection
-        let stream = tokio::select! {
-            s = PostgresSource::create_cdc_stream(client, cfg) => s?,
-            _ = &mut connection_pin => {
-                return Err(PostgresSourceError::Io(Error::new(ErrorKind::ConnectionAborted, "connection closed during setup")).into());
+        let created = tokio::select! {
+            s = PostgresSource::create_cdc_stream(client, cfg) => s.map_err(|e| format!("{e:?}")),
+            _ = &mut connection_pin => Err("connection closed during setup".to_string()),
+        };
+        let stream = match created {
+            Ok(stream) => stream,
+            Err(e) => {
+                current_backoff = next_backoff(current_backoff);
+                error!(error = %e, backoff_ms = current_backoff.as_millis(), "failed to start replication stream, retrying");
+                if !wait_applying_commands(
+                    current_backoff,
+                    &mut cmd_rx,
+                    &mut sink,
+                    &mut flush_lsn_rxs,
+                    &mut table_status_rxs,
+                    &mut saved_schemas,
+                )
+                .await
+                {
+                    break 'outer;
+                }
+                continue 'outer;
             }
         };
 
@@ -989,15 +1147,22 @@ pub async fn run_event_loop(
         }
 
         // If we reached here without shutdown, apply linear backoff before reconnect
-        if current_backoff < backoff_cap {
-            current_backoff = (current_backoff + backoff_step).min(backoff_cap);
-        }
-        if current_backoff > Duration::from_secs(0) {
-            debug!(
-                backoff_ms = current_backoff.as_millis(),
-                "backing off before reconnect"
-            );
-            tokio::time::sleep(current_backoff).await;
+        current_backoff = next_backoff(current_backoff);
+        debug!(
+            backoff_ms = current_backoff.as_millis(),
+            "backing off before reconnect"
+        );
+        if !wait_applying_commands(
+            current_backoff,
+            &mut cmd_rx,
+            &mut sink,
+            &mut flush_lsn_rxs,
+            &mut table_status_rxs,
+            &mut saved_schemas,
+        )
+        .await
+        {
+            break 'outer;
         }
 
         // Loop continues to reconnect
@@ -1039,6 +1204,46 @@ mod copy_boundary_tests {
             log.into_inner().unwrap(),
             vec![("commit", 42), ("replication", 42)]
         );
+    }
+}
+
+#[cfg(test)]
+mod supervisor_tests {
+    use super::{supervise_replication, RegisteredTables};
+    use moonlink::TableEvent;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn panicking_replication_loop_errors_every_registered_table() {
+        let registered = RegisteredTables::default();
+        let (tx_a, mut rx_a) = mpsc::channel(4);
+        let (tx_b, mut rx_b) = mpsc::channel(4);
+        registered.lock().unwrap().insert(1, tx_a);
+        registered.lock().unwrap().insert(2, tx_b);
+        let event_loop = tokio::spawn(async { panic!("boom") });
+        assert!(supervise_replication(event_loop, registered)
+            .await
+            .unwrap()
+            .is_err());
+        for rx in [&mut rx_a, &mut rx_b] {
+            match rx.recv().await {
+                Some(TableEvent::EnterErrored { reason }) => assert!(reason.contains("boom")),
+                other => panic!("expected EnterErrored, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_shutdown_leaves_tables_alone() {
+        let registered = RegisteredTables::default();
+        let (tx, mut rx) = mpsc::channel(4);
+        registered.lock().unwrap().insert(1, tx);
+        let event_loop = tokio::spawn(async { Ok(()) });
+        assert!(supervise_replication(event_loop, registered)
+            .await
+            .unwrap()
+            .is_ok());
+        assert!(rx.try_recv().is_err());
     }
 }
 

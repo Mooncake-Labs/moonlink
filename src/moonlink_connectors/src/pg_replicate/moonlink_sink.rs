@@ -5,7 +5,6 @@ use crate::pg_replicate::{
 };
 use moonlink::TableEvent;
 use moonlink::{CommitState, ReplicationState};
-use more_asserts as ma;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -54,11 +53,14 @@ impl Sink {
     ) -> Result<(), tokio::sync::mpsc::error::SendError<TableEvent>> {
         match event_sender.try_send(event) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(event)) => {
-                let permit = event_sender.reserve().await.expect("event receiver closed");
-                permit.send(event);
-                Ok(())
-            }
+            Err(TrySendError::Full(event)) => match event_sender.reserve().await {
+                Ok(permit) => {
+                    permit.send(event);
+                    Ok(())
+                }
+                // The table handler is gone (table dropped or failed); nothing to deliver to.
+                Err(_) => Err(tokio::sync::mpsc::error::SendError(event)),
+            },
             Err(TrySendError::Closed(event)) => Err(tokio::sync::mpsc::error::SendError(event)),
         }
     }
@@ -77,6 +79,18 @@ impl Sink {
             cached_event_sender: None,
             streaming_last_key: None,
             max_keepalive_lsn_seen: 0,
+        }
+    }
+
+    /// Postgres never sends a change older than a keepalive it already sent on the same stream.
+    /// If it ever does, log it rather than stopping replication for every table.
+    fn warn_if_before_keepalive(&self, lsn: u64, what: &str) {
+        if lsn < self.max_keepalive_lsn_seen {
+            warn!(
+                lsn,
+                keepalive_lsn = self.max_keepalive_lsn_seen,
+                "{what} LSN is older than an earlier keepalive"
+            );
         }
     }
 
@@ -207,7 +221,7 @@ impl Sink {
         match event {
             CdcEvent::Begin(begin_body) => {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
-                ma::assert_ge!(begin_body.final_lsn(), self.max_keepalive_lsn_seen);
+                self.warn_if_before_keepalive(begin_body.final_lsn(), "begin");
                 self.transaction_state.final_lsn = begin_body.final_lsn();
                 self.transaction_state.last_touched_table = None;
                 self.streaming_last_key = None;
@@ -217,7 +231,7 @@ impl Sink {
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
-                ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
+                self.warn_if_before_keepalive(commit_body.end_lsn(), "commit");
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id);
@@ -251,7 +265,7 @@ impl Sink {
                     end_lsn = stream_commit_body.end_lsn(),
                     "stream commit"
                 );
-                ma::assert_ge!(stream_commit_body.end_lsn(), self.max_keepalive_lsn_seen);
+                self.warn_if_before_keepalive(stream_commit_body.end_lsn(), "stream commit");
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
@@ -302,7 +316,7 @@ impl Sink {
                     if let Err(e) = Self::send_table_event(
                         event_sender,
                         TableEvent::Delete {
-                            row: PostgresTableRow(old_table_row.unwrap()).into(),
+                            row: PostgresTableRow(old_table_row).into(),
                             lsn: final_lsn,
                             xact_id,
                             delete_if_exists: false,
@@ -369,7 +383,7 @@ impl Sink {
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
                 let pg_lsn = PgLsn::from(primary_keepalive_body.wal_end());
                 let wal_end = primary_keepalive_body.wal_end();
-                ma::assert_ge!(wal_end, self.max_keepalive_lsn_seen);
+                self.warn_if_before_keepalive(wal_end, "keepalive");
                 if wal_end > self.max_keepalive_lsn_seen {
                     self.max_keepalive_lsn_seen = wal_end;
                 }

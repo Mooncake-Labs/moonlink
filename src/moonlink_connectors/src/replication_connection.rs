@@ -206,10 +206,16 @@ impl ReplicationConnection {
         // otherwise table handler will panic when trying to send back notification to sinks
         debug!(src_table_id, "drop table from table handler");
         let mut event_manager = table_state.event_manager;
-        event_manager.drop_table().await?;
+        // The table is already unregistered; finish the drop even if one step fails, otherwise
+        // the mirror could never be dropped (or re-created) again.
+        if let Err(e) = event_manager.drop_table().await {
+            warn!(error = ?e, src_table_id, "table handler could not complete the drop");
+        }
 
         // Drop from the appropriate source
-        self.source.drop_table(src_table_id, table_name).await?;
+        if let Err(e) = self.source.drop_table(src_table_id, table_name).await {
+            warn!(error = ?e, src_table_id, "failed to remove table from replication");
+        }
 
         debug!(src_table_id, "table dropped");
         Ok(())
@@ -223,7 +229,10 @@ impl ReplicationConnection {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
-                self.source.shutdown_replication().await?;
+                // The loop may have stopped already; the slot and publication still need dropping.
+                if let Err(e) = self.source.shutdown_replication().await {
+                    warn!(error = ?e, "replication loop already stopped");
+                }
                 if let Some(handle) = self.handle.take() {
                     if let Err(e) = handle.await {
                         warn!(error = ?e, "task join error during shutdown");
