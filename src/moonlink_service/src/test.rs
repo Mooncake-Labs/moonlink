@@ -50,6 +50,40 @@ async fn test_rpc_error_propagation_nonexistent_table() {
         .is_empty());
 }
 
+/// Dead RPCs keep their wire slot but fail loudly instead of silently succeeding.
+#[tokio::test]
+#[serial]
+async fn test_unsupported_rpcs() {
+    let service = TestService::start().await;
+    let mut stream = service.connect().await;
+
+    let res = moonlink_rpc::load_files(
+        &mut stream,
+        "postgres".to_string(),
+        "public.t".to_string(),
+        vec!["/tmp/a.parquet".to_string()],
+    )
+    .await;
+    match res {
+        Err(moonlink_rpc::Error::Rpc(e)) => assert!(e.message.contains("load_files"), "{e:?}"),
+        other => panic!("expected unsupported error, got {other:?}"),
+    }
+
+    let res = moonlink_rpc::get_parquet_metadatas(&mut stream, vec!["a.parquet".to_string()]).await;
+    match res {
+        Err(moonlink_rpc::Error::Rpc(e)) => {
+            assert!(e.message.contains("get_parquet_metadatas"), "{e:?}")
+        }
+        other => panic!("expected unsupported error, got {other:?}"),
+    }
+
+    // The connection keeps serving requests.
+    assert!(moonlink_rpc::list_tables(&mut stream)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 #[cfg(feature = "postgres-integration")]
 mod postgres {
     use super::*;
@@ -293,31 +327,6 @@ mod postgres {
             .await
             .unwrap()
             .is_empty());
-        pg::drop_source_table(&pg_client, table).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_load_files() {
-        let pg_client = pg::connect().await;
-        let table = "service_load_files_test";
-        pg::create_source_table(&pg_client, table, 1).await;
-
-        let service = TestService::start().await;
-        let mut stream = service.connect().await;
-        create_mirror_table(&mut stream, table, "{}").await.unwrap();
-        moonlink_rpc::load_files(
-            &mut stream,
-            DATABASE.to_string(),
-            table.to_string(),
-            /*files=*/ vec![],
-        )
-        .await
-        .unwrap();
-
-        moonlink_rpc::drop_table(&mut stream, DATABASE.to_string(), table.to_string())
-            .await
-            .unwrap();
         pg::drop_source_table(&pg_client, table).await;
     }
 }

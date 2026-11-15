@@ -71,6 +71,13 @@ pub async fn start_unix_server(
     }
 }
 
+fn unsupported(rpc: &str) -> ErrorStruct {
+    ErrorStruct::new(
+        format!("{rpc} is not supported by this moonlink build"),
+        ErrorStatus::Permanent,
+    )
+}
+
 fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
     ErrorStruct::new("backend error".to_string(), ErrorStatus::Permanent).with_source(e)
 }
@@ -123,12 +130,10 @@ where
 
                 write(&mut stream, &res).await?;
             }
-            Request::GetParquetMetadatas { data_files } => {
-                let metadata_res: RpcResult<Vec<Vec<u8>>> = backend
-                    .get_parquet_metadatas(data_files)
-                    .await
-                    .map_err(into_error_struct);
-                write(&mut stream, &metadata_res).await?;
+            // Kept for wire compatibility; no client uses it.
+            Request::GetParquetMetadatas { .. } => {
+                let res: RpcResult<Vec<Vec<u8>>> = Err(unsupported("get_parquet_metadatas"));
+                write(&mut stream, &res).await?;
             }
             Request::GetTableSchema { database, table } => {
                 let result: anyhow::Result<Vec<u8>> = async {
@@ -195,15 +200,9 @@ where
                 assert!(map.remove(&(database, table)).is_some());
                 write(&mut stream, &RpcResult::<()>::Ok(())).await?;
             }
-            Request::LoadFiles {
-                database,
-                table,
-                files,
-            } => {
-                let res: RpcResult<()> = backend
-                    .load_files(database, table, files)
-                    .await
-                    .map_err(into_error_struct);
+            // Kept for wire compatibility (pg_mooncake mooncake.load_files); loading files is not implemented.
+            Request::LoadFiles { .. } => {
+                let res: RpcResult<()> = Err(unsupported("load_files"));
                 write(&mut stream, &res).await?;
             }
         }
