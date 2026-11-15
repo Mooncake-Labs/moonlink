@@ -2011,6 +2011,15 @@ async fn same_shape_schema_change_errors_the_mirror(#[case] ddl: &str) {
 )]
 #[case::detach_then_truncate("ALTER TABLE rv_part DETACH PARTITION rv_part_1; TRUNCATE rv_part_1;")]
 #[case::detach_empty("ALTER TABLE rv_part DETACH PARTITION rv_part_3;")]
+#[case::detach_modify_reattach_in_one_transaction(
+    "BEGIN; ALTER TABLE rv_part DETACH PARTITION rv_part_1; DELETE FROM rv_part_1;
+     INSERT INTO rv_part_1 VALUES (5, 'while detached');
+     ALTER TABLE rv_part ATTACH PARTITION rv_part_1 FOR VALUES FROM (0) TO (100); COMMIT;"
+)]
+#[case::detach_empty_reattach(
+    "ALTER TABLE rv_part DETACH PARTITION rv_part_1; DELETE FROM rv_part_1;
+     ALTER TABLE rv_part ATTACH PARTITION rv_part_1 FOR VALUES FROM (0) TO (100);"
+)]
 #[case::drop_partition("DROP TABLE rv_part_1;")]
 #[tokio::test(flavor = "multi_thread")]
 #[serial]

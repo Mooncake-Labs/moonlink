@@ -16,7 +16,7 @@ use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
 use moonlink::MooncakeTableId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, SimpleQueryMessage};
@@ -45,6 +45,10 @@ pub struct SourceFingerprint {
     pub columns: Vec<SourceColumn>,
     /// Every member of the partition tree below the table (empty for a plain table).
     pub partitions: BTreeSet<u32>,
+    /// Each member's pg_inherits row version (xmin). DETACH deletes that row and ATTACH inserts a
+    /// new one, so a partition detached and attached again between two checks shows here.
+    #[serde(default)]
+    pub attachments: BTreeMap<u32, String>,
 }
 
 /// How the source compares with a recorded fingerprint.
@@ -121,11 +125,24 @@ pub async fn fetch(
     .iter()
     .map(|row| field(row, 0))
     .collect();
+    let attachments = rows(
+        client
+            .simple_query(&format!(
+                "SELECT inhrelid, xmin::text FROM pg_inherits WHERE inhrelid IN \
+                 (SELECT relid FROM pg_partition_tree({relid}::oid::regclass) \
+                  WHERE relid <> {relid}::oid::regclass);"
+            ))
+            .await?,
+    )
+    .iter()
+    .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+    .collect();
     Ok(Some(SourceFingerprint {
         value_format_version: VALUE_FORMAT_VERSION,
         relid,
         columns,
         partitions,
+        attachments,
     }))
 }
 
@@ -169,10 +186,18 @@ pub async fn drift(
             describe_column_change(&expected.columns, &current.columns)
         )));
     }
-    if !expected.partitions.is_subset(&current.partitions) {
+    // Rows left the table when a partition was detached; re-attaching it does not bring the
+    // mirror's copy of them in line with what it holds now.
+    let reattached = expected.attachments.iter().any(|(partition, xmin)| {
+        current
+            .attachments
+            .get(partition)
+            .is_some_and(|now| now != xmin)
+    });
+    if reattached || !expected.partitions.is_subset(&current.partitions) {
         return Ok(Drift::Changed(
-            "a partition was detached or dropped; partition changes other than adding empty \
-             partitions are not supported"
+            "a partition was detached (whether or not attached again) or dropped; partition \
+             changes other than adding empty partitions are not supported"
                 .to_string(),
         ));
     }
