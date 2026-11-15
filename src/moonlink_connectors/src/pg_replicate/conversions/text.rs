@@ -130,67 +130,6 @@ impl TextFormatConverter {
         }
     }
 
-    pub fn default_value(typ: &Type) -> Cell {
-        match *typ {
-            Type::BOOL => Cell::Bool(bool::default()),
-            Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::default())),
-            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                Cell::String(String::default())
-            }
-            Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY => Cell::Array(ArrayCell::String(Vec::default())),
-            Type::INT2 => Cell::I16(i16::default()),
-            Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::default())),
-            Type::INT4 => Cell::I32(i32::default()),
-            Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::default())),
-            Type::INT8 => Cell::I64(i64::default()),
-            Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(Vec::default())),
-            Type::FLOAT4 => Cell::F32(f32::default()),
-            Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::default())),
-            Type::FLOAT8 => Cell::F64(f64::default()),
-            Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::default())),
-            Type::NUMERIC => Cell::Numeric(PgNumeric::default()),
-            Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::default())),
-            Type::BYTEA => Cell::Bytes(Vec::default()),
-            Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::default())),
-            Type::DATE => Cell::Date(NaiveDate::MIN),
-            Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::default())),
-            Type::TIME => Cell::Time(NaiveTime::MIN),
-            Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::default())),
-            Type::TIMESTAMP => Cell::TimeStamp(NaiveDateTime::MIN),
-            Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::TimeStamp(Vec::default())),
-            Type::TIMESTAMPTZ => {
-                let val = DateTime::<Utc>::from_naive_utc_and_offset(NaiveDateTime::MIN, Utc);
-                Cell::TimeStampTz(val)
-            }
-            Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimeStampTz(Vec::default())),
-            Type::UUID => Cell::Uuid(Uuid::default()),
-            Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::default())),
-            Type::JSON | Type::JSONB => Cell::Json(serde_json::Value::default()),
-            Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::default())),
-            Type::OID => Cell::U32(u32::default()),
-            Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::default())),
-            _ => match typ.kind() {
-                Kind::Composite(_) => Cell::Composite(Vec::default()),
-                Kind::Array(inner_type) => {
-                    // Handle arrays of composite types.
-                    // Note: inner_type here refers to the element type of the array.
-                    // PostgreSQL supports multi-dimensional arrays (e.g., text[][]),
-                    // but we currently only handle arrays of composite types here.
-                    match inner_type.kind() {
-                        Kind::Composite(_) => Cell::Array(ArrayCell::Composite(Vec::default())),
-                        Kind::Array(_) => Cell::Null, // TODO: Multi-dimensional arrays not yet handled
-                        _ => Cell::Null,              // Unknown array type
-                    }
-                }
-                _ => Cell::Null,
-            },
-        }
-    }
-
     pub fn try_from_str(typ: &Type, str: &str) -> Result<Cell, FromTextError> {
         match *typ {
             Type::BOOL => Ok(Cell::Bool(parse_bool(str)?)),

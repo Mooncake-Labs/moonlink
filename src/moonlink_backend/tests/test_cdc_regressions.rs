@@ -640,3 +640,51 @@ async fn unconvertible_value_errors_only_its_mirror() {
         .await
         .unwrap();
 }
+
+/// An UPDATE that leaves large (out-of-line, TOASTed) values untouched sends them as "unchanged";
+/// the mirror must keep the full values, not empty or default ones.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn update_keeps_unchanged_toasted_values() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_toast;
+         CREATE TABLE rv_toast (id BIGINT PRIMARY KEY, name TEXT, big TEXT, doc JSONB, raw BYTEA);
+         ALTER TABLE rv_toast ALTER COLUMN big SET STORAGE EXTERNAL;
+         ALTER TABLE rv_toast ALTER COLUMN doc SET STORAGE EXTERNAL;
+         ALTER TABLE rv_toast ALTER COLUMN raw SET STORAGE EXTERNAL;",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_toast_mc", "public.rv_toast", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_toast
+             SELECT 1, 'a', repeat('x', 64000),
+                    jsonb_build_object('k', repeat('y', 30000)),
+                    decode(repeat('41', 20000), 'hex');
+             UPDATE rv_toast SET name = 'b' WHERE id = 1;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let timeout = Duration::from_secs(30);
+    let name = scan_rows(&backend, "rv_toast_mc", lsn, "name", timeout)
+        .await
+        .unwrap();
+    assert_eq!(name.get(&1).cloned().flatten().as_deref(), Some("b"));
+    let len =
+        |rows: BTreeMap<i64, Option<String>>| rows.get(&1).cloned().flatten().map(|v| v.len());
+    let big = scan_rows(&backend, "rv_toast_mc", lsn, "big", timeout)
+        .await
+        .unwrap();
+    assert_eq!(len(big), Some(64000));
+    let doc = scan_rows(&backend, "rv_toast_mc", lsn, "doc", timeout)
+        .await
+        .unwrap();
+    assert!(len(doc).unwrap_or(0) > 30000, "jsonb value lost");
+    // The helper reads BYTEA through a cast to UTF-8, hence the ASCII bytes above.
+    let raw = scan_rows(&backend, "rv_toast_mc", lsn, "raw", timeout)
+        .await
+        .unwrap();
+    assert!(len(raw).unwrap_or(0) >= 20000, "bytea value lost");
+}

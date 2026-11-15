@@ -26,8 +26,20 @@ pub enum CdcEventConversionError {
     #[error("unsupported type: {0}")]
     UnsupportedType(String),
 
-    #[error("delete for table id {0} carries no old row")]
-    MissingTupleInDeleteBody(SrcTableId),
+    /// Mirrors identify rows by all their columns, so updates and deletes need the complete old
+    /// row, which postgres only sends under REPLICA IDENTITY FULL (set per partition).
+    #[error("{operation} on the source table did not include the complete old row; the table (and each of its partitions) must have REPLICA IDENTITY FULL")]
+    MissingOldRow {
+        src_table_id: SrcTableId,
+        operation: &'static str,
+    },
+
+    /// An unchanged out-of-line (TOAST) value with no old row to take it from.
+    #[error("column {column}: unchanged TOAST value without the old row")]
+    UnresolvedToast {
+        src_table_id: SrcTableId,
+        column: String,
+    },
 
     #[error("schema missing for table id {0}")]
     MissingSchema(SrcTableId),
@@ -57,7 +69,8 @@ impl CdcEventConversionError {
         match self {
             Self::TupleShapeMismatch { src_table_id, .. }
             | Self::InvalidValue { src_table_id, .. }
-            | Self::MissingTupleInDeleteBody(src_table_id) => Some(*src_table_id),
+            | Self::MissingOldRow { src_table_id, .. }
+            | Self::UnresolvedToast { src_table_id, .. } => Some(*src_table_id),
             _ => None,
         }
     }
@@ -77,10 +90,13 @@ fn excerpt(value: &str) -> String {
 pub struct CdcEventConverter;
 
 impl CdcEventConverter {
+    /// Decode a tuple. `unchanged_from` supplies the values of columns postgres reports as
+    /// unchanged TOAST ('u'), which it only does for the new row of an UPDATE.
     fn try_from_tuple_data_slice(
         src_table_id: SrcTableId,
         column_schemas: &[ColumnSchema],
         tuple_data: &[TupleData],
+        unchanged_from: Option<&TableRow>,
     ) -> Result<TableRow, CdcEventConversionError> {
         if tuple_data.len() != column_schemas.len() {
             return Err(CdcEventConversionError::TupleShapeMismatch {
@@ -94,7 +110,15 @@ impl CdcEventConverter {
         for (i, column_schema) in column_schemas.iter().enumerate() {
             let cell = match &tuple_data[i] {
                 TupleData::Null => Cell::Null,
-                TupleData::UnchangedToast => TextFormatConverter::default_value(&column_schema.typ),
+                TupleData::UnchangedToast => match unchanged_from {
+                    Some(old_row) => old_row.values[i].clone(),
+                    None => {
+                        return Err(CdcEventConversionError::UnresolvedToast {
+                            src_table_id,
+                            column: column_schema.name.clone(),
+                        })
+                    }
+                },
                 TupleData::Text(bytes) => {
                     let invalid =
                         |value: String, reason: String| CdcEventConversionError::InvalidValue {
@@ -126,6 +150,7 @@ impl CdcEventConverter {
             src_table_id,
             column_schemas,
             insert_body.tuple().tuple_data(),
+            None,
         )?;
 
         Ok(CdcEvent::Insert((src_table_id, row, insert_body.xid())))
@@ -137,21 +162,30 @@ impl CdcEventConverter {
         column_schemas: &[ColumnSchema],
         update_body: UpdateBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
-        let old_row = update_body
+        // Under REPLICA IDENTITY FULL the old row is complete (detoasted), so it can fill the new
+        // row's unchanged TOAST columns. A key-only old row ('K') is not enough to find the row.
+        let old_tuple = update_body
             .old_tuple()
-            .map(|tuple| {
-                Self::try_from_tuple_data_slice(src_table_id, column_schemas, tuple.tuple_data())
-            })
-            .transpose()?;
+            .ok_or(CdcEventConversionError::MissingOldRow {
+                src_table_id,
+                operation: "UPDATE",
+            })?;
+        let old_row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            old_tuple.tuple_data(),
+            None,
+        )?;
         let new_row = Self::try_from_tuple_data_slice(
             src_table_id,
             column_schemas,
             update_body.new_tuple().tuple_data(),
+            Some(&old_row),
         )?;
 
         Ok(CdcEvent::Update((
             src_table_id,
-            old_row,
+            Some(old_row),
             new_row,
             update_body.xid(),
         )))
@@ -162,12 +196,19 @@ impl CdcEventConverter {
         column_schemas: &[ColumnSchema],
         delete_body: DeleteBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
-        let tuple = delete_body.key_tuple().or(delete_body.old_tuple()).ok_or(
-            CdcEventConversionError::MissingTupleInDeleteBody(src_table_id),
-        )?;
+        let tuple = delete_body
+            .old_tuple()
+            .ok_or(CdcEventConversionError::MissingOldRow {
+                src_table_id,
+                operation: "DELETE",
+            })?;
 
-        let row =
-            Self::try_from_tuple_data_slice(src_table_id, column_schemas, tuple.tuple_data())?;
+        let row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            tuple.tuple_data(),
+            None,
+        )?;
 
         Ok(CdcEvent::Delete((src_table_id, row, delete_body.xid())))
     }
