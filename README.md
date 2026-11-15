@@ -125,7 +125,8 @@ Moonlink acknowledges the Postgres replication slot only up to changes that ever
 **WAL retention on the source.** Postgres keeps WAL until every mirror has persisted the changes in it:
 - A mirror that is being written persists at least every 5 minutes or so (a forced snapshot every 300 s), sooner when enough rows accumulate.
 - A mirror with no new changes, including an empty one, does not hold WAL back.
-- A mirror in the errored state does not hold WAL back either; drop and re-create it.
+- A mirror in the errored state does not hold WAL back either, even when it is the only mirror of its database. It no longer follows its source; drop and re-create it, which copies the table afresh. Moonlink logs a warning naming the errored mirrors about once a minute until then.
+- After a restart, a mirror that cannot be restored yet (for example, its source is unreachable) holds its database's slot, so that it can replay what it missed; meanwhile the slots of databases whose mirrors are all errored do not advance either. Moonlink retries it and logs a warning naming it about once a minute. After an hour it is errored and its slot is released.
 
 Watch the retained WAL with:
 ```sql
