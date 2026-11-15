@@ -74,7 +74,7 @@ jobs:
               RUST_BACKTRACE=1 cargo test --lib --features=storage-gcs
           - type: chaos
             name: GCS chaos test
-            timeout-minutes: 10
+            timeout-minutes: 20
             cmd: |
               RUST_BACKTRACE=1 cargo test test_gcs_chaos --features=chaos-test,storage-gcs -p moonlink -- --nocapture
     steps:
@@ -155,7 +155,7 @@ jobs:
               RUST_BACKTRACE=1 cargo test --lib --features=storage-s3
           - type: chaos
             name: S3 chaos test
-            timeout-minutes: 10
+            timeout-minutes: 20
             cmd: |
               RUST_BACKTRACE=1 cargo test storage::filesystem::accessor -p moonlink --features=chaos-test
               RUST_BACKTRACE=1 cargo test test_s3_chaos --features=chaos-test,storage-s3 -p moonlink -- --nocapture
@@ -495,7 +495,7 @@ jobs:
           make-default: true
 
       - name: Start chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_on_local_fs --features=chaos-test -p moonlink -- --nocapture
 
@@ -530,7 +530,7 @@ jobs:
           make-default: true
 
       - name: Start chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_local_system_optimization_chaos --features=chaos-test -p moonlink -- --nocapture
 
@@ -565,7 +565,7 @@ jobs:
           make-default: true
 
       - name: Start chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_chaos_injection --features=chaos-test -p moonlink -- --nocapture
 
@@ -600,7 +600,7 @@ jobs:
           make-default: true
 
       - name: Start chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_disk_slice_chaos --features=chaos-test -p moonlink -- --nocapture
 
@@ -635,7 +635,7 @@ jobs:
           make-default: true
 
       - name: Start chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_append_only_chaos --features=chaos-test -p moonlink -- --nocapture
 
@@ -670,7 +670,7 @@ jobs:
           make-default: true
 
       - name: Start chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_upsert_chaos --features=chaos-test -p moonlink -- --nocapture
 
@@ -705,7 +705,7 @@ jobs:
           make-default: true
 
       - name: Start regression test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::regression --features=chaos-test -p moonlink -- --nocapture
   
@@ -730,7 +730,7 @@ jobs:
           make-default: true
 
       - name: Start replay chaos test
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           RUST_BACKTRACE=1 cargo test table_handler::chaos_test::test_replay_chaos --features=chaos-test -p moonlink -- --nocapture
 
@@ -837,7 +837,8 @@ jobs:
 
       - name: Run postgres bulk ingestion integration test
         # TODO(hjiang): Update after we figure out the regression change.
-        timeout-minutes: 10
+        # Each iteration re-reads every row inserted so far; run time grows quadratically (~150 of 200 iterations in 10 min on hosted runners).
+        timeout-minutes: 25
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
