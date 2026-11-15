@@ -221,7 +221,6 @@ mod tests {
         assert_eq!(deserialized, moonlink_table_config);
     }
 
-    // Testing scenario: serialized json config only contains partial fields, check whether json deserialization succeeds, and populates default value correctly.
     /// A configured mem slice byte budget survives persistence (it is reloaded at restart).
     #[test]
     fn test_mem_slice_bytes_persisted() {
@@ -241,6 +240,7 @@ mod tests {
         );
     }
 
+    // Testing scenario: serialized json config only contains partial fields, check whether json deserialization succeeds, and populates default value correctly.
     #[test]
     fn test_mooncake_persisted_config_serde() {
         // Intentionally miss a few fields persisted config.
