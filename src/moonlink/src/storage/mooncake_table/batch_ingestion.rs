@@ -171,6 +171,19 @@ impl MooncakeTable {
     ) -> Result<FileIndex> {
         // Accumulate (hash, seg_idx, row_idx)
         let mut entries: Vec<(u64, usize, usize)> = Vec::new();
+        // The projection yields identity columns in schema order; keys hash in key order.
+        let key_order: Option<Vec<usize>> = match &identity {
+            IdentityProp::Keys(keys) => {
+                let mut sorted = keys.clone();
+                sorted.sort_unstable();
+                Some(
+                    keys.iter()
+                        .map(|k| sorted.binary_search(k).unwrap())
+                        .collect(),
+                )
+            }
+            _ => None,
+        };
 
         for (seg_idx, data_file) in files.iter().enumerate() {
             let file = tokio::fs::File::open(data_file.file_path()).await?;
@@ -187,7 +200,12 @@ impl MooncakeTable {
                 let mut batch_stream = row_group_reader;
                 while let Some(batch) = batch_stream.next().transpose()? {
                     let rows = MoonlinkRow::from_record_batch(&batch)?;
-                    for row in rows {
+                    for mut row in rows {
+                        if let Some(order) = &key_order {
+                            row = MoonlinkRow::new(
+                                order.iter().map(|&i| row.values[i].clone()).collect(),
+                            );
+                        }
                         let hash = identity.get_lookup_key_from_identity_row(&row);
                         entries.push((hash, seg_idx, row_idx_within_file));
                         row_idx_within_file += 1;
@@ -293,6 +311,44 @@ mod tests {
         let keys: Vec<u64> = rows
             .iter()
             .map(|row| IdentityProp::FullRow.get_lookup_key(row))
+            .collect();
+        let lookups =
+            crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
+                keys.clone().into_iter(),
+            );
+        let results = index.search_values(&lookups).await;
+        for (row_idx, key) in keys.iter().enumerate() {
+            assert!(
+                results.contains(&(*key, RecordLocation::DiskFile(data_file.file_id(), row_idx))),
+                "row {row_idx} not found"
+            );
+        }
+    }
+
+    /// Identity keys not in schema order hash like CDC rows do (in key order).
+    #[tokio::test]
+    async fn test_build_index_for_files_with_unordered_keys() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("unordered_keys.parquet");
+        let batch = batch_with_rows(&[1, 2, 3]);
+        write_parquet_file(&path, std::slice::from_ref(&batch)).await;
+        let data_file = crate::storage::storage_utils::create_data_file(
+            /*file_id=*/ 0,
+            path.to_str().unwrap().to_string(),
+        );
+        let identity = IdentityProp::Keys(vec![2, 0]);
+        let index = MooncakeTable::build_index_for_files(
+            vec![data_file.clone()],
+            identity.clone(),
+            temp_dir.path().to_path_buf(),
+            /*index_file_id=*/ 1,
+        )
+        .await
+        .unwrap();
+        let rows = MoonlinkRow::from_record_batch(&batch).unwrap();
+        let keys: Vec<u64> = rows
+            .iter()
+            .map(|row| identity.get_lookup_key(row))
             .collect();
         let lookups =
             crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
