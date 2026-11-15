@@ -3,6 +3,7 @@
 use super::test_utils::*;
 use super::*;
 use crate::row::IdentityProp;
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::base_unbuffered_stream_writer::BaseUnbufferedStreamWriter;
 use crate::storage::filesystem::accessor::metadata::ObjectMetadata;
@@ -147,10 +148,22 @@ async fn open(
     context: &TestContext,
     failing: Option<Arc<FailingAccessor>>,
 ) -> Result<(MooncakeTable, mpsc::Receiver<TableEvent>)> {
+    open_with_cache(
+        context,
+        failing,
+        create_test_object_storage_cache(&context.temp_dir),
+    )
+    .await
+}
+
+async fn open_with_cache(
+    context: &TestContext,
+    failing: Option<Arc<FailingAccessor>>,
+    cache: Arc<dyn CacheTrait>,
+) -> Result<(MooncakeTable, mpsc::Receiver<TableEvent>)> {
     let iceberg_table_config = test_iceberg_table_config(context, "commit");
     let mut table_config = test_mooncake_table_config(context);
     table_config.row_identity = IdentityProp::FullRow;
-    let cache = create_test_object_storage_cache(&context.temp_dir);
     let mut table = match failing {
         Some(failing) => {
             let metadata = Arc::new(TableMetadata {
@@ -343,4 +356,45 @@ async fn test_failed_commit_removes_the_files_it_wrote() {
     let mut committed = committed;
     committed.sort();
     assert_eq!(left, committed, "files of the failed commit left behind");
+}
+
+/// A failed commit that carried deletes releases the cache entries it pinned for the new
+/// deletion vectors (they would otherwise stay pinned, never evictable, until restart).
+#[tokio::test]
+async fn test_failed_commit_releases_deletion_vector_cache_pins() {
+    let context = TestContext::new("commit");
+    let failing = failing_accessor(&context);
+    let cache = crate::ObjectStorageCache::default_for_test(&context.temp_dir);
+    let (mut table, mut rx) =
+        open_with_cache(&context, Some(failing.clone()), Arc::new(cache.clone()))
+            .await
+            .unwrap();
+    table.append(test_row(1, "r", 1)).unwrap();
+    table.append(test_row(2, "r", 2)).unwrap();
+    table.commit(10);
+    flush_table_and_sync(&mut table, &mut rx, 10).await.unwrap();
+    create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+    create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+    let pinned_before: std::collections::HashSet<_> = cache
+        .get_non_evictable_filenames()
+        .await
+        .into_iter()
+        .collect();
+
+    table.delete(test_row(1, "r", 1), 15).await;
+    table.commit(20);
+    flush_table_and_sync(&mut table, &mut rx, 20).await.unwrap();
+    let (_, payload, _, _, _) = create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    failing.arm_times(".metadata.json", FailWrite::Before, 100);
+    assert!(create_iceberg_snapshot(&mut table, payload, &mut rx)
+        .await
+        .is_err());
+    *failing.rule.lock().unwrap() = None;
+
+    let pinned_after: std::collections::HashSet<_> = cache
+        .get_non_evictable_filenames()
+        .await
+        .into_iter()
+        .collect();
+    assert_eq!(pinned_after, pinned_before);
 }

@@ -791,63 +791,87 @@ impl IcebergTableManager {
             .sync_deletion_vector(new_deletion_vector, &file_params)
             .await?;
 
-        let remote_file_indices = self
-            .sync_file_indices(
-                &new_file_indices,
-                &old_file_indices,
-                data_file_import_result.local_data_files_to_remote,
-            )
-            .await?;
+        // A failure from here on must release the cache entries pinned for the new deletion
+        // vectors, which no snapshot will ever reference.
+        let committed: IcebergResult<_> = async {
+            let remote_file_indices = self
+                .sync_file_indices(
+                    &new_file_indices,
+                    &old_file_indices,
+                    data_file_import_result.local_data_files_to_remote,
+                )
+                .await?;
 
-        // Update snapshot summary properties.
-        // Every commit carries all rebuilt indices (see MooncakeTable::new_with_table_manager), so
-        // stamping the current lookup-key version is always accurate.
-        #[allow(unused_mut)]
-        let mut snapshot_properties = HashMap::<String, String>::from([
-            (
-                MOONCAKE_TABLE_FLUSH_LSN.to_string(),
-                snapshot_payload.flush_lsn.to_string(),
-            ),
-            (
-                crate::storage::table::common::MOONCAKE_LOOKUP_KEY_VERSION.to_string(),
-                crate::row::LOOKUP_KEY_VERSION.to_string(),
-            ),
-        ]);
-        #[cfg(test)]
-        if crate::row::LEGACY_LOOKUP_KEY_SALT_FOR_TEST.with(|salt| salt.get()) != 0 {
-            snapshot_properties.remove(crate::storage::table::common::MOONCAKE_LOOKUP_KEY_VERSION);
-        }
+            // Update snapshot summary properties.
+            // Every commit carries all rebuilt indices (see MooncakeTable::new_with_table_manager), so
+            // stamping the current lookup-key version is always accurate.
+            #[allow(unused_mut)]
+            let mut snapshot_properties = HashMap::<String, String>::from([
+                (
+                    MOONCAKE_TABLE_FLUSH_LSN.to_string(),
+                    snapshot_payload.flush_lsn.to_string(),
+                ),
+                (
+                    crate::storage::table::common::MOONCAKE_LOOKUP_KEY_VERSION.to_string(),
+                    crate::row::LOOKUP_KEY_VERSION.to_string(),
+                ),
+            ]);
+            #[cfg(test)]
+            if crate::row::LEGACY_LOOKUP_KEY_SALT_FOR_TEST.with(|salt| salt.get()) != 0 {
+                snapshot_properties
+                    .remove(crate::storage::table::common::MOONCAKE_LOOKUP_KEY_VERSION);
+            }
 
-        let mut txn = Transaction::new(self.iceberg_table.as_ref().unwrap());
-        let mut action = txn.fast_append();
+            let mut txn = Transaction::new(self.iceberg_table.as_ref().unwrap());
+            let mut action = txn.fast_append();
 
-        // Duplicate files check is very expensive, disable for production usage.
-        #[cfg(not(any(test, debug_assertions)))]
-        {
-            action = action.with_check_duplicate(false);
-        }
-        #[cfg(any(test, debug_assertions))]
-        {
-            action = action.with_check_duplicate(true);
-        }
+            // Duplicate files check is very expensive, disable for production usage.
+            #[cfg(not(any(test, debug_assertions)))]
+            {
+                action = action.with_check_duplicate(false);
+            }
+            #[cfg(any(test, debug_assertions))]
+            {
+                action = action.with_check_duplicate(true);
+            }
 
-        // Only start append action when there're new data files.
-        if !data_file_import_result.new_iceberg_data_files.is_empty() {
-            let action = action.add_data_files(data_file_import_result.new_iceberg_data_files);
-            let action = action.set_snapshot_properties(snapshot_properties);
-            txn = action.apply(txn)?;
-        }
-        // Start an append transaction only to add snapshot properties.
-        else {
-            let action = action.set_snapshot_properties(snapshot_properties);
-            txn = action.apply(txn)?;
-        }
+            // Only start append action when there're new data files.
+            if !data_file_import_result.new_iceberg_data_files.is_empty() {
+                let action = action.add_data_files(data_file_import_result.new_iceberg_data_files);
+                let action = action.set_snapshot_properties(snapshot_properties);
+                txn = action.apply(txn)?;
+            }
+            // Start an append transaction only to add snapshot properties.
+            else {
+                let action = action.set_snapshot_properties(snapshot_properties);
+                txn = action.apply(txn)?;
+            }
 
-        let updated_iceberg_table = {
-            // Start recording transaction commit latency.
-            let _guard = self.persistence_stats.transaction_commit.start();
-            // Commit the transaction.
-            txn.commit(&*self.catalog).await?
+            let updated_iceberg_table = {
+                // Start recording transaction commit latency.
+                let _guard = self.persistence_stats.transaction_commit.start();
+                // Commit the transaction.
+                txn.commit(&*self.catalog).await?
+            };
+            Ok((remote_file_indices, updated_iceberg_table))
+        }
+        .await;
+        let (remote_file_indices, updated_iceberg_table) = match committed {
+            Ok(committed) => committed,
+            Err(e) => {
+                let mut evicted = deletion_vectors_sync_result.evicted_files_to_delete;
+                for blob in deletion_vectors_sync_result
+                    .puffin_deletion_blobs
+                    .into_values()
+                {
+                    let handle = blob.puffin_file_cache_handle;
+                    evicted.extend(handle.unreference_and_delete().await);
+                }
+                for path in evicted {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                return Err(e.into());
+            }
         };
         self.iceberg_table = Some(updated_iceberg_table);
 
