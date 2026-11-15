@@ -30,6 +30,11 @@ async fn test_composite_types() {
     resources.add_table(table_name.clone());
     resources.add_publication(publication.clone());
     resources.add_slot(slot_name.clone());
+    resources.add_type("test_person");
+    resources.add_type("test_location");
+    resources.add_type("test_point");
+    resources.add_type("test_address");
+    resources.drop_existing().await;
 
     // Create composite types
     resources.client()
@@ -41,10 +46,6 @@ async fn test_composite_types() {
         )
         .await
         .unwrap();
-    resources.add_type("test_person");
-    resources.add_type("test_location");
-    resources.add_type("test_point");
-    resources.add_type("test_address");
 
     // Create test table
     resources
@@ -335,6 +336,7 @@ async fn test_null() {
     resources.add_table(table_name.clone());
     resources.add_publication(publication.clone());
     resources.add_slot(slot_name.clone());
+    resources.drop_existing().await;
 
     // Simple schema with text columns to verify stringified "null"
     resources
