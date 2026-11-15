@@ -414,7 +414,8 @@ impl PostgresSource {
 
             // Build batches and push to writers
             let (arrow_schema, _id) =
-                crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema);
+                crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema)
+                    .map_err(|e| crate::Error::from(PostgresSourceError::from(e)))?;
             let arrow_schema = std::sync::Arc::new(arrow_schema);
             let mut builder = ArrowBatchBuilder::new(arrow_schema, max_rows_per_batch);
             let mut rows: u64 = 0;

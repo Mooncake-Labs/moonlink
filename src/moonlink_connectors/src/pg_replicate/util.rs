@@ -1,3 +1,4 @@
+use crate::pg_replicate::clients::postgres::ReplicationClientError;
 use crate::pg_replicate::{
     conversions::{numeric::PgNumeric, table_row::TableRow, ArrayCell, Cell},
     table::{LookupKey, TableSchema},
@@ -113,14 +114,14 @@ fn postgres_type_to_arrow_type(
     name: &str,
     nullable: bool,
     field_id: &mut i32,
-) -> Field {
-    match typ.kind() {
+) -> Result<Field, ReplicationClientError> {
+    Ok(match typ.kind() {
         Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id),
         Kind::Array(inner) => {
             let item_type = postgres_type_to_arrow_type(
                 inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ true,
                 field_id,
-            );
+            )?;
             let field = Field::new_list(name, Arc::new(item_type), nullable);
             let mut metadata = HashMap::new();
             metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
@@ -139,7 +140,7 @@ fn postgres_type_to_arrow_type(
                         field_id,
                     )
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             let mut field = Field::new_struct(name, fields, nullable);
             let mut metadata = HashMap::new();
             metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
@@ -147,14 +148,21 @@ fn postgres_type_to_arrow_type(
             field.with_metadata(metadata)
         }
         Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
+        // Rejected when the mirror is created; never panic on one that slips through.
         _ => {
-            todo!("Unsupported type: {:?}", typ);
+            return Err(ReplicationClientError::UnsupportedType(
+                name.to_string(),
+                typ.oid(),
+                typ.name().to_string(),
+            ))
         }
-    }
+    })
 }
 
 /// Convert a PostgreSQL TableSchema to an Arrow Schema
-pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema, IdentityProp) {
+pub fn postgres_schema_to_moonlink_schema(
+    table_schema: &TableSchema,
+) -> Result<(Schema, IdentityProp), ReplicationClientError> {
     let mut field_id = 0; // Used to indicate different columns, including internal fields within complex type.
     let fields: Vec<Field> = table_schema
         .column_schemas
@@ -168,7 +176,7 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
                 &mut field_id,
             )
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let identity = match &table_schema.lookup_key {
         LookupKey::Key { name: _, columns } => {
@@ -179,14 +187,19 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
                         .column_schemas
                         .iter()
                         .position(|cs| cs.name == *c)
-                        .unwrap()
+                        .ok_or_else(|| {
+                            ReplicationClientError::MissingColumn(
+                                c.clone(),
+                                table_schema.table_name.to_string(),
+                            )
+                        })
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             IdentityProp::new_key(columns, &fields)
         }
         LookupKey::FullRow => IdentityProp::FullRow,
     };
-    (Schema::new(fields), identity)
+    Ok((Schema::new(fields), identity))
 }
 
 pub(crate) struct PostgresTableRow(pub TableRow);
@@ -384,6 +397,28 @@ mod tests {
     use moonlink::row::RowValue;
     use std::str::FromStr;
 
+    #[test]
+    fn unsupported_column_type_is_an_error_not_a_panic() {
+        let table_schema = TableSchema {
+            table_name: TableName {
+                schema: "public".to_string(),
+                name: "ranges".to_string(),
+            },
+            src_table_id: 1,
+            column_schemas: vec![ColumnSchema {
+                name: "r".to_string(),
+                typ: Type::INT4_RANGE,
+                modifier: -1,
+                nullable: true,
+            }],
+            lookup_key: LookupKey::FullRow,
+        };
+        let err = postgres_schema_to_moonlink_schema(&table_schema).unwrap_err();
+        assert!(
+            matches!(err, crate::pg_replicate::clients::postgres::ReplicationClientError::UnsupportedType(ref column, _, _) if column == "r"),
+            "{err:?}"
+        );
+    }
     #[test]
     fn test_table_schema_to_arrow_schema() {
         let table_schema = TableSchema {
@@ -607,7 +642,7 @@ mod tests {
             },
         };
 
-        let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema);
+        let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema).unwrap();
         assert_eq!(arrow_schema.fields().len(), 26);
 
         assert_eq!(arrow_schema.field(0).name(), "bool_field");

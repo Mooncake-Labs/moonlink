@@ -71,7 +71,8 @@ pub async fn copy_table_stream(
     config: InitialCopyConfig,
 ) -> Result<CopyProgress> {
     // Convert PostgreSQL schema to Arrow schema
-    let (arrow_schema, _identity_prop) = postgres_schema_to_moonlink_schema(&table_schema);
+    let (arrow_schema, _identity_prop) =
+        postgres_schema_to_moonlink_schema(&table_schema).map_err(PostgresSourceError::from)?;
     let arrow_schema = Arc::new(arrow_schema);
 
     // Prepare writer config

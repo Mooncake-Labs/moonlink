@@ -81,7 +81,8 @@ const SCHEMA_GOLDEN: &str = "ffffffff380b00001000000000000a000c000a00090004000a0
 
 #[test]
 fn test_get_table_schema_ipc_golden() {
-    let (schema, _) = postgres_schema_to_moonlink_schema(&table_schema(byte_stable_columns()));
+    let (schema, _) =
+        postgres_schema_to_moonlink_schema(&table_schema(byte_stable_columns())).unwrap();
     let bytes = encode_table_schema(&schema).unwrap();
     let actual: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     if std::env::var_os("WIRE_GOLDEN_PRINT").is_some() {
@@ -123,7 +124,7 @@ fn test_get_table_schema_type_mapping() {
         column("c_enum", mood, -1, true),
         column("c_composite", point2, -1, true),
     ]);
-    let (schema, _) = postgres_schema_to_moonlink_schema(&table_schema(columns));
+    let (schema, _) = postgres_schema_to_moonlink_schema(&table_schema(columns)).unwrap();
     let bytes = encode_table_schema(&schema).unwrap();
     let decoded = StreamReader::try_new(std::io::Cursor::new(bytes), None)
         .unwrap()

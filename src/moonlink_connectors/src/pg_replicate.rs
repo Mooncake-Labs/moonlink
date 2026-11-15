@@ -683,7 +683,8 @@ impl PostgresConnection {
         }
 
         let (arrow_schema, identity) =
-            crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema);
+            crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema)
+                .map_err(PostgresSourceError::from)?;
         moonlink_table_config.mooncake_table_config.row_identity = identity;
         let table_components = TableComponents {
             read_state_filepath_remap,
