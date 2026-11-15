@@ -1561,3 +1561,30 @@ async fn numeric_special_values_error_the_mirror(
     .unwrap_err();
     assert!(err.contains(reported), "{err}");
 }
+
+/// Generated columns are not published by logical replication, so a table with one is refused
+/// when the mirror is created (its definition would name a column the mirror never receives).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn table_with_generated_column_is_refused() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_generated;
+         CREATE TABLE rv_generated (id BIGINT PRIMARY KEY, a INT,
+                                    twice INT GENERATED ALWAYS AS (a * 2) STORED);
+         INSERT INTO rv_generated (id, a) VALUES (1, 1);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    let err = try_mirror(
+        &backend,
+        &tmp,
+        "rv_generated_mc",
+        "public.rv_generated",
+        &uri,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("generated columns (\"twice\")"), "{err}");
+    wait_for_no_slots(&client).await;
+}

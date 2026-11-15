@@ -167,6 +167,15 @@ fn stable_hash32(input: &str) -> u32 {
     })
 }
 
+/// `table_name` ("schema.table" or "table") as a quoted literal to cast to regclass.
+fn regclass_literal(table_name: &str) -> String {
+    let ident = match TableName::parse_schema_name(table_name) {
+        Ok((schema, name)) => format!("{}.{}", quote_identifier(&schema), quote_identifier(&name)),
+        Err(_) => quote_identifier(table_name).into_owned(),
+    };
+    quote_literal(&ident).to_string()
+}
+
 /// Slot name for a database: `moonlink_slot_<db>` when that is a valid slot name, otherwise a
 /// sanitized prefix of it plus a hash of the database name.
 pub fn slot_name_for_database(database: &str) -> String {
@@ -370,12 +379,6 @@ impl PostgresConnection {
 
     /// Include full row in cdc stream (not just primary keys).
     pub async fn alter_table_replica_identity(&mut self, table_name: &str) -> Result<()> {
-        let ident = match TableName::parse_schema_name(table_name) {
-            Ok((schema, name)) => {
-                format!("{}.{}", quote_identifier(&schema), quote_identifier(&name))
-            }
-            Err(_) => quote_identifier(table_name).into_owned(),
-        };
         // REPLICA IDENTITY is per relation and not inherited: every partition needs it, or its
         // updates and deletes arrive without the old row (and, without a primary key, postgres
         // rejects them on the source). Partitions attached later are covered at the next start;
@@ -385,7 +388,7 @@ impl PostgresConnection {
             "SELECT c.oid::regclass::text FROM pg_class c WHERE c.relreplident <> 'f' \
              AND (c.oid = {table}::regclass \
                   OR c.oid IN (SELECT relid FROM pg_partition_tree({table}::regclass)));",
-            table = quote_literal(&ident)
+            table = regclass_literal(table_name)
         );
         let relations: Vec<String> = self
             .run_control_query(&query)
@@ -409,16 +412,10 @@ impl PostgresConnection {
     /// Checked at creation and at every recovery; a child added while running is only detected at
     /// the next start.
     async fn check_not_inheritance_parent(&mut self, table_name: &str) -> Result<()> {
-        let ident = match TableName::parse_schema_name(table_name) {
-            Ok((schema, name)) => {
-                format!("{}.{}", quote_identifier(&schema), quote_identifier(&name))
-            }
-            Err(_) => quote_identifier(table_name).into_owned(),
-        };
         let query = format!(
             "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \
              WHERE i.inhparent = {}::regclass AND c.relkind = 'r' LIMIT 1;",
-            quote_literal(&ident)
+            regclass_literal(table_name)
         );
         let has_children = self
             .run_control_query(&query)
@@ -429,6 +426,36 @@ impl PostgresConnection {
             return Err(crate::Error::unsupported_source_table(
                 table_name,
                 "it has inheritance children, whose changes are not replicated with it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse tables with generated columns: logical replication does not publish them, so the
+    /// mirror would lack a column its definition has. Only checked at creation; existing mirrors
+    /// keep working for their other columns.
+    async fn check_no_generated_columns(&mut self, table_name: &str) -> Result<()> {
+        let query = format!(
+            "SELECT a.attname FROM pg_attribute a WHERE a.attrelid = {}::regclass \
+             AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> '' ORDER BY a.attnum;",
+            regclass_literal(table_name)
+        );
+        let generated: Vec<String> = self
+            .run_control_query(&query)
+            .await?
+            .iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::Row(row) => row.get(0).map(|name| format!("\"{name}\"")),
+                _ => None,
+            })
+            .collect();
+        if !generated.is_empty() {
+            return Err(crate::Error::unsupported_source_table(
+                table_name,
+                &format!(
+                    "generated columns ({}) are not replicated",
+                    generated.join(", ")
+                ),
             ));
         }
         Ok(())
@@ -698,6 +725,9 @@ impl PostgresConnection {
     ) -> Result<(SrcTableId, crate::pg_replicate::table_init::TableResources)> {
         debug!(table_name, "adding table");
         self.check_not_inheritance_parent(table_name).await?;
+        if !is_recovery {
+            self.check_no_generated_columns(table_name).await?;
+        }
         // TODO: We should not naively alter the replica identity of a table. We should only do this if we are sure that the table does not already have a FULL replica identity. [https://github.com/Mooncake-Labs/moonlink/issues/104]
         self.alter_table_replica_identity(table_name).await?;
         let table_schema = self
