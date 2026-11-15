@@ -100,6 +100,10 @@ impl ReplicationConnection {
     }
 
     /// Connection string the replication connection was opened with.
+    pub fn set_slot_hold(&self, hold: bool) {
+        self.source.set_slot_hold(hold);
+    }
+
     pub fn uri(&self) -> &str {
         &self.source.uri
     }

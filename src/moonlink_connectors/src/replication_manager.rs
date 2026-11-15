@@ -32,6 +32,12 @@ pub struct ReplicationManager {
     table_info: HashMap<MooncakeTableId, (String, SrcTableId)>,
     /// Recovered mirrors that are not served (errored before, or failed to recover).
     errored_tables: HashMap<MooncakeTableId, ErroredTable>,
+    /// Mirrors that could not be restored for a transient reason, retried until they can, with
+    /// their connection strings. The slot of their database is held meanwhile, so they replay
+    /// exactly once restored.
+    pending_recoveries: HashMap<MooncakeTableId, String>,
+    /// Hold every slot (while recovering: a mirror not restored yet must find its changes).
+    hold_all_slots: bool,
     /// Base directory for mooncake tables.
     table_base_path: String,
     /// Object storage cache.
@@ -47,6 +53,8 @@ impl ReplicationManager {
             uri_keys: HashMap::new(),
             table_info: HashMap::new(),
             errored_tables: HashMap::new(),
+            pending_recoveries: HashMap::new(),
+            hold_all_slots: false,
             table_base_path,
             object_storage_cache,
             shutdown_handles: Vec::new(),
@@ -124,7 +132,10 @@ impl ReplicationManager {
         }
 
         let key = self.source_key(src_uri).await?;
-        let replication_connection = self.get_or_create_connection(src_uri).await?;
+        self.get_or_create_connection(src_uri).await?;
+        // Before replication can confirm anything for a new connection.
+        self.refresh_slot_holds();
+        let replication_connection = self.connections.get_mut(&key).unwrap();
         if replication_connection.uri() != src_uri {
             crate::pg_replicate::check_role_can_read_table(src_uri, table_name).await?;
         }
@@ -193,6 +204,96 @@ impl ReplicationManager {
         self.errored_tables.insert(mooncake_table_id, errored);
     }
 
+    /// Register a mirror that could not be restored for a transient reason (see
+    /// [`Self::pending_recoveries`]); requests on it return `errored.message` until it is
+    /// restored by [`Self::begin_retry`] / [`Self::end_retry`].
+    pub fn add_pending_table(&mut self, mooncake_table_id: MooncakeTableId, errored: ErroredTable) {
+        self.pending_recoveries
+            .insert(mooncake_table_id.clone(), errored.src_uri.clone());
+        self.errored_tables.insert(mooncake_table_id, errored);
+        self.refresh_slot_holds();
+    }
+
+    pub fn pending_table_ids(&self) -> Vec<MooncakeTableId> {
+        self.pending_recoveries.keys().cloned().collect()
+    }
+
+    /// Unregister a pending mirror's placeholder so it can be added again; its slot stays held
+    /// until [`Self::end_retry`].
+    pub fn begin_retry(&mut self, mooncake_table_id: &MooncakeTableId) -> Option<ErroredTable> {
+        if !self.pending_recoveries.contains_key(mooncake_table_id) {
+            return None;
+        }
+        self.errored_tables.remove(mooncake_table_id)
+    }
+
+    /// Finish a retry: restored (`None`), still failing for a transient reason, or failed for good
+    /// (persisted as errored).
+    pub async fn end_retry(
+        &mut self,
+        mooncake_table_id: MooncakeTableId,
+        failure: Option<(ErroredTable, /*transient=*/ bool)>,
+    ) {
+        match failure {
+            None => {
+                self.pending_recoveries.remove(&mooncake_table_id);
+            }
+            Some((errored, true)) => {
+                self.errored_tables.insert(mooncake_table_id, errored);
+            }
+            Some((errored, false)) => {
+                self.pending_recoveries.remove(&mooncake_table_id);
+                self.add_errored_table(mooncake_table_id, errored, /*persist=*/ true)
+                    .await;
+            }
+        }
+        self.refresh_slot_holds();
+    }
+
+    /// Whether `uri` names the source `key`: by its resolved identity, or, for a source not
+    /// reached yet, by the database and port it names.
+    fn uri_matches_key(&self, uri: &str, key: &str) -> bool {
+        if let Some(resolved) = self.uri_keys.get(uri) {
+            return resolved == key;
+        }
+        let Ok(config) = uri.parse::<tokio_postgres::Config>() else {
+            return true;
+        };
+        let database = config
+            .get_dbname()
+            .or_else(|| config.get_user())
+            .unwrap_or_default()
+            .to_string();
+        let port = config
+            .get_ports()
+            .first()
+            .copied()
+            .unwrap_or(5432)
+            .to_string();
+        let mut parts = key.splitn(3, '/');
+        let (_system_id, key_port, key_database) = (parts.next(), parts.next(), parts.next());
+        key_port == Some(port.as_str()) && key_database == Some(database.as_str())
+    }
+
+    /// Hold every slot until [`Self::set_hold_all_slots`] is called with false (during recovery,
+    /// before every mirror is either restored or pending).
+    pub fn set_hold_all_slots(&mut self, hold: bool) {
+        self.hold_all_slots = hold;
+        self.refresh_slot_holds();
+    }
+
+    /// Hold the slot of every connection whose database has a pending mirror; release the rest.
+    fn refresh_slot_holds(&self) {
+        for (key, connection) in &self.connections {
+            let hold = self.hold_all_slots
+                || self
+                    .pending_recoveries
+                    .values()
+                    .any(|uri| self.uri_matches_key(uri, key));
+            connection.set_slot_hold(hold);
+        }
+    }
+
     /// After dropping a placeholder: take its table out of the publication, and if no live
     /// mirror of its database remains, drop the database's slot and publication as dropping the
     /// last live mirror would (placeholders never resume, so nothing needs them). Best effort.
@@ -211,6 +312,14 @@ impl ReplicationManager {
             {
                 warn!(error = ?e, "failed to remove the dropped mirror's table from the publication");
             }
+            return;
+        }
+        // Another mirror of the database still waits to be restored from the slot.
+        if self
+            .pending_recoveries
+            .values()
+            .any(|uri| uri == &errored.src_uri)
+        {
             return;
         }
         let cleanup = async {
@@ -248,6 +357,8 @@ impl ReplicationManager {
     /// Return whether the table is tracked by moonlink.
     pub async fn drop_table(&mut self, mooncake_table_id: &MooncakeTableId) -> Result<bool> {
         if let Some(errored) = self.errored_tables.remove(mooncake_table_id) {
+            self.pending_recoveries.remove(mooncake_table_id);
+            self.refresh_slot_holds();
             // Best effort: the mirror is gone from moonlink either way.
             let _ = errored_tables::drop_iceberg_table_files(&errored.iceberg_table_config).await;
             errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;

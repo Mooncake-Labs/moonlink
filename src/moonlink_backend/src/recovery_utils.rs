@@ -9,7 +9,11 @@ use futures::FutureExt;
 use std::collections::HashSet;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use tracing::{error, warn};
+use std::sync::Weak;
+use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
 /// Backend related attributes used for recovery.
 #[derive(Clone, Debug)]
@@ -65,12 +69,12 @@ pub(super) async fn recover_all_tables(
     metadata_store_accessor: &dyn MetadataStoreTrait,
     read_state_filepath_remap: ReadStateFilepathRemap,
     replication_manager: &mut ReplicationManager,
-) -> Result<()> {
+) -> Result<Vec<PendingRecovery>> {
     let mut unique_uris = HashSet::<String>::new();
 
     // Skep-1: check metadata store table existence, skip if not.
     if !metadata_store_accessor.metadata_table_exists().await? {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Step-2: load persisted metadata from storage, perform recovery for each managed tables.
@@ -81,7 +85,11 @@ pub(super) async fn recover_all_tables(
         .await?;
 
     // Perform recovery on all managed tables. A table that cannot be recovered never stops the
-    // others (or the service): it is registered as errored, so it reports why and can be dropped.
+    // others (or the service): it is registered as errored, so it reports why and can be dropped,
+    // or, for a transient reason, as pending and retried (see [`retry_pending_recoveries`]).
+    // No slot advances until every table is restored or pending.
+    replication_manager.set_hold_all_slots(true);
+    let mut pending = Vec::new();
     for mut cur_metadata_entry in table_metadata_entries.into_iter() {
         // Update certain attributes, which are not persisted before crash.
         cur_metadata_entry
@@ -118,28 +126,24 @@ pub(super) async fn recover_all_tables(
         unique_uris.insert(cur_metadata_entry.src_table_uri.clone());
         let failed = errored_table(String::new());
         if let Err(e) = recover_isolated(recover_table(
-            cur_metadata_entry,
+            cur_metadata_entry.clone(),
             replication_manager,
             read_state_filepath_remap.clone(),
         ))
         .await
         {
-            error!(error = ?e, table = %mooncake_table_id, "failed to recover mirror");
-            // Persisted: the other mirrors of its database move the slot past its changes from
-            // now on, so it could not be resumed faithfully at a later start.
-            let message = moonlink::Error::errored_table_message(
-                &mooncake_table_id.to_string(),
-                &format!("it could not be restored at startup ({e})"),
-            );
-            replication_manager
-                .add_errored_table(
-                    mooncake_table_id,
-                    ErroredTable { message, ..failed },
-                    /*persist=*/ true,
-                )
+            register_failed_recovery(replication_manager, mooncake_table_id.clone(), failed, &e)
                 .await;
+            if is_transient(&e) {
+                pending.push(PendingRecovery {
+                    mooncake_table_id,
+                    metadata_entry: cur_metadata_entry,
+                    read_state_filepath_remap: read_state_filepath_remap.clone(),
+                });
+            }
         }
     }
+    replication_manager.set_hold_all_slots(false);
 
     for uri in unique_uris.into_iter() {
         if let Err(e) = replication_manager.start_replication(&uri).await {
@@ -147,7 +151,134 @@ pub(super) async fn recover_all_tables(
         }
     }
 
-    Ok(())
+    Ok(pending)
+}
+
+/// A mirror whose recovery failed for a transient reason, to retry.
+pub(crate) struct PendingRecovery {
+    mooncake_table_id: MooncakeTableId,
+    metadata_entry: TableMetadataEntry,
+    read_state_filepath_remap: ReadStateFilepathRemap,
+}
+
+/// Whether a recovery failure is about reaching the source rather than about the table: such
+/// a mirror is retried (its slot held meanwhile), never persisted as errored.
+fn is_transient(e: &crate::Error) -> bool {
+    use moonlink_connectors::error::{error_struct_has_cause, is_transient_cause};
+    match e {
+        crate::Error::RecoveryPanicked(_) => false,
+        e => error_struct_has_cause(e.error_struct(), &is_transient_cause),
+    }
+}
+
+/// Register a mirror that failed recovery: pending (retried) for a transient failure, persisted
+/// as errored otherwise.
+async fn register_failed_recovery(
+    replication_manager: &mut ReplicationManager,
+    mooncake_table_id: MooncakeTableId,
+    failed: ErroredTable,
+    e: &crate::Error,
+) {
+    let table = mooncake_table_id.to_string();
+    if is_transient(e) {
+        warn!(error = ?e, %table, "mirror cannot be restored yet; retrying");
+        let message = format!(
+            "mirror {table} is not available yet: it could not be restored ({e}); moonlink keeps retrying"
+        );
+        replication_manager
+            .add_pending_table(mooncake_table_id, ErroredTable { message, ..failed });
+    } else {
+        error!(error = ?e, %table, "failed to recover mirror");
+        let message = moonlink::Error::errored_table_message(
+            &table,
+            &format!("it could not be restored at startup ({e})"),
+        );
+        replication_manager
+            .add_errored_table(
+                mooncake_table_id,
+                ErroredTable { message, ..failed },
+                /*persist=*/ true,
+            )
+            .await;
+    }
+}
+
+/// How long to wait for a source to answer before a retry is attempted (outside the lock).
+const PENDING_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Retry the pending recoveries with backoff (2 s doubling up to 60 s) until each is restored,
+/// fails for good, or is dropped, or the backend is gone.
+pub(crate) fn retry_pending_recoveries(
+    replication_manager: Weak<RwLock<ReplicationManager>>,
+    mut pending: Vec<PendingRecovery>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(2);
+        while !pending.is_empty() {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+            let mut still_pending = Vec::new();
+            for retry in pending {
+                let Some(manager) = replication_manager.upgrade() else {
+                    return;
+                };
+                // Cheap reachability check, so an unreachable source never holds the lock.
+                let reachable = tokio::time::timeout(
+                    PENDING_RECOVERY_PROBE_TIMEOUT,
+                    moonlink_connectors::pg_replicate::SourceIdentity::identify(
+                        &retry.metadata_entry.src_table_uri,
+                    ),
+                )
+                .await
+                .is_ok_and(|identified| identified.is_ok());
+                if !reachable {
+                    still_pending.push(retry);
+                    continue;
+                }
+                let mut manager = manager.write().await;
+                // Dropped by the user meanwhile.
+                let Some(failed) = manager.begin_retry(&retry.mooncake_table_id) else {
+                    continue;
+                };
+                let result = recover_isolated(recover_table(
+                    retry.metadata_entry.clone(),
+                    &mut manager,
+                    retry.read_state_filepath_remap.clone(),
+                ))
+                .await;
+                let table = retry.mooncake_table_id.to_string();
+                match result {
+                    Ok(()) => {
+                        info!(%table, "mirror restored");
+                        manager.end_retry(retry.mooncake_table_id, None).await;
+                    }
+                    Err(e) if is_transient(&e) => {
+                        warn!(error = ?e, %table, "mirror cannot be restored yet; retrying");
+                        let message = format!(
+                            "mirror {table} is not available yet: it could not be restored ({e}); moonlink keeps retrying"
+                        );
+                        let errored = ErroredTable { message, ..failed };
+                        manager
+                            .end_retry(retry.mooncake_table_id.clone(), Some((errored, true)))
+                            .await;
+                        still_pending.push(retry);
+                    }
+                    Err(e) => {
+                        error!(error = ?e, %table, "failed to recover mirror");
+                        let message = moonlink::Error::errored_table_message(
+                            &table,
+                            &format!("it could not be restored at startup ({e})"),
+                        );
+                        let errored = ErroredTable { message, ..failed };
+                        manager
+                            .end_retry(retry.mooncake_table_id, Some((errored, false)))
+                            .await;
+                    }
+                }
+            }
+            pending = still_pending;
+        }
+    })
 }
 
 #[cfg(test)]

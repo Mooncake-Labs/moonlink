@@ -92,6 +92,25 @@ impl Error {
         ))
     }
 
+    pub fn error_struct(&self) -> &ErrorStruct {
+        match self {
+            Error::ParseIntError(es)
+            | Error::PostgresSource(es)
+            | Error::Io(es)
+            | Error::MoonlinkConnectorError(es)
+            | Error::MoonlinkError(es)
+            | Error::MoonlinkMetadataStoreError(es)
+            | Error::InvalidArgumentError(es)
+            | Error::DataCorruptionError(es)
+            | Error::TokioWatchRecvError(es)
+            | Error::Json(es)
+            | Error::MpscChannelSendError(es)
+            | Error::InvalidConfig(es)
+            | Error::InsufficientDiskSpace(es)
+            | Error::RecoveryPanicked(es) => es,
+        }
+    }
+
     pub fn get_status(&self) -> ErrorStatus {
         match self {
             Error::ParseIntError(es) => es.status,

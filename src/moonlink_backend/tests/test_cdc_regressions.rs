@@ -2423,3 +2423,170 @@ async fn partition_attached_after_a_concurrent_load_errors_the_mirror() {
         .await
         .unwrap();
 }
+
+fn local_postgres(action: &str) {
+    let script = format!("{}/work/scripts/pg.sh", std::env::var("HOME").unwrap());
+    assert!(std::process::Command::new(script)
+        .arg(action)
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// A source that cannot be reached at startup (restarting, refusing connections) is a transient
+/// failure: its mirrors are retried, never persisted as errored, and are restored with every
+/// change once the source is back, in the same run and after a restart.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn mirror_is_restored_once_an_unreachable_source_is_back() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_down;
+         CREATE TABLE rv_down (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_down VALUES (1);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_down_mc", "public.rv_down", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_down_mc", lsn).await, None);
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    drop(client);
+
+    local_postgres("stop");
+    let backend = new_backend(&tmp).await.expect("startup must not fail");
+    let err = scan_error(&backend, "rv_down_mc")
+        .await
+        .expect("not available while the source is down");
+    assert!(err.contains("not available yet"), "{err}");
+    // Not persisted: a restart while the source is still down retries again.
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    local_postgres("start");
+
+    let (client, _) = connect_to_postgres(&uri).await;
+    client
+        .simple_query("INSERT INTO rv_down VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let mut rows = None;
+    for _ in 0..90 {
+        if scan_error(&backend, "rv_down_mc").await.is_none() {
+            rows = scan_ids(&backend, "rv_down_mc", lsn).await;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert_eq!(rows, Some(vec![1, 2]), "mirror was not restored");
+    assert_eq!(snapshot_error(&backend, "rv_down_mc", lsn).await, None);
+}
+
+const LATE_OTHER_DB: &str = "cdc_regressions_late_other";
+
+/// At startup mirrors register one at a time. No slot may advance before every mirror is
+/// restored or pending: if the first mirror of a database is errored on replay (its source was
+/// truncated while moonlink was down), a mirror of that database registered later (here delayed
+/// by a slow recovery of a mirror of another database) must still get every change made while
+/// moonlink was down. Recovery order is by mirror name (rv_s1_a, rv_s2_c, rv_s3_b).
+#[rstest::rstest]
+#[case::first_mirror_errors_on_replay(true)]
+#[case::control_first_mirror_healthy(false)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn mirror_registered_late_at_startup_keeps_changes_made_while_down(#[case] truncate_a: bool) {
+    let uri = get_database_uri();
+    let (admin, _) = connect_to_postgres(&uri).await;
+    admin
+        .simple_query(&format!(
+            "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '{LATE_OTHER_DB}';"
+        ))
+        .await
+        .unwrap();
+    admin
+        .simple_query(&format!(
+            "DROP DATABASE IF EXISTS {LATE_OTHER_DB} WITH (FORCE);"
+        ))
+        .await
+        .unwrap();
+    admin
+        .simple_query(&format!("CREATE DATABASE {LATE_OTHER_DB};"))
+        .await
+        .unwrap();
+    let other_uri = uri_for_database(&uri, LATE_OTHER_DB);
+    {
+        let (other, _) = connect_to_postgres(&other_uri).await;
+        other
+            .simple_query("CREATE TABLE rv_c (id BIGINT PRIMARY KEY); INSERT INTO rv_c VALUES (1);")
+            .await
+            .unwrap();
+    }
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_a, rv_b;
+         CREATE TABLE rv_a (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_b (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_a VALUES (1); INSERT INTO rv_b VALUES (1);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_s1_a", "public.rv_a", &uri).await;
+    mirror(&backend, &tmp, "rv_s2_c", "public.rv_c", &other_uri).await;
+    mirror(&backend, &tmp, "rv_s3_b", "public.rv_b", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    for t in ["rv_s1_a", "rv_s3_b"] {
+        assert_eq!(scan_ids(&backend, t, lsn).await, Some(vec![1]));
+        assert_eq!(snapshot_error(&backend, t, lsn).await, None);
+    }
+    backend.shutdown_connection(&uri, false).await;
+    backend.shutdown_connection(&other_uri, false).await;
+    drop(backend);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // While moonlink is down.
+    if truncate_a {
+        client.simple_query("TRUNCATE rv_a;").await.unwrap();
+    }
+    client
+        .simple_query("INSERT INTO rv_b VALUES (2);")
+        .await
+        .unwrap();
+
+    // Hold new connections to the other database for longer than one status interval.
+    let (locker, _) = connect_to_postgres(&uri).await;
+    locker
+        .simple_query(&format!(
+            "BEGIN; ALTER DATABASE {LATE_OTHER_DB} RENAME TO {LATE_OTHER_DB}_held;"
+        ))
+        .await
+        .unwrap();
+    let base = tmp.path().to_str().unwrap().to_string();
+    let startup = tokio::spawn(async move {
+        let store = SqliteMetadataStore::new_with_directory(&base)
+            .await
+            .unwrap();
+        MoonlinkBackend::new(base, None, Box::new(store))
+            .await
+            .map_err(|e| format!("{e:?}"))
+    });
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    let confirmed_while_held = confirmed_flush(&client).await;
+    locker.simple_query("ROLLBACK;").await.unwrap();
+    let backend = startup.await.unwrap().unwrap();
+
+    client
+        .simple_query("INSERT INTO rv_b VALUES (3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let rows = scan_ids(&backend, "rv_s3_b", lsn).await;
+    eprintln!(
+        "truncate_a={truncate_a} confirmed_while_held={confirmed_while_held} rv_s3_b={rows:?}"
+    );
+    assert_eq!(
+        rows,
+        Some(vec![1, 2, 3]),
+        "mirror registered after an all-errored window lost the change made while moonlink was down"
+    );
+    for t in ["rv_s1_a", "rv_s2_c", "rv_s3_b"] {
+        let _ = backend.drop_table(DB.to_string(), t.to_string()).await;
+    }
+}

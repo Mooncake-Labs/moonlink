@@ -59,6 +59,31 @@ pub enum Error {
 pub type Result<T> = result::Result<T, Error>;
 
 impl Error {
+    pub fn error_struct(&self) -> &ErrorStruct {
+        match self {
+            Error::PostgresSourceError(es)
+            | Error::TokioPostgres(es)
+            | Error::CdcStream(es)
+            | Error::TableCopyStream(es)
+            | Error::MoonlinkError(es)
+            | Error::Io(es)
+            | Error::MpscChannelSendError(es)
+            | Error::TableNotFound(es)
+            | Error::ReplDuplicateTable(es)
+            | Error::ParquetError(es)
+            | Error::WriterTaskFailed(es)
+            | Error::TableErrored(es)
+            | Error::UnsupportedSourceTable(es) => es,
+        }
+    }
+
+    /// Whether the failure is about reaching the source (refused or lost connections, the server
+    /// starting or shutting down, too many connections, authentication, lock timeouts), so trying
+    /// again later can succeed, rather than about the table itself.
+    pub fn is_transient_source_error(&self) -> bool {
+        error_struct_has_cause(self.error_struct(), &is_transient_cause)
+    }
+
     #[track_caller]
     pub fn table_not_found(table_name: String) -> Self {
         Error::TableNotFound(ErrorStruct {
@@ -233,4 +258,57 @@ impl From<parquet::errors::ParquetError> for Error {
             location: Some(Location::caller().to_string()),
         })
     }
+}
+
+/// Whether `es` or anything it wraps (through nested connector errors too) satisfies `pred`.
+pub fn error_struct_has_cause(
+    es: &ErrorStruct,
+    pred: &dyn Fn(&(dyn std::error::Error + 'static)) -> bool,
+) -> bool {
+    let Some(source) = &es.source else {
+        return false;
+    };
+    source.chain().any(|cause| {
+        pred(cause)
+            || cause
+                .downcast_ref::<Error>()
+                .is_some_and(|inner| error_struct_has_cause(inner.error_struct(), pred))
+    })
+}
+
+pub fn is_transient_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(e) = cause.downcast_ref::<TokioPostgresError>() {
+        return match e.code() {
+            // Not a server error: connecting, a closed connection, I/O, a timeout.
+            None => true,
+            Some(code) => {
+                let code = code.code();
+                // connection exception, insufficient resources, invalid authorization
+                code.starts_with("08")
+                    || code.starts_with("53")
+                    || code.starts_with("28")
+                    // admin/crash shutdown, cannot connect now (starting up)
+                    || code.starts_with("57P0")
+                    // lock_not_available (lock_timeout), serialization failure, deadlock
+                    || code == "55P03"
+                    || code == "40001"
+                    || code == "40P01"
+            }
+        };
+    }
+    if let Some(e) = cause.downcast_ref::<std::io::Error>() {
+        use std::io::ErrorKind::*;
+        return matches!(
+            e.kind(),
+            ConnectionRefused
+                | ConnectionReset
+                | ConnectionAborted
+                | NotConnected
+                | TimedOut
+                | BrokenPipe
+                | AddrNotAvailable
+                | UnexpectedEof
+        );
+    }
+    false
 }

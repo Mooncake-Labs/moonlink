@@ -104,6 +104,9 @@ pub struct PostgresConnection {
     fingerprint_watch: Option<JoinHandle<()>>,
     /// Set when the replication loop stopped unexpectedly (see [`supervise_replication`]).
     replication_stopped: Arc<AtomicBool>,
+    /// While set, the slot is not advanced: a mirror of this database that could not be restored
+    /// yet will replay from it once it can.
+    slot_hold: Arc<AtomicBool>,
 }
 
 type RegisteredTables = Arc<std::sync::Mutex<HashMap<SrcTableId, mpsc::Sender<TableEvent>>>>;
@@ -333,6 +336,7 @@ impl PostgresConnection {
             watched_tables: Arc::default(),
             fingerprint_watch: None,
             replication_stopped: Arc::default(),
+            slot_hold: Arc::default(),
         })
     }
 
@@ -1052,7 +1056,14 @@ impl PostgresConnection {
         let source = self.source.clone();
 
         let checker = FingerprintChecker::new(self.uri.clone(), &self.watched_tables);
-        let event_loop = tokio::spawn(run_event_loop(cfg, sink, receiver, source, checker));
+        let event_loop = tokio::spawn(run_event_loop(
+            cfg,
+            sink,
+            receiver,
+            source,
+            checker,
+            self.slot_hold.clone(),
+        ));
         self.fingerprint_watch = Some(spawn_fingerprint_watch(
             self.uri.clone(),
             &self.watched_tables,
@@ -1063,6 +1074,11 @@ impl PostgresConnection {
             self.registered_tables.clone(),
             self.replication_stopped.clone(),
         )
+    }
+
+    /// Hold the slot where it is (see [`PostgresConnection::slot_hold`]) or release it.
+    pub fn set_slot_hold(&self, hold: bool) {
+        self.slot_hold.store(hold, Ordering::SeqCst);
     }
 
     /// Set once the replication loop stopped unexpectedly. The errored state that causes for every
@@ -1406,6 +1422,7 @@ pub async fn run_event_loop(
     mut cmd_rx: mpsc::Receiver<PostgresReplicationCommand>,
     postgres_source: Arc<PostgresSource>,
     mut fingerprint_checker: FingerprintChecker,
+    slot_hold: Arc<AtomicBool>,
 ) -> Result<()> {
     // Persist across reconnects
     let mut saved_schemas: Vec<TableSchema> = Vec::new();
@@ -1432,8 +1449,12 @@ pub async fn run_event_loop(
         }
 
         // Prepare connection and stream
-        let confirmed_flush_lsn = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs)
-            .unwrap_or(PgLsn::from(0));
+        // 0 starts from the slot's confirmed position (and confirms nothing).
+        let confirmed_flush_lsn = if slot_hold.load(Ordering::SeqCst) {
+            PgLsn::from(0)
+        } else {
+            compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs).unwrap_or(PgLsn::from(0))
+        };
 
         // Transient source errors (restarts, network, slot briefly still active) must never end
         // replication: retry with backoff while still applying table commands.
@@ -1529,8 +1550,12 @@ pub async fn run_event_loop(
             tokio::select! {
                 _ = status_interval.tick() => {
                     // With no healthy table (every one errored) nothing needs the WAL received so far.
-                    let lsn_to_send = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs)
-                        .unwrap_or_else(|| PgLsn::from(sink.replication_lsn()));
+                    let lsn_to_send = if slot_hold.load(Ordering::SeqCst) {
+                        PgLsn::from(0)
+                    } else {
+                        compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs)
+                            .unwrap_or_else(|| PgLsn::from(sink.replication_lsn()))
+                    };
                     if let Err(e) = stream
                         .as_mut()
                         .send_status_update(lsn_to_send)

@@ -38,7 +38,7 @@ pub struct MoonlinkBackend {
     // Metadata storage accessor.
     metadata_store_accessor: Box<dyn MetadataStoreTrait>,
 
-    replication_manager: RwLock<ReplicationManager>,
+    replication_manager: Arc<RwLock<ReplicationManager>>,
 }
 
 impl MoonlinkBackend {
@@ -110,20 +110,27 @@ impl MoonlinkBackend {
         let backend_attributes = BackendAttributes {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
         };
-        recovery_utils::recover_all_tables(
+        let pending_recoveries = recovery_utils::recover_all_tables(
             backend_attributes,
             &*metadata_store_accessor,
             read_state_filepath_remap.clone(),
             &mut replication_manager,
         )
         .await?;
+        let replication_manager = Arc::new(RwLock::new(replication_manager));
+        if !pending_recoveries.is_empty() {
+            recovery_utils::retry_pending_recoveries(
+                Arc::downgrade(&replication_manager),
+                pending_recoveries,
+            );
+        }
 
         Ok(Self {
             base_path: base_path_str.to_string(),
             read_state_filepath_remap,
             http_filepath_remap,
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
-            replication_manager: RwLock::new(replication_manager),
+            replication_manager,
             metadata_store_accessor,
         })
     }
