@@ -42,6 +42,16 @@ fn table_config(tmp: &TempDir) -> String {
     serde_json::to_string(&cfg).unwrap()
 }
 
+/// An error as text for assertions: its debug form without any backtrace (captured with
+/// RUST_BACKTRACE=1, which names the test's own functions and would match their words).
+fn error_text(e: &impl std::fmt::Debug) -> String {
+    let text = format!("{e:?}");
+    match text.split_once("Stack backtrace") {
+        Some((message, _)) => message.to_string(),
+        None => text,
+    }
+}
+
 async fn new_backend(tmp: &TempDir) -> Result<MoonlinkBackend, String> {
     let base = tmp.path().to_str().unwrap().to_string();
     let store = SqliteMetadataStore::new_with_directory(&base)
@@ -49,7 +59,7 @@ async fn new_backend(tmp: &TempDir) -> Result<MoonlinkBackend, String> {
         .unwrap();
     MoonlinkBackend::new(base, None, Box::new(store))
         .await
-        .map_err(|e| format!("{e:?}"))
+        .map_err(|e| error_text(&e))
 }
 
 /// Fresh backend + client, with all moonlink slots/publications from earlier runs removed.
@@ -447,7 +457,7 @@ async fn snapshot_error(backend: &MoonlinkBackend, dst: &str, lsn: u64) -> Optio
     .await
     .expect("create_snapshot timed out")
     .err()
-    .map(|e| format!("{e:?}"))
+    .map(|e| error_text(&e))
 }
 
 /// Any change to a mirrored table's definition puts that mirror, and only that mirror, into the
@@ -791,7 +801,7 @@ async fn try_mirror(
     })
     .await
     {
-        Ok(result) => result.map_err(|e| format!("{e:?}")),
+        Ok(result) => result.map_err(|e| error_text(&e)),
         Err(join_error) => panic!("create_table panicked: {join_error}"),
     }
 }
@@ -876,7 +886,7 @@ async fn scan_error(backend: &MoonlinkBackend, dst: &str) -> Option<String> {
         .scan_table(DB.to_string(), dst.to_string(), None)
         .await
         .err()
-        .map(|e| format!("{e:?}"))
+        .map(|e| error_text(&e))
 }
 
 /// A mirror that cannot be recovered at startup (its source table was dropped) must not stop
@@ -2577,7 +2587,7 @@ async fn mirror_registered_late_at_startup_keeps_changes_made_while_down(#[case]
             .unwrap();
         MoonlinkBackend::new(base, None, Box::new(store))
             .await
-            .map_err(|e| format!("{e:?}"))
+            .map_err(|e| error_text(&e))
     });
     tokio::time::sleep(Duration::from_secs(25)).await;
     let confirmed_while_held = confirmed_flush(&client).await;
@@ -3539,7 +3549,10 @@ async fn savepoints_in_a_streamed_transaction_apply_exactly_or_error_the_mirror(
     let sp_error = snapshot_error(&backend, "rv_sp_mc", lsn).await;
     if errors {
         let err = sp_error.expect("a rolled-back savepoint must error the mirror it changed");
-        assert!(err.contains("savepoint"), "{err}");
+        assert!(
+            err.contains("was rolled back inside a transaction"),
+            "{err}"
+        );
     } else {
         assert_eq!(sp_error, None);
         assert_eq!(
@@ -3650,7 +3663,10 @@ async fn unlogged_partition_errors_the_mirror(#[case] ddl: &str) {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let err = err.expect("a mirror with an unlogged partition must be errored");
-    assert!(err.contains("unlogged"), "{err}");
+    assert!(
+        err.contains("is unlogged, so postgres never sends its changes"),
+        "{err}"
+    );
 
     let backend = Arc::new(backend);
     backend
@@ -3660,7 +3676,10 @@ async fn unlogged_partition_errors_the_mirror(#[case] ddl: &str) {
     let err = try_mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri)
         .await
         .unwrap_err();
-    assert!(err.contains("unlogged"), "{err}");
+    assert!(
+        err.contains("is unlogged, so postgres never sends its changes"),
+        "{err}"
+    );
     client
         .simple_query("DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2, rv_part_4;")
         .await
