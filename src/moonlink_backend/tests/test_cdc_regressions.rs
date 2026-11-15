@@ -1329,3 +1329,68 @@ async fn inheritance_parent_is_refused() {
         .await
         .unwrap();
 }
+
+/// Dropping a source database that still has mirrors (after removing its slot, as postgres
+/// requires) must not stop moonlink from starting; the orphaned mirror reports why and can be
+/// dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn startup_survives_a_dropped_source_database() {
+    let admin_uri = get_database_uri();
+    let (admin, _) = connect_to_postgres(&admin_uri).await;
+    admin
+        .simple_query("DROP DATABASE IF EXISTS rv_dropdb WITH (FORCE);")
+        .await
+        .unwrap();
+    admin
+        .simple_query("CREATE DATABASE rv_dropdb;")
+        .await
+        .unwrap();
+    let uri = uri_for_database(&admin_uri, "rv_dropdb");
+    let (client, _) = connect_to_postgres(&uri).await;
+    client
+        .simple_query("CREATE TABLE rv_t (id BIGINT PRIMARY KEY); INSERT INTO rv_t VALUES (1);")
+        .await
+        .unwrap();
+    let tmp = TempDir::new().unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    mirror(&backend, &tmp, "rv_t_mc", "public.rv_t", &uri).await;
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    drop(client);
+    admin
+        .simple_query(
+            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots
+              WHERE database = 'rv_dropdb' AND active_pid IS NOT NULL;",
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    admin
+        .simple_query(
+            "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots
+              WHERE database = 'rv_dropdb';",
+        )
+        .await
+        .unwrap();
+    admin
+        .simple_query("DROP DATABASE rv_dropdb WITH (FORCE);")
+        .await
+        .unwrap();
+
+    let backend = new_backend(&tmp).await.expect("startup must not fail");
+    let err = scan_error(&backend, "rv_t_mc")
+        .await
+        .expect("must be errored");
+    assert!(err.contains("could not be restored"), "{err}");
+    backend
+        .drop_table(DB.to_string(), "rv_t_mc".to_string())
+        .await
+        .unwrap();
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    assert!(scan_error(&backend, "rv_t_mc")
+        .await
+        .unwrap()
+        .contains("not found"));
+}
