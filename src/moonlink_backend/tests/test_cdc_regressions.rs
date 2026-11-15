@@ -70,6 +70,8 @@ async fn setup(ddl: &str) -> (TempDir, MoonlinkBackend, Client) {
         )
         .await
         .unwrap();
+    // A test that failed while forcing large transactions to stream must not leak that setting.
+    stream_large_transactions(&client, false).await;
     client.simple_query(ddl).await.unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = new_backend(&tmp).await.unwrap();
@@ -2860,6 +2862,7 @@ async fn failure_in_a_streamed_transaction_errors_the_mirror(
     .await;
     mirror(&backend, &tmp, "rv_st_mc", "public.rv_st", &uri).await;
     mirror(&backend, &tmp, "rv_fill_mc", "public.rv_fill", &uri).await;
+    let streamed_before = stream_txns(&client).await;
     stream_large_transactions(&client, true).await;
     let result = client
         .simple_query(&format!(
@@ -2871,7 +2874,6 @@ async fn failure_in_a_streamed_transaction_errors_the_mirror(
              COMMIT;"
         ))
         .await;
-    stream_large_transactions(&client, false).await;
     result.unwrap();
     let lsn = current_wal_lsn(&client).await;
     let err = snapshot_error(&backend, "rv_st_mc", lsn)
@@ -2889,6 +2891,7 @@ async fn failure_in_a_streamed_transaction_errors_the_mirror(
         scan_rows(&backend, "rv_fill_mc", lsn, "v", Duration::from_secs(30)).await,
         Some(source)
     );
+    stop_streaming_large_transactions(&client, true, streamed_before).await;
 }
 
 /// A new partition is judged without reading it: a partition the mirror's role cannot read (or
@@ -3110,6 +3113,28 @@ async fn empty_copy_with_a_streamed_boundary_commit_can_snapshot(#[case] streame
         matches!(snapshot, Ok(Ok(_))),
         "create_snapshot of the idle empty mirror did not complete: {snapshot:?}"
     );
+}
+
+/// Undo [`stream_large_transactions`] once the mirrors have caught up: the walsender decodes a
+/// transaction after its commit and rereads the setting meanwhile, so resetting it earlier can
+/// stop the rest of the transaction from being streamed. With `streamed`, check that it was.
+async fn stop_streaming_large_transactions(client: &Client, streamed: bool, streamed_before: i64) {
+    let mut streamed_after = stream_txns(client).await;
+    // Slot statistics are reported about once a second.
+    for _ in 0..50 {
+        if !streamed || streamed_after > streamed_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        streamed_after = stream_txns(client).await;
+    }
+    stream_large_transactions(client, false).await;
+    if streamed {
+        assert!(
+            streamed_after > streamed_before,
+            "the large transaction was not streamed"
+        );
+    }
 }
 
 async fn stream_txns(client: &Client) -> i64 {
@@ -3463,6 +3488,7 @@ async fn savepoints_in_a_streamed_transaction_apply_exactly_or_error_the_mirror(
     .await;
     mirror(&backend, &tmp, "rv_sp_mc", "public.rv_sp", &uri).await;
     mirror(&backend, &tmp, "rv_sq_mc", "public.rv_sq", &uri).await;
+    let streamed_before = stream_txns(&client).await;
     stream_large_transactions(&client, streamed).await;
     let result = client
         .simple_query(&format!(
@@ -3475,7 +3501,6 @@ async fn savepoints_in_a_streamed_transaction_apply_exactly_or_error_the_mirror(
              {end};"
         ))
         .await;
-    stream_large_transactions(&client, false).await;
     result.unwrap();
     // A later small transaction: the mirrors keep following after the large one.
     client
@@ -3515,6 +3540,7 @@ async fn savepoints_in_a_streamed_transaction_apply_exactly_or_error_the_mirror(
             "table with savepoint changes"
         );
     }
+    stop_streaming_large_transactions(&client, streamed, streamed_before).await;
 }
 
 /// A failure of a streamed transaction (TRUNCATE, unconvertible value) is not erased by a
@@ -3544,6 +3570,7 @@ async fn rolled_back_savepoint_keeps_the_failures_of_its_streamed_transaction(
     .await;
     mirror(&backend, &tmp, "rv_st_mc", "public.rv_st", &uri).await;
     mirror(&backend, &tmp, "rv_fill_mc", "public.rv_fill", &uri).await;
+    let streamed_before = stream_txns(&client).await;
     stream_large_transactions(&client, true).await;
     let result = client
         .simple_query(&format!(
@@ -3557,7 +3584,6 @@ async fn rolled_back_savepoint_keeps_the_failures_of_its_streamed_transaction(
              COMMIT;"
         ))
         .await;
-    stream_large_transactions(&client, false).await;
     result.unwrap();
     let lsn = current_wal_lsn(&client).await;
     let err = snapshot_error(&backend, "rv_st_mc", lsn)
@@ -3576,6 +3602,7 @@ async fn rolled_back_savepoint_keeps_the_failures_of_its_streamed_transaction(
         scan_rows(&backend, "rv_fill_mc", lsn, "v", Duration::from_secs(30)).await,
         Some(source)
     );
+    stop_streaming_large_transactions(&client, true, streamed_before).await;
 }
 
 /// Postgres never decodes changes of an unlogged partition: one that appears later (created
