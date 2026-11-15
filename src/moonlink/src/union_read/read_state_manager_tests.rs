@@ -305,6 +305,91 @@ async fn errored_table_fails_reads_immediately_and_wakes_waiters() {
     assert!(err.to_string().contains("out of sync"), "{err}");
 }
 
+/// When CDC fails a table, the sink drops the table's replication watch before the table handler
+/// marks the table errored. A snapshot request or scan waiting on that watch reports the errored
+/// reason, not the closed channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_report_the_errored_reason_when_the_replication_watch_closes_first() {
+    use crate::TableStatus;
+
+    let env = Env::new("watch_closed").await;
+    env.commit_tx.send(100).unwrap();
+    for scan in [false, true] {
+        let (replication_tx, replication_rx) = watch::channel(100u64);
+        let (status_tx, status_rx) = watch::channel(TableStatus::Healthy);
+        let rsm = Arc::new(ReadStateManager::new(
+            &env.table,
+            replication_rx,
+            env.commit_tx.subscribe(),
+            status_rx,
+            get_read_state_filepath_remap(),
+        ));
+        let waiting = tokio::spawn(async move {
+            if scan {
+                rsm.try_read(Some(500)).await.map(|_| ())
+            } else {
+                rsm.wait_for_lsn_coverage(500).await.map(|_| ())
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(replication_tx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Fails only if the read already ended (and dropped the receiver); the assertion says how.
+        let _ = status_tx.send(TableStatus::Errored(
+            "mirror t is out of sync: source schema changed".to_string(),
+        ));
+        let err = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("read hung after its replication watch closed")
+            .unwrap()
+            .expect_err("read of a failed table must fail");
+        assert!(
+            matches!(err, crate::Error::TableErrored(_))
+                && err.to_string().contains("source schema changed"),
+            "scan={scan}: {err:?}"
+        );
+    }
+}
+
+/// A read whose replication watch closed while the table stays healthy fails after a bounded wait
+/// with the closed-channel error; a table dropped meanwhile reports that it was dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_whose_replication_watch_closes_end_without_a_status_change() {
+    use crate::TableStatus;
+
+    let env = Env::new("watch_closed_healthy").await;
+    env.commit_tx.send(100).unwrap();
+    for drop_status in [false, true] {
+        let (replication_tx, replication_rx) = watch::channel(100u64);
+        let (status_tx, status_rx) = watch::channel(TableStatus::Healthy);
+        let rsm = ReadStateManager::new(
+            &env.table,
+            replication_rx,
+            env.commit_tx.subscribe(),
+            status_rx,
+            get_read_state_filepath_remap(),
+        );
+        drop(replication_tx);
+        if drop_status {
+            drop(status_tx);
+        } else {
+            std::mem::forget(status_tx);
+        }
+        let err = tokio::time::timeout(Duration::from_secs(5), rsm.wait_for_lsn_coverage(500))
+            .await
+            .expect("a read whose watch closed must not hang")
+            .expect_err("replication can no longer reach the LSN");
+        if drop_status {
+            assert!(err.to_string().contains("dropped"), "{err:?}");
+        } else {
+            assert!(
+                matches!(err, crate::Error::WatchChannelRecvError(_)),
+                "{err:?}"
+            );
+        }
+    }
+}
+
 /// Snapshot requests resolve the session LSN against replication progress: once replication is at
 /// the LSN, the table's latest commit is the LSN a snapshot has to cover.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

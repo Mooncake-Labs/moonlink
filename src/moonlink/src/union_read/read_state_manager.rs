@@ -146,6 +146,12 @@ pub(crate) fn always_healthy_table_status() -> watch::Receiver<TableStatus> {
     receiver
 }
 
+/// How long a read whose watch closed waits for the table status to say why.
+#[cfg(not(test))]
+const PRODUCER_ENDED_STATUS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const PRODUCER_ENDED_STATUS_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub struct ReadStateManager {
     cache: Arc<RwLock<CachedRead>>,
     snapshot_seq: Arc<AtomicU64>,
@@ -239,7 +245,11 @@ impl ReadStateManager {
                 return Ok(commit);
             }
             tokio::select! {
-                res = replication_lsn_rx.changed() => res?,
+                res = replication_lsn_rx.changed() => {
+                    if let Err(closed) = res {
+                        return Err(Self::producer_ended(&mut table_status_rx, closed.into()).await);
+                    }
+                }
                 res = Self::table_status_changed(&mut table_status_rx) => res?,
             }
         }
@@ -278,6 +288,29 @@ impl ReadStateManager {
             ));
         }
         Ok(())
+    }
+
+    /// The error for a read whose LSN or snapshot watch closed (its producer stopped). When CDC
+    /// fails a table, the sink drops the table's replication watch before the table handler has
+    /// marked the table errored, so wait briefly for the status: its errored reason (or "dropped")
+    /// tells users what to do, the closed channel does not.
+    async fn producer_ended(
+        status_rx: &mut watch::Receiver<TableStatus>,
+        closed: crate::Error,
+    ) -> crate::Error {
+        let status = async {
+            loop {
+                if let Err(e) = Self::check_healthy(status_rx) {
+                    return e;
+                }
+                if let Err(e) = Self::table_status_changed(status_rx).await {
+                    return e;
+                }
+            }
+        };
+        tokio::time::timeout(PRODUCER_ENDED_STATUS_WAIT, status)
+            .await
+            .unwrap_or(closed)
     }
 
     #[inline]
@@ -319,10 +352,16 @@ impl ReadStateManager {
             // `observe` and `check_healthy` marked the receivers as seen, so these wait for the
             // next update.
             let wait_replication = requested_lsn.unwrap() > view.replication;
-            tokio::select! {
-                res = replication_lsn_rx.changed(), if wait_replication => res?,
-                res = table_snapshot_rx.changed(), if !wait_replication => res?,
-                res = Self::table_status_changed(&mut table_status_rx) => res?,
+            let closed = tokio::select! {
+                res = replication_lsn_rx.changed(), if wait_replication => res.err(),
+                res = table_snapshot_rx.changed(), if !wait_replication => res.err(),
+                res = Self::table_status_changed(&mut table_status_rx) => {
+                    res?;
+                    None
+                }
+            };
+            if let Some(closed) = closed {
+                return Err(Self::producer_ended(&mut table_status_rx, closed.into()).await);
             }
         }
     }
