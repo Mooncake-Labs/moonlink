@@ -1,6 +1,7 @@
 //! Garbage collection of iceberg table files that the current snapshot no longer references:
 //! metadata files right after each commit, and data/puffin/index files once no reader can still
 //! use them.
+use crate::storage::table::iceberg::file_catalog::VERSION_HINT_FILENAME;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::Result;
 
@@ -92,10 +93,17 @@ impl IcebergTableManager {
             NamespaceIdent::from_strs(&self.config.namespace)?.to_url_string(),
             self.config.table_name
         );
+        let metadata_dir = format!("{table_dir}/metadata");
+        if at_load && !self.loaded_hinted_version(table, &metadata_dir).await {
+            tracing::warn!(
+                table = self.config.table_name,
+                "loaded an iceberg metadata file other than the one the version hint names; skipping garbage collection until the next commit"
+            );
+            return Ok(());
+        }
         let mut to_delete = Vec::new();
 
         // Metadata files are only read at load: delete unreferenced ones right away.
-        let metadata_dir = format!("{table_dir}/metadata");
         let metadata_files = self
             .filesystem_accessor
             .list_direct_files(&metadata_dir)
@@ -169,5 +177,31 @@ impl IcebergTableManager {
             self.filesystem_accessor.delete_object(&path).await?;
         }
         Ok(())
+    }
+
+    /// Whether the loaded metadata file is the one `version-hint.text` names (false after a
+    /// fallback load).
+    async fn loaded_hinted_version(
+        &self,
+        table: &iceberg::table::Table,
+        metadata_dir: &str,
+    ) -> bool {
+        let Some(loaded) = table
+            .metadata_location()
+            .map(basename)
+            .and_then(metadata_version)
+        else {
+            return false;
+        };
+        let hint_path = format!("{metadata_dir}/{VERSION_HINT_FILENAME}");
+        match self.filesystem_accessor.read_object(&hint_path).await {
+            Ok(bytes) => {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+                    == Some(loaded)
+            }
+            Err(_) => false,
+        }
     }
 }

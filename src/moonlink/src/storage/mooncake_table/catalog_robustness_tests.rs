@@ -1,8 +1,10 @@
-//! The file catalog survives interrupted writes: a lost, empty or dangling version hint falls
-//! back to the newest readable metadata file, and existing tables are never re-created empty.
+//! The file catalog survives interrupted writes: a lost or empty version hint falls back to the
+//! newest readable metadata file, a hint naming an unreadable metadata file fails the load, and
+//! existing tables are never re-created empty.
 use super::test_utils::*;
 use super::*;
 use crate::row::IdentityProp;
+use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
 use tokio::sync::mpsc;
 
@@ -72,25 +74,66 @@ async fn test_empty_version_hint_falls_back_to_latest_metadata() {
     assert_two_rows(&context).await;
 }
 
+/// A hint naming a metadata file that cannot be read (corruption, a power loss without directory
+/// fsync, a non-atomic write by an older moonlink) fails the load instead of silently loading an
+/// older version that may miss changes already acknowledged to the source.
 #[tokio::test]
-async fn test_hint_pointing_to_truncated_metadata_falls_back() {
+async fn test_hint_pointing_to_unreadable_metadata_fails_the_load() {
     let context = TestContext::new("robust");
     write_two_commits(&context).await;
-    let next = metadata_versions(&context).last().unwrap() + 1;
+    let current = *metadata_versions(&context).last().unwrap();
     let dir = metadata_dir(&context);
-    std::fs::write(dir.join(format!("v{next}.metadata.json")), b"{\"format-v").unwrap();
-    std::fs::write(dir.join("version-hint.text"), next.to_string()).unwrap();
-    assert_two_rows(&context).await;
+    std::fs::write(
+        dir.join(format!("v{current}.metadata.json")),
+        b"{\"format-v",
+    )
+    .unwrap();
+    let data_files_before = data_file_names(&context);
 
-    // The next commit replaces the broken file and the table keeps working.
-    let (mut table, mut rx) = open(&context).await;
-    table.append(test_row(3, "r", 3)).unwrap();
-    table.commit(30);
-    flush_table_and_sync(&mut table, &mut rx, 30).await.unwrap();
-    create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
-    drop(table);
-    let (table, _rx) = open(&context).await;
-    assert_eq!(table.get_persistence_snapshot_lsn(), Some(30));
+    let iceberg_table_config = test_iceberg_table_config(&context, "robust");
+    let mut table_config = test_mooncake_table_config(&context);
+    table_config.row_identity = IdentityProp::FullRow;
+    let res = MooncakeTable::new(
+        (*create_test_arrow_schema()).clone(),
+        "robust".to_string(),
+        1,
+        context.path(),
+        iceberg_table_config.clone(),
+        table_config,
+        create_test_object_storage_cache(&context.temp_dir),
+        create_test_filesystem_accessor(&iceberg_table_config),
+    )
+    .await;
+    let err = res
+        .err()
+        .expect("loading a corrupted current metadata file must fail");
+    assert!(err.to_string().contains("cannot be loaded"), "{err}");
+    // Nothing was garbage-collected on the way.
+    assert_eq!(data_file_names(&context), data_files_before);
+}
+
+/// After a fallback load (unusable hint) the load-time sweep deletes nothing: the loaded version
+/// may be older than the committed one, whose files are the only copy of its changes.
+#[tokio::test]
+async fn test_fallback_load_keeps_unreferenced_files() {
+    let context = TestContext::new("robust");
+    write_two_commits(&context).await;
+    let data_dir = metadata_dir(&context).parent().unwrap().join("data");
+    std::fs::write(data_dir.join("unreferenced.parquet"), b"x").unwrap();
+    std::fs::write(metadata_dir(&context).join("version-hint.text"), b"").unwrap();
+    assert_two_rows(&context).await;
+    assert!(data_dir.join("unreferenced.parquet").exists());
+}
+
+fn data_file_names(context: &TestContext) -> Vec<String> {
+    let data_dir = metadata_dir(context).parent().unwrap().join("data");
+    let mut names: Vec<String> = std::fs::read_dir(data_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
 }
 
 /// No hint at all (e.g. a crash right after the first metadata file was written): the table is

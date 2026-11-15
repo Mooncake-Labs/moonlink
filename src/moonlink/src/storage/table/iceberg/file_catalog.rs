@@ -62,7 +62,7 @@ pub(super) const NAMESPACE_INDICATOR_OBJECT_NAME: &str = "indicator.text";
 /// Metadata directory, which stores all metadata files, including manifest files, metadata files, version hint files, etc.
 pub(super) const METADATA_DIRECTORY: &str = "metadata";
 /// Version hint file which indicates the latest version for the table, the file exists for all valid iceberg tables.
-pub(super) const VERSION_HINT_FILENAME: &str = "version-hint.text";
+pub(crate) const VERSION_HINT_FILENAME: &str = "version-hint.text";
 
 #[derive(Debug)]
 pub struct FileCatalog {
@@ -801,36 +801,37 @@ impl CatalogAccess for FileCatalog {
         // Load and assign etag; a missing or unreadable hint is handled by the fallback below.
         let _ = self.load_version_hint_etag(&version_hint_filepath).await;
 
-        // Read version hint file, then the metadata it points to.
-        let hinted = match self.load_current_version(&version_hint_filepath).await {
+        // Read version hint file, then the metadata it points to. Only a missing or unreadable
+        // hint falls back to the newest readable metadata file: if the hint names a metadata file
+        // that cannot be loaded, an older version may lack changes whose source WAL is already
+        // released, so loading it would silently lose them.
+        let hint_err = match self.load_current_version(&version_hint_filepath).await {
             Ok(version) => {
                 let metadata_filepath = format!("{metadata_directory}/v{version}.metadata.json");
-                self.load_table_metadata(&metadata_filepath)
-                    .await
-                    .map(|metadata| (metadata_filepath, metadata))
+                return match self.load_table_metadata(&metadata_filepath).await {
+                    Ok(metadata) => Ok((metadata_filepath, metadata)),
+                    Err(e) => Err(IcebergError::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        format!(
+                            "iceberg metadata file {metadata_filepath} named by the version hint cannot be loaded ({e}); not falling back to an older version, which could miss committed changes"
+                        ),
+                    )),
+                };
             }
-            Err(e) => Err(e),
+            Err(e) => e,
         };
-        match hinted {
-            Ok(loaded) => Ok(loaded),
-            Err(hint_err) => {
-                // An interrupted write or a full disk can leave the hint (or the file it names)
-                // unreadable; the newest metadata file that parses is the committed state.
-                let loaded = self
-                    .load_latest_parseable_metadata(&metadata_directory)
-                    .await
-                    .map_err(|_| {
-                        IcebergError::new(hint_err.kind(), hint_err.message().to_string())
-                    })?;
-                tracing::warn!(
-                    table = %table_ident,
-                    error = %hint_err,
-                    metadata = loaded.0,
-                    "iceberg version hint unusable, loaded the newest readable metadata file instead"
-                );
-                Ok(loaded)
-            }
-        }
+        // An interrupted write can leave the hint missing or unreadable.
+        let loaded = self
+            .load_latest_parseable_metadata(&metadata_directory)
+            .await
+            .map_err(|_| IcebergError::new(hint_err.kind(), hint_err.message().to_string()))?;
+        tracing::warn!(
+            table = %table_ident,
+            error = %hint_err,
+            metadata = loaded.0,
+            "iceberg version hint unusable, loaded the newest readable metadata file instead"
+        );
+        Ok(loaded)
     }
 }
 
