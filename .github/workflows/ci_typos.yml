@@ -23,9 +23,12 @@ on:
   push:
     branches:
       - main
+      - v0.3-dev
   pull_request:
     branches:
       - main
+      - v0.3-dev
+      - 'slim/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
