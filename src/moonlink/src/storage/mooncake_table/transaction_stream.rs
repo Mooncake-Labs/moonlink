@@ -331,6 +331,10 @@ impl MooncakeTable {
         }
     }
 
+    pub(crate) fn has_transaction_stream(&self, xact_id: u32) -> bool {
+        self.transaction_stream_states.contains_key(&xact_id)
+    }
+
     pub fn abort_in_stream_batch(&mut self, xact_id: u32) {
         // Record events for replay.
         if let Some(event_replay_tx) = &self.event_replay_tx {
@@ -632,7 +636,7 @@ impl MooncakeTable {
                 .iter()
                 .map(|ptr| ptr.arc_ptr()),
         );
-        ma::assert_ge!(lsn, self.next_snapshot_task.commit_lsn_baseline);
+        let lsn = super::clamp_commit_lsn(lsn, self.next_snapshot_task.commit_lsn_baseline);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
 
         // We update our delete records with the last lsn of the transaction

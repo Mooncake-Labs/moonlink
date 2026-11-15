@@ -67,6 +67,8 @@ pub enum PostgresReplicationCommand {
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
+        /// Restart the stream once the table is registered, so postgres replays from the slot.
+        replay_from_slot: bool,
         ready_tx: oneshot::Sender<()>,
     },
     DropTable {
@@ -396,6 +398,7 @@ impl PostgresConnection {
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
+        replay_from_slot: bool,
     ) -> Result<oneshot::Receiver<()>> {
         let (ready_tx, ready_rx) = oneshot::channel();
         let cmd = PostgresReplicationCommand::AddTable {
@@ -404,6 +407,7 @@ impl PostgresConnection {
             event_sender,
             commit_state,
             flush_lsn_rx,
+            replay_from_slot,
             ready_tx,
         };
         self.cmd_tx.send(cmd).await?;
@@ -529,6 +533,10 @@ impl PostgresConnection {
                     .flush_lsn_rx
                     .take()
                     .expect("flush_lsn_rx is None"),
+                // A recovered table's changes after its iceberg snapshot may already have been
+                // streamed (and dropped) before it was registered.
+                /*replay_from_slot=*/
+                is_recovery,
             )
             .await?;
 
@@ -652,6 +660,31 @@ pub async fn run_event_loop(
     let mut current_backoff = Duration::from_secs(0);
 
     'outer: loop {
+        // With no table registered every change would be dropped, including what a recovering
+        // table needs replayed from the slot, so wait for the first table before streaming.
+        while flush_lsn_rxs.is_empty() {
+            match cmd_rx.recv().await {
+                Some(PostgresReplicationCommand::AddTable {
+                    src_table_id,
+                    schema,
+                    event_sender,
+                    commit_state,
+                    flush_lsn_rx,
+                    replay_from_slot: _,
+                    ready_tx,
+                }) => {
+                    sink.add_table(src_table_id, event_sender, commit_state, &schema);
+                    flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+                    saved_schemas.push(schema);
+                    if let Err(e) = ready_tx.send(()) {
+                        error!(error = ?e, "failed to send ready signal");
+                    }
+                }
+                Some(PostgresReplicationCommand::DropTable { .. }) => {}
+                Some(PostgresReplicationCommand::Shutdown) | None => break 'outer,
+            }
+        }
+
         // Prepare connection and stream
         let confirmed_flush_lsn =
             compute_confirmed_flush_lsn(&flush_lsn_rxs).unwrap_or(PgLsn::from(0));
@@ -674,6 +707,7 @@ pub async fn run_event_loop(
 
         // Reset keepalive floor for this connection
         sink.reset_keepalive_floor();
+        sink.abort_in_progress_streams().await;
 
         // Reset backoff after a successful stream creation
         current_backoff = Duration::from_secs(0);
@@ -719,12 +753,17 @@ pub async fn run_event_loop(
                     }
                 },
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, ready_tx } => {
+                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, replay_from_slot, ready_tx } => {
                         sink.add_table(src_table_id, event_sender, commit_state, &schema);
                         flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
                         stream.as_mut().add_table_schema(schema);
                         if let Err(e) = ready_tx.send(()) {
                             error!(error = ?e, "failed to send ready signal");
+                        }
+                        if replay_from_slot {
+                            debug!(src_table_id, "reconnecting to replay recovered table from the slot");
+                            saved_schemas = stream.as_mut().schemas_snapshot();
+                            break;
                         }
                     }
                     PostgresReplicationCommand::DropTable { src_table_id } => {

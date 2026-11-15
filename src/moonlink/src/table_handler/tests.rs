@@ -1439,7 +1439,7 @@ async fn test_index_merge_with_sufficient_file_indices() {
 
     // Add another file and trigger a new force index merge.
     env.append_row(
-        /*id=*/ 4, /*name=*/ "Cat", /*age=*/ 40, /*lsn=*/ 5,
+        /*id=*/ 4, /*name=*/ "Cat", /*age=*/ 40, /*lsn=*/ 25,
         /*xact_id=*/ None,
     )
     .await;
@@ -1516,7 +1516,7 @@ async fn test_data_compaction_with_sufficient_data_files() {
 
     // Add another file and trigger a new force data compaction.
     env.append_row(
-        /*id=*/ 4, /*name=*/ "Cat", /*age=*/ 40, /*lsn=*/ 5,
+        /*id=*/ 4, /*name=*/ "Cat", /*age=*/ 40, /*lsn=*/ 25,
         /*xact_id=*/ None,
     )
     .await;
@@ -1611,7 +1611,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
 
     // Add another file and trigger a new force full compaction.
     env.append_row(
-        /*id=*/ 4, /*name=*/ "Cat", /*age=*/ 40, /*lsn=*/ 5,
+        /*id=*/ 4, /*name=*/ "Cat", /*age=*/ 40, /*lsn=*/ 25,
         /*xact_id=*/ None,
     )
     .await;

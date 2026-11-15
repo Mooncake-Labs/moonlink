@@ -502,6 +502,20 @@ pub struct MooncakeTable {
     event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
 }
 
+/// Postgres can re-send transactions that were already applied (e.g. after a restart, the slot
+/// may trail what was applied); the commit LSN must never move backwards, and must not panic.
+pub(crate) fn clamp_commit_lsn(lsn: u64, commit_lsn_baseline: u64) -> u64 {
+    if lsn < commit_lsn_baseline {
+        tracing::warn!(
+            lsn,
+            commit_lsn_baseline,
+            "commit LSN is behind the table, committing at the current LSN"
+        );
+        return commit_lsn_baseline;
+    }
+    lsn
+}
+
 impl MooncakeTable {
     /// foreground functions
     ///
@@ -1215,6 +1229,7 @@ impl MooncakeTable {
     }
 
     pub fn commit(&mut self, lsn: u64) {
+        let lsn = clamp_commit_lsn(lsn, self.next_snapshot_task.commit_lsn_baseline);
         // Record events for commit.
         if let Some(event_replay_tx) = &self.event_replay_tx {
             let table_event =
@@ -1225,7 +1240,6 @@ impl MooncakeTable {
         }
 
         // Perform commit operation.
-        ma::assert_ge!(lsn, self.next_snapshot_task.commit_lsn_baseline);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(

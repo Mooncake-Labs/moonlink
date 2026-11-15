@@ -770,6 +770,20 @@ impl TableHandler {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
+        if table_handler_state.is_replayed_applied_event(&event) {
+            // Streamed rows of a replayed transaction were collected again; drop them.
+            if let TableEvent::Commit {
+                xact_id: Some(xact_id),
+                ..
+            } = event
+            {
+                if table.has_transaction_stream(xact_id) {
+                    table.abort_in_stream_batch(xact_id);
+                }
+            }
+            return;
+        }
+
         // Don't update the lsn if the event is not processed yet.
         table_handler_state.update_table_lsns(&event);
 

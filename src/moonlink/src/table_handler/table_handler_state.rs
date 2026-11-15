@@ -239,6 +239,25 @@ impl TableHandlerState {
         }
     }
 
+    /// Whether the event belongs to a transaction this table has already applied. When replication
+    /// reconnects, postgres re-sends every transaction after the slot's confirmed LSN, which trails
+    /// what is applied in memory. LSN boundaries follow [`Self::should_discard_event`].
+    pub(crate) fn is_replayed_applied_event(&self, event: &TableEvent) -> bool {
+        let Some(latest_commit_lsn) = self.latest_commit_lsn else {
+            return false;
+        };
+        match event {
+            TableEvent::Commit { lsn, .. } => *lsn <= latest_commit_lsn,
+            TableEvent::Append {
+                lsn, xact_id: None, ..
+            }
+            | TableEvent::Delete {
+                lsn, xact_id: None, ..
+            } => *lsn < latest_commit_lsn,
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_in_blocking_state(&self) -> bool {
         self.special_table_state != SpecialTableState::Normal
     }
