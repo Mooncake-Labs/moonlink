@@ -11,7 +11,7 @@
 //! partition that already holds rows, or any partition that leaves the table (detached or
 //! dropped), errors the mirror: whether those rows were ever replicated cannot be told from the
 //! catalog. So does an unlogged or foreign partition, whose changes are never decoded, and an
-//! inheritance child of a regular table.
+//! inheritance child of a regular table, and a renamed value of an enum its columns use.
 
 use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
@@ -50,6 +50,11 @@ pub struct SourceFingerprint {
     /// new one, so a partition detached and attached again between two checks shows here.
     #[serde(default)]
     pub attachments: BTreeMap<u32, String>,
+    /// The labels of every enum value its columns can hold (directly, in arrays, domains or
+    /// composites), by pg_enum oid. Mirrors store the label, so a renamed value would leave every
+    /// existing row with the old one; a new value is harmless.
+    #[serde(default)]
+    pub enum_labels: BTreeMap<u32, String>,
 }
 
 /// How the source compares with a recorded fingerprint.
@@ -138,12 +143,34 @@ pub async fn fetch(
     .iter()
     .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
     .collect();
+    let enum_labels = rows(
+        client
+            .simple_query(&format!(
+                "WITH RECURSIVE used(oid) AS ( \
+                   SELECT atttypid FROM pg_attribute \
+                   WHERE attrelid = {relid} AND attnum > 0 AND NOT attisdropped \
+                   UNION \
+                   SELECT inner_type.oid FROM used JOIN pg_type t ON t.oid = used.oid, \
+                   LATERAL (SELECT t.typelem WHERE t.typelem <> 0 \
+                            UNION ALL SELECT t.typbasetype WHERE t.typbasetype <> 0 \
+                            UNION ALL SELECT a.atttypid FROM pg_attribute a \
+                            WHERE t.typrelid <> 0 AND a.attrelid = t.typrelid \
+                            AND a.attnum > 0 AND NOT a.attisdropped) inner_type(oid)) \
+                 SELECT e.oid, e.enumlabel FROM pg_enum e WHERE e.enumtypid IN \
+                 (SELECT oid FROM used);"
+            ))
+            .await?,
+    )
+    .iter()
+    .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+    .collect();
     Ok(Some(SourceFingerprint {
         value_format_version: VALUE_FORMAT_VERSION,
         relid,
         columns,
         partitions,
         attachments,
+        enum_labels,
     }))
 }
 
@@ -238,6 +265,23 @@ pub async fn drift(
             "{}; schema changes are not supported",
             describe_column_change(&expected.columns, &current.columns)
         )));
+    }
+    // A value's oid survives ALTER TYPE ... RENAME VALUE; values cannot be dropped.
+    for (value, label) in &expected.enum_labels {
+        match current.enum_labels.get(value) {
+            Some(now) if now == label => {}
+            Some(now) => {
+                return Ok(Drift::Changed(format!(
+                    "the enum value '{label}' its columns can hold was renamed to '{now}', and the \
+                     mirror's rows keep the old label"
+                )))
+            }
+            None => {
+                return Ok(Drift::Changed(format!(
+                    "the enum value '{label}' its columns can hold no longer exists"
+                )))
+            }
+        }
     }
     if has_inheritance_children(client, expected.relid).await? {
         return Ok(Drift::Changed(

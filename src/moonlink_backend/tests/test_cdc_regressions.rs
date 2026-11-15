@@ -4227,3 +4227,101 @@ async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
         );
     }
 }
+
+/// Mirrors store enum labels, so renaming a value (ALTER TYPE ... RENAME VALUE) would leave every
+/// existing row with the old label: whether the column holds the enum directly, in an array,
+/// through a domain or in a composite, the mirror is errored within seconds (and at recovery, if
+/// renamed while moonlink was stopped). Adding a value changes no existing row and is followed.
+#[rstest::rstest]
+#[case::direct("rv_mood", "'sad'")]
+#[case::array("rv_mood[]", "'{sad}'")]
+#[case::domain("rv_dmood", "'sad'")]
+#[case::composite("rv_feeling", "ROW('sad', 1)")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn renamed_enum_value_errors_the_mirror(#[case] column_type: &str, #[case] value: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_en, rv_en_bystander;
+         DROP DOMAIN IF EXISTS rv_dmood;
+         DROP TYPE IF EXISTS rv_feeling, rv_mood;
+         CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
+         CREATE DOMAIN rv_dmood AS rv_mood;
+         CREATE TYPE rv_feeling AS (m rv_mood, n INT);
+         CREATE TABLE rv_en (id BIGINT PRIMARY KEY, v {column_type});
+         CREATE TABLE rv_en_bystander (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_en VALUES (1, {value});"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_en_mc", "public.rv_en", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_en_by_mc",
+        "public.rv_en_bystander",
+        &uri,
+    )
+    .await;
+
+    // A new value: followed, and rows using it replicate.
+    client
+        .simple_query("ALTER TYPE rv_mood ADD VALUE 'calm';")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    client
+        .simple_query("INSERT INTO rv_en (id) VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_en_mc", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_en_mc", lsn).await, Some(vec![1, 2]));
+
+    client
+        .simple_query("ALTER TYPE rv_mood RENAME VALUE 'sad' TO 'unhappy';")
+        .await
+        .unwrap();
+    let mut err = None;
+    for _ in 0..20 {
+        client
+            .simple_query("INSERT INTO rv_en_bystander VALUES (1) ON CONFLICT DO NOTHING;")
+            .await
+            .unwrap();
+        let lsn = current_wal_lsn(&client).await;
+        err = snapshot_error(&backend, "rv_en_mc", lsn).await;
+        if err.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let err = err.expect("a renamed enum value must error the mirror");
+    assert!(
+        err.contains("enum value 'sad' its columns can hold was renamed to 'unhappy'"),
+        "{err}"
+    );
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_en_by_mc", lsn).await, None);
+
+    // Renamed while moonlink is stopped: errored at recovery.
+    let backend = Arc::new(backend);
+    backend
+        .drop_table(DB.to_string(), "rv_en_mc".to_string())
+        .await
+        .unwrap();
+    try_mirror(&backend, &tmp, "rv_en_mc", "public.rv_en", &uri)
+        .await
+        .unwrap();
+    let backend = Arc::into_inner(backend).unwrap();
+    let backend = restart_with(
+        backend,
+        &tmp,
+        &client,
+        &uri,
+        "ALTER TYPE rv_mood RENAME VALUE 'happy' TO 'glad';",
+    )
+    .await;
+    let err = scan_error(&backend, "rv_en_mc")
+        .await
+        .expect("renamed while stopped: errored at recovery");
+    assert!(err.contains("was renamed to 'glad'"), "{err}");
+}
