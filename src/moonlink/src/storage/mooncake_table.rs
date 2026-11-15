@@ -864,7 +864,19 @@ impl MooncakeTable {
             "table was written by an older moonlink whose file indices are not restart-safe; rebuilding them from the data files"
         );
         let mut new_file_indices = Vec::with_capacity(snapshot.disk_files.len());
-        for data_file in snapshot.disk_files.keys() {
+        let started = std::time::Instant::now();
+        let mut last_progress = started;
+        let total_files = snapshot.disk_files.len();
+        for (done, data_file) in snapshot.disk_files.keys().enumerate() {
+            if last_progress.elapsed() >= std::time::Duration::from_secs(10) {
+                last_progress = std::time::Instant::now();
+                tracing::info!(
+                    table = table_metadata.mooncake_table_id,
+                    done,
+                    total_files,
+                    "rebuilding file indices"
+                );
+            }
             let index_file_id = *next_file_id as u64;
             *next_file_id += 1;
             // A panic here would abort the whole service start, not just this table.
@@ -893,6 +905,12 @@ impl MooncakeTable {
             })?;
             new_file_indices.push(index);
         }
+        tracing::info!(
+            table = table_metadata.mooncake_table_id,
+            files = total_files,
+            elapsed = ?started.elapsed(),
+            "rebuilt file indices written by an older moonlink"
+        );
         Ok(Some(FileIndiceMergeResult {
             uuid: uuid::Uuid::new_v4(),
             old_file_indices: snapshot.indices.file_indices.iter().cloned().collect(),
