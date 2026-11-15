@@ -161,12 +161,18 @@ async fn emptiness(
     let Some(name) = name.first().and_then(|row| row.get(0)).map(str::to_string) else {
         return Ok(None);
     };
-    let any = rows(
+    // By size, not by reading it: the mirror's role may lack SELECT on a partition another role
+    // created, and row-level security could hide its rows. Pages left by deleted rows make it
+    // look non-empty, which errors the mirror (loud, never silent).
+    let size = rows(
         client
-            .simple_query(&format!("SELECT EXISTS (SELECT 1 FROM {name});"))
+            .simple_query(&format!(
+                "SELECT COALESCE(SUM(pg_relation_size(relid)), 0) FROM \
+                 pg_partition_tree({relid}::oid::regclass) WHERE isleaf;"
+            ))
             .await?,
     );
-    let empty = any.first().and_then(|row| row.get(0)) == Some("f");
+    let empty = size.first().and_then(|row| row.get(0)) == Some("0");
     Ok(Some((name, empty)))
 }
 

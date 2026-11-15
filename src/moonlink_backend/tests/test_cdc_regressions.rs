@@ -2889,3 +2889,52 @@ async fn failure_in_a_streamed_transaction_errors_the_mirror(
         Some(source)
     );
 }
+
+/// A new partition is judged without reading it: a partition the mirror's role cannot read (or
+/// whose rows row-level security hides) is neither adopted as empty nor ignored.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn partition_the_mirror_role_cannot_read_is_judged_by_size() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_repl') THEN
+             EXECUTE 'DROP OWNED BY rv_repl'; EXECUTE 'DROP ROLE rv_repl';
+           END IF;
+         END $$;
+         CREATE ROLE rv_repl LOGIN REPLICATION PASSWORD 'rv';
+         DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO rv_repl', current_database()); END $$;
+         GRANT CREATE ON SCHEMA public TO rv_repl;
+         SET ROLE rv_repl;
+         CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
+         INSERT INTO rv_part VALUES (1, 'a');
+         RESET ROLE;",
+    )
+    .await;
+    let repl_uri = uri_for_user(&uri, "rv_repl", "rv");
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &repl_uri).await;
+    client
+        .simple_query(
+            "CREATE TABLE rv_part_2 (id BIGINT PRIMARY KEY, v TEXT);
+             INSERT INTO rv_part_2 VALUES (150, 'never published');
+             ALTER TABLE rv_part ATTACH PARTITION rv_part_2 FOR VALUES FROM (100) TO (200);
+             INSERT INTO rv_part VALUES (2, 'b');",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_part_mc", lsn)
+        .await
+        .expect("must be errored");
+    assert!(err.contains("already held rows"), "{err}");
+    backend
+        .drop_table(DB.to_string(), "rv_part_mc".to_string())
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE rv_part; DROP OWNED BY rv_repl; DROP ROLE rv_repl;")
+        .await
+        .unwrap();
+}
