@@ -1258,3 +1258,29 @@ async fn arrays_that_are_not_one_dimensional_error_the_mirror(
         .unwrap_err();
     assert!(err.contains("not supported"), "{err}");
 }
+
+/// numeric typmods that a decimal cannot represent (scale above precision, negative scale) are
+/// refused cleanly when the mirror is created, leaving nothing behind.
+#[rstest::rstest]
+#[case::scale_above_precision("NUMERIC(3, 6)", "0.000123")]
+#[case::negative_scale("NUMERIC(3, -3)", "12000")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[case] value: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_typmod;
+         CREATE TABLE rv_typmod (id BIGINT PRIMARY KEY, v {column_type});
+         INSERT INTO rv_typmod VALUES (1, {value});"
+    ))
+    .await;
+    let backend = Arc::new(backend);
+    let err = try_mirror(&backend, &tmp, "rv_typmod_mc", "public.rv_typmod", &uri)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("not supported") && err.contains("numeric("),
+        "{err}"
+    );
+    wait_for_no_slots(&client).await;
+}

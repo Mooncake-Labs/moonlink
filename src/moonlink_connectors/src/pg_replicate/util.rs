@@ -116,13 +116,20 @@ enum ArrowExtensionType {
     Json,
 }
 
+/// A column whose type mirrors cannot store; `type_name` describes the offending type.
+struct UnsupportedColumn {
+    column: String,
+    oid: u32,
+    type_name: String,
+}
+
 fn postgres_primitive_to_arrow_type(
     typ: &Type,
     modifier: i32,
     name: &str,
     mut nullable: bool,
     field_id: &mut i32,
-) -> Field {
+) -> Result<Field, UnsupportedColumn> {
     let (data_type, extension_name) = match *typ {
         Type::BOOL => (DataType::Boolean, None),
         Type::INT2 => (DataType::Int16, None),
@@ -134,8 +141,20 @@ fn postgres_primitive_to_arrow_type(
             // Numeric type can contain invalid values, we will cast them to NULL
             // so make it nullable.
             nullable = true;
-            let (precision, scale) = numeric_precision_scale(modifier)
-                .unwrap_or((DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE));
+            let (precision, scale) = numeric_storage_precision_scale(modifier);
+            // Postgres also accepts numeric(p, s) with s > p or s < 0 (PG15+) and p > 38, which
+            // Decimal128 cannot represent.
+            if precision == 0
+                || precision > DECIMAL128_MAX_PRECISION
+                || scale < 0
+                || scale as u8 > precision
+            {
+                return Err(UnsupportedColumn {
+                    column: name.to_string(),
+                    oid: typ.oid(),
+                    type_name: format!("numeric({precision},{scale})"),
+                });
+            }
             (DataType::Decimal128(precision, scale), None)
         }
         Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::CHAR | Type::NAME => {
@@ -187,7 +206,7 @@ fn postgres_primitive_to_arrow_type(
         }
     }
 
-    field
+    Ok(field)
 }
 
 fn postgres_type_to_arrow_type(
@@ -196,9 +215,9 @@ fn postgres_type_to_arrow_type(
     name: &str,
     nullable: bool,
     field_id: &mut i32,
-) -> Result<Field, ReplicationClientError> {
+) -> Result<Field, UnsupportedColumn> {
     Ok(match typ.kind() {
-        Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id),
+        Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id)?,
         Kind::Array(inner) => {
             let item_type = postgres_type_to_arrow_type(
                 inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ true,
@@ -232,11 +251,11 @@ fn postgres_type_to_arrow_type(
         Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
         // Rejected when the mirror is created; never panic on one that slips through.
         _ => {
-            return Err(ReplicationClientError::UnsupportedType(
-                name.to_string(),
-                typ.oid(),
-                typ.name().to_string(),
-            ))
+            return Err(UnsupportedColumn {
+                column: name.to_string(),
+                oid: typ.oid(),
+                type_name: typ.name().to_string(),
+            })
         }
     })
 }
@@ -258,7 +277,14 @@ pub fn postgres_schema_to_moonlink_schema(
                 &mut field_id,
             )
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .map_err(|unsupported| {
+            ReplicationClientError::UnsupportedType(
+                format!("{} ({})", unsupported.column, unsupported.type_name),
+                unsupported.oid,
+                table_schema.table_name.to_string(),
+            )
+        })?;
 
     let identity = match &table_schema.lookup_key {
         LookupKey::Key { name: _, columns } => {
@@ -524,6 +550,35 @@ mod tests {
     }
 
     #[test]
+    fn numeric_typmods_decimal128_cannot_store_are_rejected() {
+        let typmod = |precision: i32, scale: i32| ((precision << 16) | (scale & 0x7ff)) + 4;
+        let schema_with = |modifier: i32| TableSchema {
+            table_name: TableName {
+                schema: "public".to_string(),
+                name: "nums".to_string(),
+            },
+            src_table_id: 1,
+            column_schemas: vec![ColumnSchema {
+                name: "v".to_string(),
+                typ: Type::NUMERIC,
+                modifier,
+                nullable: true,
+            }],
+            lookup_key: LookupKey::FullRow,
+        };
+        for (precision, scale) in [(3, 6), (3, -3), (50, 2)] {
+            let err = postgres_schema_to_moonlink_schema(&schema_with(typmod(precision, scale)))
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains(&format!("numeric({precision},{scale})")),
+                "{err}"
+            );
+        }
+        assert!(postgres_schema_to_moonlink_schema(&schema_with(typmod(38, 10))).is_ok());
+        assert!(postgres_schema_to_moonlink_schema(&schema_with(-1)).is_ok());
+    }
+
+    #[test]
     fn unsupported_column_type_is_an_error_not_a_panic() {
         let table_schema = TableSchema {
             table_name: TableName {
@@ -541,7 +596,7 @@ mod tests {
         };
         let err = postgres_schema_to_moonlink_schema(&table_schema).unwrap_err();
         assert!(
-            matches!(err, crate::pg_replicate::clients::postgres::ReplicationClientError::UnsupportedType(ref column, _, _) if column == "r"),
+            matches!(err, crate::pg_replicate::clients::postgres::ReplicationClientError::UnsupportedType(ref column, _, ref relation) if column == "r (int4range)" && relation == "public.ranges"),
             "{err:?}"
         );
     }
