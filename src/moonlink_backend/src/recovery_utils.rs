@@ -161,6 +161,11 @@ pub(crate) struct PendingRecovery {
     read_state_filepath_remap: ReadStateFilepathRemap,
 }
 
+/// How long a mirror may stay pending. Its database's slot is held meanwhile (the source keeps
+/// WAL), so a failure that never clears (a removed role, a host that no longer resolves) turns
+/// into an errored mirror instead of holding the slot forever.
+const PENDING_RECOVERY_LIMIT: Duration = Duration::from_secs(3600);
+
 /// Whether a recovery failure is about reaching the source rather than about the table: such
 /// a mirror is retried (its slot held meanwhile), never persisted as errored.
 fn is_transient(e: &crate::Error) -> bool {
@@ -213,6 +218,7 @@ pub(crate) fn retry_pending_recoveries(
     mut pending: Vec<PendingRecovery>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
         let mut backoff = Duration::from_secs(2);
         while !pending.is_empty() {
             tokio::time::sleep(backoff).await;
@@ -231,11 +237,30 @@ pub(crate) fn retry_pending_recoveries(
                 )
                 .await
                 .is_ok_and(|identified| identified.is_ok());
-                if !reachable {
+                let given_up = started.elapsed() >= PENDING_RECOVERY_LIMIT;
+                if !reachable && !given_up {
                     still_pending.push(retry);
                     continue;
                 }
                 let mut manager = manager.write().await;
+                if !reachable {
+                    let Some(failed) = manager.begin_retry(&retry.mooncake_table_id) else {
+                        continue;
+                    };
+                    let table = retry.mooncake_table_id.to_string();
+                    error!(%table, "mirror could not be restored for an hour; giving up, it is errored now and its slot no longer held");
+                    let message = moonlink::Error::errored_table_message(
+                        &table,
+                        "its source could not be reached for an hour after a restart",
+                    );
+                    manager
+                        .end_retry(
+                            retry.mooncake_table_id,
+                            Some((ErroredTable { message, ..failed }, false)),
+                        )
+                        .await;
+                    continue;
+                }
                 // Dropped by the user meanwhile.
                 let Some(failed) = manager.begin_retry(&retry.mooncake_table_id) else {
                     continue;
@@ -252,7 +277,7 @@ pub(crate) fn retry_pending_recoveries(
                         info!(%table, "mirror restored");
                         manager.end_retry(retry.mooncake_table_id, None).await;
                     }
-                    Err(e) if is_transient(&e) => {
+                    Err(e) if is_transient(&e) && started.elapsed() < PENDING_RECOVERY_LIMIT => {
                         warn!(error = ?e, %table, "mirror cannot be restored yet; retrying");
                         let message = format!(
                             "mirror {table} is not available yet: it could not be restored ({e}); moonlink keeps retrying"

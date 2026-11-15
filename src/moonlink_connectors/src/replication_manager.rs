@@ -304,7 +304,8 @@ impl ReplicationManager {
     }
 
     /// Whether `uri` names the source `key`: by its resolved identity, or, for a source not
-    /// reached yet, by the database and port it names.
+    /// reached yet, by the database it names alone (its port may be mapped, e.g. a container or
+    /// a pooler; holding a slot too many is the safe mistake).
     fn uri_matches_key(&self, uri: &str, key: &str) -> bool {
         if let Some(resolved) = self.uri_keys.get(uri) {
             return resolved == key;
@@ -317,15 +318,8 @@ impl ReplicationManager {
             .or_else(|| config.get_user())
             .unwrap_or_default()
             .to_string();
-        let port = config
-            .get_ports()
-            .first()
-            .copied()
-            .unwrap_or(5432)
-            .to_string();
-        let mut parts = key.splitn(3, '/');
-        let (_system_id, key_port, key_database) = (parts.next(), parts.next(), parts.next());
-        key_port == Some(port.as_str()) && key_database == Some(database.as_str())
+        let key_database = key.splitn(3, '/').nth(2);
+        key_database == Some(database.as_str())
     }
 
     /// Hold every slot until [`Self::set_hold_all_slots`] is called with false (during recovery,
