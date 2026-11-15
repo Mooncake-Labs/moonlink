@@ -150,6 +150,11 @@ impl IcebergGcContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn maintenance_reader_count(&self) -> usize {
+        self.maintenance_read_seqs.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_grace_without_reader_info(&self, grace: Duration) {
         *self.grace_without_reader_info.lock().unwrap() = grace;
     }

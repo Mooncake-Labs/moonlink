@@ -641,6 +641,9 @@ pub struct MooncakeTable {
 
     #[cfg(test)]
     pub(crate) flush_failure_injector: Arc<disk_slice::FlushFailureInjector>,
+    /// Test-only: compactions and index merges wait for a permit before they read their inputs.
+    #[cfg(test)]
+    pub(crate) maintenance_start_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Deletes a table's iceberg table and local files without the `MooncakeTable` itself; used when
@@ -916,6 +919,8 @@ impl MooncakeTable {
             full_disk_flush_wait: Arc::default(),
             #[cfg(test)]
             flush_failure_injector: Arc::default(),
+            #[cfg(test)]
+            maintenance_start_gate: None,
         };
         table.snapshot.try_write().unwrap().snapshot_seq = table.snapshot_seq.clone();
         if let Some(index_swap) = rebuilt_file_indices {
@@ -1897,10 +1902,16 @@ impl MooncakeTable {
             .as_ref()
             .map(|gc_context| gc_context.register_maintenance_reader());
 
+        #[cfg(test)]
+        let start_gate = self.maintenance_start_gate.clone();
         // Create a detached task, whose completion will be notified separately.
         let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
         spawn_supervised("index merge", supervisor_notify, async move {
             let _maintenance_reader = maintenance_reader;
+            #[cfg(test)]
+            if let Some(gate) = start_gate {
+                drop(gate.acquire().await);
+            }
             let result: Result<()> = async move {
                 let mut builder = GlobalIndexBuilder::new();
                 builder.set_directory(table_directory);
@@ -1993,6 +2004,8 @@ impl MooncakeTable {
         assert!(self.next_snapshot_task.compacting_data_files.is_empty());
         self.next_snapshot_task.compacting_data_files = compaction_payload.get_data_files();
 
+        #[cfg(test)]
+        let start_gate = self.maintenance_start_gate.clone();
         // Create a detached task, whose completion will be notified separately.
         let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
         spawn_supervised(
@@ -2000,6 +2013,10 @@ impl MooncakeTable {
             supervisor_notify,
             async move {
                 let _maintenance_reader = maintenance_reader;
+                #[cfg(test)]
+                if let Some(gate) = start_gate {
+                    drop(gate.acquire().await);
+                }
                 let builder = CompactionBuilder::new(compaction_payload, schema_ref, file_params);
                 let data_compaction_result = builder.build().await;
                 table_notify_tx_copy

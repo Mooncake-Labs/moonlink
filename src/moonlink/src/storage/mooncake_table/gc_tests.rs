@@ -455,3 +455,110 @@ async fn test_previous_version_loadable_after_restart() {
     drop(guard);
     assert_eq!(live_rows(&previous).await, 3);
 }
+
+fn deletion_vector_puffins(context: &TestContext) -> Vec<String> {
+    names_in(&table_dir(context).join("data"))
+        .into_iter()
+        .filter(|n| n.contains("deletion-vector"))
+        .collect()
+}
+
+/// A running compaction reads the deletion vectors of its input files. One that a later commit
+/// replaces (and the mooncake snapshot applies) stays until the compaction has read it.
+#[tokio::test]
+async fn test_deletion_vector_kept_while_a_compaction_reads_it() {
+    use crate::storage::snapshot_options::{
+        IcebergSnapshotOption, MaintenanceOption, SnapshotOption,
+    };
+    let context = TestContext::new("gc");
+    let (mut table, mut rx) = open_gc_table(&context).await;
+    for (rows, lsn) in [(1..=3, 10u64), (4..=6, 20)] {
+        for i in rows {
+            table.append(test_row(i, "r", i)).unwrap();
+        }
+        table.commit(lsn);
+        flush_table_and_sync(&mut table, &mut rx, lsn)
+            .await
+            .unwrap();
+        create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+    }
+    let delete_and_persist = async |table: &mut MooncakeTable, rx: &mut _, row: i32, lsn: u64| {
+        table.delete(test_row(row, "r", row), lsn - 5).await;
+        table.commit(lsn);
+        flush_table_and_sync(table, rx, lsn).await.unwrap();
+        // Commit the new deletion vector, then apply the commit.
+        create_mooncake_and_persist_for_test(table, rx).await;
+        create_mooncake_and_persist_for_test(table, rx).await;
+    };
+    delete_and_persist(&mut table, &mut rx, 1, 30).await;
+    let read_by_compaction = deletion_vector_puffins(&context);
+    assert_eq!(read_by_compaction.len(), 1);
+
+    // Plan a compaction of both files; it waits before reading its inputs.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    table.maintenance_start_gate = Some(gate.clone());
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        dump_snapshot: false,
+        iceberg_snapshot_option: IcebergSnapshotOption::Skip,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::ForceFull(uuid::Uuid::new_v4()),
+    }));
+    let (_, _, _, compaction, _) = sync_mooncake_snapshot(&mut table, &mut rx).await;
+    table.perform_data_compaction(compaction.take_payload().expect("compaction payload"));
+
+    // Replace the deletion vector the compaction is about to read, then commit again.
+    delete_and_persist(&mut table, &mut rx, 2, 40).await;
+    commit_row(&mut table, &mut rx, 100).await;
+    let present = deletion_vector_puffins(&context);
+    assert!(
+        present.contains(&read_by_compaction[0]),
+        "deletion vector deleted under a running compaction: {present:?}"
+    );
+
+    gate.add_permits(1);
+    let TableEvent::DataCompactionResult {
+        data_compaction_result,
+    } = rx.recv().await.unwrap()
+    else {
+        panic!("expected the compaction result");
+    };
+    data_compaction_result.expect("the compaction could not read its inputs");
+}
+
+/// An index merge reads the index blocks of its inputs and keeps them from collection meanwhile.
+#[tokio::test]
+async fn test_index_merge_keeps_its_inputs_while_running() {
+    use crate::storage::snapshot_options::{
+        IcebergSnapshotOption, MaintenanceOption, SnapshotOption,
+    };
+    let context = TestContext::new("gc");
+    let (mut table, mut rx) = open_gc_table(&context).await;
+    write_files(&mut table, &mut rx, 3).await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    table.maintenance_start_gate = Some(gate.clone());
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        dump_snapshot: false,
+        iceberg_snapshot_option: IcebergSnapshotOption::Skip,
+        index_merge_option: MaintenanceOption::ForceRegular(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::Skip,
+    }));
+    let (_, _, index_merge, _, _) = sync_mooncake_snapshot(&mut table, &mut rx).await;
+    let gc_context = table.gc_context.clone().unwrap();
+    assert_eq!(gc_context.maintenance_reader_count(), 0);
+    table.perform_index_merge(index_merge.take_payload().expect("index merge payload"));
+    assert_eq!(
+        gc_context.maintenance_reader_count(),
+        1,
+        "a running index merge does not hold back garbage collection"
+    );
+    gate.add_permits(1);
+    let TableEvent::IndexMergeResult { index_merge_result } = rx.recv().await.unwrap() else {
+        panic!("expected the index merge result");
+    };
+    index_merge_result.unwrap();
+    assert_eq!(gc_context.maintenance_reader_count(), 0);
+}
