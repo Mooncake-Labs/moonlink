@@ -110,8 +110,7 @@ impl SnapshotTableState {
             // Every file must be small enough, or deleted enough, to be worth rewriting.
             let all_files_eligible = group.files.iter().all(|f| {
                 f.file_size < data_compaction_file_size_threshold
-                    || (data_file_deletion_percentage_threshold != 0
-                        && f.deletion_percentage >= data_file_deletion_percentage_threshold)
+                    || f.is_deletion_heavy(data_file_deletion_percentage_threshold)
             });
             if all_files_eligible {
                 if group.files.len() > max_data_compaction_file_num_threshold {
@@ -143,6 +142,7 @@ impl SnapshotTableState {
                 eligible_groups,
                 min_data_compaction_file_num_threshold,
                 max_data_compaction_file_num_threshold,
+                data_file_deletion_percentage_threshold,
             )
         } else {
             choose_compaction_groups(
@@ -539,6 +539,20 @@ pub(crate) struct CompactionGroupFile {
     pub(crate) deletion_percentage: usize,
 }
 
+impl CompactionGroupFile {
+    /// Whether enough of the file's rows are deleted that rewriting it reclaims space; a threshold
+    /// of 0 disables deletion-triggered compaction.
+    fn is_deletion_heavy(&self, deletion_percentage_threshold: usize) -> bool {
+        deletion_percentage_threshold != 0
+            && self.deletion_percentage >= deletion_percentage_threshold
+    }
+
+    /// Bytes of the file's rows that are not deleted.
+    fn live_bytes(&self) -> u64 {
+        (self.file_size * (100 - self.deletion_percentage.min(100)) / 100) as u64
+    }
+}
+
 /// Data files connected through shared file indices; compaction takes a group as a whole.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompactionGroup {
@@ -547,24 +561,46 @@ pub(crate) struct CompactionGroup {
 }
 
 /// Like [`choose_compaction_groups`], restricted to groups of similar live size.
+///
+/// Groups with a deletion-heavy file (see `deletion_percentage_threshold`) are taken regardless of
+/// size, because rewriting them reclaims the deleted rows; a large, mostly deleted file would
+/// otherwise wait until enough files of its live size accumulate. Like the unrestricted choice,
+/// they are only compacted together with at least `min_files` files in total, topped up with the
+/// smallest other groups.
 pub(crate) fn choose_similar_sized_compaction_groups(
     eligible: Vec<CompactionGroup>,
     min_files: usize,
     max_files: usize,
+    deletion_percentage_threshold: usize,
 ) -> Vec<CompactionGroup> {
-    let candidates = eligible
+    let (deletion_heavy, others): (Vec<_>, Vec<_>) = eligible.into_iter().partition(|group| {
+        group
+            .files
+            .iter()
+            .any(|f| f.is_deletion_heavy(deletion_percentage_threshold))
+    });
+    let mut candidates = others
         .into_iter()
         .map(|group| SizedCandidate {
             bytes: group
                 .files
                 .iter()
-                .map(|f| (f.file_size * (100 - f.deletion_percentage.min(100)) / 100) as u64)
+                .map(CompactionGroupFile::live_bytes)
                 .sum(),
             weight: group.files.len(),
             item: group,
         })
-        .collect();
-    pick_similar_sized(candidates, min_files, max_files)
+        .collect::<Vec<_>>();
+    if deletion_heavy.is_empty() {
+        return pick_similar_sized(candidates, min_files, max_files);
+    }
+    candidates.sort_by_key(|c| c.bytes);
+    let smallest_first = candidates.into_iter().map(|c| c.item);
+    choose_compaction_groups(
+        deletion_heavy.into_iter().chain(smallest_first).collect(),
+        min_files,
+        max_files,
+    )
 }
 
 /// Pick whole groups to compact, up to `max_files` data files in total. Returns an empty list if
