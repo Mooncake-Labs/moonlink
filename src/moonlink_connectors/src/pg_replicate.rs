@@ -88,6 +88,111 @@ pub struct PostgresConnection {
     pub retry_handles: Vec<JoinHandle<Result<()>>>,
 }
 
+/// Identifies the database a connection string points at, independent of how it is spelled
+/// (user, host alias, options). One replication slot and publication exist per database, so every
+/// connection string for the same database must share one replication connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceIdentity {
+    pub system_id: String,
+    pub database: String,
+}
+
+impl SourceIdentity {
+    pub async fn identify(uri: &str) -> Result<Self> {
+        let (client, connection) = ReplicationClient::connect(uri, true)
+            .await
+            .map_err(PostgresSourceError::from)?;
+        let connection_task = tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                debug!("identify connection closed: {}", e);
+            }
+        });
+        let identified = client
+            .identify_system()
+            .await
+            .map_err(PostgresSourceError::from);
+        drop(client);
+        connection_task.abort();
+        let (system_id, database) = identified?;
+        Ok(Self {
+            system_id,
+            database,
+        })
+    }
+
+    /// Key used to share one replication connection per source database.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.system_id, self.database)
+    }
+}
+
+/// Postgres only accepts `[a-z0-9_]` in slot names, up to 63 bytes.
+fn is_valid_slot_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// FNV-1a; slot names must stay stable across releases, which std hashers do not promise.
+fn stable_hash32(input: &str) -> u32 {
+    input.bytes().fold(0x811c9dc5u32, |hash, b| {
+        (hash ^ b as u32).wrapping_mul(0x01000193)
+    })
+}
+
+/// Slot name for a database: `moonlink_slot_<db>` when that is a valid slot name, otherwise a
+/// sanitized prefix of it plus a hash of the database name.
+pub fn slot_name_for_database(database: &str) -> String {
+    let legacy = format!("moonlink_slot_{database}");
+    if is_valid_slot_name(&legacy) {
+        return legacy;
+    }
+    let sanitized: String = legacy
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(63 - 9)
+        .collect();
+    format!("{sanitized}_{:08x}", stable_hash32(database))
+}
+
+/// Keep the slot name earlier releases derived from the connection string when such a slot
+/// already exists for this database, so upgrades keep replaying from it.
+async fn choose_slot_name(client: &Client, uri: &str, database: &str) -> Result<String> {
+    let canonical = slot_name_for_database(database);
+    let legacy = match uri
+        .parse::<Config>()
+        .ok()
+        .and_then(|c| c.get_dbname().map(str::to_string))
+    {
+        Some(db) => format!("moonlink_slot_{db}"),
+        None => "moonlink_slot".to_string(),
+    };
+    if legacy == canonical || !is_valid_slot_name(&legacy) {
+        return Ok(canonical);
+    }
+    let query = format!(
+        "SELECT 1 FROM pg_replication_slots WHERE slot_name = {} AND database = {};",
+        quote_literal(&legacy),
+        quote_literal(database)
+    );
+    let legacy_exists = client
+        .simple_query(&query)
+        .await
+        .map_err(PostgresSourceError::from)?
+        .iter()
+        .any(|m| matches!(m, SimpleQueryMessage::Row(_)));
+    Ok(if legacy_exists { legacy } else { canonical })
+}
+
 /// Create `moonlink_pub` unless it already exists. It must never be dropped and re-created while
 /// tables are mirrored: pgoutput filters changes by publication membership as of each change's LSN,
 /// so anything committed between a re-create and the table being added back would never be sent.
@@ -136,16 +241,8 @@ impl PostgresConnection {
             .await?;
         ensure_publication_exists(&postgres_client).await?;
 
-        let db_name = uri
-            .parse::<Config>()
-            .ok()
-            .and_then(|c| c.get_dbname().map(|s| s.to_string()))
-            .unwrap_or_else(|| "".to_string());
-        let slot_name = if db_name.is_empty() {
-            "moonlink_slot".to_string()
-        } else {
-            format!("moonlink_slot_{db_name}")
-        };
+        let identity = SourceIdentity::identify(&uri).await?;
+        let slot_name = choose_slot_name(&postgres_client, &uri, &identity.database).await?;
 
         // Preemptively terminate any stale backend holding this slot
         let terminate_query = format!(
@@ -871,6 +968,42 @@ pub async fn run_event_loop(
 
     debug!("replication event loop stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod slot_name_tests {
+    use super::slot_name_for_database;
+
+    #[test]
+    fn valid_database_names_keep_the_legacy_slot_name() {
+        assert_eq!(slot_name_for_database("postgres"), "moonlink_slot_postgres");
+        assert_eq!(slot_name_for_database("app_db2"), "moonlink_slot_app_db2");
+    }
+
+    #[test]
+    fn invalid_database_names_get_a_stable_valid_slot_name() {
+        let names = ["my-app", "MyApp", "caf\u{e9}", &"x".repeat(80)];
+        let slots: Vec<String> = names.iter().map(|n| slot_name_for_database(n)).collect();
+        for slot in &slots {
+            assert!(slot.len() <= 63, "{slot}");
+            assert!(
+                slot.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{slot}"
+            );
+        }
+        // Distinct databases that sanitize to the same prefix still get distinct slots.
+        assert_ne!(
+            slot_name_for_database("my-app"),
+            slot_name_for_database("my_app")
+        );
+        assert_ne!(slots[0], slots[1]);
+        // Stable across calls and releases.
+        assert_eq!(
+            slot_name_for_database("my-app"),
+            "moonlink_slot_my_app_ef484009"
+        );
+    }
 }
 
 #[cfg(test)]

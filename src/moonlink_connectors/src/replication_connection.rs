@@ -57,6 +57,11 @@ impl ReplicationConnection {
         })
     }
 
+    /// Connection string the replication connection was opened with.
+    pub fn uri(&self) -> &str {
+        &self.source.uri
+    }
+
     /// Check if replication has started.
     pub fn replication_started(&self) -> bool {
         self.replication_started

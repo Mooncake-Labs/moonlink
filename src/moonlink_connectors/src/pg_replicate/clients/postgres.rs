@@ -95,6 +95,28 @@ impl ReplicationClient {
         ))
     }
 
+    /// Run IDENTIFY_SYSTEM; only valid on a connection opened in replication mode.
+    /// Returns (system identifier, database name).
+    pub async fn identify_system(&self) -> Result<(String, String), ReplicationClientError> {
+        for message in self.postgres_client.simple_query("IDENTIFY_SYSTEM").await? {
+            if let SimpleQueryMessage::Row(row) = message {
+                let column = |name: &str| {
+                    row.get(name).map(str::to_string).ok_or_else(|| {
+                        ReplicationClientError::MissingColumn(
+                            name.to_string(),
+                            "identify_system".to_string(),
+                        )
+                    })
+                };
+                return Ok((column("systemid")?, column("dbname")?));
+            }
+        }
+        Err(ReplicationClientError::MissingColumn(
+            "systemid".to_string(),
+            "identify_system".to_string(),
+        ))
+    }
+
     /// Create a ReplicationClient from an existing PostgresClient
     pub fn from_client(postgres_client: PostgresClient) -> Self {
         ReplicationClient {

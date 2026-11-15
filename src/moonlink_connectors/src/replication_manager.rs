@@ -1,4 +1,5 @@
 use crate::pg_replicate::table::SrcTableId;
+use crate::pg_replicate::SourceIdentity;
 use crate::ReplicationConnection;
 use crate::{Error, Result};
 use moonlink::{
@@ -8,18 +9,24 @@ use moonlink::{ReadStateFilepathRemap, TableStatusReader};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, info};
 
-/// Manage replication sources keyed by their connection URI.
+/// Manage replication sources, one per source database.
+///
+/// Connections are keyed by [`SourceIdentity::key`], not by the connection string: each database
+/// has a single replication slot and publication, so two spellings of the same database (another
+/// user, host alias, options) must share one connection instead of taking the slot over from it.
 ///
 /// This struct abstracts the lifecycle of `MoonlinkPostgresSource` and
 /// provides a single entry point to add new tables to a running
 /// replication. A new replication will automatically be started when a
 /// table is added for a URI that is not currently being replicated.
 pub struct ReplicationManager {
-    /// Maps from uri to replication connection.
+    /// Maps from source key to replication connection.
     connections: HashMap<String, ReplicationConnection>,
-    /// Maps from mooncake table id to (uri, source table id).
+    /// Maps every connection string seen so far to its source key.
+    uri_keys: HashMap<String, String>,
+    /// Maps from mooncake table id to (source key, source table id).
     table_info: HashMap<MooncakeTableId, (String, SrcTableId)>,
     /// Base directory for mooncake tables.
     table_base_path: String,
@@ -33,6 +40,7 @@ impl ReplicationManager {
     pub fn new(table_base_path: String, object_storage_cache: ObjectStorageCache) -> Self {
         Self {
             connections: HashMap::new(),
+            uri_keys: HashMap::new(),
             table_info: HashMap::new(),
             table_base_path,
             object_storage_cache,
@@ -40,12 +48,31 @@ impl ReplicationManager {
         }
     }
 
+    /// Resolve a connection string to its source key, contacting the source the first time.
+    async fn source_key(&mut self, src_uri: &str) -> Result<String> {
+        if let Some(key) = self.uri_keys.get(src_uri) {
+            return Ok(key.clone());
+        }
+        let key = SourceIdentity::identify(src_uri).await?.key();
+        self.uri_keys.insert(src_uri.to_string(), key.clone());
+        Ok(key)
+    }
+
     pub async fn get_or_create_connection(
         &mut self,
         src_uri: &str,
     ) -> Result<&mut ReplicationConnection> {
-        let replication_connection = match self.connections.entry(src_uri.to_string()) {
-            Entry::Occupied(entry) => entry.into_mut(),
+        let key = self.source_key(src_uri).await?;
+        let replication_connection = match self.connections.entry(key) {
+            Entry::Occupied(entry) => {
+                if entry.get().uri() != src_uri {
+                    info!(
+                        "reusing the replication connection already open for this database; \
+                         its connection string is used for the new table too"
+                    );
+                }
+                entry.into_mut()
+            }
             Entry::Vacant(entry) => {
                 debug!(%src_uri, "creating replication connection");
 
@@ -89,6 +116,7 @@ impl ReplicationManager {
             return Err(Error::repl_duplicate_table(mooncake_table_id.to_string()));
         }
 
+        let key = self.source_key(src_uri).await?;
         let replication_connection = self.get_or_create_connection(src_uri).await?;
         if !replication_connection.replication_started() {
             replication_connection.start_replication().await?;
@@ -106,10 +134,7 @@ impl ReplicationManager {
 
         assert!(self
             .table_info
-            .insert(
-                mooncake_table_id.clone(),
-                (src_uri.to_string(), src_table_id)
-            )
+            .insert(mooncake_table_id.clone(), (key, src_table_id))
             .is_none());
 
         debug!(src_table_id, "table added through manager");
@@ -118,9 +143,10 @@ impl ReplicationManager {
     }
 
     pub async fn start_replication(&mut self, src_uri: &str) -> Result<()> {
-        assert!(self.connections.contains_key(src_uri));
-
-        let connection = self.connections.get_mut(src_uri).unwrap();
+        let key = self.source_key(src_uri).await?;
+        let Some(connection) = self.connections.get_mut(&key) else {
+            return Err(Error::table_not_found(src_uri.to_string()));
+        };
         if !connection.replication_started() {
             connection.start_replication().await?;
         }
@@ -145,7 +171,7 @@ impl ReplicationManager {
                 // Clear manager mapping after successful drop
                 self.table_info.remove(mooncake_table_id);
                 if repl_conn.table_count() == 0 {
-                    self.shutdown_connection(&table_uri, true);
+                    self.shutdown_connection_by_key(&table_uri, true);
                 }
 
                 debug!(src_table_id, "table dropped through manager");
@@ -209,13 +235,20 @@ impl ReplicationManager {
     /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
     /// which allows for recovery from the PostgreSQL replication slot.
     pub fn shutdown_connection(&mut self, uri: &str, postgres_drop_all: bool) {
+        if let Some(key) = self.uri_keys.get(uri).cloned() {
+            self.shutdown_connection_by_key(&key, postgres_drop_all);
+        }
+    }
+
+    fn shutdown_connection_by_key(&mut self, key: &str, postgres_drop_all: bool) {
         // Clean up completed shutdown handles first
         self.cleanup_completed_shutdowns();
 
-        if let Some(conn) = self.connections.remove(uri) {
+        if let Some(conn) = self.connections.remove(key) {
             let shutdown_handle = conn.shutdown(postgres_drop_all);
             self.shutdown_handles.push(shutdown_handle);
-            self.table_info.retain(|_, (u, _)| u != uri);
+            self.table_info.retain(|_, (k, _)| k != key);
+            self.uri_keys.retain(|_, k| k != key);
         }
     }
 
