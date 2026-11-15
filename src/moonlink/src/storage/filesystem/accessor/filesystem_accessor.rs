@@ -87,6 +87,31 @@ impl FileSystemAccessor {
             .await
     }
 
+    /// On the local filesystem, make the rename that completed an atomic write durable: without
+    /// a directory fsync, a power loss can undo it (e.g. roll back the version hint while the
+    /// replication slot was already acknowledged past it).
+    // Irrefutable when the local filesystem is the only storage backend compiled in.
+    #[allow(irrefutable_let_patterns)]
+    async fn sync_parent_directory(&self, object: &str) -> Result<()> {
+        #[cfg(feature = "storage-fs")]
+        if let crate::storage::filesystem::storage_config::StorageConfig::FileSystem {
+            root_directory,
+            ..
+        } = &self.config.storage_config
+        {
+            let relative = self.sanitize_path(object).trim_start_matches('/');
+            let path = std::path::Path::new(root_directory).join(relative);
+            if let Some(parent) = path.parent() {
+                let parent = parent.to_path_buf();
+                tokio::task::spawn_blocking(move || std::fs::File::open(&parent)?.sync_all())
+                    .await??;
+            }
+        }
+        #[cfg(not(feature = "storage-fs"))]
+        let _ = object;
+        Ok(())
+    }
+
     /// Util function to get local file size.
     async fn get_local_file_size(path: &str) -> Result<u64> {
         let file = tokio::fs::File::open(path).await?;
@@ -327,6 +352,7 @@ impl BaseFileSystemAccess for FileSystemAccessor {
             }
         };
         assert_eq!(metadata.content_length(), expected_len as u64);
+        self.sync_parent_directory(object).await?;
         Ok(metadata)
     }
 
