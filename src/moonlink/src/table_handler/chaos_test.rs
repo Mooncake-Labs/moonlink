@@ -54,6 +54,7 @@ struct ChaosTestArgs {
 /// Combine argument parsing logic into one function using pico-args.
 /// Since cargo test filters unknown flags, we use a different approach:
 /// - Try to parse from command line args first (for direct binary execution)
+/// - Then the `MOONLINK_CHAOS_SEED` environment variable (works through `cargo test`)
 /// - Fall back to timestamp-based seed
 /// - For print events, we'll use a simple flag that might work
 fn parse_chaos_test_args() -> ChaosTestArgs {
@@ -63,6 +64,14 @@ fn parse_chaos_test_args() -> ChaosTestArgs {
     let seed: Option<u64> = pargs.opt_value_from_str("--seed").unwrap_or(None);
     let print_events_on_success = pargs.contains("--print-events-on-success");
 
+    let seed = seed.or_else(|| {
+        std::env::var("MOONLINK_CHAOS_SEED").ok().map(|value| {
+            value
+                .trim()
+                .parse()
+                .expect("MOONLINK_CHAOS_SEED must be a u64")
+        })
+    });
     // Default seed if not provided
     let seed = seed.unwrap_or_else(|| {
         SystemTime::now()
@@ -1019,10 +1028,17 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
             test_env_config.special_table_option == SpecialTableOption::AppendOnly,
             test_env_config.special_table_option == SpecialTableOption::UpsertDeleteIfExists,
         );
-        println!(
-            "Test {} is with random seed {}",
-            test_env_config.test_name, state.random_seed
-        );
+        // Written to the stderr handle, which the test harness does not capture, so the seed is
+        // visible even if the test hangs (rerun with MOONLINK_CHAOS_SEED=<seed>).
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "Test {} is with random seed {}",
+                test_env_config.test_name,
+                state.random_seed
+            );
+        }
 
         // Attempt read on empty table.
         check_read_snapshot(
