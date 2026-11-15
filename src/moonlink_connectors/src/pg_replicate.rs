@@ -451,8 +451,8 @@ impl PostgresConnection {
     /// Refuse regular tables with inheritance children: the copy would include the children's rows
     /// (like SELECT from the parent does), but their changes are never published with the parent's,
     /// so the mirror would silently diverge. (Partitions are published through their root.)
-    /// Checked at creation and at every recovery; a child added while running is only detected at
-    /// the next start.
+    /// Checked at creation and at every recovery; a child added while running is caught by the
+    /// source comparison (see source_fingerprint).
     async fn check_not_inheritance_parent(&mut self, table_name: &str) -> Result<()> {
         let query = format!(
             "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \

@@ -1329,7 +1329,7 @@ async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[
 
 /// Inheritance parents cannot be mirrored faithfully (children's changes are not replicated with
 /// the parent): creating such a mirror is refused, and a mirror whose table gained a child is
-/// errored at the next start rather than silently diverging.
+/// errored, at the next start or within seconds while running, rather than silently diverging.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn inheritance_parent_is_refused() {
@@ -1366,6 +1366,45 @@ async fn inheritance_parent_is_refused() {
         .await
         .expect("must be errored after a child appeared");
     assert!(err.contains("inheritance children"), "{err}");
+
+    // While running: the source is compared again within seconds.
+    client
+        .simple_query(
+            "DROP TABLE rv_later_parent CASCADE; CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);",
+        )
+        .await
+        .unwrap();
+    backend
+        .drop_table(DB.to_string(), "rv_later_parent_mc".to_string())
+        .await
+        .unwrap();
+    let backend = Arc::new(backend);
+    try_mirror(
+        &backend,
+        &tmp,
+        "rv_later_parent_mc",
+        "public.rv_later_parent",
+        &uri,
+    )
+    .await
+    .unwrap();
+    client
+        .simple_query(
+            "CREATE TABLE rv_later_child () INHERITS (rv_later_parent); INSERT INTO rv_later_child VALUES (7);",
+        )
+        .await
+        .unwrap();
+    let mut err = None;
+    for _ in 0..20 {
+        let lsn = current_wal_lsn(&client).await;
+        err = snapshot_error(&backend, "rv_later_parent_mc", lsn).await;
+        if err.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let err = err.expect("must be errored once a child appears while running");
+    assert!(err.contains("gained inheritance children"), "{err}");
     client
         .simple_query("DROP TABLE rv_parent, rv_later_parent CASCADE;")
         .await

@@ -10,7 +10,8 @@
 //! it is first seen (created ahead of use): it is adopted, and its replica identity set. A
 //! partition that already holds rows, or any partition that leaves the table (detached or
 //! dropped), errors the mirror: whether those rows were ever replicated cannot be told from the
-//! catalog. So does an unlogged or foreign partition, whose changes are never decoded.
+//! catalog. So does an unlogged or foreign partition, whose changes are never decoded, and an
+//! inheritance child of a regular table.
 
 use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
@@ -146,6 +147,23 @@ pub async fn fetch(
     }))
 }
 
+/// Whether a regular table has inheritance children (partitions of a partitioned table are
+/// published through it and do not count).
+async fn has_inheritance_children(
+    client: &Client,
+    relid: SrcTableId,
+) -> Result<bool, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \
+                 WHERE i.inhparent = {relid} AND c.relkind = 'r' LIMIT 1;"
+            ))
+            .await?,
+    );
+    Ok(!found.is_empty())
+}
+
 /// A partition whose changes logical decoding never sees (unlogged, or a foreign table), as a
 /// user-facing description; None if every partition is a regular permanent table. Partitioned
 /// members have no storage (their rows are in their leaves, checked themselves), so their own
@@ -220,6 +238,13 @@ pub async fn drift(
             "{}; schema changes are not supported",
             describe_column_change(&expected.columns, &current.columns)
         )));
+    }
+    if has_inheritance_children(client, expected.relid).await? {
+        return Ok(Drift::Changed(
+            "it gained inheritance children, whose changes are not replicated with it (and \
+             which a query of the table includes)"
+                .to_string(),
+        ));
     }
     if let Some(partition) = unreplicated_partition(client, expected.relid).await? {
         return Ok(Drift::Changed(format!(
