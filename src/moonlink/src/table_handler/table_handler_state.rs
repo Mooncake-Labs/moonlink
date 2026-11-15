@@ -13,6 +13,7 @@ use tracing::{debug, error, info};
 
 /// Consecutive failed iceberg persistence attempts after which the table is errored.
 pub(crate) const MAX_CONSECUTIVE_PERSISTENCE_FAILURES: u32 = 10;
+pub(crate) const MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES: u32 = 5;
 #[cfg(not(test))]
 const PERSISTENCE_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(test)]
@@ -157,6 +158,9 @@ pub(crate) struct TableHandlerState {
     //
     /// Consecutive failed iceberg persistence attempts.
     pub(crate) consecutive_persistence_failures: u32,
+    /// Consecutive failed compactions / index merges; background maintenance stops at
+    /// [`MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES`] (explicit optimize requests still run).
+    pub(crate) consecutive_maintenance_failures: u32,
     /// Consecutive persistence failures caused by a full disk (not counted above).
     pub(crate) consecutive_full_disk_persistence_failures: u32,
     /// Do not start another iceberg persistence before this instant.
@@ -203,6 +207,7 @@ impl TableHandlerState {
             initial_copy_loaded_files: false,
             table_status_tx: None,
             consecutive_persistence_failures: 0,
+            consecutive_maintenance_failures: 0,
             consecutive_full_disk_persistence_failures: 0,
             persistence_retry_after: None,
             persistence_retry_pending: false,
@@ -686,6 +691,14 @@ impl TableHandlerState {
             return MaintenanceOption::Skip;
         }
         match request_status {
+            // A maintenance that keeps failing (e.g. on an unreadable file) would otherwise be
+            // retried, rewriting and deleting its partial output, on every snapshot.
+            MaintenanceRequestStatus::Unrequested
+                if self.consecutive_maintenance_failures
+                    >= MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES =>
+            {
+                MaintenanceOption::Skip
+            }
             MaintenanceRequestStatus::Unrequested => {
                 MaintenanceOption::BestEffort(uuid::Uuid::new_v4())
             }
@@ -725,9 +738,11 @@ impl TableHandlerState {
         match index_merge_result {
             Ok(_) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+                self.consecutive_maintenance_failures = 0;
             }
             Err(err) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
+                self.consecutive_maintenance_failures += 1;
                 // Background maintenance has no waiter; ignore the missing receiver.
                 let _ = self.table_maintenance_completion_tx.send(Err(err.clone()));
             }
@@ -743,9 +758,11 @@ impl TableHandlerState {
         match &data_compaction_result {
             Ok(_) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+                self.consecutive_maintenance_failures = 0;
             }
             Err(err) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
+                self.consecutive_maintenance_failures += 1;
                 // Background maintenance has no waiter; ignore the missing receiver.
                 let _ = self.table_maintenance_completion_tx.send(Err(err.clone()));
             }

@@ -115,3 +115,50 @@ async fn test_compaction_failure_then_retry_succeeds() {
     env.set_readable_lsn(30);
     env.verify_snapshot(30, &[1, 2, 3]).await;
 }
+
+/// Background maintenance that keeps failing stops after a few attempts instead of retrying on
+/// every snapshot; explicit requests still run, and a success re-enables it.
+#[tokio::test]
+async fn test_repeated_maintenance_failures_stop_background_maintenance() {
+    use crate::storage::snapshot_options::MaintenanceOption;
+    use crate::table_handler::table_handler_state::{
+        MaintenanceProcessStatus, MaintenanceRequestStatus, TableHandlerState,
+        MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES,
+    };
+    let (sender, _receiver) = crate::event_sync::create_table_event_syncer();
+    let mut state = TableHandlerState::new(
+        sender.table_maintenance_completion_tx.clone(),
+        sender.force_snapshot_completion_tx.clone(),
+        None,
+        None,
+    );
+    let failed: crate::Result<crate::storage::mooncake_table::DataCompactionResult> = Err(
+        crate::Error::from(std::io::Error::other("unreadable input")),
+    );
+    for _ in 0..MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES {
+        assert!(matches!(
+            state.get_maintenance_task_option(&MaintenanceRequestStatus::Unrequested),
+            MaintenanceOption::BestEffort(_)
+        ));
+        state.table_maintenance_process_status = MaintenanceProcessStatus::InProcess;
+        state.mark_data_compaction_completed(&failed).await;
+    }
+    assert!(matches!(
+        state.get_maintenance_task_option(&MaintenanceRequestStatus::Unrequested),
+        MaintenanceOption::Skip
+    ));
+    assert!(matches!(
+        state.get_maintenance_task_option(&MaintenanceRequestStatus::ForceRegular),
+        MaintenanceOption::ForceRegular(_)
+    ));
+
+    state.table_maintenance_process_status = MaintenanceProcessStatus::InProcess;
+    state
+        .mark_data_compaction_completed(&Ok(Default::default()))
+        .await;
+    state.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
+    assert!(matches!(
+        state.get_maintenance_task_option(&MaintenanceRequestStatus::Unrequested),
+        MaintenanceOption::BestEffort(_)
+    ));
+}

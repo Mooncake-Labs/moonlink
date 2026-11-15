@@ -842,6 +842,10 @@ impl TableHandler {
                             }
                             Err(err) => {
                                 error!(error = ?err, "failed to perform index merge");
+                                Self::log_if_background_maintenance_stopped(
+                                    &table_handler_state,
+                                    &table,
+                                );
                                 table.on_index_merge_failed();
                             }
                         }
@@ -860,6 +864,10 @@ impl TableHandler {
                             Err(err) => {
                                 // TODO(hjiang): Need to record failed compaction result back to snapshot, so committed deletion logs could be pruned.
                                 error!(error = ?err, "failed to perform compaction");
+                                Self::log_if_background_maintenance_stopped(
+                                    &table_handler_state,
+                                    &table,
+                                );
                                 table.on_data_compaction_failed();
                             }
                         }
@@ -1086,6 +1094,21 @@ impl TableHandler {
             tokio::time::sleep(wait).await;
             let _ = sender.send(TableEvent::ErroredDropTimeout).await;
         });
+    }
+
+    fn log_if_background_maintenance_stopped(
+        table_handler_state: &TableHandlerState,
+        table: &MooncakeTable,
+    ) {
+        if table_handler_state.consecutive_maintenance_failures
+            == table_handler_state::MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES
+        {
+            error!(
+                table = table.mooncake_table_id(),
+                failures = table_handler_state.consecutive_maintenance_failures,
+                "background compaction and index merge stopped after repeated failures; explicit optimize requests still run them"
+            );
+        }
     }
 
     /// Best-effort deletion of evicted cache files in a detached task.
