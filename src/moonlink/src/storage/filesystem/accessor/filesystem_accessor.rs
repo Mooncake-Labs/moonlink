@@ -435,7 +435,10 @@ impl BaseFileSystemAccess for FileSystemAccessor {
                 if n == 0 {
                     break;
                 }
-                tx.send(buffer[..n].to_vec()).await.unwrap();
+                // The writer stopped after an error, which is reported below.
+                if tx.send(buffer[..n].to_vec()).await.is_err() {
+                    break;
+                }
             }
             Ok::<(), std::io::Error>(())
         });
@@ -445,12 +448,23 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let mut writer = operator
             .writer_options(sanitized_dst, self.get_write_option())
             .await?;
-        while let Some(cur_chunk) = rx.recv().await {
-            let cur_byte_len = cur_chunk.len();
-            writer.write(cur_chunk).await?;
-            total_size += cur_byte_len as u64;
+        let written: std::result::Result<(), opendal::Error> = async {
+            while let Some(cur_chunk) = rx.recv().await {
+                let cur_byte_len = cur_chunk.len();
+                writer.write(cur_chunk).await?;
+                total_size += cur_byte_len as u64;
+            }
+            writer.close().await?;
+            Ok(())
         }
-        writer.close().await?;
+        .await;
+        if let Err(e) = written {
+            // As in write_object: drop the partial temp file of the atomic write.
+            let _ = writer.abort().await;
+            drop(rx);
+            let _ = reader_task_handle.await;
+            return Err(e.into());
+        }
 
         // Wait for reader task to finish.
         reader_task_handle.await??;
@@ -608,6 +622,46 @@ mod tests {
             std::fs::read(temp_dir.path().join("t").join("v2.metadata.json")).unwrap(),
             b"ok"
         );
+    }
+
+    /// Same for a file above the block size, which is copied through a streaming writer.
+    #[tokio::test]
+    async fn test_failed_large_copy_leaves_no_temp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor =
+            create_filesystem_accessor(AccessorConfig::new_with_storage_config(storage_config));
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("large.parquet");
+        std::fs::write(&source, vec![7u8; IO_BLOCK_SIZE * 2 + 1]).unwrap();
+        let target = temp_dir.path().join("t").join("data").join("large.parquet");
+        std::fs::create_dir_all(target.join("occupied")).unwrap();
+
+        let res = accessor
+            .copy_from_local_to_remote(source.to_str().unwrap(), "t/data/large.parquet")
+            .await;
+        assert!(res.is_err());
+        assert!(target.is_dir(), "target replaced by a partial file");
+        let leftovers = atomic_tmp_files(temp_dir.path());
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+
+        accessor
+            .copy_from_local_to_remote(source.to_str().unwrap(), "t/data/other.parquet")
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(temp_dir.path().join("t").join("data").join("other.parquet"))
+                .unwrap()
+                .len(),
+            (IO_BLOCK_SIZE * 2 + 1) as u64
+        );
+        assert!(atomic_tmp_files(temp_dir.path()).is_empty());
     }
 
     /// Temp files a crash left behind are deleted before this process first writes there.
