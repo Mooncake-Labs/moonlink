@@ -421,9 +421,6 @@ impl TableHandler {
                             }
                         }
                         table_handler_state.finish_initial_copy(start_lsn);
-
-                        // Drop any events that have LSN less than the start LSN during apply.
-                        table_handler_state.initial_persistence_lsn = Some(start_lsn);
                         // Apply the buffered events.
                         Self::process_blocked_events(&mut table, &mut table_handler_state).await;
                     }
@@ -1038,26 +1035,8 @@ impl TableHandler {
             return;
         }
 
-        // A streamed transaction is never discarded above (its rows arrive before its LSN); one
-        // committed at or below the persisted/copy boundary is aborted when its commit is
-        // processed, so it must not move the LSNs either.
-        let streamed_below_boundary = match &event {
-            TableEvent::Commit {
-                lsn,
-                xact_id: Some(_),
-            }
-            | TableEvent::CommitFlush {
-                lsn,
-                xact_id: Some(_),
-            } => table_handler_state
-                .initial_persistence_lsn
-                .is_some_and(|boundary| *lsn <= boundary),
-            _ => false,
-        };
         // Don't update the lsn if the event is not processed yet.
-        if !streamed_below_boundary {
-            table_handler_state.update_table_lsns(&event);
-        }
+        table_handler_state.update_table_lsns(&event);
 
         match event {
             TableEvent::Append { row, xact_id, .. } => {

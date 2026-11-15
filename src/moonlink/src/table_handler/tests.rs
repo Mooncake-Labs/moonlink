@@ -1833,11 +1833,13 @@ async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
 
 /// Testing scenario: a streamed transaction committed at or below the table's replay floor is
 /// skipped, whichever floor applies: the recovered snapshot LSN of a restarted table, or the copy
-/// boundary of a freshly copied (here empty) one. A later streamed transaction is applied.
+/// boundary of a freshly copied (here empty) one. The skipped commit does not move the table's LSNs:
+/// a snapshot forced at the floor completes at once (it would wait forever for a commit LSN no
+/// snapshot reaches). A later streamed transaction is applied.
 #[tokio::test]
 async fn test_streamed_commit_below_either_replay_floor_is_skipped() {
     // Floor 1: recovered snapshot at LSN 100.
-    let env = create_env_recovered_at(/*persisted_lsn=*/ 100).await;
+    let mut env = create_env_recovered_at(/*persisted_lsn=*/ 100).await;
     env.append_row(
         /*id=*/ 1,
         /*name=*/ "John",
@@ -1847,6 +1849,18 @@ async fn test_streamed_commit_below_either_replay_floor_is_skipped() {
     )
     .await;
     env.stream_commit(/*lsn=*/ 90, /*xact_id=*/ 7).await;
+    env.set_replication_lsn(100);
+    let rx = env
+        .table_event_manager
+        .initiate_snapshot(/*lsn=*/ 100)
+        .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 100),
+    )
+    .await
+    .expect("skipped streamed commit moved the table's LSNs")
+    .unwrap();
     env.append_row(
         /*id=*/ 2,
         /*name=*/ "Bob",
@@ -1861,7 +1875,7 @@ async fn test_streamed_commit_below_either_replay_floor_is_skipped() {
     env.verify_snapshot(150, &[2]).await;
 
     // Floor 2: empty initial copy with boundary LSN 100.
-    let env = TestEnvironment::default().await;
+    let mut env = TestEnvironment::default().await;
     let sender = env.handler.get_event_sender();
     sender.send(TableEvent::StartInitialCopy).await.unwrap();
     env.append_row(
@@ -1877,6 +1891,18 @@ async fn test_streamed_commit_below_either_replay_floor_is_skipped() {
         .send(TableEvent::FinishInitialCopy { start_lsn: 100 })
         .await
         .unwrap();
+    env.set_replication_lsn(100);
+    let rx = env
+        .table_event_manager
+        .initiate_snapshot(/*lsn=*/ 100)
+        .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 100),
+    )
+    .await
+    .expect("skipped streamed commit moved the table's LSNs")
+    .unwrap();
     env.append_row(
         /*id=*/ 2,
         /*name=*/ "Bob",
@@ -1921,6 +1947,73 @@ fn test_resent_events_are_skipped_and_counted() {
     assert!(!state.skip_resent_event(&append(100)));
     assert!(!state.skip_resent_event(&commit(120)));
     assert_eq!(state.skipped_resent_events, 6);
+}
+
+fn new_table_handler_state(
+    initial_persistence_lsn: Option<u64>,
+    persistence_snapshot_lsn: Option<u64>,
+) -> TableHandlerState {
+    let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
+    let (force_snapshot_completion_tx, _) = watch::channel(None);
+    TableHandlerState::new(
+        table_maintenance_completion_tx,
+        force_snapshot_completion_tx,
+        initial_persistence_lsn,
+        persistence_snapshot_lsn,
+    )
+}
+
+/// Testing scenario: a recovered table skips a streamed commit at or below its snapshot LSN as
+/// re-sent, and its LSNs stay at the snapshot.
+#[test]
+fn test_streamed_commit_below_recovered_floor_is_skipped() {
+    let mut state = new_table_handler_state(Some(100), Some(100));
+    let commit = TableEvent::Commit {
+        lsn: 90,
+        xact_id: Some(7),
+    };
+    assert!(state.skip_resent_event(&commit));
+    assert_eq!(state.latest_commit_lsn, Some(100));
+    assert_eq!(state.table_consistent_view_lsn, Some(100));
+}
+
+/// Testing scenario: after an empty initial copy the table has applied no commit, so a streamed
+/// commit at or below the copy boundary is not a re-send; the boundary keeps it from moving the
+/// table's LSNs. A streamed commit above the boundary moves them.
+#[test]
+fn test_streamed_commit_below_empty_copy_boundary_does_not_move_lsns() {
+    let mut state = new_table_handler_state(None, None);
+    state.start_initial_copy();
+    state.finish_initial_copy(/*lsn=*/ 100);
+    let commit = TableEvent::Commit {
+        lsn: 90,
+        xact_id: Some(7),
+    };
+    assert!(!state.skip_resent_event(&commit));
+    assert!(!state.should_discard_event(&commit));
+    state.update_table_lsns(&commit);
+    assert_eq!(state.latest_commit_lsn, None);
+    assert_eq!(state.table_consistent_view_lsn, None);
+
+    let commit = TableEvent::Commit {
+        lsn: 150,
+        xact_id: Some(8),
+    };
+    state.update_table_lsns(&commit);
+    assert_eq!(state.latest_commit_lsn, Some(150));
+    assert_eq!(state.table_consistent_view_lsn, Some(150));
+}
+
+/// Testing scenario: finishing an initial copy never lowers a replay floor.
+#[test]
+fn test_finish_initial_copy_keeps_higher_floor() {
+    let mut state = new_table_handler_state(Some(200), None);
+    state.latest_commit_lsn = Some(200);
+    state.start_initial_copy();
+    state.initial_copy_loaded_files = true;
+    state.finish_initial_copy(/*lsn=*/ 100);
+    assert_eq!(state.initial_persistence_lsn, Some(200));
+    assert_eq!(state.latest_commit_lsn, Some(200));
 }
 
 /// ---- Util functions unit test ----

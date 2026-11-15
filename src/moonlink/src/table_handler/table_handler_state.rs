@@ -159,8 +159,10 @@ impl TableHandlerState {
             last_unflushed_commit_lsn: None,
             // Everything up to the persisted snapshot counts as applied, so transactions postgres
             // re-sends after a restart are skipped like those re-sent after a reconnect, streamed
-            // ones included. A copied table's floor is its copy boundary instead
-            // (`initial_persistence_lsn`); a table never has both.
+            // ones included. The other floor is `initial_persistence_lsn` (the persisted snapshot,
+            // or the copy boundary after an initial copy): an event at or below either is skipped.
+            // A recovered table has both at its snapshot LSN, and a copy that loaded files sets
+            // both to its boundary; neither floor ever moves down.
             latest_commit_lsn: persistence_snapshot_lsn,
             skipped_resent_events: 0,
             skipped_resent_commits: 0,
@@ -215,6 +217,25 @@ impl TableHandlerState {
     }
 
     pub(crate) fn update_table_lsns(&mut self, event: &TableEvent) {
+        // A streamed transaction is never discarded by `should_discard_event` (its rows arrive
+        // before its LSN); one committed at or below the persisted/copy boundary is aborted when
+        // its commit is processed, so it must not move the LSNs either.
+        if let TableEvent::Commit {
+            lsn,
+            xact_id: Some(_),
+        }
+        | TableEvent::CommitFlush {
+            lsn,
+            xact_id: Some(_),
+        } = event
+        {
+            if self
+                .initial_persistence_lsn
+                .is_some_and(|boundary| *lsn <= boundary)
+            {
+                return;
+            }
+        }
         if event.is_ingest_event() {
             match event {
                 // Update LSN for commit operations.
@@ -318,8 +339,6 @@ impl TableHandlerState {
         }
     }
 
-    /// Whether every committed change this table has applied is persisted, so the replication slot
-    /// may move past the current replication position for it.
     /// Whether to skip `event` because the table already applied it (postgres re-sends everything
     /// after the slot's confirmed LSN on a restart or reconnect). Skips are counted, and a run of
     /// them is logged once it ends, so a skip that should not have happened leaves a trace.
@@ -358,6 +377,8 @@ impl TableHandlerState {
         }
     }
 
+    /// Whether every committed change this table has applied is persisted, so the replication slot
+    /// may move past the current replication position for it.
     pub(crate) fn has_no_unpersisted_commit(&self, persistence_snapshot_lsn: Option<u64>) -> bool {
         if self.special_table_state != SpecialTableState::Normal {
             return false;
@@ -539,9 +560,11 @@ impl TableHandlerState {
         // would report a persisted table LSN of 0 until the first write (stalling forced snapshots
         // and the replication slot), since no iceberg snapshot ever exists at that LSN.
         if self.initial_copy_loaded_files {
-            self.latest_commit_lsn = Some(lsn);
+            self.latest_commit_lsn = Some(raised_floor(self.latest_commit_lsn, lsn));
             self.table_consistent_view_lsn = Some(lsn);
         }
+        // Buffered events the copy already contains are dropped while they are applied.
+        self.initial_persistence_lsn = Some(raised_floor(self.initial_persistence_lsn, lsn));
     }
 
     /// ============================
@@ -668,4 +691,9 @@ struct SkippedRun {
     commits: u64,
     first_commit_lsn: Option<u64>,
     last_commit_lsn: Option<u64>,
+}
+
+/// A replay floor moved to `lsn`, never down: losing a higher floor would apply events twice.
+fn raised_floor(floor: Option<u64>, lsn: u64) -> u64 {
+    floor.map_or(lsn, |floor| floor.max(lsn))
 }
