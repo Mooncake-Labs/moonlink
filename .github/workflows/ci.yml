@@ -878,6 +878,11 @@ jobs:
           RUST_BACKTRACE=1 cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3 storage-gcs"
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features postgres-integration -- --nocapture
 
+      - name: Build Backend integration tests
+        timeout-minutes: 30
+        run: |
+          cargo test --package moonlink_backend --test '*' --features test-utils --no-run
+
       - name: Run Backend integration tests
         timeout-minutes: 30
         env:
@@ -885,6 +890,12 @@ jobs:
           MOONLINK_TEST_PG_CTL: ${{ github.workspace }}/.github/scripts/pg_control.sh
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_backend --test '*' --features test-utils --no-fail-fast
+
+      - name: Make sure PostgreSQL is running after the backend tests
+        if: always()
+        timeout-minutes: 2
+        run: |
+          .github/scripts/pg_control.sh start
 
       - name: Run postgres bulk ingestion integration test
         # TODO(hjiang): Update after we figure out the regression change.
