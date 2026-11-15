@@ -47,19 +47,19 @@ fn get_available_bytes(path: &str) -> Option<u64> {
 
 /// Read-cache budget for the given available bytes. Never fails: a full disk only shrinks the
 /// cache, it must not stop the service from starting.
+/// Monotonic in the available space.
 pub(super) fn cache_bytes_for_available(available_bytes: Option<u64>) -> u64 {
     match available_bytes {
         Some(available) if available >= MIN_DISK_SPACE_FOR_CACHE + MIN_CACHE_BYTES => {
             available - MIN_DISK_SPACE_FOR_CACHE
         }
         Some(available) => {
-            let budget = std::cmp::max(available / 2, MIN_CACHE_BYTES);
             tracing::warn!(
                 available,
-                budget,
+                budget = MIN_CACHE_BYTES,
                 "low disk space for the read cache, using a small cache"
             );
-            budget
+            MIN_CACHE_BYTES
         }
         None => MIN_CACHE_BYTES,
     }
@@ -148,8 +148,26 @@ mod cache_size_tests {
         );
         // Low space (or a filesystem reporting nothing useful): small cache, no error.
         assert_eq!(cache_bytes_for_available(Some(0)), MIN_CACHE_BYTES);
-        assert_eq!(cache_bytes_for_available(Some(512 << 20)), 256 << 20);
+        assert_eq!(cache_bytes_for_available(Some(512 << 20)), MIN_CACHE_BYTES);
         assert_eq!(cache_bytes_for_available(None), MIN_CACHE_BYTES);
+
+        // More free space never means a smaller cache, also around the reserve boundary.
+        let boundary = MIN_DISK_SPACE_FOR_CACHE + MIN_CACHE_BYTES;
+        let mut previous = 0;
+        for available in (0..=(boundary + (256 << 20))).step_by(16 << 20) {
+            let budget = cache_bytes_for_available(Some(available));
+            assert!(budget >= previous, "budget shrank at {available}");
+            previous = budget;
+        }
+        assert_eq!(
+            cache_bytes_for_available(Some(boundary - 1)),
+            MIN_CACHE_BYTES
+        );
+        assert_eq!(cache_bytes_for_available(Some(boundary)), MIN_CACHE_BYTES);
+        assert_eq!(
+            cache_bytes_for_available(Some(boundary + 1)),
+            MIN_CACHE_BYTES + 1
+        );
     }
 
     #[test]
