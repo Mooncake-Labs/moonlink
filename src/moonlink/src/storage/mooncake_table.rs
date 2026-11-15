@@ -17,7 +17,6 @@ pub mod snapshot_read_output;
 mod snapshot_validation;
 pub mod table_config;
 pub mod table_event_manager;
-pub mod table_secret;
 mod table_snapshot;
 pub mod table_status;
 pub mod table_status_reader;

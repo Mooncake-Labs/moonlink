@@ -5,13 +5,11 @@ edition = { workspace = true }
 license = { workspace = true }
 
 [features]
-default = ["storage-fs", "metadata-sqlite"]
-storage-all = ["storage-fs", "metadata-sqlite"]
+default = ["storage-fs"]
+storage-all = ["storage-fs"]
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-fs = ["moonlink/storage-fs"]
-
-metadata-sqlite = ["sqlx"]
 
 test-utils = ["moonlink/test-utils"]
 
@@ -25,7 +23,7 @@ serde_json = { workspace = true }
 sqlx = { version = "0.8", features = [
   "sqlite",
   "runtime-tokio",
-], optional = true }
+] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

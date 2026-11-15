@@ -7,9 +7,6 @@ use thiserror::Error;
 #[derive(Clone, Debug, Error, Deserialize, Serialize)]
 pub enum Error {
     #[error("{0}")]
-    PostgresRowCountError(ErrorStruct),
-
-    #[error("{0}")]
     Sqlx(ErrorStruct),
 
     #[error("{0}")]
@@ -63,8 +60,7 @@ impl From<std::io::Error> for Error {
 impl Error {
     pub fn get_status(&self) -> ErrorStatus {
         match self {
-            Error::PostgresRowCountError(err)
-            | Error::Sqlx(err)
+            Error::Sqlx(err)
             | Error::SqliteRowCountError(err)
             | Error::MetadataStoreFailedPrecondition(err)
             | Error::SerdeJson(err)

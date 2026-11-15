@@ -1,6 +1,3 @@
-#[cfg(feature = "storage-s3")]
-use crate::MoonlinkSecretType;
-use crate::MoonlinkTableSecret;
 use serde::{Deserialize, Serialize};
 
 /// StorageConfig contains configuration for multiple storage backends.
@@ -101,29 +98,6 @@ impl StorageConfig {
             StorageConfig::S3 {
                 secret_access_key, ..
             } => Some(secret_access_key.clone()),
-        }
-    }
-
-    /// Extract security metadata entry from current filesystem config.
-    pub fn extract_security_metadata_entry(&self) -> Option<MoonlinkTableSecret> {
-        match &self {
-            #[cfg(feature = "storage-fs")]
-            StorageConfig::FileSystem { .. } => None,
-            #[cfg(feature = "storage-s3")]
-            StorageConfig::S3 {
-                access_key_id,
-                secret_access_key,
-                region,
-                endpoint,
-                ..
-            } => Some(MoonlinkTableSecret {
-                secret_type: MoonlinkSecretType::S3,
-                key_id: access_key_id.to_string(),
-                secret: secret_access_key.to_string(),
-                project: None,
-                endpoint: endpoint.clone(),
-                region: Some(region.clone()),
-            }),
         }
     }
 }

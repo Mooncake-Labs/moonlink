@@ -29,9 +29,6 @@ pub use filesystem::storage_config::StorageConfig;
 pub use index::index_merge_config::FileIndexMergeConfig;
 pub use mooncake_table::table_config::TableConfig as MoonlinkTableConfig;
 pub use mooncake_table::table_event_manager::TableEventManager;
-pub use mooncake_table::table_secret::{
-    SecretEntry as MoonlinkTableSecret, SecretType as MoonlinkSecretType,
-};
 pub use mooncake_table::table_status::TableSnapshotStatus;
 pub use mooncake_table::table_status_reader::TableStatusReader;
 pub use mooncake_table::MooncakeTable;

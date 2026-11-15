@@ -68,9 +68,6 @@ parquet = { version = "56", default-features = false, features = [
 paste = "1"
 postgres-native-tls = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
 postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
-postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455", features = [
-  "with-serde_json-1",
-] }
 prost = "0.14"
 prost-types = "0.14"
 rand = "0.9"

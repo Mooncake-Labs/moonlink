@@ -1,4 +1,3 @@
-use crate::MoonlinkTableSecret;
 use crate::StorageConfig;
 
 /// This module contains a few filesystem wrappers, including timeout, retry, etc.
@@ -183,10 +182,6 @@ impl AccessorConfig {
 
     pub fn get_root_path(&self) -> String {
         self.storage_config.get_root_path()
-    }
-
-    pub fn extract_security_metadata_entry(&self) -> Option<MoonlinkTableSecret> {
-        self.storage_config.extract_security_metadata_entry()
     }
 }
 

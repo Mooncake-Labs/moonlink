@@ -25,9 +25,9 @@ pub use storage::{
     FileSystemAccessor, FsChaosConfig, FsRetryConfig, FsThrottleConfig, FsTimeoutConfig,
     IcebergCatalogConfig, IcebergFileCatalogConfig, IcebergPersistenceConfig,
     IcebergSnapshotFetcher, IcebergTableConfig, IcebergTableManager, MooncakeTable,
-    MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig, MoonlinkTableSecret,
-    ObjectStorageCache, ObjectStorageCacheConfig, SnapshotReadOutput, StorageConfig,
-    TableEventManager, TableManager, TableSnapshotStatus, TableStatusReader,
+    MooncakeTableConfig, MoonlinkTableConfig, ObjectStorageCache, ObjectStorageCacheConfig,
+    SnapshotReadOutput, StorageConfig, TableEventManager, TableManager, TableSnapshotStatus,
+    TableStatusReader,
 };
 pub use table_handler::TableHandler;
 pub use table_handler_timer::TableHandlerTimer;

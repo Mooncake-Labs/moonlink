@@ -6,9 +6,9 @@ use moonlink::table_handler_timer::create_table_handler_timers;
 use moonlink::ReadStateFilepathRemap;
 use moonlink::{
     row::IdentityProp, AccessorConfig, EventSyncReceiver, EventSyncSender, FileSystemAccessor,
-    IcebergTableConfig, MooncakeTable, MooncakeTableConfig, MoonlinkSecretType,
-    MoonlinkTableConfig, MoonlinkTableSecret, ObjectStorageCache, ReadStateManager, StorageConfig,
-    TableEvent, TableEventManager, TableHandler, TableStatusReader,
+    IcebergTableConfig, MooncakeTable, MooncakeTableConfig, MoonlinkTableConfig,
+    ObjectStorageCache, ReadStateManager, StorageConfig, TableEvent, TableEventManager,
+    TableHandler, TableStatusReader,
 };
 use moonlink::{CommitState, ReplicationState};
 
