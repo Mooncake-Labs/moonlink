@@ -22,7 +22,10 @@ use more_asserts as ma;
 pub(crate) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
-    pending_deletions_in_main_table: Vec<RawDeletionRecord>,
+    pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
+    /// Main mem-slice positions of `pending_deletions_in_main_mem_slice`; identical rows (tables
+    /// without a key) must each claim a different position.
+    claimed_main_mem_slice_positions: HashSet<(u64, usize)>,
     index_bloom_filter: BloomFilter,
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
@@ -125,7 +128,8 @@ impl TransactionStreamState {
         Self {
             mem_slice: MemSlice::new(schema, batch_size, identity, streaming_counter),
             local_deletions: Vec::new(),
-            pending_deletions_in_main_table: Vec::new(),
+            pending_deletions_in_main_mem_slice: Vec::new(),
+            claimed_main_mem_slice_positions: HashSet::new(),
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             stream_indices: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
@@ -319,24 +323,25 @@ impl MooncakeTable {
 
         // Scope the main table deletion lookup. Rows are only marked deleted at commit, so skip
         // positions this transaction already claimed (identical rows of a table without a key).
-        let claimed: HashSet<(u64, usize)> = self
+        let no_claims = HashSet::new();
+        let claimed = self
             .transaction_stream_states
             .get(&xact_id)
-            .map(|state| {
-                state
-                    .pending_deletions_in_main_mem_slice
-                    .iter()
-                    .filter_map(|d| d.pos)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map_or(&no_claims, |state| &state.claimed_main_mem_slice_positions);
         record.pos =
             self.mem_slice
-                .find_non_deleted_position_excluding(&record, &row_identity, &claimed);
+                .find_non_deleted_position_excluding(&record, &row_identity, claimed);
 
         record.compact_full_row_identity(&row_identity);
         let stream_state = self.get_or_create_stream_state(xact_id);
-        stream_state.pending_deletions_in_main_table.push(record);
+        if let Some(pos) = record.pos {
+            stream_state.claimed_main_mem_slice_positions.insert(pos);
+            stream_state
+                .pending_deletions_in_main_mem_slice
+                .push(record);
+        } else {
+            self.next_snapshot_task.new_deletions.push(record);
+        }
     }
 
     /// Deletion records held by streamed transactions or waiting for the next snapshot, and how

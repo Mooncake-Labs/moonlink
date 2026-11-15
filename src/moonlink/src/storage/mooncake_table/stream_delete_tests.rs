@@ -101,3 +101,35 @@ async fn test_stream_delete_racing_regular_delete_of_duplicate() {
     commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, 20).await;
     assert_remaining(&mut table, &mut rx, 30, &[8]).await;
 }
+
+/// Each streamed delete of a distinct mem-slice row costs O(1) in the claimed positions (a
+/// quadratic rebuild took minutes for a bulk DELETE of recently inserted rows).
+#[tokio::test]
+async fn test_many_streamed_deletes_of_mem_slice_rows_scale_linearly() {
+    let context = TestContext::new("many_stream_deletes");
+    let mut table = table_with_batch_size(&context, 4096).await;
+    let (tx, mut rx) = mpsc::channel(100);
+    table.register_table_notify(tx).await;
+
+    const ROWS: i32 = 20_000;
+    for id in 0..ROWS {
+        table.append(test_row(id, "row", id)).unwrap();
+    }
+    table.commit(10);
+
+    let xact_id = 42;
+    let started = std::time::Instant::now();
+    for id in 0..ROWS {
+        table
+            .delete_in_stream_batch(test_row(id, "row", id), xact_id)
+            .await;
+    }
+    // Quadratic behaviour took ~160 s here in a debug build; linear takes well under a second.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "streamed deletes took {:?}",
+        started.elapsed()
+    );
+    commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, 20).await;
+    assert_remaining(&mut table, &mut rx, 30, &[]).await;
+}
