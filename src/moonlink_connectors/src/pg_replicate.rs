@@ -376,8 +376,30 @@ impl PostgresConnection {
             }
             Err(_) => quote_identifier(table_name).into_owned(),
         };
-        let sql = format!("ALTER TABLE {} REPLICA IDENTITY FULL;", ident);
-        self.run_control_query(&sql).await?;
+        // REPLICA IDENTITY is per relation and not inherited: every partition needs it, or its
+        // updates and deletes arrive without the old row (and, without a primary key, postgres
+        // rejects them on the source). Partitions attached later are covered at the next start;
+        // until then their changes put the mirror in the errored state.
+        // pg_partition_tree() returns nothing for a plain table, so include the table itself.
+        let query = format!(
+            "SELECT c.oid::regclass::text FROM pg_class c WHERE c.relreplident <> 'f' \
+             AND (c.oid = {table}::regclass \
+                  OR c.oid IN (SELECT relid FROM pg_partition_tree({table}::regclass)));",
+            table = quote_literal(&ident)
+        );
+        let relations: Vec<String> = self
+            .run_control_query(&query)
+            .await?
+            .into_iter()
+            .filter_map(|message| match message {
+                SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        for relation in relations {
+            let sql = format!("ALTER TABLE {relation} REPLICA IDENTITY FULL;");
+            self.run_control_query(&sql).await?;
+        }
         Ok(())
     }
 

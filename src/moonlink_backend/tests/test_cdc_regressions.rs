@@ -985,3 +985,53 @@ async fn errored_mirror_stays_errored_after_restart_until_recreated() {
     let lsn = current_wal_lsn(&client).await;
     assert_eq!(scan_ids(&backend, "rv_ddl_mc", lsn).await, Some(vec![1, 2]));
 }
+
+/// Partitioned source tables: REPLICA IDENTITY FULL must reach every partition, so updates and
+/// deletes replicate (with a primary key) and are not rejected on the source (without one).
+#[rstest::rstest]
+#[case::with_primary_key("id BIGINT PRIMARY KEY, v TEXT")]
+#[case::without_primary_key("id BIGINT, v TEXT")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn partitioned_source_replicates_updates_and_deletes(#[case] columns: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_part, rv_bystander;
+         CREATE TABLE rv_part ({columns}) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
+         CREATE TABLE rv_part_2 PARTITION OF rv_part FOR VALUES FROM (100) TO (200);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query(
+            "INSERT INTO rv_part VALUES (1, 'a'), (150, 'b'), (151, 'c');
+             UPDATE rv_part SET v = 'z' WHERE id IN (1, 150);
+             DELETE FROM rv_part WHERE id = 151;
+             INSERT INTO rv_bystander VALUES (7);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let rows = scan_rows(&backend, "rv_part_mc", lsn, "v", Duration::from_secs(30)).await;
+    assert_eq!(
+        rows,
+        Some(BTreeMap::from([
+            (1, Some("z".to_string())),
+            (150, Some("z".to_string()))
+        ]))
+    );
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![7])
+    );
+}
