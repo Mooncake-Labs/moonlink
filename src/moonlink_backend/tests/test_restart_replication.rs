@@ -289,4 +289,74 @@ mod tests {
             "slot pinned by a recovered idle mirror: confirmed_flush_lsn={confirmed:X} idle_iceberg_lsn={idle_lsn:X} active_iceberg_lsn={active_lsn:X}"
         );
     }
+
+    async fn terminate_walsender(client: &Client) {
+        client
+            .simple_query(
+                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots \
+                 WHERE slot_name = 'moonlink_slot_postgres' AND active_pid IS NOT NULL;",
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn reconnect_mid_transaction(streamed: bool) {
+        let (_ctl, _h) = connect_to_postgres(&get_database_uri()).await;
+        let work_mem = if streamed { "64kB" } else { "1GB" };
+        _ctl.simple_query(&format!(
+            "ALTER SYSTEM SET logical_decoding_work_mem = '{work_mem}'"
+        ))
+        .await
+        .unwrap();
+        _ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+
+        const N: i64 = 200_000;
+        let mut failures = Vec::new();
+        let mut hi_total = 0;
+        for (i, delay_ms) in [0u64, 50, 150, 400, 800].into_iter().enumerate() {
+            let lo = i as i64 * N + 1;
+            let hi = lo + N - 1;
+            hi_total = hi;
+            let lsn = insert_range(&client, "rr_a", lo, hi).await;
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            terminate_walsender(&client).await;
+            let got =
+                scan_id_counts(&backend, DATABASE.to_string(), TABLE_A.to_string(), lsn).await;
+            let dups = got.values().filter(|c| **c > 1).count();
+            let missing = (1..=hi).filter(|id| !got.contains_key(id)).count();
+            if dups > 0 || missing > 0 {
+                failures.push(format!(
+                    "delay {delay_ms}ms: {dups} duplicated ids, {missing} missing ids"
+                ));
+            }
+        }
+        cleanup(&backend, &[TABLE_A]).await;
+        _ctl.simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
+            .await
+            .unwrap();
+        _ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+        assert!(
+            failures.is_empty(),
+            "streamed={streamed}, ids 1..={hi_total}: {failures:?}"
+        );
+    }
+
+    /// A replication reconnect while a large non-streamed transaction is being delivered: postgres
+    /// re-sends it whole, and none of it may be applied twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn reconnect_mid_non_streamed_transaction_applies_it_once() {
+        reconnect_mid_transaction(false).await;
+    }
+
+    /// The same with protocol v2 streaming forced (logical_decoding_work_mem = 64kB).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn reconnect_mid_streamed_transaction_applies_it_once() {
+        reconnect_mid_transaction(true).await;
+    }
 }

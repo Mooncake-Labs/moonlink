@@ -67,6 +67,11 @@ pub struct Sink {
     table_replication_states: HashMap<SrcTableId, Arc<ReplicationState>>,
     /// Tables that may receive replication progress (recovered, or past their initial copy).
     progress_ready_tables: HashSet<SrcTableId>,
+    /// Changes of the current non-streamed transaction, handed to the tables at its COMMIT. If the
+    /// stream breaks first, postgres re-sends the whole transaction, so nothing of it may have
+    /// reached a table. Postgres streams any transaction larger than logical_decoding_work_mem,
+    /// which bounds this buffer.
+    pending_transaction_changes: Vec<(SrcTableId, TableEvent)>,
 }
 
 impl Sink {
@@ -112,6 +117,36 @@ impl Sink {
             copy_failures: HashMap::new(),
             table_replication_states: HashMap::new(),
             progress_ready_tables: HashSet::new(),
+            pending_transaction_changes: Vec::new(),
+        }
+    }
+
+    /// Send a change to its table now (streamed transaction) or at COMMIT (non-streamed).
+    async fn deliver_change(
+        &mut self,
+        table_id: SrcTableId,
+        xact_id: Option<u32>,
+        event: TableEvent,
+    ) {
+        if xact_id.is_none() {
+            self.pending_transaction_changes.push((table_id, event));
+            return;
+        }
+        if let Some(event_sender) = self.get_event_sender_for(table_id) {
+            if let Err(e) = Self::send_table_event(event_sender, event).await {
+                warn!(error = ?e, "failed to send change event");
+            }
+        }
+    }
+
+    /// Hand the current non-streamed transaction's changes to their tables, before its COMMIT.
+    async fn deliver_pending_transaction_changes(&mut self) {
+        for (table_id, event) in std::mem::take(&mut self.pending_transaction_changes) {
+            if let Some(event_sender) = self.get_event_sender_for(table_id) {
+                if let Err(e) = Self::send_table_event(event_sender, event).await {
+                    warn!(error = ?e, "failed to send change event");
+                }
+            }
         }
     }
 
@@ -304,6 +339,8 @@ impl Sink {
                 }
             }
         }
+        // Nothing of an interrupted non-streamed transaction has reached a table yet.
+        self.pending_transaction_changes.clear();
         self.transaction_state = TransactionState::default();
         self.streaming_last_key = None;
     }
@@ -472,6 +509,7 @@ impl Sink {
             }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
+                self.deliver_pending_transaction_changes().await;
                 self.warn_if_before_keepalive(commit_body.end_lsn(), "commit");
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 for table_id in self.transaction_state.touched_tables.clone() {
@@ -544,70 +582,40 @@ impl Sink {
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let xact_id = self.top_level_xid(table_id, xact_id);
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                if let Some(event_sender) = self.get_event_sender_for(table_id) {
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
-                        TableEvent::Append {
-                            row: PostgresTableRow(table_row).into(),
-                            lsn: final_lsn,
-                            xact_id,
-                        },
-                    )
-                    .await
-                    {
-                        warn!(error = ?e, "failed to send append event");
-                    }
-                }
+                let append = TableEvent::Append {
+                    row: PostgresTableRow(table_row).into(),
+                    lsn: final_lsn,
+                    xact_id,
+                };
+                self.deliver_change(table_id, xact_id, append).await;
             }
             CdcEvent::Update((table_id, old_table_row, new_table_row, xact_id)) => {
                 let xact_id = self.top_level_xid(table_id, xact_id);
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                if let Some(event_sender) = self.get_event_sender_for(table_id) {
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
-                        TableEvent::Delete {
-                            row: PostgresTableRow(old_table_row).into(),
-                            lsn: final_lsn,
-                            xact_id,
-                            delete_if_exists: false,
-                        },
-                    )
-                    .await
-                    {
-                        warn!(error = ?e, "failed to send delete event");
-                    }
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
-                        TableEvent::Append {
-                            row: PostgresTableRow(new_table_row).into(),
-                            lsn: final_lsn,
-                            xact_id,
-                        },
-                    )
-                    .await
-                    {
-                        warn!(error = ?e, "failed to send append event");
-                    }
-                }
+                let delete = TableEvent::Delete {
+                    row: PostgresTableRow(old_table_row).into(),
+                    lsn: final_lsn,
+                    xact_id,
+                    delete_if_exists: false,
+                };
+                self.deliver_change(table_id, xact_id, delete).await;
+                let append = TableEvent::Append {
+                    row: PostgresTableRow(new_table_row).into(),
+                    lsn: final_lsn,
+                    xact_id,
+                };
+                self.deliver_change(table_id, xact_id, append).await;
             }
             CdcEvent::Delete((table_id, table_row, xact_id)) => {
                 let xact_id = self.top_level_xid(table_id, xact_id);
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                if let Some(event_sender) = self.get_event_sender_for(table_id) {
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
-                        TableEvent::Delete {
-                            row: PostgresTableRow(table_row).into(),
-                            lsn: final_lsn,
-                            xact_id,
-                            delete_if_exists: false,
-                        },
-                    )
-                    .await
-                    {
-                        warn!(error = ?e, "failed to send delete event");
-                    }
-                }
+                let delete = TableEvent::Delete {
+                    row: PostgresTableRow(table_row).into(),
+                    lsn: final_lsn,
+                    xact_id,
+                    delete_if_exists: false,
+                };
+                self.deliver_change(table_id, xact_id, delete).await;
             }
             CdcEvent::Relation(relation_body) => {
                 debug!(
@@ -958,6 +966,11 @@ mod tests {
         assert_eq!(sink.transaction_state.touched_tables, vec![a, b]);
         assert_eq!(sink.transaction_state.last_touched_table, Some(b));
 
+        // Non-streamed changes reach the tables only at the transaction's COMMIT.
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
+        sink.deliver_pending_transaction_changes().await;
+
         // Drain a few events to ensure they were emitted to each table
         for _ in 0..5 {
             matches!(rx_a.recv().await.unwrap(), TableEvent::Append { .. });
@@ -1192,6 +1205,9 @@ mod tests {
         }
         assert_eq!(sink.transaction_state.touched_tables, vec![table_id]);
         assert_eq!(sink.transaction_state.last_touched_table, Some(table_id));
+        // Non-streamed changes reach the table only at the transaction's COMMIT.
+        assert!(rx.try_recv().is_err());
+        sink.deliver_pending_transaction_changes().await;
         assert!(sink.cached_event_sender.is_some());
         for _ in 0..3 {
             matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
@@ -1216,6 +1232,7 @@ mod tests {
         assert_eq!(sink.transaction_state.last_touched_table, Some(table_id));
         // Sender cache should remain usable across transactions
         assert!(sink.cached_event_sender.is_some());
+        sink.deliver_pending_transaction_changes().await;
         for _ in 0..2 {
             matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
         }
