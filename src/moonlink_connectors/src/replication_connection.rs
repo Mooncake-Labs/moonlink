@@ -4,6 +4,8 @@ use moonlink::{
     MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap,
     ReadStateManager, TableEventManager, TableStatusReader,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::errored_tables;
 use crate::pg_replicate::source_fingerprint;
@@ -31,10 +33,13 @@ struct UniqueTableId {
 }
 
 /// Record the errored state on disk as soon as the table enters it, so it survives restarts.
+/// Not when the replication loop itself stopped: nothing is wrong with the table, the slot still
+/// covers it, and a restart resumes it.
 fn spawn_errored_marker_writer(
     base_path: String,
     mooncake_table_id: MooncakeTableId,
     mut table_status: watch::Receiver<TableStatus>,
+    replication_stopped: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -43,6 +48,10 @@ fn spawn_errored_marker_writer(
                 TableStatus::Healthy => None,
             };
             if let Some(message) = errored {
+                if replication_stopped.load(Ordering::SeqCst) {
+                    warn!(table = %mooncake_table_id, "errored because replication stopped; not persisted, a restart resumes it");
+                    return;
+                }
                 if let Err(e) =
                     errored_tables::write_marker(&base_path, &mooncake_table_id, &message).await
                 {
@@ -202,6 +211,7 @@ impl ReplicationConnection {
             self.table_base_path.clone(),
             mooncake_table_id.clone(),
             table_resources.table_event_manager.subscribe_table_status(),
+            self.source.replication_stopped(),
         );
         let table_state = TableState {
             src_table_name: src_table_name.to_string(),
@@ -296,5 +306,35 @@ impl ReplicationConnection {
             debug!("replication connection shutdown complete");
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn marker_after_error(replication_stopped: bool) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_str().unwrap().to_string();
+        let id = MooncakeTableId {
+            database: "db".to_string(),
+            table: "t".to_string(),
+        };
+        let (tx, rx) = watch::channel(TableStatus::Healthy);
+        let writer = spawn_errored_marker_writer(
+            base.clone(),
+            id.clone(),
+            rx,
+            Arc::new(AtomicBool::new(replication_stopped)),
+        );
+        tx.send(TableStatus::Errored("broken".to_string())).unwrap();
+        writer.await.unwrap();
+        errored_tables::read_marker(&base, &id).await
+    }
+
+    #[tokio::test]
+    async fn errored_state_is_persisted_unless_replication_stopped() {
+        assert_eq!(marker_after_error(false).await.as_deref(), Some("broken"));
+        assert_eq!(marker_after_error(true).await, None);
     }
 }

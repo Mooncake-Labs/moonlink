@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Error, ErrorKind};
 use std::mem::take;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::pin;
@@ -95,6 +96,8 @@ pub struct PostgresConnection {
     /// Source fingerprints of the replicated tables, polled for changes the stream does not show.
     watched_tables: WatchedTables,
     fingerprint_watch: Option<JoinHandle<()>>,
+    /// Set when the replication loop stopped unexpectedly (see [`supervise_replication`]).
+    replication_stopped: Arc<AtomicBool>,
 }
 
 type RegisteredTables = Arc<std::sync::Mutex<HashMap<SrcTableId, mpsc::Sender<TableEvent>>>>;
@@ -326,6 +329,7 @@ impl PostgresConnection {
             registered_tables: Arc::default(),
             watched_tables: Arc::default(),
             fingerprint_watch: None,
+            replication_stopped: Arc::default(),
         })
     }
 
@@ -1054,7 +1058,18 @@ impl PostgresConnection {
             &self.watched_tables,
             self.registered_tables.clone(),
         ));
-        supervise_replication(event_loop, self.registered_tables.clone())
+        supervise_replication(
+            event_loop,
+            self.registered_tables.clone(),
+            self.replication_stopped.clone(),
+        )
+    }
+
+    /// Set once the replication loop stopped unexpectedly. The errored state that causes for every
+    /// table is not a problem of the tables: the slot still covers them, so it is not persisted
+    /// and a restart resumes them.
+    pub fn replication_stopped(&self) -> Arc<AtomicBool> {
+        self.replication_stopped.clone()
     }
 }
 
@@ -1233,6 +1248,7 @@ fn compute_confirmed_flush_lsn(
 fn supervise_replication(
     event_loop: JoinHandle<Result<()>>,
     registered_tables: RegisteredTables,
+    replication_stopped: Arc<AtomicBool>,
 ) -> JoinHandle<Result<()>> {
     tokio::spawn(async move {
         let (reason, result) = match event_loop.await {
@@ -1255,6 +1271,7 @@ fn supervise_replication(
             }
         };
         error!(%reason, "replication event loop stopped");
+        replication_stopped.store(true, Ordering::SeqCst);
         let senders: Vec<_> = registered_tables
             .lock()
             .unwrap()
@@ -1655,10 +1672,12 @@ mod supervisor_tests {
         registered.lock().unwrap().insert(1, tx_a);
         registered.lock().unwrap().insert(2, tx_b);
         let event_loop = tokio::spawn(async { panic!("boom") });
-        assert!(supervise_replication(event_loop, registered)
-            .await
-            .unwrap()
-            .is_err());
+        assert!(
+            supervise_replication(event_loop, registered, Default::default())
+                .await
+                .unwrap()
+                .is_err()
+        );
         for rx in [&mut rx_a, &mut rx_b] {
             match rx.recv().await {
                 Some(TableEvent::EnterErrored { reason }) => assert!(reason.contains("boom")),
@@ -1673,10 +1692,12 @@ mod supervisor_tests {
         let (tx, mut rx) = mpsc::channel(4);
         registered.lock().unwrap().insert(1, tx);
         let event_loop = tokio::spawn(async { Ok(()) });
-        assert!(supervise_replication(event_loop, registered)
-            .await
-            .unwrap()
-            .is_ok());
+        assert!(
+            supervise_replication(event_loop, registered, Default::default())
+                .await
+                .unwrap()
+                .is_ok()
+        );
         assert!(rx.try_recv().is_err());
     }
 }
