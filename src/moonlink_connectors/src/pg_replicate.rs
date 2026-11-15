@@ -71,7 +71,7 @@ pub enum PostgresReplicationCommand {
         commit_state: Arc<CommitState>,
         replication_state: Arc<ReplicationState>,
         flush_lsn_rx: watch::Receiver<u64>,
-        table_status_rx: watch::Receiver<TableStatus>,
+        table_status_rx: TableStatusWatch,
         /// The table was recovered and needs its changes after its snapshot from the slot. Before
         /// streaming starts that needs nothing more; a table registered later (a recovery that is
         /// retried) restarts the stream so postgres replays from the slot.
@@ -717,7 +717,7 @@ impl PostgresConnection {
         commit_state: Arc<CommitState>,
         replication_state: Arc<ReplicationState>,
         flush_lsn_rx: watch::Receiver<u64>,
-        table_status_rx: watch::Receiver<TableStatus>,
+        table_status_rx: TableStatusWatch,
         replay_from_slot: bool,
     ) -> Result<oneshot::Receiver<()>> {
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -959,7 +959,10 @@ impl PostgresConnection {
                     .flush_lsn_rx
                     .take()
                     .expect("flush_lsn_rx is None"),
-                slot_status_rx,
+                TableStatusWatch {
+                    table: table_resources.table_event_manager.subscribe_table_status(),
+                    slot: slot_status_rx,
+                },
                 /*replay_from_slot=*/ is_recovery,
             )
             .await?;
@@ -1360,7 +1363,7 @@ const ERRORED_WARNING_EVERY_TICKS: u64 = 6;
 /// source; say so periodically rather than only once, when it happened.
 fn warn_about_stalled_mirrors(
     sink: &Sink,
-    table_status_rxs: &HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    table_status_rxs: &HashMap<SrcTableId, TableStatusWatch>,
     slot_held: bool,
 ) {
     let errored = errored_table_names(sink, table_status_rxs);
@@ -1374,15 +1377,29 @@ fn warn_about_stalled_mirrors(
 
 fn errored_table_names(
     sink: &Sink,
-    table_status_rxs: &HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    table_status_rxs: &HashMap<SrcTableId, TableStatusWatch>,
 ) -> Vec<String> {
     let mut names: Vec<String> = table_status_rxs
         .iter()
-        .filter(|(_, status)| *status.borrow() != TableStatus::Healthy)
-        .map(|(id, _)| sink.table_name(*id).unwrap_or_else(|| id.to_string()))
+        .filter(|(_, status)| *status.table.borrow() != TableStatus::Healthy)
+        .map(|(id, status)| {
+            let name = sink.table_name(*id).unwrap_or_else(|| id.to_string());
+            if *status.slot.borrow() == TableStatus::Healthy {
+                format!("{name} (errored state not written yet; the slot stays held for it)")
+            } else {
+                name
+            }
+        })
         .collect();
     names.sort();
     names
+}
+
+/// A table's status, and its status as the replication slot sees it: errored only once the errored
+/// state is persisted (see `spawn_errored_marker_writer`).
+pub struct TableStatusWatch {
+    pub table: watch::Receiver<TableStatus>,
+    pub slot: watch::Receiver<TableStatus>,
 }
 
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
@@ -1392,14 +1409,14 @@ fn errored_table_names(
 /// not hold the slot back; otherwise the source would retain WAL forever.
 fn compute_confirmed_flush_lsn(
     flush_lsn_rxs: &HashMap<SrcTableId, watch::Receiver<u64>>,
-    table_status_rxs: &HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    table_status_rxs: &HashMap<SrcTableId, TableStatusWatch>,
 ) -> Option<PgLsn> {
     flush_lsn_rxs
         .iter()
         .filter(|(table_id, _)| {
             table_status_rxs
                 .get(table_id)
-                .is_none_or(|status| *status.borrow() == TableStatus::Healthy)
+                .is_none_or(|status| *status.slot.borrow() == TableStatus::Healthy)
         })
         .map(|(_, rx)| *rx.borrow())
         .min()
@@ -1465,7 +1482,7 @@ async fn apply_command_without_stream(
     streaming_requested: &mut bool,
     sink: &mut Sink,
     flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
-    table_status_rxs: &mut HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    table_status_rxs: &mut HashMap<SrcTableId, TableStatusWatch>,
     saved_schemas: &mut Vec<TableSchema>,
 ) -> bool {
     match cmd {
@@ -1534,7 +1551,7 @@ async fn wait_applying_commands(
     streaming_requested: &mut bool,
     sink: &mut Sink,
     flush_lsn_rxs: &mut HashMap<SrcTableId, watch::Receiver<u64>>,
-    table_status_rxs: &mut HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    table_status_rxs: &mut HashMap<SrcTableId, TableStatusWatch>,
     saved_schemas: &mut Vec<TableSchema>,
 ) -> bool {
     let sleep = tokio::time::sleep(delay);
@@ -1563,7 +1580,7 @@ pub async fn run_event_loop(
     // Persist across reconnects
     let mut saved_schemas: Vec<TableSchema> = Vec::new();
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
-    let mut table_status_rxs: HashMap<SrcTableId, watch::Receiver<TableStatus>> = HashMap::new();
+    let mut table_status_rxs: HashMap<SrcTableId, TableStatusWatch> = HashMap::new();
     let mut last_seen_end_lsn: Option<PgLsn> = None;
     let mut streaming_requested = false;
 
@@ -1894,7 +1911,7 @@ mod supervisor_tests {
 
 #[cfg(test)]
 mod stalled_mirror_tests {
-    use super::errored_table_names;
+    use super::{errored_table_names, TableStatusWatch};
     use crate::pg_replicate::moonlink_sink::Sink;
     use crate::pg_replicate::table::{LookupKey, TableName, TableSchema};
     use moonlink::{CommitState, ReplicationState, TableStatus};
@@ -1908,6 +1925,7 @@ mod stalled_mirror_tests {
         for (id, status) in [
             (1, TableStatus::Healthy),
             (2, TableStatus::Errored("truncated".to_string())),
+            (3, TableStatus::Errored("truncated".to_string())),
         ] {
             let (tx, _rx) = mpsc::channel(1);
             let schema = TableSchema {
@@ -1920,9 +1938,26 @@ mod stalled_mirror_tests {
                 lookup_key: LookupKey::FullRow,
             };
             sink.add_table(id, tx, CommitState::new(), &schema, false);
-            statuses.insert(id, watch::channel(status).1);
+            let persisted = if id == 3 {
+                TableStatus::Healthy
+            } else {
+                status.clone()
+            };
+            statuses.insert(
+                id,
+                TableStatusWatch {
+                    table: watch::channel(status).1,
+                    slot: watch::channel(persisted).1,
+                },
+            );
         }
-        assert_eq!(errored_table_names(&sink, &statuses), vec!["public.t2"]);
+        assert_eq!(
+            errored_table_names(&sink, &statuses),
+            vec![
+                "public.t2",
+                "public.t3 (errored state not written yet; the slot stays held for it)"
+            ]
+        );
     }
 }
 
