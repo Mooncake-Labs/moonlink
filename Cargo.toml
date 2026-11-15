@@ -19,7 +19,6 @@ license = "LicenseRef-BSL-1.1"
 
 [workspace.dependencies]
 anyhow = "1.0"
-apache-avro = "0.20"
 arrow = { version = "56", default-features = false, features = [
   "canonical_extension_types",
 ] }

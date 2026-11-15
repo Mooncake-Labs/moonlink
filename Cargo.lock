@@ -3808,7 +3808,6 @@ dependencies = [
 name = "moonlink_backend"
 version = "0.0.1"
 dependencies = [
- "apache-avro",
  "arrow",
  "arrow-array",
  "arrow-schema",
@@ -3842,23 +3841,18 @@ dependencies = [
 name = "moonlink_connectors"
 version = "0.0.1"
 dependencies = [
- "anyhow",
- "apache-avro",
  "arrow",
  "arrow-array",
  "arrow-schema",
- "async-stream",
  "async-trait",
  "bigdecimal",
  "byteorder",
  "bytes",
  "chrono",
- "chrono-tz",
  "futures",
  "iceberg",
  "moonlink",
  "moonlink_error",
- "moonlink_proto",
  "more-asserts",
  "native-tls",
  "num-traits",
@@ -3867,7 +3861,6 @@ dependencies = [
  "pin-project-lite",
  "postgres-native-tls",
  "postgres-replication",
- "prost 0.14.1",
  "serde",
  "serde_json",
  "serial_test",

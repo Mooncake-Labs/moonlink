@@ -1,5 +1,4 @@
 use crate::pg_replicate::table::SrcTableId;
-use crate::rest_ingest::event_request::EventRequest;
 use crate::ReplicationConnection;
 use crate::{Error, Result};
 use moonlink::{
@@ -10,8 +9,6 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
 use tracing::debug;
-
-pub const REST_API_URI: &str = "rest://api";
 
 /// Manage replication sources keyed by their connection URI.
 ///
@@ -120,132 +117,6 @@ impl ReplicationManager {
         Ok(())
     }
 
-    /// Add a table for REST API ingestion from the given REST API URI.
-    ///
-    /// The REST API connection must already exist - this will fail if it doesn't.
-    ///
-    /// # Arguments
-    ///
-    /// * src_uri: should be a REST API URL
-    /// * arrow_schema: Arrow schema for the table
-    /// * flush_lsn: only assigned when recovery, which indicates the iceberg persistence LSN; otherwise it's a fresh table.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_rest_table(
-        &mut self,
-        src_uri: &str,
-        mooncake_table_id: MooncakeTableId,
-        src_table_name: &str,
-        arrow_schema: arrow_schema::Schema,
-        moonlink_table_config: MoonlinkTableConfig,
-        read_state_filepath_remap: ReadStateFilepathRemap,
-        flush_lsn: Option<u64>,
-    ) -> Result<()> {
-        debug!(%src_uri, src_table_name, "adding REST API table through manager");
-
-        // Fail if REST API connection doesn't exist
-        if !self.connections.contains_key(src_uri) {
-            return Err(crate::Error::rest_api(
-                format!("REST API connection '{src_uri}' not found. Initialize REST API first."),
-                None,
-            ));
-        }
-
-        let replication_connection = self.connections.get_mut(src_uri).unwrap();
-
-        let src_table_id = replication_connection
-            .add_table_api(
-                src_table_name,
-                &mooncake_table_id,
-                arrow_schema,
-                moonlink_table_config,
-                read_state_filepath_remap,
-                flush_lsn,
-            )
-            .await?;
-        match self.table_info.entry(mooncake_table_id) {
-            Entry::Vacant(entry) => {
-                entry.insert((src_uri.to_string(), src_table_id));
-            }
-            Entry::Occupied(_) => {
-                return Err(Error::rest_duplicate_table(src_table_id));
-            }
-        }
-
-        debug!(src_table_id, "REST API table added through manager");
-
-        Ok(())
-    }
-
-    /// Set Avro schema for an existing REST table
-    ///
-    /// # Arguments
-    ///
-    /// * src_table_name: Source table name to set Avro schema for
-    /// * avro_schema: Avro schema for parsing data
-    pub async fn set_avro_schema(
-        &mut self,
-        src_table_name: String,
-        avro_schema: apache_avro::schema::Schema,
-    ) -> Result<()> {
-        debug!(src_table_name, "setting Avro schema for REST table");
-
-        // Find REST API connection (should exist)
-        let rest_connection = self.connections.get_mut(REST_API_URI).ok_or_else(|| {
-            crate::Error::rest_api(
-                "REST API connection not found. Initialize REST API first.".to_string(),
-                None,
-            )
-        })?;
-
-        // Set Avro schema on the REST connection
-        rest_connection
-            .set_avro_schema(src_table_name.clone(), avro_schema)
-            .await?;
-
-        debug!(src_table_name, "Avro schema set for REST table");
-
-        Ok(())
-    }
-
-    /// Initialize event API connection for data ingestion.
-    /// Returns the event request sender channel for the API to use.
-    pub async fn initialize_event_api_for_once(
-        &mut self,
-        base_path: &str,
-    ) -> Result<tokio::sync::mpsc::Sender<EventRequest>> {
-        if self.connections.contains_key(REST_API_URI) {
-            return Ok(self
-                .connections
-                .get(REST_API_URI)
-                .as_ref()
-                .unwrap()
-                .get_rest_request_sender());
-        }
-
-        // Create the directory that will hold all tables
-        tokio::fs::create_dir_all(base_path).await?;
-        let base_path = tokio::fs::canonicalize(base_path).await?;
-
-        // Create event API connection
-        let replication_connection = crate::ReplicationConnection::new(
-            REST_API_URI.to_string(),
-            base_path.to_str().unwrap().to_string(),
-            self.object_storage_cache.clone(),
-        )
-        .await?;
-
-        // Get the sender before inserting the connection
-        let rest_sender = replication_connection.get_rest_request_sender();
-        // Insert the connection
-        self.connections
-            .insert(REST_API_URI.to_string(), replication_connection);
-
-        // Start the REST API replication
-        self.start_replication(REST_API_URI).await?;
-
-        Ok(rest_sender)
-    }
-
     pub async fn start_replication(&mut self, src_uri: &str) -> Result<()> {
         assert!(self.connections.contains_key(src_uri));
 
@@ -273,7 +144,7 @@ impl ReplicationManager {
             Ok(()) => {
                 // Clear manager mapping after successful drop
                 self.table_info.remove(mooncake_table_id);
-                if repl_conn.table_count() == 0 && table_uri != REST_API_URI {
+                if repl_conn.table_count() == 0 {
                     self.shutdown_connection(&table_uri, true);
                 }
 
