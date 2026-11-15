@@ -121,21 +121,21 @@ impl TableEventManager {
     }
 
     /// Initiate an index merge event, return the channel for synchronization.
-    /// Fails at once if the table is errored or its handler is gone.
+    /// Fails at once if the table handler is gone; an errored table answers with its error.
     pub async fn initiate_index_merge(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
         self.initiate_maintenance(TableEvent::ForceRegularIndexMerge)
             .await
     }
 
     /// Initiate a data compaction event, return the channel for synchronization.
-    /// Fails at once if the table is errored or its handler is gone.
+    /// Fails at once if the table handler is gone; an errored table answers with its error.
     pub async fn initiate_data_compaction(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
         self.initiate_maintenance(TableEvent::ForceRegularDataCompaction)
             .await
     }
 
     /// Initiate full table maintenance event, return the channel for synchronization.
-    /// Fails at once if the table is errored or its handler is gone.
+    /// Fails at once if the table handler is gone; an errored table answers with its error.
     pub async fn initiate_full_compaction(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
         self.initiate_maintenance(TableEvent::ForceFullMaintenance)
             .await
@@ -145,7 +145,6 @@ impl TableEventManager {
         &mut self,
         event: TableEvent,
     ) -> Result<broadcast::Receiver<Result<()>>> {
-        self.check_healthy()?;
         let subscriber = self.table_maintenance_completion_tx.subscribe();
         self.table_event_tx
             .send(event)
@@ -197,4 +196,62 @@ fn self_stopped_error() -> crate::Error {
     crate::Error::table_handler_stopped(
         "table handler stopped unexpectedly; drop and re-create the mirror",
     )
+}
+
+#[cfg(test)]
+mod maintenance_request_tests {
+    use super::*;
+    use crate::event_sync::create_table_event_syncer;
+
+    fn manager_without_handler() -> TableEventManager {
+        let (table_event_tx, table_event_rx) = mpsc::channel(1);
+        drop(table_event_rx);
+        let (_sender, receiver) = create_table_event_syncer();
+        TableEventManager::new(table_event_tx, receiver)
+    }
+
+    /// A maintenance request to a table whose handler is gone fails instead of panicking.
+    #[tokio::test]
+    async fn initiate_without_handler_fails() {
+        let mut manager = manager_without_handler();
+        assert!(matches!(
+            manager.initiate_index_merge().await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+        assert!(matches!(
+            manager.initiate_data_compaction().await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+        assert!(matches!(
+            manager.initiate_full_compaction().await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+    }
+
+    /// Waiting for a maintenance result returns the handler's error, and an error (not a panic)
+    /// once the result channel is closed; a lagged receiver keeps waiting for a result.
+    #[tokio::test]
+    async fn synchronize_maintenance_request_results() {
+        let (tx, rx) = broadcast::channel::<Result<()>>(1);
+        tx.send(Err(crate::Error::table_errored("mirror t is out of sync")))
+            .unwrap();
+        assert!(matches!(
+            TableEventManager::synchronize_maintenance_request(rx).await,
+            Err(crate::Error::TableErrored(_))
+        ));
+
+        let rx = tx.subscribe();
+        drop(tx);
+        assert!(matches!(
+            TableEventManager::synchronize_maintenance_request(rx).await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+
+        let (tx, rx) = broadcast::channel::<Result<()>>(1);
+        tx.send(Err(crate::Error::table_errored("lost"))).unwrap();
+        tx.send(Ok(())).unwrap();
+        assert!(TableEventManager::synchronize_maintenance_request(rx)
+            .await
+            .is_ok());
+    }
 }
