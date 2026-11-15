@@ -312,7 +312,20 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let sanitized_object = self.sanitize_path(object);
         let operator = self.get_operator().await?;
         let expected_len = content.len();
-        let metadata = operator.write(sanitized_object, content).await?;
+        let mut writer = operator.writer(sanitized_object).await?;
+        let written = match writer.write(content).await {
+            Ok(()) => writer.close().await,
+            Err(e) => Err(e),
+        };
+        let metadata = match written {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                // Remove the partial temp file of an atomic write (e.g. on a full disk), which
+                // would otherwise hold on to the space forever.
+                let _ = writer.abort().await;
+                return Err(e.into());
+            }
+        };
         assert_eq!(metadata.content_length(), expected_len as u64);
         Ok(metadata)
     }
@@ -514,6 +527,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(metadata.content_length(), TARGET_FILESIZE as u64);
+    }
+
+    fn atomic_tmp_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = root.join(
+            crate::storage::filesystem::accessor::operator_utils::DEFAULT_ATOMIC_WRITE_SUBDIR,
+        );
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default()
+    }
+
+    /// A write that fails after its temp file was written (here: the final rename, because the
+    /// target is a directory) leaves neither a partial target nor a temp file behind.
+    #[tokio::test]
+    async fn test_failed_atomic_write_leaves_no_temp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor =
+            create_filesystem_accessor(AccessorConfig::new_with_storage_config(storage_config));
+        let target = temp_dir.path().join("t").join("v1.metadata.json");
+        std::fs::create_dir_all(target.join("occupied")).unwrap();
+
+        let res = accessor
+            .write_object("t/v1.metadata.json", vec![7u8; 1 << 20])
+            .await;
+        assert!(res.is_err());
+        assert!(target.is_dir(), "target replaced by a partial file");
+        let leftovers = atomic_tmp_files(temp_dir.path());
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+
+        // Writes go through the temp directory by default.
+        accessor
+            .write_object("t/v2.metadata.json", b"ok".to_vec())
+            .await
+            .unwrap();
+        assert!(atomic_tmp_files(temp_dir.path()).is_empty());
+        assert!(
+            temp_dir
+                .path()
+                .join(crate::storage::filesystem::accessor::operator_utils::DEFAULT_ATOMIC_WRITE_SUBDIR)
+                .is_dir(),
+            "writes do not go through a temp file"
+        );
+        assert_eq!(
+            std::fs::read(temp_dir.path().join("t").join("v2.metadata.json")).unwrap(),
+            b"ok"
+        );
+    }
+
+    /// Temp files a crash left behind are deleted before this process first writes there.
+    #[tokio::test]
+    async fn test_leftover_atomic_write_files_are_removed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = temp_dir.path().join(
+            crate::storage::filesystem::accessor::operator_utils::DEFAULT_ATOMIC_WRITE_SUBDIR,
+        );
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::write(tmp_dir.join("partial-write"), vec![1u8; 4096]).unwrap();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor =
+            create_filesystem_accessor(AccessorConfig::new_with_storage_config(storage_config));
+        accessor
+            .write_object("t/file", b"content".to_vec())
+            .await
+            .unwrap();
+        assert!(atomic_tmp_files(temp_dir.path()).is_empty());
     }
 
     // Test atomic write operation for local filesystem.
