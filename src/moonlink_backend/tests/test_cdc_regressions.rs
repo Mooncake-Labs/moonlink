@@ -1499,3 +1499,65 @@ async fn keyless_table_with_nested_columns_replicates() {
         .await
         .unwrap();
 }
+
+/// numeric NaN (also allowed in numeric(p,s)) and +/-Infinity have no decimal representation: a
+/// mirror that receives one via CDC is errored and a mirror of a table holding one is refused, never NULL.
+#[rstest::rstest]
+#[case::nan("NUMERIC", "NaN", "NaN")]
+#[case::constrained_nan("NUMERIC(10, 2)", "NaN", "NaN")]
+#[case::infinity("NUMERIC", "Infinity", "Infinity")]
+#[case::negative_infinity("NUMERIC", "-Infinity", "Infinity")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn numeric_special_values_error_the_mirror(
+    #[case] column_type: &str,
+    #[case] value: &str,
+    #[case] reported: &str,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_special, rv_special_copy, rv_bystander;
+         CREATE TABLE rv_special (id BIGINT PRIMARY KEY, v {column_type});
+         CREATE TABLE rv_special_copy (id BIGINT PRIMARY KEY, v {column_type});
+         INSERT INTO rv_special_copy VALUES (1, 1), (2, '{value}');
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);"
+    ))
+    .await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_special_mc", "public.rv_special", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query(&format!(
+            "INSERT INTO rv_special VALUES (1, 1), (2, '{value}');
+             INSERT INTO rv_bystander VALUES (1);"
+        ))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    let err = snapshot_error(&backend, "rv_special_mc", lsn)
+        .await
+        .expect("mirror must be errored");
+    assert!(err.contains(reported), "{err}");
+
+    let err = try_mirror(
+        &backend,
+        &tmp,
+        "rv_special_copy_mc",
+        "public.rv_special_copy",
+        &uri,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains(reported), "{err}");
+}
