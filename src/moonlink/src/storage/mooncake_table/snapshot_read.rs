@@ -156,7 +156,9 @@ impl SnapshotTableState {
             self.get_deletion_records().await;
 
         // For committed but not persisted records, we create a temporary file for them, which gets deleted after query completion.
-        let file_path = self.current_snapshot.get_name_for_inmemory_file();
+        let file_path = self
+            .current_snapshot
+            .get_name_for_inmemory_file(self.table_instance_id);
         let filepath_exists = tokio::fs::try_exists(&file_path).await?;
         if filepath_exists {
             data_file_paths.push(DataFileForRead::TemporaryDataFile(

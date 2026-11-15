@@ -204,11 +204,17 @@ impl Snapshot {
             .sum()
     }
 
-    pub fn get_name_for_inmemory_file(&self) -> PathBuf {
+    /// File holding this snapshot's committed in-memory rows for reads; reused while it exists.
+    /// `table_instance_id` tells apart tables with the same id in one temporary directory, whose
+    /// snapshots can have the same version (a table recovered at its persisted LSN).
+    pub fn get_name_for_inmemory_file(&self, table_instance_id: uuid::Uuid) -> PathBuf {
         let mut directory = PathBuf::from(&self.metadata.config.temp_files_directory);
         directory.push(format!(
-            "inmemory_{}_{}_{}.parquet",
-            self.metadata.mooncake_table_id, self.metadata.table_id, self.snapshot_version
+            "inmemory_{}_{}_{}_{}.parquet",
+            self.metadata.mooncake_table_id,
+            self.metadata.table_id,
+            table_instance_id,
+            self.snapshot_version
         ));
         directory
     }
