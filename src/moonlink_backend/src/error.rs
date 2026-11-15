@@ -129,12 +129,12 @@ fn find_table_errored(es: &ErrorStruct) -> Option<&ErrorStruct> {
             _ => None,
         };
     }
-    if let Some(MoonlinkConnectorError::MoonlinkError(es)) =
-        source.downcast_ref::<MoonlinkConnectorError>()
-    {
-        return find_table_errored(es);
+    match source.downcast_ref::<MoonlinkConnectorError>() {
+        Some(MoonlinkConnectorError::MoonlinkError(es)) => find_table_errored(es),
+        // Recovered mirrors that are not served (moonlink_connectors placeholders).
+        Some(MoonlinkConnectorError::TableErrored(es)) => Some(es),
+        _ => None,
     }
-    None
 }
 
 impl From<PostgresSourceError> for Error {
@@ -259,5 +259,21 @@ impl<T: Send + Sync + 'static> From<tokio::sync::mpsc::error::SendError<T>> for 
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod table_errored_tests {
+    use super::*;
+
+    #[test]
+    fn errored_placeholder_message_is_found() {
+        let err = Error::from(MoonlinkConnectorError::table_errored(
+            "mirror x is out of sync",
+        ));
+        assert_eq!(
+            err.table_errored().map(|es| es.message.as_str()),
+            Some("mirror x is out of sync")
+        );
     }
 }
