@@ -883,7 +883,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
-          RUST_BACKTRACE=1 cargo test --package moonlink_backend --test '*'
+          RUST_BACKTRACE=1 cargo test --package moonlink_backend --test '*' --no-fail-fast
 
       - name: Run postgres bulk ingestion integration test
         # TODO(hjiang): Update after we figure out the regression change.
