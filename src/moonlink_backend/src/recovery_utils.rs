@@ -20,6 +20,33 @@ use tracing::{error, info, warn};
 pub(crate) struct BackendAttributes {
     // Temporary files directory.
     pub(crate) temp_files_dir: String,
+    // Base directory, where moonlink 0.2 kept its WAL.
+    pub(crate) base_path: String,
+}
+
+/// Directory under the base path where moonlink 0.2 kept each mirror's WAL.
+const LEGACY_WAL_DIRECTORY: &str = "_wal";
+
+/// Mirrors among `mooncake_table_ids` that still have files in moonlink 0.2's WAL directory.
+/// That version acknowledged changes once they were in its WAL, so changes only there were never
+/// replayed after the upgrade unless the mirror was snapshotted before it.
+async fn mirrors_with_legacy_wal(
+    base_path: &str,
+    mooncake_table_ids: &[MooncakeTableId],
+) -> Vec<String> {
+    let mut mirrors = Vec::new();
+    for mooncake_table_id in mooncake_table_ids {
+        let directory = std::path::Path::new(base_path)
+            .join(LEGACY_WAL_DIRECTORY)
+            .join(mooncake_table_id.to_string());
+        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
+            continue;
+        };
+        if matches!(entries.next_entry().await, Ok(Some(_))) {
+            mirrors.push(mooncake_table_id.to_string());
+        }
+    }
+    mirrors
 }
 
 /// Delay before recovering each table after the first, so tests can widen the window in which
@@ -104,6 +131,7 @@ pub(super) async fn recover_all_tables(
     // No slot advances until every table is restored or pending.
     replication_manager.set_hold_all_slots(true);
     let mut pending = Vec::new();
+    let mut recovered_table_ids = Vec::new();
     for (index, mut cur_metadata_entry) in table_metadata_entries.into_iter().enumerate() {
         #[cfg(feature = "test-utils")]
         if index > 0 {
@@ -121,6 +149,7 @@ pub(super) async fn recover_all_tables(
             database: cur_metadata_entry.database.clone(),
             table: cur_metadata_entry.table.clone(),
         };
+        recovered_table_ids.push(mooncake_table_id.clone());
         let errored_table = |message: String| ErroredTable {
             message,
             iceberg_table_config: cur_metadata_entry
@@ -165,6 +194,16 @@ pub(super) async fn recover_all_tables(
         }
     }
     replication_manager.set_hold_all_slots(false);
+
+    let legacy_wal_mirrors =
+        mirrors_with_legacy_wal(&backend_attributes.base_path, &recovered_table_ids).await;
+    if !legacy_wal_mirrors.is_empty() {
+        warn!(
+            mirrors = ?legacy_wal_mirrors,
+            directory = %std::path::Path::new(&backend_attributes.base_path).join(LEGACY_WAL_DIRECTORY).display(),
+            "mirrors have files in the WAL directory of moonlink 0.2; changes that were only in it are missing unless create_snapshot was run on each mirror before upgrading. Otherwise drop and re-create these mirrors; then delete the directory"
+        );
+    }
 
     // Stream only now that every recovered mirror is registered: until then the slot must not be
     // acknowledged past changes a mirror still has to replay.
@@ -409,5 +448,24 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("index rebuild failed"), "{err}");
         assert!(recover_isolated(async { Ok(()) }).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mirrors_with_files_in_the_legacy_wal_are_found() {
+        let base = tempfile::tempdir().unwrap();
+        let base_path = base.path().to_str().unwrap();
+        let id = |table: &str| MooncakeTableId {
+            database: "db".to_string(),
+            table: table.to_string(),
+        };
+        let wal = base.path().join(LEGACY_WAL_DIRECTORY);
+        std::fs::create_dir_all(wal.join("db.with_wal")).unwrap();
+        std::fs::write(wal.join("db.with_wal").join("wal_0.json"), "{}").unwrap();
+        std::fs::create_dir_all(wal.join("db.empty_wal")).unwrap();
+        let ids = [id("with_wal"), id("empty_wal"), id("no_wal")];
+        assert_eq!(
+            mirrors_with_legacy_wal(base_path, &ids).await,
+            vec!["db.with_wal".to_string()]
+        );
     }
 }

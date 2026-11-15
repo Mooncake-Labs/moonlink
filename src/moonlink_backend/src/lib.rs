@@ -111,6 +111,7 @@ impl MoonlinkBackend {
 
         let backend_attributes = BackendAttributes {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
+            base_path: base_path_str.to_string(),
         };
         let pending_recoveries = recovery_utils::recover_all_tables(
             backend_attributes,
