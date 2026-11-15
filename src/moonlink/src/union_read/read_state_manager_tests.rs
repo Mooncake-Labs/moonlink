@@ -339,13 +339,20 @@ async fn lsn_coverage_resolves_to_last_table_commit_once_replicated() {
 
 mod gc {
     use super::*;
+    use crate::storage::mooncake_table::table_creation_test_utils::{
+        create_test_arrow_schema, create_test_filesystem_accessor,
+    };
     use crate::storage::mooncake_table::table_operation_test_utils::{
         create_mooncake_and_persist_for_test, perform_data_compaction_for_test,
-        sync_mooncake_snapshot,
+        sync_iceberg_snapshot, sync_mooncake_snapshot,
+    };
+    use crate::storage::mooncake_table::test_utils::{
+        test_iceberg_table_config, test_mooncake_table_config,
     };
     use crate::storage::snapshot_options::{
         IcebergSnapshotOption, MaintenanceOption, SnapshotOption,
     };
+    use crate::ObjectStorageCacheConfig;
 
     fn data_parquet_count(env: &Env) -> usize {
         let dir = env
@@ -440,5 +447,128 @@ mod gc {
         );
         // The next scan rebuilds from the compacted snapshot.
         assert_rows(&env.rsm.try_read(Some(50)).await.unwrap(), &[1, 2, 3, 4, 5]).await;
+    }
+
+    /// Table with the production cache setting (cache entries of persisted files point at the
+    /// iceberg files in place) and a deletion-vector puffin per committed delete.
+    async fn production_cache_env(name: &str) -> Env {
+        let context = TestContext::new(name);
+        let iceberg_table_config = test_iceberg_table_config(&context, name);
+        let mut table_config = test_mooncake_table_config(&context);
+        table_config.batch_size = 2;
+        table_config.row_identity = IdentityProp::FullRow;
+        table_config.persistence_config.new_committed_deletion_log = 1;
+        let cache_dir = context.temp_dir.path().join("read_cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache = Arc::new(ObjectStorageCache::new(ObjectStorageCacheConfig::new(
+            1 << 30,
+            cache_dir.to_str().unwrap().to_string(),
+            /*optimize_local_filesystem=*/ true,
+        )));
+        let mut table = MooncakeTable::new(
+            (*create_test_arrow_schema()).clone(),
+            name.to_string(),
+            1,
+            context.path(),
+            iceberg_table_config.clone(),
+            table_config,
+            cache,
+            create_test_filesystem_accessor(&iceberg_table_config),
+        )
+        .await
+        .unwrap();
+        // Reader liveness alone must keep the files; no grace period to hide behind.
+        table.set_gc_grace_for_test(Duration::ZERO);
+        let (notify_tx, notify_rx) = mpsc::channel(100);
+        table.register_table_notify(notify_tx).await;
+        Env::wrap(Some(context), table, notify_rx)
+    }
+
+    async fn commit_flush_and_persist(env: &mut Env, lsn: u64) {
+        env.table.commit(lsn);
+        flush_table_and_sync(&mut env.table, &mut env.notify_rx, lsn)
+            .await
+            .unwrap();
+        create_mooncake_and_persist_for_test(&mut env.table, &mut env.notify_rx).await;
+        create_mooncake_and_persist_for_test(&mut env.table, &mut env.notify_rx).await;
+    }
+
+    fn puffins(read_state: &ReadState) -> Vec<String> {
+        decode_read_state_for_testing(read_state).1
+    }
+
+    /// Applying an iceberg commit is a mooncake snapshot that keeps the snapshot LSN. A reader
+    /// that starts after it must not get the cached read state from before it (with the replaced
+    /// deletion-vector puffin), and the replaced puffin must survive later commits for as long as
+    /// a read state that lists it is alive, however long ago the replacing commit was.
+    #[tokio::test]
+    async fn replaced_puffin_is_neither_served_to_new_readers_nor_deleted_under_old_ones() {
+        let mut env = production_cache_env("gc_puffin").await;
+        for id in 1..=3 {
+            append_rows(&mut env.table, vec![test_row(id, "r", id)]).unwrap();
+        }
+        commit_flush_and_persist(&mut env, 10).await;
+        env.table.delete(test_row(1, "r", 1), 15).await;
+        commit_flush_and_persist(&mut env, 20).await;
+
+        // An in-memory delete on top of persisted puffin A: the read state lists A.
+        env.table.delete(test_row(2, "r", 2), 25).await;
+        env.table.commit(30);
+        flush_table_and_sync(&mut env.table, &mut env.notify_rx, 30)
+            .await
+            .unwrap();
+        let (_, payload, _, _, _) =
+            create_mooncake_snapshot_for_test(&mut env.table, &mut env.notify_rx).await;
+        env.publish(30, 30, 30);
+        let old_reader = env.rsm.try_read(None).await.unwrap();
+        let old_puffins = puffins(&old_reader);
+        assert_eq!(old_puffins.len(), 1, "{old_puffins:?}");
+        assert_rows(&old_reader, &[3]).await;
+
+        // The iceberg commit writes puffin B replacing A; the next mooncake snapshot applies it
+        // without moving the snapshot LSN.
+        env.table.persist_iceberg_snapshot(payload.unwrap());
+        let result = sync_iceberg_snapshot(&mut env.notify_rx).await;
+        env.table.set_persistence_snapshot_res(result);
+        create_mooncake_snapshot_for_test(&mut env.table, &mut env.notify_rx).await;
+        env.publish(30, 30, 30);
+
+        let new_reader = env.rsm.try_read(None).await.unwrap();
+        assert!(
+            !Arc::ptr_eq(&old_reader, &new_reader),
+            "a reader after the apply got the cached read state from before it"
+        );
+        let new_puffins = puffins(&new_reader);
+        assert!(
+            new_puffins.iter().all(|p| !old_puffins.contains(p)),
+            "new reader still lists the replaced puffin: {new_puffins:?}"
+        );
+        assert_rows(&new_reader, &[3]).await;
+
+        // The next commit runs garbage collection: A is kept for the old reader.
+        append_rows(&mut env.table, vec![test_row(4, "r", 4)]).unwrap();
+        commit_flush_and_persist(&mut env, 40).await;
+        let exists = |paths: &[String]| paths.iter().all(|p| std::path::Path::new(p).exists());
+        assert!(
+            exists(&old_puffins),
+            "puffin deleted under a live read state: {old_puffins:?}"
+        );
+        assert!(exists(&new_puffins), "{new_puffins:?}");
+        assert_rows(&old_reader, &[3]).await;
+
+        // Once both readers are gone (only the idle cached read state is left), the following
+        // commit collects A.
+        drop(old_reader);
+        drop(new_reader);
+        append_rows(&mut env.table, vec![test_row(5, "r", 5)]).unwrap();
+        commit_flush_and_persist(&mut env, 50).await;
+        assert!(
+            old_puffins
+                .iter()
+                .all(|p| !std::path::Path::new(p).exists()),
+            "replaced puffin pinned after its last reader ended: {old_puffins:?}"
+        );
+        env.publish(50, 50, 50);
+        assert_rows(&env.rsm.try_read(Some(50)).await.unwrap(), &[3, 4, 5]).await;
     }
 }
