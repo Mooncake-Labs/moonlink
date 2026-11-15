@@ -4,7 +4,7 @@ use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
 use crate::storage::mooncake_table::snapshot_read_output::{
-    DataFileForRead, ReadOutput as SnapshotReadOutput,
+    release_abandoned_read, DataFileForRead, ReadOutput as SnapshotReadOutput,
 };
 use crate::storage::mooncake_table::table_status::TableSnapshotStatus;
 use crate::storage::storage_utils::RecordLocation;
@@ -181,6 +181,7 @@ impl SnapshotTableState {
             filesystem_accessor: self.filesystem_accessor.clone(),
             table_notifier: self.table_notify.as_ref().unwrap().clone(),
             snapshot_seq: self.snapshot_seq.load(std::sync::atomic::Ordering::SeqCst),
+            handed_over: false,
         };
 
         assert!(matches!(
@@ -232,6 +233,22 @@ pub(crate) struct PendingRead {
     table_notifier: Sender<TableEvent>,
     /// Snapshot sequence the read was prepared from (read under the snapshot lock).
     snapshot_seq: u64,
+    /// Set once the pins and the temp parquet were handed to a [`SnapshotReadOutput`] or released.
+    handed_over: bool,
+}
+
+impl Drop for PendingRead {
+    /// A read dropped before it was materialized (an error or a panic while it was built)
+    /// releases its deletion-vector pins and a partly written temp parquet.
+    fn drop(&mut self) {
+        if self.handed_over {
+            return;
+        }
+        release_abandoned_read(
+            std::mem::take(&mut self.puffin_cache_handles),
+            vec![self.temp_file_path.to_string_lossy().to_string()],
+        );
+    }
 }
 
 impl PendingRead {
@@ -250,6 +267,7 @@ impl PendingRead {
                 for handle in self.puffin_cache_handles.drain(..) {
                     files_to_delete.extend(handle.unreference().await);
                 }
+                self.handed_over = true;
                 let _ = self
                     .table_notifier
                     .send(TableEvent::EvictedFilesToDelete {
@@ -264,15 +282,16 @@ impl PendingRead {
                 .push(DataFileForRead::TemporaryDataFile(path.clone()));
             associated_files.push(path);
         }
+        self.handed_over = true;
         Ok(SnapshotReadOutput {
-            data_file_paths: self.data_file_paths,
-            puffin_cache_handles: self.puffin_cache_handles,
-            deletion_vectors: self.deletion_vectors,
-            position_deletes: self.position_deletes,
+            data_file_paths: std::mem::take(&mut self.data_file_paths),
+            puffin_cache_handles: std::mem::take(&mut self.puffin_cache_handles),
+            deletion_vectors: std::mem::take(&mut self.deletion_vectors),
+            position_deletes: std::mem::take(&mut self.position_deletes),
             associated_files,
-            object_storage_cache: Some(self.object_storage_cache),
-            filesystem_accessor: Some(self.filesystem_accessor),
-            table_notifier: Some(self.table_notifier),
+            object_storage_cache: Some(self.object_storage_cache.clone()),
+            filesystem_accessor: Some(self.filesystem_accessor.clone()),
+            table_notifier: Some(self.table_notifier.clone()),
         })
     }
 

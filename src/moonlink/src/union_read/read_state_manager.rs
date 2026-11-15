@@ -403,7 +403,10 @@ pub(crate) mod test_hooks {
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
 
-    type Hook = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    enum Hook {
+        Block(oneshot::Sender<()>, oneshot::Receiver<()>),
+        Panic,
+    }
 
     /// Armed hooks, keyed by the table snapshot they apply to, so that reads of other tables
     /// (tests run in parallel in one process) never take them.
@@ -424,8 +427,20 @@ pub(crate) mod test_hooks {
             .lock()
             .unwrap()
             .get_or_insert_with(HashMap::new)
-            .insert(key(&manager.table_snapshot), (reached_tx, release_rx));
+            .insert(
+                key(&manager.table_snapshot),
+                Hook::Block(reached_tx, release_rx),
+            );
         (reached_rx, release_tx)
+    }
+
+    /// Make the next materialization of `manager`'s table panic.
+    pub(crate) fn panic_next_materialize(manager: &ReadStateManager) {
+        BLOCK_MATERIALIZE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(key(&manager.table_snapshot), Hook::Panic);
     }
 
     pub(crate) async fn before_materialize(table_snapshot: &Arc<RwLock<SnapshotTableState>>) {
@@ -434,9 +449,13 @@ pub(crate) mod test_hooks {
             .unwrap()
             .as_mut()
             .and_then(|hooks| hooks.remove(&key(table_snapshot)));
-        if let Some((reached, release)) = hook {
-            let _ = reached.send(());
-            let _ = release.await;
+        match hook {
+            Some(Hook::Block(reached, release)) => {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+            Some(Hook::Panic) => panic!("injected panic while building a read state"),
+            None => {}
         }
     }
 }

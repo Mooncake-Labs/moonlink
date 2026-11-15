@@ -17,6 +17,48 @@ use tokio::sync::mpsc::Sender;
 /// Maximum number of parallel remote file operations to prevent excessive resource usage
 const MAX_PARALLEL_OPERATIONS: usize = 128;
 
+/// Unpin `handles` and delete `files` of a read abandoned before it became a [`ReadState`] (a
+/// panic while it was built). Runs detached, like the release in `ReadState::drop`.
+pub(crate) fn release_abandoned_read(handles: Vec<NonEvictableHandle>, files: Vec<String>) {
+    if handles.is_empty() && files.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut files_to_delete = files;
+        for handle in handles {
+            files_to_delete.extend(handle.unreference().await);
+        }
+        if let Err(e) = io_utils::delete_local_files(&files_to_delete).await {
+            tracing::error!(
+                ?files_to_delete,
+                ?e,
+                "failed to delete files of an abandoned read"
+            );
+        }
+    });
+}
+
+/// Armed while [`ReadOutput::take_as_read_state`] runs. Holds copies of the pins (a copy shares
+/// the pin, it does not add one) and owns the data-file pins as they are taken, so that a panic
+/// releases them exactly once; the success and error paths disarm it after handing them on.
+struct PinsOnPanic {
+    puffin_cache_handles: Vec<NonEvictableHandle>,
+    associated_files: Vec<String>,
+    data_file_cache_handles: Vec<NonEvictableHandle>,
+    armed: bool,
+}
+
+impl Drop for PinsOnPanic {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut handles = std::mem::take(&mut self.puffin_cache_handles);
+        handles.append(&mut self.data_file_cache_handles);
+        release_abandoned_read(handles, std::mem::take(&mut self.associated_files));
+    }
+}
+
 /// Mooncake snapshot for read.
 ///
 /// Pass out two types of data files to read.
@@ -166,7 +208,12 @@ impl ReadOutput {
     ) -> Result<Arc<ReadState>> {
         // Resolve remote data files.
         let mut resolved_data_files = vec![String::new(); self.data_file_paths.len()];
-        let mut cache_handles = vec![];
+        let mut pins = PinsOnPanic {
+            puffin_cache_handles: self.puffin_cache_handles.clone(),
+            associated_files: self.associated_files.clone(),
+            data_file_cache_handles: Vec::new(),
+            armed: true,
+        };
         let data_file_paths = std::mem::take(&mut self.data_file_paths);
 
         // Separate temporary files and remote files while preserving order
@@ -193,15 +240,23 @@ impl ReadOutput {
                 self.filesystem_accessor.as_ref().unwrap(),
             );
 
-            self.resolve_remote_files(
-                object_storage_cache.clone(),
-                filesystem_accessor.clone(),
-                remote_files_entries,
-                &mut resolved_data_files,
-                &mut cache_handles,
-            )
-            .await?;
+            let resolved = self
+                .resolve_remote_files(
+                    object_storage_cache.clone(),
+                    filesystem_accessor.clone(),
+                    remote_files_entries,
+                    &mut resolved_data_files,
+                    &mut pins.data_file_cache_handles,
+                )
+                .await;
+            if resolved.is_err() {
+                // resolve_remote_files released everything already.
+                pins.armed = false;
+            }
+            resolved?;
         }
+        pins.armed = false;
+        let cache_handles = std::mem::take(&mut pins.data_file_cache_handles);
 
         // Construct read state.
         Ok(Arc::new(ReadState::new(

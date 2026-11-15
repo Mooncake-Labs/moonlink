@@ -650,4 +650,51 @@ mod gc {
             );
         }
     }
+
+    /// A read state build that panics after its read was prepared releases the cache pins and
+    /// temp parquet it took, the panic reaches the caller, and later reads work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicking_read_state_build_does_not_leak_cache_pins_or_temp_files() {
+        use crate::union_read::read_state_manager::test_hooks::panic_next_materialize;
+
+        let (mut env, cache) = production_cache_env("gc_panic").await;
+        for id in 1..=3 {
+            append_rows(&mut env.table, vec![test_row(id, "r", id)]).unwrap();
+        }
+        commit_flush_and_persist(&mut env, 10).await;
+        env.table.delete(test_row(1, "r", 1), 15).await;
+        commit_flush_and_persist(&mut env, 20).await;
+        // An unflushed row, so the read also has a temp parquet to write.
+        append_rows(&mut env.table, vec![test_row(4, "r", 4)]).unwrap();
+        env.table.commit(30);
+        create_mooncake_snapshot_for_test(&mut env.table, &mut env.notify_rx).await;
+        env.publish(30, 30, 30);
+        let baseline = pinned_refs(&cache).await;
+
+        panic_next_materialize(&env.rsm);
+        let rsm = env.rsm.clone();
+        let scan = tokio::spawn(async move { rsm.try_read(None).await.map(|_| ()) });
+        assert!(
+            scan.await.unwrap_err().is_panic(),
+            "the build panic must reach the caller"
+        );
+
+        let temp_dir = env._context.as_ref().unwrap().temp_dir.path().to_path_buf();
+        let released = async {
+            while pinned_refs(&cache).await != baseline || inmemory_temp_files(&temp_dir) != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(5), released)
+            .await
+            .is_err()
+        {
+            panic!(
+                "a panicking build leaked: pinned refs {} (baseline {baseline}), temp files {}",
+                pinned_refs(&cache).await,
+                inmemory_temp_files(&temp_dir)
+            );
+        }
+        assert_rows(&env.rsm.try_read(None).await.unwrap(), &[2, 3, 4]).await;
+    }
 }
