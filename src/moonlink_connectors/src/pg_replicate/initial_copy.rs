@@ -53,6 +53,16 @@ struct CtidShard {
     end_block_exclusive: Option<i64>,
 }
 
+/// Directory the initial copy writes its parquet files to.
+pub fn initial_copy_output_dir(
+    table_base_path: &str,
+    src_table_id: SrcTableId,
+) -> std::path::PathBuf {
+    std::path::PathBuf::from(table_base_path)
+        .join("initial_copy")
+        .join(format!("table_{src_table_id}"))
+}
+
 /// Reads rows using parallel readers and sends them to the provided `event_sender`.
 pub async fn copy_table_stream(
     table_schema: TableSchema,
@@ -68,9 +78,7 @@ pub async fn copy_table_stream(
     let writer_cfg = config.writer.clone();
 
     // Create output directory for initial copy files
-    let output_dir = std::path::PathBuf::from(table_base_path)
-        .join("initial_copy")
-        .join(format!("table_{}", table_schema.src_table_id));
+    let output_dir = initial_copy_output_dir(table_base_path, table_schema.src_table_id);
 
     // Create batch channel for RecordBatches
     let (batch_tx, batch_rx) = create_batch_channel(writer_cfg.batch_channel_capacity);

@@ -7,7 +7,7 @@ use tracing::error;
 
 use crate::pg_replicate::conversions::text::TextFormatConverter;
 
-use super::{text::FromTextError, Cell};
+use super::Cell;
 
 #[derive(Debug)]
 pub struct TableRow {
@@ -28,8 +28,13 @@ pub enum TableRowConversionError {
     #[error("unterminated row")]
     UnterminatedRow,
 
-    #[error("invalid value: {0}")]
-    InvalidValue(#[from] FromTextError),
+    #[error("column {column} ({type_name}): cannot convert {value}: {reason}")]
+    InvalidValue {
+        column: String,
+        type_name: String,
+        value: String,
+        reason: String,
+    },
 }
 
 pub struct TableRowConverter;
@@ -112,7 +117,17 @@ impl TableRowConverter {
                                 "error parsing column `{}` of type `{}` from text `{val_str}`",
                                 column_schema.name, column_schema.typ
                             );
-                            return Err(e.into());
+                            let value = if val_str.chars().count() > 64 {
+                                format!("'{}...'", val_str.chars().take(64).collect::<String>())
+                            } else {
+                                format!("'{val_str}'")
+                            };
+                            return Err(TableRowConversionError::InvalidValue {
+                                column: column_schema.name.clone(),
+                                type_name: column_schema.typ.name().to_string(),
+                                value,
+                                reason: e.to_string(),
+                            });
                         }
                     }
                 };

@@ -591,10 +591,11 @@ impl CdcStream {
 
     pub fn add_table_schema(self: Pin<&mut Self>, schema: TableSchema) {
         let this = self.project();
-        assert!(this
-            .table_schemas
-            .insert(schema.src_table_id, schema)
-            .is_none());
+        let src_table_id = schema.src_table_id;
+        if this.table_schemas.insert(src_table_id, schema).is_some() {
+            // Duplicates are rejected before a table is registered; keep the newest schema.
+            warn!(src_table_id, "table schema registered twice");
+        }
     }
 
     /// Stop decoding a table. Its schema is already gone if the table was failed by a schema change.

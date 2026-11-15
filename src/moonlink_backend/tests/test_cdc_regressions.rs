@@ -759,3 +759,103 @@ async fn replication_resumes_after_source_refuses_connections() {
         .await
         .unwrap();
 }
+
+async fn try_mirror(
+    backend: &Arc<MoonlinkBackend>,
+    tmp: &TempDir,
+    dst: &str,
+    src: &str,
+    uri: &str,
+) -> std::result::Result<(), String> {
+    let (b, cfg, dst, src, uri) = (
+        backend.clone(),
+        table_config(tmp),
+        dst.to_string(),
+        src.to_string(),
+        uri.to_string(),
+    );
+    match tokio::spawn(async move {
+        b.create_table(DB.to_string(), dst, src, uri, cfg, None)
+            .await
+    })
+    .await
+    {
+        Ok(result) => result.map_err(|e| format!("{e:?}")),
+        Err(join_error) => panic!("create_table panicked: {join_error}"),
+    }
+}
+
+/// A failing initial copy returns an error from create_table (no panic), leaves nothing behind
+/// (a retry fails the same way, no slot stays when it was the database's first mirror), and
+/// never disturbs other mirrors.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn failed_initial_copy_is_a_clean_error() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_good, rv_bad;
+         CREATE TABLE rv_good (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_bad (id BIGINT PRIMARY KEY, ts TIMESTAMP);
+         INSERT INTO rv_bad VALUES (1, 'infinity');",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    // As the database's first mirror: no slot may remain afterwards.
+    let err = try_mirror(&backend, &tmp, "rv_bad_mc", "public.rv_bad", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("infinity"), "{err}");
+    wait_for_no_slots(&client).await;
+
+    mirror(&backend, &tmp, "rv_good_mc", "public.rv_good", &uri).await;
+    for attempt in 0..2 {
+        let err = try_mirror(
+            &backend,
+            &tmp,
+            &format!("rv_bad_mc{attempt}"),
+            "public.rv_bad",
+            &uri,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("infinity"), "attempt {attempt}: {err}");
+    }
+    client
+        .simple_query("INSERT INTO rv_good VALUES (5);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_good_mc", lsn).await, Some(vec![5]));
+
+    // The bad table can be mirrored once the bad value is gone.
+    client
+        .simple_query("UPDATE rv_bad SET ts = '2020-01-01';")
+        .await
+        .unwrap();
+    try_mirror(&backend, &tmp, "rv_bad_mc", "public.rv_bad", &uri)
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_bad_mc", lsn).await, Some(vec![1]));
+}
+
+/// A source table can have only one mirror; a second one is refused without affecting the first.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn second_mirror_of_same_source_is_refused() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) =
+        setup("DROP TABLE IF EXISTS rv_one; CREATE TABLE rv_one (id BIGINT PRIMARY KEY);").await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_one_mc", "public.rv_one", &uri).await;
+    let err = try_mirror(&backend, &tmp, "rv_one_mc2", "public.rv_one", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("already mirrored"), "{err}");
+    client
+        .simple_query("INSERT INTO rv_one VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_one_mc", lsn).await, Some(vec![1]));
+}

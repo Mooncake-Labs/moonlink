@@ -122,7 +122,7 @@ impl ReplicationManager {
             replication_connection.start_replication().await?;
         }
 
-        let src_table_id = replication_connection
+        let added = replication_connection
             .add_table_replication(
                 table_name,
                 &mooncake_table_id,
@@ -130,7 +130,18 @@ impl ReplicationManager {
                 read_state_filepath_remap,
                 is_recovery,
             )
-            .await?;
+            .await;
+        let src_table_id = match added {
+            Ok(src_table_id) => src_table_id,
+            Err(e) => {
+                // A failed first mirror must not leave a replication slot behind that holds the
+                // source's WAL forever.
+                if replication_connection.table_count() == 0 && !is_recovery {
+                    self.shutdown_connection_by_key(&key, true);
+                }
+                return Err(e);
+            }
+        };
 
         assert!(self
             .table_info

@@ -63,6 +63,19 @@ impl Error {
         })
     }
 
+    /// A second mirror of a source table that is already mirrored.
+    #[track_caller]
+    pub fn source_already_mirrored(src_table_name: &str) -> Self {
+        Error::ReplDuplicateTable(ErrorStruct {
+            message: format!(
+                "source table {src_table_name} is already mirrored; a source table can have only one mirror"
+            ),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
     #[track_caller]
     pub fn repl_duplicate_table(table_name: String) -> Self {
         Error::ReplDuplicateTable(ErrorStruct {

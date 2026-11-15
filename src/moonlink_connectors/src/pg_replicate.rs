@@ -419,12 +419,8 @@ impl PostgresConnection {
             },
             writer: Default::default(),
         };
-        let progress = copy_table_stream(schema.clone(), &event_sender, table_base_path, ic_config)
-            .await
-            .expect(&format!(
-                "failed to copy table for src_table_id: {}",
-                src_table_id
-            ));
+        let progress =
+            copy_table_stream(schema.clone(), &event_sender, table_base_path, ic_config).await?;
 
         if let Err(e) = event_sender
             .send(TableEvent::FinishInitialCopy {
@@ -650,6 +646,15 @@ impl PostgresConnection {
             .source
             .fetch_table_schema(None, Some(table_name), None)
             .await?;
+        // One mirror per source table: changes are routed by source table id.
+        if self
+            .registered_tables
+            .lock()
+            .unwrap()
+            .contains_key(&table_schema.src_table_id)
+        {
+            return Err(crate::Error::source_already_mirrored(table_name));
+        }
 
         let (arrow_schema, identity) =
             crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema);
@@ -701,7 +706,7 @@ impl PostgresConnection {
         }
 
         // Perform initial copy
-        let initial_copy_performed = self
+        let initial_copy_performed = match self
             .perform_initial_copy(
                 &table_schema,
                 table_resources.event_sender.clone(),
@@ -709,7 +714,21 @@ impl PostgresConnection {
                 commit_lsn_tx_for_copy,
                 table_base_path,
             )
-            .await?;
+            .await
+        {
+            Ok(performed) => performed,
+            Err(e) => {
+                error!(error = ?e, table_name, "initial copy failed, removing the table again");
+                self.undo_add_table(
+                    table_schema.src_table_id,
+                    table_name,
+                    &mut table_resources,
+                    table_base_path,
+                )
+                .await;
+                return Err(e);
+            }
+        };
 
         assert!(
             !(is_recovery && initial_copy_performed),
@@ -719,6 +738,35 @@ impl PostgresConnection {
         debug!(src_table_id = table_schema.src_table_id, "table added");
 
         Ok((table_schema.src_table_id, table_resources))
+    }
+
+    /// Undo a table registration that did not complete: unregister it from the replication loop,
+    /// drop its handler and files, and take it out of the publication. Best effort; each step logs.
+    async fn undo_add_table(
+        &mut self,
+        src_table_id: SrcTableId,
+        table_name: &str,
+        table_resources: &mut crate::pg_replicate::table_init::TableResources,
+        table_base_path: &str,
+    ) {
+        if let Err(e) = self.drop_table_from_replication(src_table_id).await {
+            warn!(error = ?e, table_name, "failed to unregister table from replication");
+        }
+        if let Err(e) = table_resources.table_event_manager.drop_table().await {
+            warn!(error = ?e, table_name, "failed to drop table handler");
+        }
+        if let Err(e) = self.remove_table_from_publication(table_name).await {
+            warn!(error = ?e, table_name, "failed to remove table from publication");
+        }
+        let copy_dir = crate::pg_replicate::initial_copy::initial_copy_output_dir(
+            table_base_path,
+            src_table_id,
+        );
+        if let Err(e) = tokio::fs::remove_dir_all(&copy_dir).await {
+            if e.kind() != ErrorKind::NotFound {
+                warn!(error = ?e, table_name, "failed to remove initial copy files");
+            }
+        }
     }
 
     /// Drop table from PostgreSQL replication
