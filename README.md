@@ -137,7 +137,7 @@ A mirror that can no longer follow its source table enters the errored state: qu
 - **Values a mirror cannot store** (for example `numeric` `NaN` or `Infinity`, more fractional digits than an unconstrained `numeric` keeps, dates outside the supported range) error the mirror instead of being stored differently.
 - **After upgrading to this version,** mirrors of tables without a primary key that have `json`, `jsonb`, `char(n)`, `"char"`, unconstrained `numeric`, array or composite columns are errored at the first start, because they were stored differently before. Re-create them.
 
-A source that cannot be reached when moonlink starts (restarting, refusing connections) is not an error: its mirrors report that they are not available yet and are restored automatically once it is back. Postgres retains WAL for that database meanwhile.
+A source that cannot be reached when moonlink starts (restarting, refusing connections) is not an error: its mirrors report that they are not available yet and are restored automatically once it is back. Postgres retains WAL for that database meanwhile. If it is still unreachable an hour after moonlink started, its mirrors enter the errored state (drop and re-create them), and the slot is no longer held for them.
 
 ## Contributing
 
