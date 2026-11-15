@@ -2,8 +2,10 @@ use crate::pg_replicate::clients::postgres::build_tls_connector;
 use crate::pg_replicate::table::{TableName, TableSchema};
 use crate::pg_replicate::ReplicationClient;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_postgres::connect;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::PgLsn;
 
 #[cfg(feature = "test-tls")]
@@ -129,35 +131,56 @@ pub async fn create_replication_client_and_slot(slot_name: &str) -> (Replication
     (replication_client, slot_info.confirmed_flush_lsn)
 }
 
+/// Logs instead of unwrapping: cleanup runs from `Drop`, and a panic while unwinding aborts the whole test binary.
+async fn run_cleanup_sql(client: &tokio_postgres::Client, sql: &str) {
+    if let Err(e) = client.simple_query(sql).await {
+        eprintln!("test cleanup `{sql}` failed: {e}");
+    }
+}
+
 async fn drop_publication(client: &tokio_postgres::Client, publication: &str) {
-    let _ = client
-        .simple_query(&format!("DROP PUBLICATION {publication} CASCADE;"))
-        .await
-        .unwrap();
+    run_cleanup_sql(
+        client,
+        &format!("DROP PUBLICATION IF EXISTS {publication} CASCADE;"),
+    )
+    .await;
 }
 
 async fn drop_table(client: &tokio_postgres::Client, table_name: &str) {
-    let _ = client
-        .simple_query(&format!("DROP TABLE {table_name} CASCADE;"))
-        .await
-        .unwrap();
+    run_cleanup_sql(
+        client,
+        &format!("DROP TABLE IF EXISTS {table_name} CASCADE;"),
+    )
+    .await;
 }
 
 async fn drop_type(client: &tokio_postgres::Client, type_name: &str) {
-    let _ = client
-        .simple_query(&format!("DROP TYPE {type_name} CASCADE;"))
-        .await
-        .unwrap();
+    run_cleanup_sql(client, &format!("DROP TYPE IF EXISTS {type_name} CASCADE;")).await;
 }
 
+/// The walsender of a just-closed replication stream releases its slot asynchronously, so dropping the slot
+/// right after the stream ends can fail with "replication slot ... is active for PID n". Terminate the holder
+/// and retry.
 async fn drop_replication_slot(client: &tokio_postgres::Client, slot_name: &str) {
-    let _ = client
-        .simple_query(&format!(
-            "SELECT pg_drop_replication_slot('{slot}');",
-            slot = slot_name
-        ))
-        .await
-        .unwrap();
+    let sql = format!(
+        "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots \
+         WHERE slot_name = '{slot_name}' AND active_pid IS NOT NULL; \
+         SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots \
+         WHERE slot_name = '{slot_name}';"
+    );
+    for _ in 0..100 {
+        match client.simple_query(&sql).await {
+            Ok(_) => return,
+            Err(e) if e.code() == Some(&SqlState::OBJECT_IN_USE) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => {
+                eprintln!("test cleanup: dropping replication slot {slot_name} failed: {e}");
+                return;
+            }
+        }
+    }
+    eprintln!("test cleanup: replication slot {slot_name} still active after 10s, not dropped");
 }
 
 pub struct TestResources {
@@ -199,6 +222,18 @@ impl TestResources {
 
     pub fn add_type(&mut self, name: impl Into<String>) {
         self.types.push(name.into());
+    }
+
+    /// Drops leftovers of the registered objects from an earlier aborted run. Call before creating them.
+    pub async fn drop_existing(&self) {
+        Self::cleanup(
+            Arc::clone(&self.client),
+            self.slots.clone(),
+            self.publications.clone(),
+            self.tables.clone(),
+            self.types.clone(),
+        )
+        .await;
     }
 
     pub fn set_sql_tx(&mut self, tx: mpsc::UnboundedSender<String>) {
