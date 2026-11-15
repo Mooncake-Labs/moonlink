@@ -24,7 +24,7 @@ use crate::Result;
 use futures::StreamExt;
 use moonlink::{
     CommitState, MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap,
-    ReplicationState, TableEvent, WalManager,
+    ReplicationState, TableEvent,
 };
 use native_tls::{Certificate, TlsConnector};
 use pg_escape::{quote_identifier, quote_literal};
@@ -67,7 +67,6 @@ pub enum PostgresReplicationCommand {
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
-        wal_flush_lsn_rx: watch::Receiver<u64>,
         ready_tx: oneshot::Sender<()>,
     },
     DropTable {
@@ -397,7 +396,6 @@ impl PostgresConnection {
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
-        wal_flush_lsn_rx: watch::Receiver<u64>,
     ) -> Result<oneshot::Receiver<()>> {
         let (ready_tx, ready_rx) = oneshot::channel();
         let cmd = PostgresReplicationCommand::AddTable {
@@ -406,7 +404,6 @@ impl PostgresConnection {
             event_sender,
             commit_state,
             flush_lsn_rx,
-            wal_flush_lsn_rx,
             ready_tx,
         };
         self.cmd_tx.send(cmd).await?;
@@ -513,7 +510,6 @@ impl PostgresConnection {
             &table_base_path.to_string(),
             &self.replication_state,
             table_components,
-            is_recovery,
         )
         .await?;
 
@@ -533,10 +529,6 @@ impl PostgresConnection {
                     .flush_lsn_rx
                     .take()
                     .expect("flush_lsn_rx is None"),
-                table_resources
-                    .wal_flush_lsn_rx
-                    .take()
-                    .expect("wal_flush_lsn_rx is None"),
             )
             .await?;
 
@@ -556,28 +548,10 @@ impl PostgresConnection {
             )
             .await?;
 
-        if is_recovery {
-            assert!(
-                !initial_copy_performed,
-                "initial copy should not be performed during recovery"
-            );
-            debug!(
-                "Performing recovery for table with ID {:?}",
-                table_schema.src_table_id
-            );
-            // Perform recovery
-            WalManager::replay_recovery_from_wal(
-                table_resources.event_sender.clone(),
-                table_resources.wal_persistence_metadata.clone(),
-                table_resources.wal_file_accessor.clone(),
-                table_resources.last_persistence_snapshot_lsn,
-            )
-            .await?;
-            debug!(
-                "Finished recovery for table with ID {:?}",
-                table_schema.src_table_id
-            );
-        }
+        assert!(
+            !(is_recovery && initial_copy_performed),
+            "initial copy should not be performed during recovery"
+        );
 
         debug!(src_table_id = table_schema.src_table_id, "table added");
 
@@ -648,29 +622,16 @@ impl PostgresConnection {
 }
 
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
-/// In the event that the WAL has not been written yet, we return the iceberg flush lsn.
-fn compute_confirmed_wal_flush_lsn(
-    wal_flush_lsn_rxs: &HashMap<SrcTableId, watch::Receiver<u64>>,
+/// Postgres may discard WAL up to this LSN, so it must not exceed what every table has persisted into iceberg;
+/// after a restart, everything past it is replayed from the replication slot.
+fn compute_confirmed_flush_lsn(
     flush_lsn_rxs: &HashMap<SrcTableId, watch::Receiver<u64>>,
 ) -> Option<PgLsn> {
-    let mut confirmed_lsn: Option<u64> = None;
-    for (table_id, wal_rx) in wal_flush_lsn_rxs.iter() {
-        let wal_lsn = *wal_rx.borrow();
-        let persistence_lsn = flush_lsn_rxs
-            .get(table_id)
-            .map(|rx| *rx.borrow())
-            .unwrap_or(0);
-        let effective_lsn = if wal_lsn > 0 {
-            wal_lsn
-        } else {
-            persistence_lsn
-        };
-        confirmed_lsn = Some(match confirmed_lsn {
-            Some(v) => v.min(effective_lsn),
-            None => effective_lsn,
-        });
-    }
-    confirmed_lsn.map(PgLsn::from)
+    flush_lsn_rxs
+        .values()
+        .map(|rx| *rx.borrow())
+        .min()
+        .map(PgLsn::from)
 }
 
 #[tracing::instrument(name = "replication_event_loop", skip_all)]
@@ -683,7 +644,6 @@ pub async fn run_event_loop(
     // Persist across reconnects
     let mut saved_schemas: Vec<TableSchema> = Vec::new();
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
-    let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
     let mut last_seen_end_lsn: Option<PgLsn> = None;
 
     // Linear backoff parameters
@@ -694,8 +654,7 @@ pub async fn run_event_loop(
     'outer: loop {
         // Prepare connection and stream
         let confirmed_flush_lsn =
-            compute_confirmed_wal_flush_lsn(&wal_flush_lsn_rxs, &flush_lsn_rxs)
-                .unwrap_or(PgLsn::from(0));
+            compute_confirmed_flush_lsn(&flush_lsn_rxs).unwrap_or(PgLsn::from(0));
 
         let (client, mut connection) = postgres_source.connect_replication().await?;
 
@@ -750,7 +709,7 @@ pub async fn run_event_loop(
         loop {
             tokio::select! {
                 _ = status_interval.tick() => {
-                    let lsn_to_send = compute_confirmed_wal_flush_lsn(&wal_flush_lsn_rxs, &flush_lsn_rxs).unwrap_or(PgLsn::from(0));
+                    let lsn_to_send = compute_confirmed_flush_lsn(&flush_lsn_rxs).unwrap_or(PgLsn::from(0));
                     if let Err(e) = stream
                         .as_mut()
                         .send_status_update(lsn_to_send)
@@ -760,10 +719,9 @@ pub async fn run_event_loop(
                     }
                 },
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, wal_flush_lsn_rx, ready_tx } => {
+                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, ready_tx } => {
                         sink.add_table(src_table_id, event_sender, commit_state, &schema);
                         flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
-                        wal_flush_lsn_rxs.insert(src_table_id, wal_flush_lsn_rx);
                         stream.as_mut().add_table_schema(schema);
                         if let Err(e) = ready_tx.send(()) {
                             error!(error = ?e, "failed to send ready signal");
@@ -772,7 +730,6 @@ pub async fn run_event_loop(
                     PostgresReplicationCommand::DropTable { src_table_id } => {
                         sink.drop_table(src_table_id);
                         flush_lsn_rxs.remove(&src_table_id);
-                        wal_flush_lsn_rxs.remove(&src_table_id);
                         stream.as_mut().remove_table_schema(src_table_id);
                     }
                     PostgresReplicationCommand::Shutdown => {

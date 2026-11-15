@@ -1,17 +1,11 @@
 use crate::event_sync::create_table_event_syncer;
 use crate::row::IdentityProp;
 use crate::row::{MoonlinkRow, RowValue};
-use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::get_read_state_filepath_remap;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
-use crate::storage::wal::test_utils::{
-    assert_wal_events_contains, assert_wal_events_does_not_contain,
-};
-use crate::storage::wal::test_utils::{wal_file_exists, WAL_TEST_TABLE_ID};
-use crate::storage::wal::{PersistentWalMetadata, WalManager};
 use crate::storage::IcebergTableConfig;
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
@@ -19,16 +13,11 @@ use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
 use crate::IcebergCatalogConfig;
 use crate::Result;
-use crate::{
-    FileSystemAccessor, IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager,
-    WalConfig, WalTransactionState,
-};
+use crate::{IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager};
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
-use futures::StreamExt;
 use iceberg::io::FileIOBuilder;
 use iceberg::io::FileRead;
-use more_asserts as ma;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::AsyncArrowWriter;
 use std::sync::Arc;
@@ -69,10 +58,7 @@ pub struct TestEnvironment {
     replication_tx: watch::Sender<u64>,
     last_commit_tx: watch::Sender<u64>,
     snapshot_lsn_tx: watch::Sender<u64>,
-    pub(crate) wal_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
-    pub(crate) wal_config: WalConfig,
     pub(crate) force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
-    pub(crate) wal_flush_lsn_rx: watch::Receiver<u64>,
     pub(crate) table_event_manager: TableEventManager,
     pub(crate) temp_dir: TempDir,
 }
@@ -111,13 +97,6 @@ impl TestEnvironment {
         let force_snapshot_completion_rx = table_event_sync_receiver
             .force_snapshot_completion_rx
             .clone();
-        let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
-
-        // TODO(Paul): Change this default when we support object storage for WAL
-        let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
-        let wal_filesystem_accessor = Arc::new(FileSystemAccessor::new(
-            wal_config.get_accessor_config().clone(),
-        ));
         let table_handler_timer = create_table_handler_timers();
 
         let handler = TableHandler::new(
@@ -140,10 +119,7 @@ impl TestEnvironment {
             replication_tx,
             last_commit_tx,
             snapshot_lsn_tx,
-            wal_filesystem_accessor,
-            wal_config,
             force_snapshot_completion_rx,
-            wal_flush_lsn_rx,
             table_event_manager,
             temp_dir,
         }
@@ -155,8 +131,6 @@ impl TestEnvironment {
         let table_name = "table_name";
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
-        let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
-        let wal_manager = WalManager::new(&wal_config);
 
         let mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
@@ -165,7 +139,6 @@ impl TestEnvironment {
             path,
             iceberg_table_config.clone(),
             mooncake_table_config,
-            wal_manager,
             create_test_object_storage_cache(&temp_dir),
             create_test_filesystem_accessor(&iceberg_table_config),
         )
@@ -233,12 +206,7 @@ impl TestEnvironment {
             id, name, age, lsn, xact_id
         );
         let row = create_row(id, name, age);
-        let event = TableEvent::Append {
-            row,
-            lsn,
-            xact_id,
-            is_recovery: false,
-        };
+        let event = TableEvent::Append { row, lsn, xact_id };
         self.send_event(event.clone()).await;
         event
     }
@@ -257,18 +225,13 @@ impl TestEnvironment {
             lsn,
             xact_id,
             delete_if_exists: false,
-            is_recovery: false,
         };
         self.send_event(event.clone()).await;
         event
     }
 
     pub async fn commit(&self, lsn: u64) -> TableEvent {
-        let event = TableEvent::Commit {
-            lsn,
-            xact_id: None,
-            is_recovery: false,
-        };
+        let event = TableEvent::Commit { lsn, xact_id: None };
         self.send_event(event.clone()).await;
         event
     }
@@ -277,18 +240,13 @@ impl TestEnvironment {
         let event = TableEvent::Commit {
             lsn,
             xact_id: Some(xact_id),
-            is_recovery: false,
         };
         self.send_event(event.clone()).await;
         event
     }
 
     pub async fn stream_abort(&self, xact_id: u32) -> TableEvent {
-        let event = TableEvent::StreamAbort {
-            xact_id,
-            is_recovery: false,
-            closes_incomplete_wal_transaction: false,
-        };
+        let event = TableEvent::StreamAbort { xact_id };
         self.send_event(event.clone()).await;
         event
     }
@@ -313,12 +271,8 @@ impl TestEnvironment {
 
     /// Commit the transaction, flush and create mooncake/iceberg snapshot.
     pub async fn flush_table_and_sync(&mut self, lsn: u64, xact_id: Option<u32>) {
-        self.send_event(TableEvent::CommitFlush {
-            lsn,
-            xact_id,
-            is_recovery: false,
-        })
-        .await;
+        self.send_event(TableEvent::CommitFlush { lsn, xact_id })
+            .await;
         self.send_event(TableEvent::ForceSnapshot { lsn: Some(lsn) })
             .await;
         TableEventManager::synchronize_force_snapshot_request(
@@ -330,20 +284,12 @@ impl TestEnvironment {
     }
 
     pub async fn flush_table(&self, lsn: u64) {
-        self.send_event(TableEvent::CommitFlush {
-            lsn,
-            xact_id: None,
-            is_recovery: false,
-        })
-        .await;
+        self.send_event(TableEvent::CommitFlush { lsn, xact_id: None })
+            .await;
     }
 
     pub async fn stream_flush(&self, xact_id: u32) {
-        self.send_event(TableEvent::StreamFlush {
-            xact_id,
-            is_recovery: false,
-        })
-        .await;
+        self.send_event(TableEvent::StreamFlush { xact_id }).await;
     }
 
     pub async fn bulk_upload_files(
@@ -413,183 +359,6 @@ impl TestEnvironment {
         self.send_event(TableEvent::DropTable).await;
         if let Some(handle) = self.handler._event_handle.take() {
             handle.await.expect("TableHandler task panicked");
-        }
-    }
-
-    /// Force WAL persistence by sending a periodic WAL event and waiting for completion
-    /// Note that this assumes that this is being called after an event with an updated LSN
-    /// has just been sent, if not it will wait indefinitely.
-    pub async fn force_wal_persistence(&mut self, expected_lsn: u64) {
-        self.send_event(TableEvent::PeriodicalPersistenceUpdateWal(
-            uuid::Uuid::new_v4(),
-        ))
-        .await;
-
-        loop {
-            if *self.wal_flush_lsn_rx.borrow() >= expected_lsn {
-                break;
-            }
-            self.wal_flush_lsn_rx.changed().await.unwrap();
-        }
-    }
-
-    // Recover wal events locally by reading from the wal filesystem and finding the lowest file number
-    // TODO(Paul): Rework these when implementing object storage WAL
-    pub async fn get_wal_events_with_metadata(
-        &self,
-        wal_metadata: &PersistentWalMetadata,
-    ) -> Vec<TableEvent> {
-        let wal_events_stream = WalManager::recover_flushed_wals_flat(
-            self.wal_filesystem_accessor.clone(),
-            wal_metadata,
-        );
-        let wal_events_vec = wal_events_stream
-            .collect::<Vec<Result<TableEvent>>>()
-            .await
-            .into_iter()
-            .map(|event| match event {
-                // panic if there are any errors
-                Ok(event) => event,
-                Err(e) => {
-                    panic!("Error recovering wal events: {e:?}");
-                }
-            })
-            .collect::<Vec<TableEvent>>();
-        wal_events_vec
-    }
-
-    pub async fn get_latest_wal_metadata(&self) -> Option<PersistentWalMetadata> {
-        WalManager::recover_from_persistent_wal_metadata(
-            self.wal_filesystem_accessor.clone(),
-            self.wal_config.clone(),
-        )
-        .await
-    }
-
-    pub async fn check_wal_events_from_metadata(
-        &self,
-        wal_metadata: &PersistentWalMetadata,
-        should_contain_table_events: &[TableEvent],
-        should_not_contain_table_events: &[TableEvent],
-    ) {
-        if wal_metadata.get_live_wal_files_tracker().is_empty() {
-            assert!(
-                should_contain_table_events.is_empty(),
-                "No live wal files found in wal metadata but should contain events was not empty: {should_contain_table_events:?}"
-            );
-            return;
-        }
-
-        let wal_events = self.get_wal_events_with_metadata(wal_metadata).await;
-
-        assert_wal_events_contains(&wal_events, should_contain_table_events);
-        assert_wal_events_does_not_contain(&wal_events, should_not_contain_table_events);
-    }
-
-    pub async fn check_wal_metadata_invariants(
-        &self,
-        metadata: &PersistentWalMetadata,
-        persistence_snapshot_lsn: Option<u64>,
-        should_contain_xact_ids: Vec<u32>,
-        should_not_contain_xact_ids: Vec<u32>,
-    ) {
-        assert_eq!(
-            metadata.get_persistence_snapshot_lsn(),
-            persistence_snapshot_lsn,
-            "iceberg snapshot lsn should be the same"
-        );
-
-        // Assertions for active transaction tracking
-        for (xact_id, xact_state) in metadata.get_active_transactions() {
-            assert!(
-                should_contain_xact_ids.contains(xact_id),
-                "xact {xact_id} should be in the metadata"
-            );
-            assert!(
-                !should_not_contain_xact_ids.contains(xact_id),
-                "xact {xact_id} should not be in the metadata"
-            );
-
-            if let WalTransactionState::Commit { completion_lsn, .. }
-            | WalTransactionState::Abort { completion_lsn, .. } = xact_state
-            {
-                if let Some(lsn) = persistence_snapshot_lsn {
-                    ma::assert_gt!(
-                        *completion_lsn,
-                        lsn,
-                        "xact {xact_id} should have completion LSN > iceberg snapshot LSN"
-                    );
-                }
-            }
-        }
-
-        // Assertions for main transaction tracking
-        for i in 0..metadata.get_main_transaction_tracker().len() {
-            let xact = &metadata.get_main_transaction_tracker()[i];
-            if i != metadata.get_main_transaction_tracker().len() - 1 {
-                if let WalTransactionState::Open { .. } = xact {
-                    panic!("xact {xact:?} should not be open unless it is the last xact");
-                }
-            }
-            if let WalTransactionState::Commit { completion_lsn, .. }
-            | WalTransactionState::Abort { completion_lsn, .. } = xact
-            {
-                if let Some(lsn) = persistence_snapshot_lsn {
-                    ma::assert_gt!(
-                        *completion_lsn,
-                        lsn,
-                        "xact {xact:?} should have completion LSN > iceberg snapshot LSN"
-                    );
-                }
-            }
-        }
-
-        // Check consistency between files
-        let active_wal_files = metadata.get_live_wal_files_tracker();
-
-        let highest_file_number_from_metadata =
-            active_wal_files.last().map(|file| file.file_number);
-        if let Some(highest_file_number_from_metadata) = highest_file_number_from_metadata {
-            // check if the metadata is empty
-            let file_number = highest_file_number_from_metadata + 1;
-            assert!(
-                !wal_file_exists(
-                    file_number,
-                    self.wal_filesystem_accessor.clone(),
-                    &self.wal_config
-                )
-                .await,
-                "file {file_number} should not exist as it is out of range of the active wal files",
-            );
-        };
-
-        let lowest_file_number_from_metadata =
-            active_wal_files.first().map(|file| file.file_number);
-        if let Some(lowest_file_number_from_metadata) = lowest_file_number_from_metadata {
-            if lowest_file_number_from_metadata > 0 {
-                let file_number = lowest_file_number_from_metadata - 1;
-                assert!(!wal_file_exists(
-                    file_number,
-                    self.wal_filesystem_accessor.clone(),
-                    &self.wal_config
-                )
-                .await,
-                "file {file_number} should not exist as it is out of range of the active wal files",
-            );
-            }
-        }
-
-        for file in active_wal_files {
-            assert!(
-                wal_file_exists(
-                    file.file_number,
-                    self.wal_filesystem_accessor.clone(),
-                    &self.wal_config
-                )
-                .await,
-                "file {file_number} should exist",
-                file_number = file.file_number
-            );
         }
     }
 }
@@ -674,7 +443,8 @@ pub(crate) async fn generate_parquet_file_in_gcs(
     let temp_dir = tempdir().unwrap();
     let local_parquet_file = generate_parquet_file(&temp_dir, &filename).await;
     let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
-    let filesystem_accessor = FileSystemAccessor::new(accessor_config);
+    use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+    let filesystem_accessor = crate::FileSystemAccessor::new(accessor_config);
     filesystem_accessor
         .copy_from_local_to_remote(&local_parquet_file, gcs_filepath)
         .await
@@ -694,7 +464,8 @@ pub(crate) async fn generate_parquet_file_in_s3(storage_config: StorageConfig, s
     let temp_dir = tempdir().unwrap();
     let local_parquet_file = generate_parquet_file(&temp_dir, &filename).await;
     let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
-    let filesystem_accessor = FileSystemAccessor::new(accessor_config);
+    use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+    let filesystem_accessor = crate::FileSystemAccessor::new(accessor_config);
     filesystem_accessor
         .copy_from_local_to_remote(&local_parquet_file, s3_filepath)
         .await

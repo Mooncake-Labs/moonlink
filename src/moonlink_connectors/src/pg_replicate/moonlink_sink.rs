@@ -224,7 +224,6 @@ impl Sink {
                             TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
-                                is_recovery: false,
                             },
                         )
                         .await
@@ -259,7 +258,6 @@ impl Sink {
                                 TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
-                                    is_recovery: false,
                                 },
                             )
                             .await
@@ -283,7 +281,6 @@ impl Sink {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -302,7 +299,6 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                             delete_if_exists: false,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -315,7 +311,6 @@ impl Sink {
                             row: PostgresTableRow(new_table_row).into(),
                             lsn: final_lsn,
                             xact_id,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -334,7 +329,6 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                             delete_if_exists: false,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -385,11 +379,7 @@ impl Sink {
                         if let Some(event_sender) = self.event_senders.get(table_id) {
                             if let Err(e) = Self::send_table_event(
                                 event_sender,
-                                TableEvent::StreamAbort {
-                                    xact_id,
-                                    is_recovery: false,
-                                    closes_incomplete_wal_transaction: false,
-                                },
+                                TableEvent::StreamAbort { xact_id },
                             )
                             .await
                             {

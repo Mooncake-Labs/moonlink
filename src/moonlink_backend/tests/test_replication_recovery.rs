@@ -57,7 +57,7 @@ mod tests {
             .unwrap();
         let lsn2 = current_wal_lsn(&client).await;
 
-        // Wait until WAL flush reaches lsn2, then verify rows once
+        // Wait until rows up to lsn2 are visible, then verify them
         let ids = nonunique_ids_from_state(
             &backend
                 .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn2))

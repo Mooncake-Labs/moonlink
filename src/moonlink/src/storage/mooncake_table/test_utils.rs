@@ -7,9 +7,7 @@ use crate::storage::mooncake_table::table_operation_test_utils::*;
 use crate::storage::table::iceberg::deletion_vector::DeletionVector as IcebergDeletionVector;
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::puffin_utils;
-use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
-use crate::storage::wal::WalManager;
-use crate::{StorageConfig, WalConfig};
+use crate::StorageConfig;
 use arrow::array::Int32Array;
 use arrow_array::Array;
 use futures::future::join_all;
@@ -78,8 +76,6 @@ pub async fn test_table(
     let mut table_config = test_mooncake_table_config(context);
     table_config.batch_size = 2;
     table_config.row_identity = identity;
-    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
-    let wal_manager = WalManager::new(&wal_config);
     MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),
@@ -87,7 +83,6 @@ pub async fn test_table(
         context.path(),
         iceberg_table_config.clone(),
         table_config,
-        wal_manager,
         create_test_object_storage_cache(&context.temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
@@ -102,8 +97,6 @@ pub async fn test_append_only_table(context: &TestContext, table_name: &str) -> 
     table_config.batch_size = 2;
     table_config.append_only = true;
     table_config.row_identity = IdentityProp::None;
-    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
-    let wal_manager = WalManager::new(&wal_config);
     MooncakeTable::new(
         (*create_test_arrow_schema()).clone(),
         table_name.to_string(),
@@ -111,7 +104,6 @@ pub async fn test_append_only_table(context: &TestContext, table_name: &str) -> 
         context.path(),
         iceberg_table_config.clone(),
         table_config,
-        wal_manager,
         create_test_object_storage_cache(&context.temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )

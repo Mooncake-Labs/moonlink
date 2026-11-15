@@ -2,7 +2,7 @@ use crate::error::Result;
 use moonlink::row::IdentityProp;
 use moonlink::{
     DataCompactionConfig, DiskSliceWriterConfig, FileIndexMergeConfig, IcebergPersistenceConfig,
-    IcebergTableConfig, MooncakeTableConfig, MoonlinkTableConfig, WalConfig,
+    IcebergTableConfig, MooncakeTableConfig, MoonlinkTableConfig,
 };
 /// This module contains util functions related to moonlink config.
 use serde::{Deserialize, Serialize};
@@ -69,8 +69,6 @@ struct MoonlinkTableConfigForPersistence {
     mooncake_table_config: MooncakeTableConfigForPersistence,
     /// Iceberg table configuration.
     iceberg_table_config: IcebergTableConfig,
-    /// WAL configuration.
-    wal_config: WalConfig,
 }
 
 impl MoonlinkTableConfigForPersistence {
@@ -126,11 +124,9 @@ pub(crate) fn parse_moonlink_table_config(
 ) -> Result<serde_json::Value> {
     // Serialize mooncake table config.
     let iceberg_table_config = moonlink_table_config.iceberg_table_config;
-    let wal_config = moonlink_table_config.wal_table_config;
     let mooncake_config = moonlink_table_config.mooncake_table_config;
     let persisted = MoonlinkTableConfigForPersistence {
         iceberg_table_config,
-        wal_config,
         mooncake_table_config: MooncakeTableConfigForPersistence {
             mem_slice_size: mooncake_config.mem_slice_size,
             snapshot_deletion_record_count: mooncake_config.snapshot_deletion_record_count,
@@ -159,7 +155,6 @@ pub(crate) fn deserialize_moonlink_table_config(
 
     let moonlink_table_config = MoonlinkTableConfig {
         iceberg_table_config: parsed.iceberg_table_config,
-        wal_table_config: parsed.wal_config,
         mooncake_table_config,
     };
 
@@ -177,7 +172,6 @@ mod tests {
         let old_moonlink_table_config = MoonlinkTableConfig {
             iceberg_table_config: IcebergTableConfig::default(),
             mooncake_table_config: MooncakeTableConfig::default(),
-            wal_table_config: WalConfig::default(),
         };
         let serialized_persisted_config =
             parse_moonlink_table_config(old_moonlink_table_config.clone()).unwrap();
@@ -191,6 +185,34 @@ mod tests {
             new_moonlink_table_config.iceberg_table_config,
             old_moonlink_table_config.iceberg_table_config
         );
+    }
+
+    // Configs persisted by moonlink versions with a WAL carry a `wal_config` entry; it must be ignored.
+    #[test]
+    fn test_deserialize_config_persisted_with_legacy_wal_config() {
+        let moonlink_table_config = MoonlinkTableConfig {
+            iceberg_table_config: IcebergTableConfig::default(),
+            mooncake_table_config: MooncakeTableConfig::default(),
+        };
+        let mut persisted = parse_moonlink_table_config(moonlink_table_config.clone()).unwrap();
+        let legacy_accessor_config =
+            serde_json::to_value(moonlink::AccessorConfig::new_with_storage_config(
+                moonlink::StorageConfig::FileSystem {
+                    root_directory: "/tmp/legacy_wal".to_string(),
+                    atomic_write_dir: None,
+                },
+            ))
+            .unwrap();
+        persisted.as_object_mut().unwrap().insert(
+            "wal_config".to_string(),
+            json!({
+                "accessor_config": legacy_accessor_config,
+                "mooncake_table_id": "db.schema.table",
+            }),
+        );
+
+        let deserialized = deserialize_moonlink_table_config(persisted).unwrap();
+        assert_eq!(deserialized, moonlink_table_config);
     }
 
     // Testing scenario: serialized json config only contains partial fields, check whether json deserialization succeeds, and populates default value correctly.

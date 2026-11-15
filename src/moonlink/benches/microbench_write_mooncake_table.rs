@@ -1,7 +1,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use criterion::{criterion_group, criterion_main, Criterion};
 use moonlink::row::{IdentityProp, MoonlinkRow, RowValue};
-use moonlink::{AccessorConfig, FileSystemAccessor, StorageConfig, WalConfig, WalManager};
+use moonlink::{AccessorConfig, FileSystemAccessor, StorageConfig};
 use moonlink::{IcebergTableConfig, ObjectStorageCache};
 use moonlink::{MooncakeTable, MooncakeTableConfig};
 use pprof::criterion::{Output, PProfProfiler};
@@ -74,8 +74,6 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
     table_config.row_identity = IdentityProp::SinglePrimitiveKey(0);
 
     // TODO(Paul): May need to tie this to the actual mooncake table ID in the future.
-    let wal_config = WalConfig::default_wal_config_local("1", &base_path);
-    let wal_manager = WalManager::new(&wal_config);
     let mut table = rt
         .block_on(MooncakeTable::new(
             schema,
@@ -84,7 +82,6 @@ fn bench_write_mooncake_table(c: &mut Criterion) {
             base_path,
             iceberg_table_config,
             table_config,
-            wal_manager,
             ObjectStorageCache::create_bench_object_storage_cache(),
             Arc::new(FileSystemAccessor::new(
                 AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
