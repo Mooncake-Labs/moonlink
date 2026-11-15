@@ -858,6 +858,20 @@ impl PostgresConnection {
                         "it was dropped while being added",
                     )
                 })?;
+        if !is_recovery {
+            let unreplicated = source_fingerprint::unreplicated_partition(
+                &self.postgres_client,
+                table_schema.src_table_id,
+            )
+            .await
+            .map_err(PostgresSourceError::from)?;
+            if let Some(partition) = unreplicated {
+                return Err(crate::Error::unsupported_source_table(
+                    table_name,
+                    &format!("{partition}; only regular (logged) partitions are supported"),
+                ));
+            }
+        }
 
         // One mirror per source table: changes are routed by source table id.
         if self

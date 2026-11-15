@@ -3582,3 +3582,57 @@ async fn rolled_back_savepoint_keeps_the_failures_of_its_streamed_transaction(
         Some(source)
     );
 }
+
+/// Postgres never decodes changes of an unlogged partition: one that appears later (created
+/// unlogged, or an existing partition set unlogged) errors the mirror, and a partitioned source
+/// with one is refused.
+#[rstest::rstest]
+#[case::unlogged_partition_created("CREATE UNLOGGED TABLE rv_part_2 PARTITION OF rv_part FOR VALUES FROM (100) TO (200); INSERT INTO rv_part VALUES (150, 'u');")]
+#[case::partition_set_unlogged(
+    "ALTER TABLE rv_part_4 SET UNLOGGED; INSERT INTO rv_part VALUES (350, 'u');"
+)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn unlogged_partition_errors_the_mirror(#[case] ddl: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2, rv_part_4;
+         CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
+         CREATE TABLE rv_part_4 PARTITION OF rv_part FOR VALUES FROM (300) TO (400);
+         INSERT INTO rv_part VALUES (1, 'a');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    client.simple_query(ddl).await.unwrap();
+    // Nothing of an unlogged partition reaches the stream; the source is polled every 5 s.
+    let mut err = None;
+    for _ in 0..20 {
+        client
+            .simple_query("INSERT INTO rv_part VALUES (2, 'b') ON CONFLICT (id) DO UPDATE SET v = rv_part.v || 'x';")
+            .await
+            .unwrap();
+        let lsn = current_wal_lsn(&client).await;
+        err = snapshot_error(&backend, "rv_part_mc", lsn).await;
+        if err.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let err = err.expect("a mirror with an unlogged partition must be errored");
+    assert!(err.contains("unlogged"), "{err}");
+
+    let backend = Arc::new(backend);
+    backend
+        .drop_table(DB.to_string(), "rv_part_mc".to_string())
+        .await
+        .unwrap();
+    let err = try_mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("unlogged"), "{err}");
+    client
+        .simple_query("DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2, rv_part_4;")
+        .await
+        .unwrap();
+}

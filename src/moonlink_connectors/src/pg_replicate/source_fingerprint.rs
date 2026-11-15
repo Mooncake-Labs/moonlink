@@ -10,7 +10,7 @@
 //! it is first seen (created ahead of use): it is adopted, and its replica identity set. A
 //! partition that already holds rows, or any partition that leaves the table (detached or
 //! dropped), errors the mirror: whether those rows were ever replicated cannot be told from the
-//! catalog.
+//! catalog. So does an unlogged or foreign partition, whose changes are never decoded.
 
 use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
@@ -146,6 +146,33 @@ pub async fn fetch(
     }))
 }
 
+/// A partition whose changes logical decoding never sees (unlogged, or a foreign table), as a
+/// user-facing description; None if every partition is a regular permanent table.
+pub async fn unreplicated_partition(
+    client: &Client,
+    relid: SrcTableId,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT c.oid::regclass::text, c.relkind = 'f' FROM \
+                 pg_partition_tree({relid}::oid::regclass) t JOIN pg_class c ON c.oid = t.relid \
+                 WHERE t.relid <> {relid}::oid::regclass \
+                 AND (c.relpersistence <> 'p' OR c.relkind = 'f') ORDER BY 1 LIMIT 1;"
+            ))
+            .await?,
+    );
+    Ok(found.first().map(|row| {
+        let name = row.get(0).unwrap_or_default();
+        let what = if row.get(1) == Some("t") {
+            "a foreign table"
+        } else {
+            "unlogged"
+        };
+        format!("partition {name} is {what}, so postgres never sends its changes")
+    }))
+}
+
 /// Name of a relation, and whether it holds no rows; None if it no longer exists.
 async fn emptiness(
     client: &Client,
@@ -190,6 +217,11 @@ pub async fn drift(
         return Ok(Drift::Changed(format!(
             "{}; schema changes are not supported",
             describe_column_change(&expected.columns, &current.columns)
+        )));
+    }
+    if let Some(partition) = unreplicated_partition(client, expected.relid).await? {
+        return Ok(Drift::Changed(format!(
+            "{partition}; only regular (logged) partitions are supported"
         )));
     }
     // Rows left the table when a partition was detached; re-attaching it does not bring the
