@@ -4162,3 +4162,68 @@ async fn changes_of_a_published_table_without_a_mirror_are_ignored() {
         Some(vec![1, 2])
     );
 }
+
+/// Dates and timestamps replicate exactly whatever TimeZone and DateStyle the mirror's role or
+/// database defaults to: a local zone prints old timestamptz values with second-precision (LMT)
+/// offsets, and a non-ISO DateStyle prints dates as DD/MM/YYYY.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_tz;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_tz_role') THEN
+             EXECUTE 'DROP OWNED BY rv_tz_role'; DROP ROLE rv_tz_role;
+           END IF;
+         END $$;
+         CREATE ROLE rv_tz_role LOGIN SUPERUSER PASSWORD 'pwtz';
+         ALTER ROLE rv_tz_role SET TimeZone = 'America/Los_Angeles';
+         ALTER ROLE rv_tz_role SET DateStyle = 'SQL, DMY';
+         CREATE TABLE rv_tz (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ);
+         INSERT INTO rv_tz VALUES
+             (1, '0044-03-15 BC', '0044-03-15 12:00:00 BC', '0044-03-15 12:00:00+00 BC'),
+             (2, '1800-01-01', '1800-01-01 00:00:00', '1800-01-01 00:00:00+00'),
+             (3, '2020-06-30', '2020-06-30 23:59:59.5', '2020-06-30 23:59:59.5+00');",
+    )
+    .await;
+    let role_uri = uri_for_user(&uri, "rv_tz_role", "pwtz");
+    mirror(&backend, &tmp, "rv_tz_mc", "public.rv_tz", &role_uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_tz VALUES
+                 (4, '1883-11-18', '1883-11-18 12:00:00', '1883-11-18 12:00:00+00'),
+                 (5, '0001-01-01 BC', '0001-01-01 00:00:00 BC', '1909-06-01 00:00:00+00');
+             UPDATE rv_tz SET tz = tz + interval '1 second' WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_tz_mc", lsn).await, None);
+    for (column, epoch) in [
+        ("d", "(d - DATE '1970-01-01')::bigint"),
+        ("ts", "(extract(epoch FROM ts) * 1000000)::bigint"),
+        ("tz", "(extract(epoch FROM tz) * 1000000)::bigint"),
+    ] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {epoch}::text FROM rv_tz"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            scan_rows_as(
+                &backend,
+                "rv_tz_mc",
+                lsn,
+                column,
+                Duration::from_secs(30),
+                Some(DataType::Int64)
+            )
+            .await,
+            Some(source),
+            "column {column}"
+        );
+    }
+}
