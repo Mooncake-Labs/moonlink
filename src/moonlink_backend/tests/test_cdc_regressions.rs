@@ -589,3 +589,54 @@ async fn errored_mirror_does_not_hold_back_the_slot() {
         "slot stuck at {confirmed}, expected >= {lsn}"
     );
 }
+
+/// A value moonlink cannot represent (timestamp 'infinity') fails only its own mirror. No other
+/// change in the same batch or transaction is dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn unconvertible_value_errors_only_its_mirror() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ts, rv_bystander;
+         CREATE TABLE rv_ts (id BIGINT PRIMARY KEY, ts TIMESTAMP);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ts_mc", "public.rv_ts", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    // One transaction whose bad row sits in the middle of both tables' rows.
+    client
+        .simple_query(
+            "BEGIN;
+             INSERT INTO rv_bystander SELECT generate_series(1, 50);
+             INSERT INTO rv_ts SELECT i, CASE WHEN i = 50 THEN 'infinity'::timestamp ELSE '2020-01-01'::timestamp END FROM generate_series(1, 100) i;
+             INSERT INTO rv_bystander SELECT generate_series(51, 100);
+             COMMIT;
+             INSERT INTO rv_bystander VALUES (101);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some((1..=101).collect::<Vec<i64>>())
+    );
+    let err = snapshot_error(&backend, "rv_ts_mc", lsn)
+        .await
+        .expect("mirror with the bad value must be errored");
+    assert!(
+        err.contains("column ts") && err.contains("'infinity'") && err.contains("re-create"),
+        "{err}"
+    );
+    backend
+        .drop_table(DB.to_string(), "rv_ts_mc".to_string())
+        .await
+        .unwrap();
+}

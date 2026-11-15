@@ -938,13 +938,17 @@ pub async fn run_event_loop(
                         break; // break inner loop to reconnect
                     }
 
+                    let mut reconnect = false;
                     for event in batch.drain(..n) {
                         match event {
                             Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
                                 continue;
                             }
-                            Err(CdcStreamError::CdcEventConversion(e @ CdcEventConversionError::TupleShapeMismatch { src_table_id, .. })) => {
-                                sink.fail_table(src_table_id, format!("unexpected change from the source table: {e}")).await;
+                            // A change of one table that cannot be applied faithfully fails that
+                            // table only; never skip it and carry on as if it had been applied.
+                            Err(CdcStreamError::CdcEventConversion(e)) if e.src_table_id().is_some() => {
+                                let src_table_id = e.src_table_id().unwrap();
+                                sink.fail_table(src_table_id, format!("a change from the source table could not be applied: {e}")).await;
                                 continue;
                             }
                             Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
@@ -953,17 +957,20 @@ pub async fn run_event_loop(
                                 continue;
                             }
                             Err(e) => {
-                                error!(error = ?e, "cdc stream error");
-                                // Snapshot schemas before reconnecting (once)
-                                let snapshot = stream.as_mut().schemas_snapshot();
-                                debug!(count = snapshot.len(), "snapshotting schemas before reconnect (cdc error)");
-                                saved_schemas = snapshot;
+                                // Not attributable to a table (transport or protocol error): drop the
+                                // rest of the batch and reconnect; postgres re-sends it from the slot.
+                                error!(error = ?e, "cdc stream error, reconnecting");
+                                reconnect = true;
                                 break;
                             }
                             Ok(event) => {
                                 let Ok(()) = sink.process_cdc_event(event).await;
                             }
                         }
+                    }
+                    if reconnect {
+                        saved_schemas = stream.as_mut().schemas_snapshot();
+                        break;
                     }
                     // Advance watermark to last end LSN after finishing the batch without errors
                     if let Some(end) = last_end_lsn {

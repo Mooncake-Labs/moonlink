@@ -1,5 +1,5 @@
 use core::str;
-use std::{collections::HashMap, str::Utf8Error};
+use std::collections::HashMap;
 
 use postgres_replication::protocol::{
     BeginBody, CommitBody, DeleteBody, InsertBody, LogicalReplicationMessage, PrimaryKeepAliveBody,
@@ -10,11 +10,7 @@ use thiserror::Error;
 
 use crate::pg_replicate::table::{ColumnSchema, SrcTableId, TableSchema};
 
-use super::{
-    table_row::TableRow,
-    text::{FromTextError, TextFormatConverter},
-    Cell,
-};
+use super::{table_row::TableRow, text::TextFormatConverter, Cell};
 
 #[derive(Debug, Error)]
 pub enum CdcEventConversionError {
@@ -30,8 +26,8 @@ pub enum CdcEventConversionError {
     #[error("unsupported type: {0}")]
     UnsupportedType(String),
 
-    #[error("missing tuple in delete body")]
-    MissingTupleInDeleteBody,
+    #[error("delete for table id {0} carries no old row")]
+    MissingTupleInDeleteBody(SrcTableId),
 
     #[error("schema missing for table id {0}")]
     MissingSchema(SrcTableId),
@@ -43,11 +39,39 @@ pub enum CdcEventConversionError {
         received: usize,
     },
 
-    #[error("from bytes error: {0}")]
-    FromBytes(#[from] FromTextError),
+    /// A value Postgres sent that moonlink cannot represent faithfully.
+    #[error("column {column} ({type_name}): cannot convert {value}: {reason}")]
+    InvalidValue {
+        src_table_id: SrcTableId,
+        column: String,
+        type_name: String,
+        value: String,
+        reason: String,
+    },
+}
 
-    #[error("invalid string value")]
-    InvalidStr(#[from] Utf8Error),
+impl CdcEventConversionError {
+    /// The table a conversion error belongs to, if it is specific to one table. Such errors fail
+    /// that table only; the rest of the stream is unaffected.
+    pub fn src_table_id(&self) -> Option<SrcTableId> {
+        match self {
+            Self::TupleShapeMismatch { src_table_id, .. }
+            | Self::InvalidValue { src_table_id, .. }
+            | Self::MissingTupleInDeleteBody(src_table_id) => Some(*src_table_id),
+            _ => None,
+        }
+    }
+}
+
+/// Values are quoted in errors to help users find the offending row; keep the message bounded.
+fn excerpt(value: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    if value.chars().count() <= MAX_CHARS {
+        format!("'{value}'")
+    } else {
+        let head: String = value.chars().take(MAX_CHARS).collect();
+        format!("'{head}...'")
+    }
 }
 
 pub struct CdcEventConverter;
@@ -72,8 +96,19 @@ impl CdcEventConverter {
                 TupleData::Null => Cell::Null,
                 TupleData::UnchangedToast => TextFormatConverter::default_value(&column_schema.typ),
                 TupleData::Text(bytes) => {
-                    let str = str::from_utf8(&bytes[..])?;
-                    TextFormatConverter::try_from_str(&column_schema.typ, str)?
+                    let invalid =
+                        |value: String, reason: String| CdcEventConversionError::InvalidValue {
+                            src_table_id,
+                            column: column_schema.name.clone(),
+                            type_name: column_schema.typ.name().to_string(),
+                            value,
+                            reason,
+                        };
+                    let text = str::from_utf8(&bytes[..]).map_err(|e| {
+                        invalid(excerpt(&String::from_utf8_lossy(&bytes[..])), e.to_string())
+                    })?;
+                    TextFormatConverter::try_from_str(&column_schema.typ, text)
+                        .map_err(|e| invalid(excerpt(text), e.to_string()))?
                 }
             };
             values.push(cell);
@@ -127,10 +162,9 @@ impl CdcEventConverter {
         column_schemas: &[ColumnSchema],
         delete_body: DeleteBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
-        let tuple = delete_body
-            .key_tuple()
-            .or(delete_body.old_tuple())
-            .ok_or(CdcEventConversionError::MissingTupleInDeleteBody)?;
+        let tuple = delete_body.key_tuple().or(delete_body.old_tuple()).ok_or(
+            CdcEventConversionError::MissingTupleInDeleteBody(src_table_id),
+        )?;
 
         let row =
             Self::try_from_tuple_data_slice(src_table_id, column_schemas, tuple.tuple_data())?;
