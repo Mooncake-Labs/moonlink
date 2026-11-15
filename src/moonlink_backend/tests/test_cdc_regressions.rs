@@ -4061,3 +4061,104 @@ async fn domains_and_enums_replicate() {
     let lsn = current_wal_lsn(&client).await;
     check_rv_dom(&backend, &client, lsn, "after a restart").await;
 }
+
+/// Multi-level partitions whose physical column order differs from the root's (created
+/// standalone and attached), including a sub-partitioned member attached empty after the mirror
+/// was created, replicate exactly through the root: no panic on their relation messages.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn multi_level_partitions_with_another_column_order_replicate() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ml CASCADE;
+         CREATE TABLE rv_ml (id BIGINT, b INT, c TEXT, d INT, PRIMARY KEY (id, b, c))
+             PARTITION BY RANGE (b);
+         CREATE TABLE rv_ml1 (b INT NOT NULL, id BIGINT NOT NULL, c TEXT NOT NULL, d INT)
+             PARTITION BY RANGE (c);
+         CREATE TABLE rv_ml11 (c TEXT NOT NULL, d INT, b INT NOT NULL, id BIGINT NOT NULL);
+         ALTER TABLE rv_ml1 ATTACH PARTITION rv_ml11 FOR VALUES FROM ('a') TO ('m');
+         ALTER TABLE rv_ml ATTACH PARTITION rv_ml1 FOR VALUES FROM (2) TO (10);
+         INSERT INTO rv_ml VALUES (1, 2, 'a', 1), (2, 3, 'b', 2);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ml_mc", "public.rv_ml", &uri).await;
+    client
+        .simple_query(
+            "CREATE TABLE rv_ml5 (c TEXT NOT NULL, id BIGINT NOT NULL, b INT NOT NULL, d INT)
+                 PARTITION BY LIST (c);
+             CREATE TABLE rv_ml5_a (d INT, c TEXT NOT NULL, b INT NOT NULL, id BIGINT NOT NULL);
+             ALTER TABLE rv_ml5 ATTACH PARTITION rv_ml5_a FOR VALUES IN ('a');
+             ALTER TABLE rv_ml ATTACH PARTITION rv_ml5 FOR VALUES FROM (40) TO (50);",
+        )
+        .await
+        .unwrap();
+    // Let the source comparison adopt the new (empty) partitions first.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_ml VALUES (3, 45, 'a', 7), (4, 4, 'c', 8);
+             UPDATE rv_ml SET d = d + 100;
+             DELETE FROM rv_ml WHERE id = 1;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_ml_mc", lsn).await, None);
+    for column in ["b", "c", "d"] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {column}::text FROM rv_ml"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(source.len(), 3);
+        assert_eq!(
+            scan_rows(&backend, "rv_ml_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "column {column}"
+        );
+    }
+    client
+        .simple_query("DROP TABLE IF EXISTS rv_ml CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// Relation messages and changes for a published table that has no mirror (added to the
+/// publication by hand, or whose mirror was just dropped) are ignored: replication of the other
+/// mirrors goes on.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn changes_of_a_published_table_without_a_mirror_are_ignored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_known, rv_unknown;
+         CREATE TABLE rv_known (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_unknown (id BIGINT PRIMARY KEY, v TEXT);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_known_mc", "public.rv_known", &uri).await;
+    client
+        .simple_query(
+            "ALTER PUBLICATION moonlink_pub ADD TABLE rv_unknown;
+             INSERT INTO rv_unknown VALUES (1, 'a');
+             ALTER TABLE rv_unknown ADD COLUMN w INT;
+             INSERT INTO rv_unknown VALUES (2, 'b', 2);
+             INSERT INTO rv_known VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_known_mc", lsn).await, Some(vec![1]));
+    client
+        .simple_query("INSERT INTO rv_known VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_known_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_known_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+}
