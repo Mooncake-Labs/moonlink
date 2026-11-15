@@ -3,7 +3,6 @@ members = [
     "src/moonlink",
     "src/moonlink_backend",
     "src/moonlink_connectors",
-    "src/moonlink_datafusion",
     "src/moonlink_error",
     "src/moonlink_metadata_store",
     "src/moonlink_proto",
@@ -38,8 +37,6 @@ chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 const_format = "0.2"
 crc32fast = "1"
-datafusion = "50"
-datafusion-cli = "50"
 deltalake = { version = "0.29", features = ["deltalake-aws", "deltalake-gcp"] }
 fastbloom = "0.14"
 futures = { version = "0.3", default-features = false }
@@ -55,7 +52,6 @@ moka = { version = "0.12", features = ["future"] }
 moonlink = { path = "src/moonlink" }
 moonlink_backend = { path = "src/moonlink_backend" }
 moonlink_connectors = { path = "src/moonlink_connectors" }
-moonlink_datafusion = { path = "src/moonlink_datafusion" }
 moonlink_error = { path = "src/moonlink_error" }
 moonlink_metadata_store = { path = "src/moonlink_metadata_store" }
 moonlink_proto = { path = "src/moonlink_proto" }
@@ -68,7 +64,6 @@ native-tls = "0.2.14"
 nix = { version = "0.30", default-features = false, features = ["fs"] }
 num-bigint = "0.4"
 num-traits = "0.2"
-object_store = "0.12"
 opendal = { version = "0.54", default-features = false, features = ["layers-throttle"] }
 opentelemetry = { version = "0.31", default-features = false, features = [
   "trace",

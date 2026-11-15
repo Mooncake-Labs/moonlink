@@ -501,13 +501,11 @@ jobs:
 
       - name: Run tests via llvm-cov/nextest
         timeout-minutes: 10
-        # Remove moonlink_datafusion from unit test pipeline, since it takes long to build (2x longer than all other crates), and it doesn't contain any unit tests.
         run: |
           cargo llvm-cov \
             --locked \
             --lib \
             --workspace \
-            --exclude moonlink_datafusion \
             --lcov --output-path lcov.info \
             nextest \
               --profile ci \
