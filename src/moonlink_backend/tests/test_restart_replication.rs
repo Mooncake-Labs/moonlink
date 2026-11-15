@@ -7,7 +7,7 @@ mod tests {
     use super::common::{
         confirmed_flush_lsn, connect_to_postgres, create_backend_from_base_path, current_wal_lsn,
         get_database_uri, get_serialized_table_config, id_counts_from_state_with_deletes,
-        scan_id_counts, setup_backend, DATABASE,
+        scan_id_counts, setup_backend, LogicalDecodingWorkMem, DATABASE,
     };
     use moonlink_backend::MoonlinkBackend;
     use serial_test::serial;
@@ -302,14 +302,7 @@ mod tests {
     }
 
     async fn reconnect_mid_transaction(streamed: bool) {
-        let (_ctl, _h) = connect_to_postgres(&get_database_uri()).await;
-        let work_mem = if streamed { "64kB" } else { "1GB" };
-        _ctl.simple_query(&format!(
-            "ALTER SYSTEM SET logical_decoding_work_mem = '{work_mem}'"
-        ))
-        .await
-        .unwrap();
-        _ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+        let _work_mem = LogicalDecodingWorkMem::set(if streamed { "64kB" } else { "1GB" }).await;
 
         let (tmp, backend, client) = setup_backend(None, false).await;
         recreate_src_table(&client, "rr_a").await;
@@ -336,10 +329,6 @@ mod tests {
             }
         }
         cleanup(&backend, &[TABLE_A]).await;
-        _ctl.simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
-            .await
-            .unwrap();
-        _ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
         assert!(
             failures.is_empty(),
             "streamed={streamed}, ids 1..={hi_total}: {failures:?}"
@@ -361,18 +350,45 @@ mod tests {
         reconnect_mid_transaction(true).await;
     }
 
-    /// Large streamed UPDATEs of persisted rows, each followed by a replication reconnect while it
-    /// may still be delivered (`reconnect`) or not: postgres re-sends an interrupted one under the
-    /// same xid after the first attempt is aborted, and every row must end up updated exactly once
-    /// (a lost delete leaves a duplicate, a lost insert a gap).
-    async fn streamed_updates(reconnect: bool) {
-        let (ctl, _h) = connect_to_postgres(&get_database_uri()).await;
-        ctl.simple_query("ALTER SYSTEM SET logical_decoding_work_mem = '64kB'")
+    /// Number of streamed transactions postgres has sent for the moonlink slot.
+    async fn streamed_transactions_sent(client: &Client) -> i64 {
+        client
+            .query_one(
+                "SELECT coalesce(sum(stream_txns), 0)::bigint FROM pg_stat_replication_slots \
+                 WHERE slot_name LIKE 'moonlink_slot%'",
+                &[],
+            )
             .await
-            .unwrap();
-        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+            .unwrap()
+            .get(0)
+    }
 
+    /// Scan `mooncake` at `lsn` and count its rows per id, failing if the mirror stopped applying.
+    async fn live_id_counts(
+        backend: &MoonlinkBackend,
+        mooncake: &str,
+        lsn: u64,
+    ) -> HashMap<i64, u64> {
+        let state = tokio::time::timeout(
+            Duration::from_secs(120),
+            backend.scan_table(DATABASE.to_string(), mooncake.to_string(), Some(lsn)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{mooncake} stopped applying changes"))
+        .unwrap();
+        id_counts_from_state_with_deletes(&state).await
+    }
+
+    /// Large streamed UPDATEs of persisted rows, each interrupted by a replication reconnect while it
+    /// is being streamed (before its COMMIT): postgres re-sends it under the same xid after the
+    /// first attempt is aborted, and every row must end up updated exactly once (a lost delete
+    /// leaves a duplicate, a lost insert a gap).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn reconnect_mid_streamed_update_applies_it_once() {
+        let _work_mem = LogicalDecodingWorkMem::set("64kB").await;
         let (tmp, backend, client) = setup_backend(None, false).await;
+        let (writer, _writer_connection) = connect_to_postgres(&get_database_uri()).await;
         client
             .simple_query(
                 "DROP TABLE IF EXISTS rr_pk; CREATE TABLE rr_pk (id BIGINT PRIMARY KEY, name TEXT);",
@@ -385,94 +401,85 @@ mod tests {
         persist(&backend, TABLE_A, lsn).await;
 
         let mut failures = Vec::new();
-        for (round, delay_ms) in [0u64, 50, 150, 400].into_iter().enumerate() {
-            client
-                .simple_query(&format!("UPDATE rr_pk SET name = 'round {round}';"))
+        for (round, delay_ms) in [0u64, 200, 600].into_iter().enumerate() {
+            let streamed_before = streamed_transactions_sent(&client).await;
+            writer
+                .simple_query(&format!("BEGIN; UPDATE rr_pk SET name = 'round {round}';"))
                 .await
                 .unwrap();
-            let lsn = current_wal_lsn(&client).await;
-            if reconnect {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                terminate_walsender(&client).await;
+            // Wait until postgres streams the open transaction, then cut the stream.
+            for _ in 0..100 {
+                if streamed_transactions_sent(&client).await > streamed_before {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            // The table task dies on a lost stream state, and the scan would wait forever.
-            let state = tokio::time::timeout(
-                Duration::from_secs(120),
-                backend.scan_table(DATABASE.to_string(), TABLE_A.to_string(), Some(lsn)),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("round {round}: the mirror stopped applying changes"))
-            .unwrap();
-            let got = id_counts_from_state_with_deletes(&state).await;
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            terminate_walsender(&client).await;
+            writer.simple_query("COMMIT").await.unwrap();
+            let lsn = current_wal_lsn(&client).await;
+            let got = live_id_counts(&backend, TABLE_A, lsn).await;
+            let streamed = streamed_transactions_sent(&client).await - streamed_before;
             let dups = got.values().filter(|c| **c > 1).count();
             let missing = (1..=N).filter(|id| !got.contains_key(id)).count();
-            if dups > 0 || missing > 0 {
+            if streamed < 2 || dups > 0 || missing > 0 {
                 failures.push(format!(
-                    "delay {delay_ms}ms: {dups} duplicated ids, {missing} missing ids"
+                    "delay {delay_ms}ms: streamed {streamed} times, {dups} duplicated ids, {missing} missing ids"
                 ));
             }
         }
         cleanup(&backend, &[TABLE_A]).await;
-        ctl.simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
-            .await
-            .unwrap();
-        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
-        assert!(
-            failures.is_empty(),
-            "reconnect={reconnect}, ids 1..={N}: {failures:?}"
-        );
+        assert!(failures.is_empty(), "ids 1..={N}: {failures:?}");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial]
-    async fn reconnect_mid_streamed_update_applies_it_once() {
-        streamed_updates(true).await;
-    }
-
-    /// Control: the same streamed UPDATEs without a reconnect.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial]
-    async fn streamed_update_applies_it_once() {
-        streamed_updates(false).await;
-    }
-
-    /// Restart with streamed transactions (logical_decoding_work_mem 64kB) in the slot backlog
-    /// that one mirror already persisted and the other did not: postgres re-sends them, the first
-    /// mirror skips them below its recovered snapshot, the second applies them, each exactly once
-    /// (an INSERT and an UPDATE of every row).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial]
-    async fn restart_replays_streamed_transactions_once_per_mirror() {
-        let (ctl, _h) = connect_to_postgres(&get_database_uri()).await;
-        ctl.simple_query("ALTER SYSTEM SET logical_decoding_work_mem = '64kB'")
-            .await
-            .unwrap();
-        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
-
+    /// Restart with streamed transactions in the slot backlog that one mirror already persisted:
+    /// another mirror with a small unpersisted change holds the slot behind them, so postgres
+    /// re-sends them after the restart. The mirror that persisted them must skip them (an INSERT,
+    /// an UPDATE of every row and a DELETE of a quarter), keep applying, and answer a read at a
+    /// later LSN with that change.
+    async fn restart_replays_streamed_transactions(primary_key: bool) {
+        let _work_mem = LogicalDecodingWorkMem::set("64kB").await;
         let (tmp, backend, client) = setup_backend(None, false).await;
-        recreate_src_table(&client, "rr_a").await;
-        recreate_src_table(&client, "rr_b").await;
-        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
-        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
-        const N: i64 = 20_000;
+        let key = if primary_key { " PRIMARY KEY" } else { "" };
         client
             .simple_query(&format!(
-                "BEGIN; INSERT INTO rr_a SELECT g, g::text FROM generate_series(1,{N}) g; \
-                 INSERT INTO rr_b SELECT g, g::text FROM generate_series(1,{N}) g; COMMIT;"
+                "DROP TABLE IF EXISTS rr_a; CREATE TABLE rr_a (id BIGINT{key}, name TEXT);"
             ))
             .await
             .unwrap();
-        let inserted = current_wal_lsn(&client).await;
-        persist(&backend, TABLE_A, inserted).await;
-        client
-            .simple_query(
-                "BEGIN; UPDATE rr_a SET name = 'updated'; UPDATE rr_b SET name = 'updated'; COMMIT;",
-            )
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+        let held = insert_range(&client, "rr_b", 1, 5).await;
+        backend
+            .scan_table(DATABASE.to_string(), TABLE_B.to_string(), Some(held))
             .await
             .unwrap();
-        let updated = current_wal_lsn(&client).await;
-        // Only A persists both transactions; the slot stays behind them for B.
-        persist(&backend, TABLE_A, updated).await;
+
+        const N: i64 = 20_000;
+        let first_streamed = current_wal_lsn(&client).await;
+        let streamed_before = streamed_transactions_sent(&client).await;
+        insert_range(&client, "rr_a", 1, N).await;
+        client
+            .simple_query("UPDATE rr_a SET name = 'updated';")
+            .await
+            .unwrap();
+        client
+            .simple_query(&format!("DELETE FROM rr_a WHERE id <= {};", N / 4))
+            .await
+            .unwrap();
+        let applied = current_wal_lsn(&client).await;
+        persist(&backend, TABLE_A, applied).await;
+        assert_eq!(
+            streamed_transactions_sent(&client).await - streamed_before,
+            3,
+            "the INSERT, UPDATE and DELETE were streamed"
+        );
+        let confirmed = confirmed_flush_lsn(&client).await;
+        assert!(
+            confirmed < first_streamed,
+            "the slot ({confirmed:X}) is held behind the streamed transactions ({first_streamed:X})"
+        );
 
         backend
             .shutdown_connection(&get_database_uri(), false)
@@ -480,24 +487,28 @@ mod tests {
         drop(backend);
         let base_path = tmp.path().to_str().unwrap().to_string();
         let backend = create_backend_from_base_path(base_path).await;
-        let mut got = Vec::new();
-        for t in [TABLE_A, TABLE_B] {
-            let state = tokio::time::timeout(
-                Duration::from_secs(120),
-                backend.scan_table(DATABASE.to_string(), t.to_string(), Some(updated)),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("{t} stopped applying changes"))
-            .unwrap();
-            got.push(id_counts_from_state_with_deletes(&state).await);
-        }
+        let later = insert_range(&client, "rr_a", N + 1, N + 1).await;
+        let a = live_id_counts(&backend, TABLE_A, later).await;
+        let b = live_id_counts(&backend, TABLE_B, later).await;
         cleanup(&backend, &[TABLE_A, TABLE_B]).await;
-        ctl.simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
-            .await
-            .unwrap();
-        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
-        assert_eq!(got[0], counts(1, N), "table A (persisted) after restart");
-        assert_eq!(got[1], counts(1, N), "table B (replayed) after restart");
+        assert_eq!(
+            a,
+            counts(N / 4 + 1, N + 1),
+            "mirror that persisted the replay"
+        );
+        assert_eq!(b, counts(1, 5), "mirror that held the slot");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn restart_replays_streamed_transactions_once_with_primary_key() {
+        restart_replays_streamed_transactions(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn restart_replays_streamed_transactions_once_without_primary_key() {
+        restart_replays_streamed_transactions(false).await;
     }
 
     /// After a restart, an errored mirror is restored as a placeholder and named by the periodic

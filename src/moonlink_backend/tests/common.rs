@@ -644,6 +644,49 @@ pub async fn connect_to_postgres(uri: &str) -> (Client, tokio::task::JoinHandle<
 }
 
 /// Util function to get database URI.
+/// Sets `logical_decoding_work_mem` on the test Postgres while alive and resets it when dropped,
+/// also when the test fails, so that later tests do not run with it.
+#[allow(dead_code)]
+pub struct LogicalDecodingWorkMem;
+
+#[allow(dead_code)]
+impl LogicalDecodingWorkMem {
+    pub async fn set(value: &str) -> Self {
+        let (client, _connection) = connect_to_postgres(&get_database_uri()).await;
+        client
+            .simple_query(&format!(
+                "ALTER SYSTEM SET logical_decoding_work_mem = '{value}'"
+            ))
+            .await
+            .unwrap();
+        client
+            .simple_query("SELECT pg_reload_conf()")
+            .await
+            .unwrap();
+        Self
+    }
+}
+
+impl Drop for LogicalDecodingWorkMem {
+    fn drop(&mut self) {
+        // Drop cannot wait on the test's runtime; reset from a thread with a runtime of its own.
+        let _ = std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (client, _connection) = connect_to_postgres(&get_database_uri()).await;
+                let _ = client
+                    .simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
+                    .await;
+                let _ = client.simple_query("SELECT pg_reload_conf()").await;
+            });
+        })
+        .join();
+    }
+}
+
 pub fn get_database_uri() -> String {
     env::var("DATABASE_URL").unwrap_or_else(|_| SRC_URI.to_string())
 }
