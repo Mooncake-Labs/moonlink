@@ -67,6 +67,14 @@ impl ObjectStorageCacheInternal {
         tolerate_insufficiency: bool,
     ) -> (bool, Vec<String>) {
         let mut evicted_files_to_delete = vec![];
+        // Pinned entries alone exceed the budget: evicting would empty the LRU without making
+        // room, so leave it for the next caller.
+        if tolerate_insufficiency
+            && self.cur_bytes > max_bytes
+            && self.cur_bytes - self.evictable_bytes() > max_bytes
+        {
+            return (false, evicted_files_to_delete);
+        }
         while self.cur_bytes > max_bytes {
             if self.evictable_cache.is_empty() {
                 if tolerate_insufficiency {
@@ -95,6 +103,13 @@ impl ObjectStorageCacheInternal {
         }
         self.over_budget_warned = false;
         (true, evicted_files_to_delete)
+    }
+
+    fn evictable_bytes(&self) -> u64 {
+        self.evictable_cache
+            .iter()
+            .map(|(_, entry)| entry.cache_entry.file_metadata.file_size)
+            .sum()
     }
 
     /// Util function to insert into non-evictable cache.
@@ -384,13 +399,16 @@ impl ObjectStorageCache {
             .get_cache_handle_from_remote(remote_filepath, filesystem_accessor)
             .await?;
         let file_size = cache_entry_wrapper.cache_entry.file_metadata.file_size;
+        let downloaded_filepath = cache_entry_wrapper
+            .deletable
+            .then(|| cache_entry_wrapper.cache_entry.cache_filepath.clone());
         let non_evictable_handle = NonEvictableHandle::new(
             file_id,
             cache_entry_wrapper.cache_entry.clone(),
             self.cache.clone(),
         );
 
-        {
+        let files_to_delete = {
             let mut guard = self.cache.write().await;
             guard.cur_bytes += file_size;
 
@@ -407,9 +425,20 @@ impl ObjectStorageCache {
             // Otherwise, it means cache entry failed to insert.
             ma::assert_ge!(guard.cur_bytes, file_size);
             guard.cur_bytes -= file_size;
+            files_to_delete
+        };
 
-            Ok((None, files_to_delete.into()))
+        // Nothing references the download; callers read the remote file instead.
+        if let Some(downloaded_filepath) = downloaded_filepath {
+            if let Err(e) = tokio::fs::remove_file(&downloaded_filepath).await {
+                tracing::warn!(
+                    path = downloaded_filepath,
+                    error = %e,
+                    "failed to delete a download the object storage cache had no room for"
+                );
+            }
         }
+        Ok((None, files_to_delete.into()))
     }
 
     /// Get cache entry from remote filepath [`src`].

@@ -154,3 +154,58 @@ async fn test_repin_evictable_entry_while_over_budget() {
     check_file_content(local_1.to_str().unwrap()).await;
     check_file_content(local_2.to_str().unwrap()).await;
 }
+
+/// While pinned entries alone exceed the budget, a lookup that can't be cached leaves the
+/// evictable entries alone (evicting them would not make room) and deletes its own download.
+#[tokio::test]
+async fn test_unpinned_lookup_over_budget_keeps_evictable_entries() {
+    let remote_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let filesystem_accessor = FileSystemAccessor::default_for_test(&remote_dir);
+    let mut cache = ObjectStorageCache::new(ObjectStorageCacheConfig {
+        max_bytes: 2 * CONTENT.len() as u64,
+        cache_directory: cache_dir.path().to_str().unwrap().to_string(),
+        optimize_local_filesystem: false,
+    });
+    let mut remote_files = vec![];
+    for id in 0..5 {
+        let name = format!("remote-{id}.parquet");
+        remote_files.push(create_test_file(remote_dir.path(), &name).await);
+    }
+    let remote = |id: usize| remote_files[id].to_str().unwrap().to_string();
+
+    // Four pinned entries put the cache over budget; unpinning one leaves three pinned and one
+    // evictable.
+    let mut handles = vec![];
+    for id in 0..4 {
+        let (handle, _) = cache
+            .get_cache_entry_pinned(
+                get_table_unique_file_id(id as u64),
+                &remote(id),
+                filesystem_accessor.as_ref(),
+            )
+            .await
+            .unwrap();
+        handles.push(handle);
+    }
+    let evictable_file = handles[0].get_cache_filepath().to_string();
+    assert!(handles.remove(0).unreference().await.is_empty());
+    assert_evictable_cache_size(&mut cache, 1).await;
+    assert_cache_bytes_size(&mut cache, 4 * CONTENT.len() as u64).await;
+
+    let (handle, evicted) = cache
+        .get_cache_entry(
+            get_table_unique_file_id(4),
+            &remote(4),
+            filesystem_accessor.as_ref(),
+        )
+        .await
+        .unwrap();
+    assert!(handle.is_none());
+    assert_evictable_cache_size(&mut cache, 1).await;
+    assert_cache_bytes_size(&mut cache, 4 * CONTENT.len() as u64).await;
+    assert!(evicted.is_empty());
+    check_file_content(&evictable_file).await;
+    // The download that could not be cached is deleted, leaving only the four cached files.
+    assert_eq!(std::fs::read_dir(cache_dir.path()).unwrap().count(), 4);
+}

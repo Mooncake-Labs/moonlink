@@ -61,13 +61,6 @@ pub trait CacheTrait: std::fmt::Debug + Send + Sync {
         InlineEvictedFiles, /*files_to_delete*/
     )>;
 
-    /// Increment reference count by 1 for the given cache handle.
-    ///
-    /// Precondition: the requested file id already has its cache entry pinned, otherwise panic.
-    ///
-    /// TODO(hjiang):
-    /// 1. Consider error propagation, since as a library it shouldn't panic for failed precondition.
-    /// 2. Add unit tests.
     /// Same as [`get_cache_entry`](Self::get_cache_entry), for files that must stay pinned while
     /// the table references them (file index blocks, deletion vector puffins). The entry is pinned
     /// even if that exceeds the cache budget, so a handle is always returned on success.
@@ -79,6 +72,13 @@ pub trait CacheTrait: std::fmt::Debug + Send + Sync {
         filesystem_accessor: &dyn BaseFileSystemAccess,
     ) -> Result<(NonEvictableHandle, InlineEvictedFiles)>;
 
+    /// Increment reference count by 1 for the given cache handle.
+    ///
+    /// Precondition: the requested file id already has its cache entry pinned, otherwise panic.
+    ///
+    /// TODO(hjiang):
+    /// 1. Consider error propagation, since as a library it shouldn't panic for failed precondition.
+    /// 2. Add unit tests.
     #[allow(async_fn_in_trait)]
     async fn increment_reference_count(&self, cache_handle: &NonEvictableHandle);
 }
