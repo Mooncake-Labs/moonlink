@@ -1338,7 +1338,9 @@ async fn inheritance_parent_is_refused() {
         "DROP TABLE IF EXISTS rv_parent, rv_later_parent CASCADE;
          CREATE TABLE rv_parent (id BIGINT, v TEXT);
          CREATE TABLE rv_child (extra INT) INHERITS (rv_parent);
-         CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);",
+         CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);
+         DROP TABLE IF EXISTS rv_parent_ok CASCADE;
+         CREATE TABLE rv_parent_ok (id BIGINT PRIMARY KEY);",
     )
     .await;
     let backend = Arc::new(backend);
@@ -1362,10 +1364,43 @@ async fn inheritance_parent_is_refused() {
         .await
         .unwrap();
     let backend = new_backend(&tmp).await.unwrap();
+    mirror(
+        &backend,
+        &tmp,
+        "rv_parent_ok_mc",
+        "public.rv_parent_ok",
+        &uri,
+    )
+    .await;
     let err = scan_error(&backend, "rv_later_parent_mc")
         .await
         .expect("must be errored after a child appeared");
     assert!(err.contains("inheritance children"), "{err}");
+
+    // A temporary child does not count: other sessions never see its rows, and its changes are
+    // never decoded.
+    {
+        let (session, _) = connect_to_postgres(&uri).await;
+        session
+            .simple_query(
+                "CREATE TEMPORARY TABLE rv_temp_child () INHERITS (rv_parent_ok);
+                 INSERT INTO rv_temp_child VALUES (99);",
+            )
+            .await
+            .unwrap();
+        // Past a source comparison, then a change, so the snapshot has a commit to reach.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        client
+            .simple_query("INSERT INTO rv_parent_ok VALUES (1);")
+            .await
+            .unwrap();
+        let lsn = current_wal_lsn(&client).await;
+        assert_eq!(snapshot_error(&backend, "rv_parent_ok_mc", lsn).await, None);
+        assert_eq!(
+            scan_ids(&backend, "rv_parent_ok_mc", lsn).await,
+            Some(vec![1])
+        );
+    }
 
     // While running: the source is compared again within seconds.
     client
@@ -1406,7 +1441,7 @@ async fn inheritance_parent_is_refused() {
     let err = err.expect("must be errored once a child appears while running");
     assert!(err.contains("gained inheritance children"), "{err}");
     client
-        .simple_query("DROP TABLE rv_parent, rv_later_parent CASCADE;")
+        .simple_query("DROP TABLE rv_parent, rv_later_parent, rv_parent_ok CASCADE;")
         .await
         .unwrap();
 }

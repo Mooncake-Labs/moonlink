@@ -175,7 +175,8 @@ pub async fn fetch(
 }
 
 /// Whether a regular table has inheritance children (partitions of a partitioned table are
-/// published through it and do not count).
+/// published through it and do not count; nor do temporary children, whose rows only their own
+/// session sees and whose changes are never decoded).
 async fn has_inheritance_children(
     client: &Client,
     relid: SrcTableId,
@@ -184,7 +185,9 @@ async fn has_inheritance_children(
         client
             .simple_query(&format!(
                 "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \
-                 WHERE i.inhparent = {relid} AND c.relkind = 'r' LIMIT 1;"
+                 JOIN pg_class child ON child.oid = i.inhrelid \
+                 WHERE i.inhparent = {relid} AND c.relkind = 'r' \
+                 AND child.relpersistence <> 't' LIMIT 1;"
             ))
             .await?,
     );

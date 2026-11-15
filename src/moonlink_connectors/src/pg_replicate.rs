@@ -473,7 +473,9 @@ impl PostgresConnection {
     async fn check_not_inheritance_parent(&mut self, table_name: &str) -> Result<()> {
         let query = format!(
             "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \
-             WHERE i.inhparent = {}::regclass AND c.relkind = 'r' LIMIT 1;",
+             JOIN pg_class child ON child.oid = i.inhrelid \
+             WHERE i.inhparent = {}::regclass AND c.relkind = 'r' \
+             AND child.relpersistence <> 't' LIMIT 1;",
             regclass_literal(table_name)
         );
         let has_children = self
