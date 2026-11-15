@@ -24,20 +24,20 @@ pub(crate) struct TransactionStreamState {
     pub(crate) flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
     new_record_batches: hashbrown::HashMap<u64, InMemoryBatch>,
     status: TransactionStreamStatus,
-    /// Number of pending flushes for this transaction.
+    /// Event ids of this transaction's flushes still in flight.
     /// Only safe to remove transaction stream state when there are no pending flushes.
-    ongoing_flush_count: u32,
+    ongoing_flushes: HashSet<uuid::Uuid>,
     /// Commit LSN for this transaction, set when transaction is committed.
     pub(crate) commit_lsn: Option<u64>,
 }
 
 /// Determines the state of a transaction stream.
 /// Transaction can be safely removed when it is no longer `Pending` and has no pending flushes.
+/// An aborted transaction's state is removed right away (see [`MooncakeTable::abort_in_stream_batch`]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum TransactionStreamStatus {
     Pending,
     Committed,
-    Aborted,
 }
 
 pub enum TransactionStreamOutput {
@@ -128,7 +128,7 @@ impl TransactionStreamState {
             flushed_files: hashbrown::HashMap::new(),
             new_record_batches: hashbrown::HashMap::new(),
             status: TransactionStreamStatus::Pending,
-            ongoing_flush_count: 0,
+            ongoing_flushes: HashSet::new(),
             commit_lsn: None,
         }
     }
@@ -344,20 +344,20 @@ impl MooncakeTable {
                 .unwrap();
         }
 
-        // Record abortion in snapshot task so we can remove any uncommitted deletions
-        let stream_state = self
-            .transaction_stream_states
-            .get_mut(&xact_id)
-            .expect("Stream state not found for xact_id: {xact_id}");
-
-        stream_state.status = TransactionStreamStatus::Aborted;
-
-        // If there are no pending flushes, we can remove the stream state immediately
-        // Otherwise, let `apply_stream_flush_result` handle the abortion
-        if stream_state.ongoing_flush_count == 0 {
-            self.transaction_stream_states.remove(&xact_id);
+        // Postgres re-sends a transaction under the same xid after a reconnect, so nothing of this
+        // attempt may stay keyed by the xid: drop its state now, and recognize the results of its
+        // flushes still in flight by their event ids.
+        if let Some(stream_state) = self.transaction_stream_states.remove(&xact_id) {
+            self.aborted_stream_flushes
+                .extend(stream_state.ongoing_flushes);
         }
 
+        // Its deletions not handed to a snapshot yet go now; a re-sent attempt's carry the same
+        // pending tag. Those already in the snapshot's uncommitted log go when it applies the abort.
+        let pending_xact_lsn = get_lsn_for_pending_xact(xact_id);
+        self.next_snapshot_task
+            .new_deletions
+            .retain(|deletion| deletion.lsn != pending_xact_lsn);
         self.next_snapshot_task
             .new_streaming_xact
             .push(TransactionStreamOutput::Abort(xact_id));
@@ -432,12 +432,20 @@ impl MooncakeTable {
                 .unwrap();
         }
 
+        // A flush of an aborted attempt: its rows are gone with it.
+        if self.aborted_stream_flushes.remove(&flush_event_id) {
+            return;
+        }
+
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
             .unwrap_or_else(|| panic!("Stream state not found for xact_id: {xact_id}"));
 
-        stream_state.ongoing_flush_count -= 1;
+        assert!(
+            stream_state.ongoing_flushes.remove(&flush_event_id),
+            "unknown flush {flush_event_id} for xact_id {xact_id}"
+        );
 
         // Transaction committed while stream was flushing. Add disk slice to snapshot task and let snapshot handle it.
         // Drop the stream state since the transaction is over.
@@ -452,22 +460,13 @@ impl MooncakeTable {
                 disk_slice.writer_lsn = Some(commit_lsn);
             }
 
-            let should_remove = stream_state.ongoing_flush_count == 0;
+            let should_remove = stream_state.ongoing_flushes.is_empty();
             let _ = stream_state;
 
             self.remove_ongoing_flush_lsn(commit_lsn);
             self.try_set_next_flush_lsn(commit_lsn);
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
             if should_remove {
-                self.transaction_stream_states.remove(&xact_id);
-            }
-            return;
-        }
-
-        // Transaction aborted while stream was flushing. Remove stream state and do nothing.
-        // Drop the stream state since the transaction is over.
-        if stream_state.status == TransactionStreamStatus::Aborted {
-            if stream_state.ongoing_flush_count == 0 {
                 self.transaction_stream_states.remove(&xact_id);
             }
             return;
@@ -554,12 +553,12 @@ impl MooncakeTable {
 
         let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
 
-        stream_state.ongoing_flush_count += 1;
+        stream_state.ongoing_flushes.insert(event_id);
 
         // For streaming transactions, only record ongoing flush operations when commit;
         // otherwise it's completely invisible to the outside world.
         let ongoing_flush_count = if lsn.is_some() {
-            stream_state.ongoing_flush_count
+            stream_state.ongoing_flushes.len() as u32
         } else {
             0
         };
@@ -765,12 +764,12 @@ impl SnapshotTableState {
                         }
                     });
                 }
+                // The aborted attempt's deletions in this task were dropped at the abort; any left
+                // belong to a re-sent attempt of the same xid.
                 TransactionStreamOutput::Abort(xact_id) => {
                     self.uncommitted_deletion_log.retain(|deletion| {
                         deletion.as_ref().unwrap().lsn != get_lsn_for_pending_xact(xact_id)
                     });
-                    task.new_deletions
-                        .retain(|deletion| deletion.lsn != get_lsn_for_pending_xact(xact_id));
                 }
             }
         }

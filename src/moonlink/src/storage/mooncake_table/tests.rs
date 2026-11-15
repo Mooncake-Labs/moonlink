@@ -719,7 +719,7 @@ async fn test_streaming_begin_flush_commit_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice = flush_stream_and_sync_no_apply(
+    let (disk_slice, disk_slice_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id,
@@ -747,11 +747,7 @@ async fn test_streaming_begin_flush_commit_end_flush() {
     }
 
     // Apply the flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Make sure we can still read the row after flush
     {
@@ -794,7 +790,7 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice1 = flush_stream_and_sync_no_apply(
+    let (disk_slice1, disk_slice1_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id,
@@ -808,7 +804,7 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice2 =
+    let (disk_slice2, disk_slice2_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
             .await
             .unwrap();
@@ -831,21 +827,13 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
     }
 
     // Apply the flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice1,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice1, disk_slice1_flush_id);
 
     // Make sure the stream state is still present since we have outstanding flush
     assert!(table.transaction_stream_states.contains_key(&xact_id));
 
     // Apply the second flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice2,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice2, disk_slice2_flush_id);
 
     // Assert the stream state is removed
     assert!(!table.transaction_stream_states.contains_key(&xact_id));
@@ -898,7 +886,7 @@ async fn test_streaming_begin_flush_commit_delete_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice =
+    let (disk_slice, disk_slice_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
             .await
             .expect("Disk slice should be present");
@@ -917,11 +905,7 @@ async fn test_streaming_begin_flush_commit_delete_end_flush() {
     }
 
     // Finish the flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Commit the transaction
     table.commit_transaction_stream_impl(xact_id, lsn).unwrap();
@@ -973,7 +957,7 @@ async fn test_streaming_begin_flush_delete_commit_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice = flush_stream_and_sync_no_apply(
+    let (disk_slice, disk_slice_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id,
@@ -1008,7 +992,7 @@ async fn test_streaming_begin_flush_delete_commit_end_flush() {
     table.delete_in_stream_batch(row2, xact_id2).await;
 
     // Commit the new transaction
-    let disk_slice2 = flush_stream_and_sync_no_apply(
+    let (disk_slice2, disk_slice2_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id2,
@@ -1020,16 +1004,8 @@ async fn test_streaming_begin_flush_delete_commit_end_flush() {
         .commit_transaction_stream_impl(xact_id2, lsn2 + 1)
         .unwrap();
 
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
-    table.apply_stream_flush_result(
-        xact_id2,
-        disk_slice2,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
+    table.apply_stream_flush_result(xact_id2, disk_slice2, disk_slice2_flush_id);
 
     // Make sure we only have one row in the snapshot
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -1081,7 +1057,7 @@ async fn test_streaming_begin_flush_commit_end_flush_delete() {
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Commit the transaction while the flush is pending
     // This will move the state from the stream state to the snapshot task
-    let disk_slice =
+    let (disk_slice, disk_slice_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
             .await
             .unwrap();
@@ -1090,11 +1066,7 @@ async fn test_streaming_begin_flush_commit_end_flush_delete() {
     table.commit_transaction_stream_impl(xact_id, lsn).unwrap();
 
     // Apply the flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Make sure the rows are visible in snapshot before commit finishes
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -1162,7 +1134,7 @@ async fn test_streaming_begin_flush_abort_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice =
+    let (disk_slice, disk_slice_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
             .await
             .expect("Disk slice should be present");
@@ -1173,11 +1145,7 @@ async fn test_streaming_begin_flush_abort_end_flush() {
     table.abort_in_stream_batch(xact_id);
 
     // Apply the flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Make sure we can't read the row after flush
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -1212,39 +1180,30 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let disk_slice1 =
+    let (disk_slice1, disk_slice1_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
             .await
             .expect("Disk slice should be present");
 
-    let disk_slice2 =
+    let (disk_slice2, disk_slice2_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
             .await
             .expect("Disk slice should be present");
 
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Abort the transaction while the flush is pending
-    // This will move the state from the stream state to the snapshot task
+    // The stream state goes right away, so a re-sent attempt of the xid starts afresh.
     table.abort_in_stream_batch(xact_id);
+    assert!(!table.transaction_stream_states.contains_key(&xact_id));
 
     // Apply the first flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice1,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
-
-    // Make sure the stream state is still present since we have outstanding flush
-    assert!(table.transaction_stream_states.contains_key(&xact_id));
+    table.apply_stream_flush_result(xact_id, disk_slice1, disk_slice1_flush_id);
 
     // Apply the second flush
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice2,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice2, disk_slice2_flush_id);
 
-    // Assert the stream state is removed
+    // Both results of the aborted attempt are consumed.
+    assert!(table.aborted_stream_flushes.is_empty());
     assert!(!table.transaction_stream_states.contains_key(&xact_id));
 
     // Make sure we can't read the row after flush
@@ -1256,6 +1215,106 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
         } = snapshot.request_read().await.unwrap();
         assert_eq!(data_file_paths.len(), 0);
     }
+}
+
+/// Read the current mooncake snapshot and check it holds exactly `expected_ids`.
+async fn verify_snapshot_ids(table: &mut MooncakeTable, expected_ids: &[i32]) {
+    let mut snapshot = table.snapshot.write().await;
+    let SnapshotReadOutput {
+        data_file_paths,
+        puffin_cache_handles,
+        position_deletes,
+        deletion_vectors,
+        ..
+    } = snapshot.request_read().await.unwrap();
+    verify_files_and_deletions(
+        get_data_files_for_read(&data_file_paths).as_slice(),
+        get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+        position_deletes,
+        deletion_vectors,
+        expected_ids,
+    )
+    .await;
+}
+
+/// Testing scenario: after a reconnect aborts a streamed transaction, postgres re-sends it under
+/// the same xid. Applying the first attempt's abort must not drop the re-sent attempt's deletes of
+/// main-table rows, which carry the same pending tag.
+#[tokio::test]
+async fn test_streamed_delete_resent_after_abort_is_applied() {
+    let context = TestContext::new("streamed_delete_resent_after_abort");
+    let mut table = test_table(&context, "table", IdentityProp::Keys(vec![0])).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    append_rows(&mut table, vec![test_row(1, "A", 20), test_row(2, "B", 21)]).unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    let xact_id = 7;
+    table
+        .delete_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .await;
+    table.abort_in_stream_batch(xact_id);
+    // Re-sent attempt.
+    table
+        .delete_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .await;
+    commit_transaction_stream_and_sync(
+        &mut table,
+        &mut event_completion_rx,
+        xact_id,
+        /*lsn=*/ 5,
+    )
+    .await;
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    verify_snapshot_ids(&mut table, &[2]).await;
+}
+
+/// Testing scenario: a streamed transaction is aborted while one of its flushes is in flight, and
+/// postgres re-sends it under the same xid. The stale flush result must neither drop the re-sent
+/// rows nor be committed with them.
+#[tokio::test]
+async fn test_stale_flush_of_aborted_stream_does_not_touch_resent_attempt() {
+    let context = TestContext::new("stale_flush_of_aborted_stream");
+    let mut table = test_table(&context, "table", IdentityProp::Keys(vec![0])).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 7;
+    table
+        .append_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .unwrap();
+    let (stale_disk_slice, stale_flush_id) =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
+            .await
+            .unwrap();
+    table.abort_in_stream_batch(xact_id);
+
+    // Re-sent attempt; the first attempt's flush completes in the middle of it.
+    table
+        .append_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .unwrap();
+    table
+        .append_in_stream_batch(test_row(2, "B", 21), xact_id)
+        .unwrap();
+    table.apply_stream_flush_result(xact_id, stale_disk_slice, stale_flush_id);
+    table
+        .append_in_stream_batch(test_row(3, "C", 22), xact_id)
+        .unwrap();
+    commit_transaction_stream_and_sync(
+        &mut table,
+        &mut event_completion_rx,
+        xact_id,
+        /*lsn=*/ 5,
+    )
+    .await;
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    verify_snapshot_ids(&mut table, &[1, 2, 3]).await;
 }
 
 /// ===================================
@@ -1340,7 +1399,7 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
     table.append_in_stream_batch(test_row(2, "B", 21), xact_id_2)?;
 
     // Flush streaming transactions with different LSNs (can be out of order)
-    let disk_slice_1 =
+    let (disk_slice_1, disk_slice_1_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id_1, Some(50))
             .await
             .expect("Disk slice 1 should be present");
@@ -1348,7 +1407,7 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
         .commit_transaction_stream_impl(xact_id_1, /*lsn=*/ 50)
         .unwrap();
 
-    let disk_slice_2 =
+    let (disk_slice_2, disk_slice_2_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id_2, Some(100))
             .await
             .expect("Disk slice 2 should be present");
@@ -1375,16 +1434,8 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
     assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
 
     // Complete streaming flushes
-    table.apply_stream_flush_result(
-        xact_id_1,
-        disk_slice_1,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
-    table.apply_stream_flush_result(
-        xact_id_2,
-        disk_slice_2,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id_1, disk_slice_1, disk_slice_1_flush_id);
+    table.apply_stream_flush_result(xact_id_2, disk_slice_2, disk_slice_2_flush_id);
     table.apply_flush_result(disk_slice_3, uuid::Uuid::new_v4() /*placeholder*/);
 
     // Verify all pending flushes are cleared
@@ -1990,7 +2041,7 @@ async fn test_streaming_batch_id_mismatch_with_data_compaction() -> Result<()> {
 
     // Step 3: Flush the streaming transaction
     // This creates a disk slice with the original batch IDs
-    let disk_slice = flush_stream_and_sync_no_apply(
+    let (disk_slice, disk_slice_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id,
@@ -2012,11 +2063,7 @@ async fn test_streaming_batch_id_mismatch_with_data_compaction() -> Result<()> {
 
     // Step 6: Apply the flush result
     // The disk slice still contains the original batch IDs
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Step 7: Create a mooncake snapshot
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -2079,7 +2126,7 @@ async fn test_streaming_empty_batch_filtering() -> Result<()> {
         .await;
 
     // Flush stream 1
-    let disk_slice1 = flush_stream_and_sync_no_apply(
+    let (disk_slice1, disk_slice1_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id1,
@@ -2090,11 +2137,7 @@ async fn test_streaming_empty_batch_filtering() -> Result<()> {
 
     // Commit stream 1
     table.commit_transaction_stream_impl(xact_id1, /*lsn=*/ 11)?;
-    table.apply_stream_flush_result(
-        xact_id1,
-        disk_slice1,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id1, disk_slice1, disk_slice1_flush_id);
 
     // Stream 2: Normal operations
     table.append_in_stream_batch(test_row(4, "Keep", 23), xact_id2)?;
@@ -2149,7 +2192,7 @@ async fn test_batch_id_removal_assertion_direct() -> Result<()> {
     // Step 3: Flush the streaming transaction while it has the deletion
     // This creates a disk slice that contains the original batch ID
     // but the batch will be filtered out during processing (empty after deletion)
-    let disk_slice =
+    let (disk_slice, disk_slice_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(11))
             .await
             .expect("Disk slice should be present");
@@ -2158,11 +2201,7 @@ async fn test_batch_id_removal_assertion_direct() -> Result<()> {
     table.commit_transaction_stream_impl(xact_id, 11)?;
 
     // Step 5: Apply the stream flush result
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Step 6: Create a simple snapshot
     let created = table.try_create_mooncake_snapshot(SnapshotOption {
@@ -2288,7 +2327,7 @@ async fn test_stream_commit_with_ongoing_flush_deletion_remapping() -> Result<()
 
     // Step 4: Flush the streaming transaction (creates disk slice)
     // The disk slice now contains the deletion remapping info
-    let disk_slice =
+    let (disk_slice, disk_slice_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(3))
             .await
             .expect("Disk slice should be present");
@@ -2300,11 +2339,7 @@ async fn test_stream_commit_with_ongoing_flush_deletion_remapping() -> Result<()
 
     // Step 6: Apply the stream flush result
     // This adds the disk slice to snapshot_task for later processing
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Step 7: Create a snapshot to trigger integrate_disk_slices
     // Without the fix, this would fail because deletions in committed_deletion_log
@@ -2489,7 +2524,7 @@ async fn test_streaming_deletion_remap_sets_batch_deletion_vector() {
     table.append_in_stream_batch(row2.clone(), xact_id).unwrap();
 
     // Begin the stream flush (drains mem slice into stream_state.new_record_batches and adds a mem index)
-    let disk_slice = flush_stream_and_sync_no_apply(
+    let (disk_slice, disk_slice_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id,
@@ -2503,11 +2538,7 @@ async fn test_streaming_deletion_remap_sets_batch_deletion_vector() {
 
     // Apply the stream flush result BEFORE committing the transaction.
     // This must remap the MemoryBatch deletion into the new disk file and set the batch deletion vector.
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Assert the in-memory stream state's flushed file deletion vector reflects the delete BEFORE commit.
     {
@@ -2573,7 +2604,7 @@ async fn test_streaming_commit_before_flush_finishes_sets_flush_lsn() -> Result<
     table.append_in_stream_batch(row, xact_id)?;
 
     // Begin a streaming flush WITHOUT a writer LSN to simulate a periodic flush before commit
-    let disk_slice = flush_stream_and_sync_no_apply(
+    let (disk_slice, disk_slice_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut event_completion_rx,
         xact_id,
@@ -2588,11 +2619,7 @@ async fn test_streaming_commit_before_flush_finishes_sets_flush_lsn() -> Result<
         .unwrap();
 
     // Apply the flush after commit; this should set next flush LSN to commit_lsn
-    table.apply_stream_flush_result(
-        xact_id,
-        disk_slice,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id, disk_slice, disk_slice_flush_id);
 
     // Create a snapshot to integrate the flush LSN into the current snapshot state
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -2674,7 +2701,7 @@ async fn test_streaming_batch_id_assignment() -> Result<()> {
     table.append_in_stream_batch(test_row(2, "B", 21), xact_id_2)?;
 
     // Flush streaming transactions with different LSNs (can be out of order)
-    let disk_slice_1 =
+    let (disk_slice_1, disk_slice_1_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id_1, Some(50))
             .await
             .expect("Disk slice 1 should be present");
@@ -2682,7 +2709,7 @@ async fn test_streaming_batch_id_assignment() -> Result<()> {
         .commit_transaction_stream_impl(xact_id_1, /*lsn=*/ 50)
         .unwrap();
 
-    let disk_slice_2 =
+    let (disk_slice_2, disk_slice_2_flush_id) =
         flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id_2, Some(100))
             .await
             .expect("Disk slice 2 should be present");
@@ -2696,16 +2723,8 @@ async fn test_streaming_batch_id_assignment() -> Result<()> {
     assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
 
     // Complete streaming flushes
-    table.apply_stream_flush_result(
-        xact_id_1,
-        disk_slice_1,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
-    table.apply_stream_flush_result(
-        xact_id_2,
-        disk_slice_2,
-        uuid::Uuid::new_v4(), /*placeholder*/
-    );
+    table.apply_stream_flush_result(xact_id_1, disk_slice_1, disk_slice_1_flush_id);
+    table.apply_stream_flush_result(xact_id_2, disk_slice_2, disk_slice_2_flush_id);
 
     // Verify all pending flushes are cleared
     assert!(table.ongoing_flush_lsns.is_empty());
