@@ -559,6 +559,9 @@ pub struct MooncakeTable {
     snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Shared with the iceberg table manager for garbage collection.
     gc_context: Option<Arc<IcebergGcContext>>,
+
+    #[cfg(test)]
+    pub(crate) flush_failure_injector: Arc<disk_slice::FlushFailureInjector>,
 }
 
 /// Deletes a table's iceberg table and local files without the `MooncakeTable` itself; used when
@@ -831,6 +834,8 @@ impl MooncakeTable {
             snapshot_seq,
             gc_context: None,
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
+            #[cfg(test)]
+            flush_failure_injector: Arc::default(),
         };
         table.snapshot.try_write().unwrap().snapshot_seq = table.snapshot_seq.clone();
         if let Some(index_swap) = rebuilt_file_indices {
@@ -1260,6 +1265,10 @@ impl MooncakeTable {
             );
         }
 
+        #[cfg(test)]
+        {
+            disk_slice.failure_injector = Some(self.flush_failure_injector.clone());
+        }
         let pristine_disk_slice = disk_slice.clone();
         let supervisor_notify = table_notify_tx.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
@@ -2266,3 +2275,6 @@ mod catalog_robustness_tests;
 
 #[cfg(test)]
 mod gc_tests;
+
+#[cfg(test)]
+mod full_disk_flush_tests;

@@ -57,6 +57,34 @@ pub struct DiskSliceWriter {
 
     /// Every parquet file this write created, complete or not.
     created_files: Vec<PathBuf>,
+
+    #[cfg(test)]
+    pub(super) failure_injector: Option<Arc<FlushFailureInjector>>,
+}
+
+/// Test-only: makes the next flush writes fail with a full disk after they created a data file.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct FlushFailureInjector {
+    remaining_full_disk_failures: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl FlushFailureInjector {
+    pub(crate) fn fail_next_writes(&self, writes: usize) {
+        self.remaining_full_disk_failures
+            .store(writes, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn take_failure(&self) -> bool {
+        self.remaining_full_disk_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+    }
 }
 
 impl std::fmt::Debug for DiskSliceWriter {
@@ -93,6 +121,8 @@ impl DiskSliceWriter {
             batches,
             files: vec![],
             created_files: vec![],
+            #[cfg(test)]
+            failure_injector: None,
             batch_id_to_idx: HashMap::new(),
             writer_lsn,
             table_auto_incr_id,
@@ -235,6 +265,14 @@ impl DiskSliceWriter {
             }
             // Write the batch
             writer.as_mut().unwrap().write(batch).await?;
+            #[cfg(test)]
+            if self
+                .failure_injector
+                .as_ref()
+                .is_some_and(|injector| injector.take_failure())
+            {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
+            }
             let estimated_total_size = {
                 let cur_writer = writer.as_ref().unwrap();
                 cur_writer.memory_size()
