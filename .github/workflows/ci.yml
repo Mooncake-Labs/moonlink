@@ -504,6 +504,28 @@ jobs:
           # Codecov availability must not decide whether tests pass.
           fail_ci_if_error: false
 
+  # ───────────── Wire format goldens (duckdb_mooncake compatibility) ─────────────
+  # Integration tests under tests/ are not covered by the `--lib` unit job.
+  wire_format:
+    name: Wire format golden tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ steps.toolchain.outputs.cachekey }}
+
+      - name: Run wire format golden tests
+        timeout-minutes: 15
+        run: |
+          RUST_BACKTRACE=1 cargo test --locked -p moonlink_rpc -p moonlink_table_metadata --tests
+          RUST_BACKTRACE=1 cargo test --locked -p moonlink --test scan_payload_order
+
   # ────────────────────────8 · Chaos test ────────────────────────────
   chaos_test:
     name: Chaos test

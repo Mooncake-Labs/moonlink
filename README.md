@@ -98,7 +98,7 @@ moonlink_service::start_with_config(moonlink_service::ServiceConfig {
 
 The service listens on `{base_path}/moonlink.sock` and stores tables, caches and its SQLite metadata under `base_path`. Logs go to stdout (the Postgres server log).
 
-The RPC wire format (`src/moonlink_rpc`, and the `ScanTableBegin` payload in `src/moonlink_table_metadata`) is shared with prebuilt duckdb_mooncake binaries that pin `moonlink_rpc` by git, so it is append-only. `tests/wire_golden.rs` in both crates holds byte-level goldens.
+The RPC wire format (`src/moonlink_rpc`, and the `ScanTableBegin` payload in `src/moonlink_table_metadata`) is shared with prebuilt duckdb_mooncake binaries that pin `moonlink_rpc` by git, so it is append-only. `tests/wire_golden.rs` in both crates holds byte-level goldens; CI runs them in the `wire_format` job.
 
 ## Development
 
@@ -106,6 +106,9 @@ The RPC wire format (`src/moonlink_rpc`, and the `ScanTableBegin` payload in `sr
 cargo build
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --lib --workspace              # unit tests
+# Wire-format goldens live under tests/ (not covered by --lib).
+cargo test -p moonlink_rpc -p moonlink_table_metadata --tests
+cargo test -p moonlink --test scan_payload_order
 
 # Postgres-backed tests need a Postgres with wal_level=logical.
 # They share one replication slot, so run them with cargo test (one process), not nextest.
