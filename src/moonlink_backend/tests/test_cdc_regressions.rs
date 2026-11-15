@@ -2836,7 +2836,7 @@ async fn stream_large_transactions(client: &Client, on: bool) {
 
 /// A failing change inside a streamed (large) transaction errors that mirror at the commit, like
 /// in any other transaction: an unconvertible value, or the classic reload BEGIN; TRUNCATE;
-/// INSERT ...; COMMIT. The other table of the transaction gets exactly its rows.
+/// INSERT ...; COMMIT, also inside a savepoint or a PL/pgSQL exception block. The other table of the transaction gets exactly its rows.
 #[rstest::rstest]
 #[case::bad_value(
     "INSERT INTO rv_st VALUES (10, '2024-01-01'), (11, 'infinity'), (12, '2024-01-02');",
@@ -2844,6 +2844,14 @@ async fn stream_large_transactions(client: &Client, on: bool) {
 )]
 #[case::truncate_and_reload(
     "INSERT INTO rv_st VALUES (10, '2024-01-01'); TRUNCATE rv_st; INSERT INTO rv_st VALUES (20, '2024-01-02');",
+    "truncated"
+)]
+#[case::truncate_and_reload_in_a_savepoint(
+    "SAVEPOINT r; TRUNCATE rv_st; INSERT INTO rv_st VALUES (7, '2024-01-07'); RELEASE SAVEPOINT r;",
+    "truncated"
+)]
+#[case::truncate_and_reload_in_an_exception_block(
+    "DO $$ BEGIN BEGIN TRUNCATE rv_st; INSERT INTO rv_st VALUES (7, '2024-01-07'); EXCEPTION WHEN others THEN NULL; END; END $$;",
     "truncated"
 )]
 #[tokio::test(flavor = "multi_thread")]
