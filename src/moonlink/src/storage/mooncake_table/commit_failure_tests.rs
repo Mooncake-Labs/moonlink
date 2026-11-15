@@ -32,6 +32,8 @@ struct FailingAccessor {
     stats_calls: std::sync::atomic::AtomicUsize,
     /// Run garbage collection of a table opened on this accessor in dry-run mode.
     dry_run_gc: bool,
+    /// Deletes of paths containing this fail.
+    fail_deletes_containing: Mutex<Option<String>>,
 }
 
 impl FailingAccessor {
@@ -138,6 +140,11 @@ impl BaseFileSystemAccess for FailingAccessor {
             .await
     }
     async fn delete_object(&self, object_filepath: &str) -> Result<()> {
+        if let Some(part) = self.fail_deletes_containing.lock().unwrap().as_ref() {
+            if object_filepath.contains(part.as_str()) {
+                return Err(injected_failure());
+            }
+        }
         self.inner.delete_object(object_filepath).await
     }
     async fn copy_from_local_to_remote(&self, src: &str, dst: &str) -> Result<ObjectMetadata> {
@@ -218,6 +225,7 @@ fn failing_accessor(context: &TestContext) -> Arc<FailingAccessor> {
         rule: Mutex::new(None),
         stats_calls: std::sync::atomic::AtomicUsize::new(0),
         dry_run_gc: false,
+        fail_deletes_containing: Mutex::new(None),
     })
 }
 
@@ -419,6 +427,7 @@ async fn test_gc_dry_run_stats_each_candidate_once() {
         rule: Mutex::new(None),
         stats_calls: std::sync::atomic::AtomicUsize::new(0),
         dry_run_gc: true,
+        fail_deletes_containing: Mutex::new(None),
     });
     let (mut table, mut rx) = open(&context, Some(failing.clone())).await.unwrap();
     let commits = 30;
@@ -451,4 +460,34 @@ async fn test_gc_dry_run_stats_each_candidate_once() {
         .stats_calls
         .load(std::sync::atomic::Ordering::SeqCst);
     assert!(stats <= files, "{stats} stat calls for {files} files");
+}
+
+/// A file garbage collection cannot delete does not keep it from deleting the others (else one
+/// such file would stop collection for good).
+#[tokio::test]
+async fn test_gc_continues_past_files_it_cannot_delete() {
+    let context = TestContext::new("commit");
+    {
+        let (mut table, mut rx) = open(&context, None).await.unwrap();
+        table.append(test_row(1, "r", 1)).unwrap();
+        table.commit(10);
+        flush_table_and_sync(&mut table, &mut rx, 10).await.unwrap();
+        create_mooncake_and_persist_for_test(&mut table, &mut rx).await;
+    }
+    let table_dir = context.path().join("default").join("commit");
+    // Metadata candidates come before data files, so the undeletable one is met first.
+    let undeletable = table_dir.join("metadata").join("orphan-m0.avro");
+    let orphan = table_dir.join("data").join("orphan.parquet");
+    std::fs::write(&undeletable, b"x").unwrap();
+    std::fs::write(&orphan, b"x").unwrap();
+
+    let failing = failing_accessor(&context);
+    *failing.fail_deletes_containing.lock().unwrap() = Some("/metadata/".to_string());
+    // Garbage collection at load.
+    let (_table, _rx) = open(&context, Some(failing)).await.unwrap();
+    assert!(undeletable.exists());
+    assert!(
+        !orphan.exists(),
+        "collection stopped at the file it could not delete"
+    );
 }

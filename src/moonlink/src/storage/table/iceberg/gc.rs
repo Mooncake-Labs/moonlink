@@ -442,8 +442,23 @@ impl IcebergTableManager {
             at_load,
             "deleting unreferenced iceberg files"
         );
+        // Best effort per file: one that cannot be deleted (e.g. in a read-only directory) is retried
+        // by a later run and does not keep the others.
+        let mut failed = 0;
         for path in to_delete {
-            self.filesystem_accessor.delete_object(&path).await?;
+            if let Err(e) = self.filesystem_accessor.delete_object(&path).await {
+                if failed == 0 {
+                    tracing::warn!(error = ?e, path, "cannot delete unreferenced iceberg file");
+                }
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            tracing::warn!(
+                table = self.config.table_name,
+                failed,
+                "some unreferenced iceberg files could not be deleted"
+            );
         }
         Ok(())
     }

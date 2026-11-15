@@ -429,6 +429,8 @@ impl TableHandler {
                     // Branch to drop the iceberg table and clear pinned data files from the global object storage cache, only used when the whole table requested to drop.
                     // So we block wait for asynchronous request completion.
                     TableEvent::DropTable => {
+                        // A flush waiting for disk space would hold up the drop for its whole wait.
+                        table.cancel_flushes_waiting_for_disk_space();
                         // Fast-path: no other concurrent events, directly clean up states and ack back.
                         if table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                             drop_table(&mut table, event_sync_sender).await;
@@ -964,6 +966,7 @@ impl TableHandler {
             reason = %reason,
             "mirror table entered the errored state; it must be dropped and re-created"
         );
+        table.cancel_flushes_waiting_for_disk_space();
         table_handler_state.enter_errored(table.mooncake_table_id(), reason)
     }
 

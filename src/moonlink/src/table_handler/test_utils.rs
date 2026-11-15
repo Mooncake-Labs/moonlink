@@ -127,12 +127,21 @@ impl TestEnvironment {
 
     /// Creates a new test environment with default settings.
     pub async fn new(temp_dir: TempDir, mooncake_table_config: MooncakeTableConfig) -> Self {
+        Self::new_with_table_setup(temp_dir, mooncake_table_config, |_| {}).await
+    }
+
+    /// Like [`Self::new`], with `setup` applied to the table before the handler takes it.
+    pub(crate) async fn new_with_table_setup(
+        temp_dir: TempDir,
+        mooncake_table_config: MooncakeTableConfig,
+        setup: impl FnOnce(&mut MooncakeTable),
+    ) -> Self {
         let path = temp_dir.path().to_path_buf();
         let table_name = "table_name";
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
 
-        let mooncake_table = MooncakeTable::new(
+        let mut mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),
             1,
@@ -144,6 +153,7 @@ impl TestEnvironment {
         )
         .await
         .unwrap();
+        setup(&mut mooncake_table);
 
         Self::new_with_mooncake_table(temp_dir, mooncake_table).await
     }

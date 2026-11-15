@@ -628,11 +628,6 @@ async fn assert_previous_version_loads(context: &TestContext, expected_rows: usi
     assert_eq!(live_rows(&previous).await, expected_rows);
 }
 
-fn set_dir_mode(dir: &std::path::Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
-}
-
 /// The previous version also stays loadable after a failed commit (garbage collection then reads
 /// its references from its metadata file, as at load).
 #[tokio::test]
@@ -651,18 +646,18 @@ async fn test_previous_version_loadable_after_failed_commit() {
     assert!(payload.is_some());
 
     let metadata_dir = table_dir(&context).join("metadata");
+    // Left by an earlier crash: proves the failed commit's garbage collection deleted files.
+    let orphan = table_dir(&context).join("data").join("orphan.parquet");
+    std::fs::write(&orphan, b"x").unwrap();
     let data_before = names_in(&table_dir(&context).join("data"));
     let hint_before = std::fs::read_to_string(metadata_dir.join("version-hint.text")).unwrap();
-    // The commit cannot write any metadata file: it fails before its commit point.
-    set_dir_mode(&metadata_dir, 0o555);
-    if std::fs::write(metadata_dir.join("probe"), b"").is_ok() {
-        // Running as root: permissions do not stop writes.
-        std::fs::remove_file(metadata_dir.join("probe")).unwrap();
-        set_dir_mode(&metadata_dir, 0o755);
-        return;
-    }
+    // A directory where the next metadata file goes: the commit fails before its commit point
+    // (without relying on permissions, which do not stop root).
+    let hinted: u32 = hint_before.trim().parse().unwrap();
+    let blocker = metadata_dir.join(format!("v{}.metadata.json", hinted + 1));
+    std::fs::create_dir(&blocker).unwrap();
     let res = create_iceberg_snapshot(&mut table, payload, &mut rx).await;
-    set_dir_mode(&metadata_dir, 0o755);
+    std::fs::remove_dir(&blocker).unwrap();
     let err = res.expect_err("the commit should fail");
     assert!(
         !matches!(err, crate::Error::IcebergCommitOutcomeUnknown(_)),
@@ -680,6 +675,10 @@ async fn test_previous_version_loadable_after_failed_commit() {
     assert!(
         lost.iter().all(|n| !n.contains("index_block")),
         "index blocks deleted: {lost:?}"
+    );
+    assert!(
+        !orphan.exists(),
+        "garbage collection did not run after the failed commit"
     );
 
     assert_previous_version_loads(&context, 3).await;

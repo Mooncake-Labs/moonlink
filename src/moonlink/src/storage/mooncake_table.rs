@@ -251,61 +251,80 @@ const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::fr
 const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// While flushes wait for disk space, the changes they hold stay in memory and replication keeps
 /// adding to them. Past this many bytes, summed over all tables of the process (they share one
-/// backend), the waiting flushes give up (which errors their tables) rather than growing the
-/// Postgres backend until it is killed for memory.
+/// backend), the mirrors holding the most of them give up their flushes (which errors those
+/// mirrors) rather than growing the Postgres backend until it is killed for memory.
 const FULL_DISK_MAX_WAITING_FLUSH_BYTES: u64 = 512 << 20;
 
-/// The process-wide accounting in production; each test table gets its own so tests running in
-/// parallel do not interfere.
-fn full_disk_flush_wait_for_new_table() -> Arc<FullDiskFlushWait> {
-    #[cfg(not(test))]
-    {
-        static PROCESS_WIDE: std::sync::OnceLock<Arc<FullDiskFlushWait>> =
-            std::sync::OnceLock::new();
-        PROCESS_WIDE.get_or_init(Arc::default).clone()
-    }
-    #[cfg(test)]
-    {
-        Arc::default()
-    }
+/// The accounting all tables of the process share. (Tests that make flushes wait for disk
+/// space or change the limit give their tables their own, so parallel tests do not interfere.)
+fn process_wide_full_disk_flush_wait() -> Arc<FullDiskFlushWait> {
+    static PROCESS_WIDE: std::sync::OnceLock<Arc<FullDiskFlushWait>> = std::sync::OnceLock::new();
+    PROCESS_WIDE.get_or_init(Arc::default).clone()
 }
 
-/// In-memory bytes of the flushes that are waiting for disk space.
+/// Distinguishes tables in a shared [`FullDiskFlushWait`].
+fn next_full_disk_flush_wait_table_key() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Debug, Default)]
+struct TableFlushWait {
+    bytes: u64,
+    /// One of the table's flushes gave up (so the table is errored): all of its waiting flushes
+    /// give up and release their memory.
+    gave_up: bool,
+}
+
+#[derive(Debug, Default)]
+struct WaitingFlushes {
+    total_bytes: u64,
+    tables: HashMap<u64, TableFlushWait>,
+}
+
+/// In-memory bytes of the flushes that are waiting for disk space, per table.
 #[derive(Debug)]
 pub(crate) struct FullDiskFlushWait {
-    waiting_bytes: std::sync::atomic::AtomicU64,
+    waiting: std::sync::Mutex<WaitingFlushes>,
     limit: std::sync::atomic::AtomicU64,
-    /// Set once the limit was exceeded: every waiting flush gives up.
-    gave_up: std::sync::atomic::AtomicBool,
 }
 
 impl Default for FullDiskFlushWait {
     fn default() -> Self {
         Self {
-            waiting_bytes: std::sync::atomic::AtomicU64::new(0),
+            waiting: std::sync::Mutex::new(WaitingFlushes::default()),
             limit: std::sync::atomic::AtomicU64::new(FULL_DISK_MAX_WAITING_FLUSH_BYTES),
-            gave_up: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 impl FullDiskFlushWait {
-    fn start_waiting(self: &Arc<Self>, bytes: u64) -> FullDiskFlushWaitGuard {
-        self.waiting_bytes
-            .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+    fn start_waiting(self: &Arc<Self>, table: u64, bytes: u64) -> FullDiskFlushWaitGuard {
+        let mut waiting = self.waiting.lock().unwrap();
+        waiting.total_bytes += bytes;
+        waiting.tables.entry(table).or_default().bytes += bytes;
         FullDiskFlushWaitGuard {
             wait: self.clone(),
+            table,
             bytes,
         }
     }
 
-    /// Whether waiting flushes hold more memory than allowed (from then on, until none waits).
-    fn over_limit(&self) -> bool {
-        use std::sync::atomic::Ordering;
-        if self.waiting_bytes.load(Ordering::SeqCst) > self.limit.load(Ordering::SeqCst) {
-            self.gave_up.store(true, Ordering::SeqCst);
+    /// Whether a waiting flush of `table` gives up: while the total is over the limit, only the
+    /// tables holding the most waiting bytes do, so a mirror with little waiting is not errored
+    /// for another one's load.
+    fn should_give_up(&self, table: u64) -> bool {
+        let limit = self.limit.load(std::sync::atomic::Ordering::SeqCst);
+        let mut waiting = self.waiting.lock().unwrap();
+        let over_limit = waiting.total_bytes > limit;
+        let largest = waiting.tables.values().map(|t| t.bytes).max().unwrap_or(0);
+        let Some(entry) = waiting.tables.get_mut(&table) else {
+            return false;
+        };
+        if over_limit && entry.bytes == largest {
+            entry.gave_up = true;
         }
-        self.gave_up.load(Ordering::SeqCst)
+        entry.gave_up
     }
 
     fn limit_mib(&self) -> u64 {
@@ -314,7 +333,7 @@ impl FullDiskFlushWait {
 
     #[cfg(test)]
     pub(crate) fn waiting_bytes(&self) -> u64 {
-        self.waiting_bytes.load(std::sync::atomic::Ordering::SeqCst)
+        self.waiting.lock().unwrap().total_bytes
     }
 
     #[cfg(test)]
@@ -325,19 +344,25 @@ impl FullDiskFlushWait {
 
 struct FullDiskFlushWaitGuard {
     wait: Arc<FullDiskFlushWait>,
+    table: u64,
     bytes: u64,
+}
+
+impl FullDiskFlushWaitGuard {
+    fn should_give_up(&self) -> bool {
+        self.wait.should_give_up(self.table)
+    }
 }
 
 impl Drop for FullDiskFlushWaitGuard {
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-        if self
-            .wait
-            .waiting_bytes
-            .fetch_sub(self.bytes, Ordering::SeqCst)
-            == self.bytes
-        {
-            self.wait.gave_up.store(false, Ordering::SeqCst);
+        let mut waiting = self.wait.waiting.lock().unwrap();
+        waiting.total_bytes -= self.bytes;
+        if let Some(entry) = waiting.tables.get_mut(&self.table) {
+            entry.bytes -= self.bytes;
+            if entry.bytes == 0 {
+                waiting.tables.remove(&self.table);
+            }
         }
     }
 }
@@ -654,6 +679,11 @@ pub struct MooncakeTable {
 
     /// Memory held by flushes waiting for disk space.
     pub(crate) full_disk_flush_wait: Arc<FullDiskFlushWait>,
+    /// This table's key in `full_disk_flush_wait`.
+    full_disk_flush_wait_table: u64,
+    /// Set (or closed, when the table is dropped) once the table no longer wants the results of
+    /// flushes that are waiting for disk space: they give up and release their memory.
+    flush_wait_cancel: tokio::sync::watch::Sender<bool>,
 
     #[cfg(test)]
     pub(crate) flush_failure_injector: Arc<disk_slice::FlushFailureInjector>,
@@ -932,7 +962,9 @@ impl MooncakeTable {
             snapshot_seq,
             gc_context: None,
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
-            full_disk_flush_wait: full_disk_flush_wait_for_new_table(),
+            full_disk_flush_wait: process_wide_full_disk_flush_wait(),
+            full_disk_flush_wait_table: next_full_disk_flush_wait_table_key(),
+            flush_wait_cancel: tokio::sync::watch::channel(false).0,
             #[cfg(test)]
             flush_failure_injector: Arc::default(),
             #[cfg(test)]
@@ -1374,6 +1406,8 @@ impl MooncakeTable {
         let supervisor_notify = table_notify_tx.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
         let full_disk_flush_wait = self.full_disk_flush_wait.clone();
+        let full_disk_flush_wait_table = self.full_disk_flush_wait_table;
+        let mut flush_wait_cancel = self.flush_wait_cancel.subscribe();
         spawn_supervised("flush", supervisor_notify, async move {
             // Transient IO errors are retried from the unwritten slice, under new file names (the
             // failed attempt's files are deleted first). A full disk is waited out for longer and
@@ -1389,15 +1423,24 @@ impl MooncakeTable {
                     Err(e) => {
                         candidate.remove_partial_outputs().await;
                         if e.is_storage_full() {
-                            disk_space_wait.get_or_insert_with(|| {
-                                full_disk_flush_wait
-                                    .start_waiting(pristine_disk_slice.in_memory_bytes())
+                            let waiting = disk_space_wait.get_or_insert_with(|| {
+                                full_disk_flush_wait.start_waiting(
+                                    full_disk_flush_wait_table,
+                                    pristine_disk_slice.in_memory_bytes(),
+                                )
                             });
-                            if full_disk_flush_wait.over_limit() {
-                                let message = format!(
-                                    "the disk is full and more than {} MiB of changes (of all mirrors) are waiting in memory for disk space",
-                                    full_disk_flush_wait.limit_mib()
-                                );
+                            let cancelled = *flush_wait_cancel.borrow()
+                                || flush_wait_cancel.has_changed().is_err();
+                            if cancelled || waiting.should_give_up() {
+                                let message = if cancelled {
+                                    "the disk is full and the mirror is errored or being dropped"
+                                        .to_string()
+                                } else {
+                                    format!(
+                                        "the disk is full and more than {} MiB of changes (of all mirrors) are waiting in memory for disk space, most of them from this mirror",
+                                        full_disk_flush_wait.limit_mib()
+                                    )
+                                };
                                 tracing::error!(error = ?e, "{message}; giving up the flush");
                                 break Err(crate::Error::Io(
                                     moonlink_error::ErrorStruct::new(
@@ -1411,11 +1454,13 @@ impl MooncakeTable {
                         if e.is_storage_full() && std::time::Instant::now() < full_disk_deadline {
                             full_disk_retries += 1;
                             tracing::warn!(error = ?e, full_disk_retries, "disk full while flushing table data, retrying");
-                            tokio::time::sleep(std::cmp::min(
-                                FLUSH_RETRY_BACKOFF * full_disk_retries,
-                                FLUSH_RETRY_MAX_BACKOFF,
-                            ))
-                            .await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::cmp::min(
+                                    FLUSH_RETRY_BACKOFF * full_disk_retries,
+                                    FLUSH_RETRY_MAX_BACKOFF,
+                                )) => {}
+                                _ = flush_wait_cancel.changed() => {}
+                            }
                         } else if attempt < FLUSH_WRITE_ATTEMPTS {
                             tracing::warn!(error = ?e, attempt, "disk slice write failed, retrying");
                             tokio::time::sleep(FLUSH_RETRY_BACKOFF * attempt).await;
@@ -1607,6 +1652,11 @@ impl MooncakeTable {
     }
 
     /// Mark next iceberg snapshot as force, even if the payload is empty.
+    /// Make flushes that are waiting for disk space give up (the table is errored or dropped).
+    pub(crate) fn cancel_flushes_waiting_for_disk_space(&self) {
+        self.flush_wait_cancel.send_replace(true);
+    }
+
     pub(crate) fn force_empty_persistence_payload(&mut self) {
         self.next_snapshot_task.force_empty_persistence_payload = true;
     }

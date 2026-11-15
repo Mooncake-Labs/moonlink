@@ -20,7 +20,8 @@ fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-async fn table_with_committed_rows(
+/// With the process-wide flush-wait accounting new tables get.
+async fn table_on_process_wide_accounting(
     context: &TestContext,
     rows: i32,
 ) -> (MooncakeTable, mpsc::Receiver<TableEvent>) {
@@ -31,6 +32,16 @@ async fn table_with_committed_rows(
         table.append(test_row(i, "row", i)).unwrap();
     }
     table.commit(10);
+    (table, rx)
+}
+
+/// With its own flush-wait accounting, so the test cannot affect others running in parallel.
+async fn table_with_committed_rows(
+    context: &TestContext,
+    rows: i32,
+) -> (MooncakeTable, mpsc::Receiver<TableEvent>) {
+    let (mut table, rx) = table_on_process_wide_accounting(context, rows).await;
+    table.full_disk_flush_wait = Arc::default();
     (table, rx)
 }
 
@@ -153,4 +164,96 @@ async fn test_waiting_flushes_give_up_together_past_the_memory_limit() {
         "the flushes waited for the whole retry period"
     );
     assert_eq!(table.full_disk_flush_wait.waiting_bytes(), 0);
+}
+
+async fn wait_until_waiting(wait: &FullDiskFlushWait, more_than: u64) -> u64 {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let bytes = wait.waiting_bytes();
+            if bytes > more_than {
+                return bytes;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the flush never waited for disk space")
+}
+
+/// All mirrors of the process share one accounting. When their waiting flushes together exceed
+/// the limit, only the mirror holding the most gives up: a small mirror whose flush crosses the
+/// limit keeps waiting, and flushes once there is space.
+///
+/// The only test that makes flushes wait on the process-wide instance.
+#[tokio::test]
+async fn test_only_the_mirror_holding_the_most_waiting_memory_gives_up() {
+    let big_context = TestContext::new("full_disk_big");
+    let (big, mut big_rx) = table_on_process_wide_accounting(&big_context, 2000).await;
+    let small_context = TestContext::new("full_disk_small");
+    let (small, mut small_rx) = table_on_process_wide_accounting(&small_context, 10).await;
+    let shared = process_wide_full_disk_flush_wait();
+    assert!(Arc::ptr_eq(&big.full_disk_flush_wait, &shared));
+    assert!(Arc::ptr_eq(&small.full_disk_flush_wait, &shared));
+    assert_eq!(shared.waiting_bytes(), 0);
+    let (mut big, mut small) = (big, small);
+    big.flush_failure_injector.fail_next_writes(usize::MAX);
+    small.flush_failure_injector.fail_next_writes(usize::MAX);
+
+    big.flush(10, uuid::Uuid::new_v4()).unwrap();
+    let big_bytes = wait_until_waiting(&shared, 0).await;
+    // The small mirror's flush is the one that crosses the limit.
+    shared.set_limit_for_test(big_bytes + 1);
+    small.flush(10, uuid::Uuid::new_v4()).unwrap();
+
+    let err = next_flush_error(&mut big_rx).await;
+    assert!(format!("{err:?}").contains("waiting in memory"), "{err:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        small_rx.try_recv().is_err(),
+        "the small mirror's flush gave up for the big one's memory"
+    );
+    let small_bytes = shared.waiting_bytes();
+    assert!(small_bytes > 0 && small_bytes < big_bytes);
+
+    small.flush_failure_injector.fail_next_writes(0);
+    let TableEvent::FlushResult { flush_result, .. } = small_rx.recv().await.unwrap() else {
+        panic!("expected a flush result");
+    };
+    assert!(
+        flush_result.unwrap().is_ok(),
+        "the small mirror's flush failed"
+    );
+    assert_eq!(shared.waiting_bytes(), 0);
+    shared.set_limit_for_test(FULL_DISK_MAX_WAITING_FLUSH_BYTES);
+}
+
+/// A flush waiting for disk space gives up as soon as its table is errored, dropped or being
+/// dropped, so it neither keeps its memory nor holds budget the other mirrors need.
+#[tokio::test]
+async fn test_waiting_flush_gives_up_when_its_table_no_longer_wants_it() {
+    for drop_table in [false, true] {
+        let context = TestContext::new("full_disk");
+        let (mut table, mut rx) = table_with_committed_rows(&context, 10).await;
+        table.flush_failure_injector.fail_next_writes(usize::MAX);
+        let wait = table.full_disk_flush_wait.clone();
+        table.flush(10, uuid::Uuid::new_v4()).unwrap();
+        wait_until_waiting(&wait, 0).await;
+
+        let started = std::time::Instant::now();
+        if drop_table {
+            drop(table);
+        } else {
+            table.cancel_flushes_waiting_for_disk_space();
+        }
+        let err = next_flush_error(&mut rx).await;
+        assert!(
+            format!("{err:?}").contains("errored or being dropped"),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < FLUSH_FULL_DISK_RETRY_LIMIT / 2,
+            "the flush kept waiting"
+        );
+        assert_eq!(wait.waiting_bytes(), 0);
+    }
 }

@@ -316,3 +316,42 @@ async fn test_persistent_flush_failure_errors_the_table() {
     drop(guard);
     env.drop_table().await.unwrap();
 }
+
+/// Entering the errored state releases the table's flushes that wait for disk space, so they
+/// neither keep their memory nor hold budget other mirrors need until the full-disk deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_entering_errored_releases_flushes_waiting_for_disk_space() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+    config.row_identity = IdentityProp::Keys(vec![0]);
+    let wait: Arc<crate::storage::mooncake_table::FullDiskFlushWait> = Arc::default();
+    let table_wait = wait.clone();
+    let mut env = TestEnvironment::new_with_table_setup(temp_dir, config, move |table| {
+        table.full_disk_flush_wait = table_wait;
+        table.flush_failure_injector.fail_next_writes(usize::MAX);
+    })
+    .await;
+    env.append_row(1, "Alice", 10, 5, None).await;
+    env.flush_table(10).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while wait.waiting_bytes() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the flush never waited for disk space");
+
+    env.send_event(crate::TableEvent::EnterErrored {
+        reason: "unit test reason".to_string(),
+    })
+    .await;
+    // Well before the full-disk deadline (2 s in tests).
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while wait.waiting_bytes() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the errored table's flush kept waiting for disk space");
+    env.drop_table().await.unwrap();
+}
