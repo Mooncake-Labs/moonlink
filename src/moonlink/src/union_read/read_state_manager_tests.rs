@@ -748,4 +748,34 @@ mod gc {
             .await
             .expect("reads that timed out behind a stuck build leaked cache pins");
     }
+
+    /// A materialize hook armed for one table is not taken by reads of another table, which run
+    /// in parallel in the same process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn materialize_hook_applies_to_its_table_only() {
+        use crate::union_read::read_state_manager::test_hooks::block_next_materialize;
+
+        let (mut armed, _) = production_cache_env("hook_armed").await;
+        let (mut other, _) = production_cache_env("hook_other").await;
+        for env in [&mut armed, &mut other] {
+            append_rows(&mut env.table, vec![test_row(1, "r", 1)]).unwrap();
+            env.table.commit(10);
+            create_mooncake_snapshot_for_test(&mut env.table, &mut env.notify_rx).await;
+            env.publish(10, 10, 10);
+        }
+        let (reached_rx, release_tx) = block_next_materialize(&armed.rsm);
+        let read = tokio::time::timeout(Duration::from_secs(5), other.rsm.try_read(Some(10)))
+            .await
+            .expect("another table's read took the hook");
+        assert_rows(&read.unwrap(), &[1]).await;
+
+        let rsm = armed.rsm.clone();
+        let blocked = tokio::spawn(async move { rsm.try_read(Some(10)).await.map(|_| ()) });
+        tokio::time::timeout(Duration::from_secs(5), reached_rx)
+            .await
+            .expect("the armed table's read did not take its hook")
+            .unwrap();
+        release_tx.send(()).unwrap();
+        blocked.await.unwrap().unwrap();
+    }
 }
