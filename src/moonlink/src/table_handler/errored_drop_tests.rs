@@ -155,7 +155,11 @@ async fn test_inflight_maintenance_waiter_fails_on_errored() {
     let mut env = TestEnvironment::default().await;
     env.append_row(1, "a", 1, 5, None).await;
     env.commit(10).await;
-    let mut rx = env.table_event_manager.initiate_data_compaction().await;
+    let mut rx = env
+        .table_event_manager
+        .initiate_data_compaction()
+        .await
+        .unwrap();
     env.send_event(enter_errored()).await;
     let res = tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await

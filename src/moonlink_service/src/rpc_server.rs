@@ -571,6 +571,84 @@ mod tests {
             .unwrap();
         pg::drop_source_table(&pg_client, table).await;
     }
+    /// optimize on an errored mirror answers with the mirror's "out of sync" message instead of
+    /// panicking the connection task, and the connection keeps serving requests.
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn optimize_of_an_errored_mirror_returns_its_message() {
+        use crate::test_utils::pg;
+        use std::time::Duration;
+
+        let table = "rpc_optimize_errored_test";
+        let pg_client = pg::connect().await;
+        pg::create_source_table(&pg_client, table, 3).await;
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(
+            MoonlinkBackend::new(base_path, None, Box::new(sqlite_store))
+                .await
+                .unwrap(),
+        );
+        backend
+            .create_table(
+                "postgres".to_string(),
+                table.to_string(),
+                format!("public.{table}"),
+                pg::database_uri(),
+                "{}".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend
+            .enter_errored_for_testing(
+                "postgres".to_string(),
+                table.to_string(),
+                "source schema changed".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        let connection = tokio::spawn(super::handle_stream(backend.clone(), server));
+        for mode in ["data", "index", "full"] {
+            let request = moonlink_rpc::Request::OptimizeTable {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                mode: mode.to_string(),
+            };
+            moonlink_rpc::write(&mut client, &request).await.unwrap();
+            let res: moonlink_rpc::RpcResult<()> =
+                tokio::time::timeout(Duration::from_secs(10), moonlink_rpc::read(&mut client))
+                    .await
+                    .unwrap_or_else(|_| panic!("optimize {mode} did not answer"))
+                    .unwrap_or_else(|e| panic!("optimize {mode}: connection broke: {e:?}"));
+            let err = res.expect_err("optimize of an errored mirror must fail");
+            assert!(
+                err.message.contains("out of sync")
+                    && err.message.contains("source schema changed"),
+                "optimize {mode}: {err:?}"
+            );
+        }
+        moonlink_rpc::write(&mut client, &moonlink_rpc::Request::ListTables {})
+            .await
+            .unwrap();
+        let tables: moonlink_rpc::RpcResult<Vec<moonlink_rpc::Table>> =
+            moonlink_rpc::read(&mut client).await.unwrap();
+        assert_eq!(tables.unwrap().len(), 1);
+        drop(client);
+        assert!(connection.await.is_ok(), "connection task panicked");
+
+        backend
+            .drop_table("postgres".to_string(), table.to_string())
+            .await
+            .unwrap();
+        pg::drop_source_table(&pg_client, table).await;
+    }
 }
 
 #[cfg(test)]

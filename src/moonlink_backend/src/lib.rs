@@ -400,7 +400,7 @@ impl MoonlinkBackend {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
 
-        let mut rx = {
+        let rx = {
             let mut manager = self.replication_manager.write().await;
             let mooncake_table_id = MooncakeTableId { database, table };
             let writer = manager.get_table_event_manager(&mooncake_table_id)?;
@@ -414,10 +414,27 @@ impl MoonlinkBackend {
                     "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"
                     )));
                 }
-            }
+            }?
         };
 
-        rx.recv().await.unwrap().unwrap();
+        TableEventManager::synchronize_maintenance_request(rx).await?;
+        Ok(())
+    }
+
+    /// Put a mirror into the errored state, as a runtime failure would.
+    #[cfg(feature = "test-utils")]
+    pub async fn enter_errored_for_testing(
+        &self,
+        database: String,
+        table: String,
+        reason: String,
+    ) -> Result<()> {
+        let mut manager = self.replication_manager.write().await;
+        let mooncake_table_id = MooncakeTableId { database, table };
+        manager
+            .get_table_event_manager(&mooncake_table_id)?
+            .enter_errored(reason)
+            .await?;
         Ok(())
     }
 

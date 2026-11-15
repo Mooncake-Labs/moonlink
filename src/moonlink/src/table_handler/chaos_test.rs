@@ -1038,14 +1038,21 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
             // Perform table maintenance operations.
             if let Some(TableEvent::ForceRegularIndexMerge) = &chaos_events.table_maintenance_event
             {
-                let mut rx = table_event_manager.initiate_index_merge().await;
-                rx.recv().await.unwrap().unwrap();
+                let rx = table_event_manager.initiate_index_merge().await.unwrap();
+                TableEventManager::synchronize_maintenance_request(rx)
+                    .await
+                    .unwrap();
             }
             if let Some(TableEvent::ForceRegularDataCompaction) =
                 &chaos_events.table_maintenance_event
             {
-                let mut rx = table_event_manager.initiate_data_compaction().await;
-                rx.recv().await.unwrap().unwrap();
+                let rx = table_event_manager
+                    .initiate_data_compaction()
+                    .await
+                    .unwrap();
+                TableEventManager::synchronize_maintenance_request(rx)
+                    .await
+                    .unwrap();
             }
 
             // Perform table update operations.

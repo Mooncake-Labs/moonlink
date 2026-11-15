@@ -121,33 +121,52 @@ impl TableEventManager {
     }
 
     /// Initiate an index merge event, return the channel for synchronization.
-    pub async fn initiate_index_merge(&mut self) -> broadcast::Receiver<Result<()>> {
-        let subscriber = self.table_maintenance_completion_tx.subscribe();
-        self.table_event_tx
-            .send(TableEvent::ForceRegularIndexMerge)
+    /// Fails at once if the table is errored or its handler is gone.
+    pub async fn initiate_index_merge(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
+        self.initiate_maintenance(TableEvent::ForceRegularIndexMerge)
             .await
-            .unwrap();
-        subscriber
     }
 
-    /// Initialte a data compaction event, return the channel for synchronization.
-    pub async fn initiate_data_compaction(&mut self) -> broadcast::Receiver<Result<()>> {
-        let subscriber = self.table_maintenance_completion_tx.subscribe();
-        self.table_event_tx
-            .send(TableEvent::ForceRegularDataCompaction)
+    /// Initiate a data compaction event, return the channel for synchronization.
+    /// Fails at once if the table is errored or its handler is gone.
+    pub async fn initiate_data_compaction(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
+        self.initiate_maintenance(TableEvent::ForceRegularDataCompaction)
             .await
-            .unwrap();
-        subscriber
     }
 
-    /// Initialte full table maintenance event, return the channel for synchronization.
-    pub async fn initiate_full_compaction(&mut self) -> broadcast::Receiver<Result<()>> {
+    /// Initiate full table maintenance event, return the channel for synchronization.
+    /// Fails at once if the table is errored or its handler is gone.
+    pub async fn initiate_full_compaction(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
+        self.initiate_maintenance(TableEvent::ForceFullMaintenance)
+            .await
+    }
+
+    async fn initiate_maintenance(
+        &mut self,
+        event: TableEvent,
+    ) -> Result<broadcast::Receiver<Result<()>>> {
+        self.check_healthy()?;
         let subscriber = self.table_maintenance_completion_tx.subscribe();
         self.table_event_tx
-            .send(TableEvent::ForceFullMaintenance)
+            .send(event)
             .await
-            .unwrap();
-        subscriber
+            .map_err(|_| self_stopped_error())?;
+        Ok(subscriber)
+    }
+
+    /// Wait for the result of a maintenance request started with an `initiate_*` method.
+    pub async fn synchronize_maintenance_request(
+        mut rx: broadcast::Receiver<Result<()>>,
+    ) -> Result<()> {
+        loop {
+            match rx.recv().await {
+                Ok(result) => return result,
+                // The handler answers maintenance requests in order, so a later result still
+                // means this request has finished.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Err(self_stopped_error()),
+            }
+        }
     }
 
     /// Drop a mooncake table.

@@ -264,20 +264,20 @@ impl TestEnvironment {
 
     /// Force an index merge operation, and block wait its completion.
     pub async fn force_index_merge_and_sync(&mut self) -> Result<()> {
-        let mut rx = self.table_event_manager.initiate_index_merge().await;
-        rx.recv().await.unwrap()
+        let rx = self.table_event_manager.initiate_index_merge().await?;
+        TableEventManager::synchronize_maintenance_request(rx).await
     }
 
     /// Force a data compaction operation, and block wait its completion.
     pub async fn force_data_compaction_and_sync(&mut self) -> Result<()> {
-        let mut rx = self.table_event_manager.initiate_data_compaction().await;
-        rx.recv().await.unwrap()
+        let rx = self.table_event_manager.initiate_data_compaction().await?;
+        TableEventManager::synchronize_maintenance_request(rx).await
     }
 
     /// Force a full table maintenance task operation, and block wait its completion.
     pub async fn force_full_maintenance_and_sync(&mut self) -> Result<()> {
-        let mut rx = self.table_event_manager.initiate_full_compaction().await;
-        rx.recv().await.unwrap()
+        let rx = self.table_event_manager.initiate_full_compaction().await?;
+        TableEventManager::synchronize_maintenance_request(rx).await
     }
 
     /// Commit the transaction, flush and create mooncake/iceberg snapshot.
