@@ -470,6 +470,12 @@ pub struct MooncakeTable {
     /// Event ids of flushes still in flight for aborted streamed transactions.
     aborted_stream_flushes: HashSet<uuid::Uuid>,
 
+    /// Committed streamed transactions whose flushes are still in flight, by an id of their own
+    /// (their xid may already be in use again by a re-send), and the id for each such flush.
+    committing_streams: HashMap<u64, TransactionStreamState>,
+    committing_stream_flushes: HashMap<uuid::Uuid, u64>,
+    next_committing_stream_id: u64,
+
     /// Auto increment id for generating unique file ids.
     /// Note, these ids is only used locally, and not persisted.
     next_file_id: u32,
@@ -634,6 +640,9 @@ impl MooncakeTable {
             next_snapshot_task: SnapshotTask::new(table_metadata.as_ref().config.clone()),
             transaction_stream_states: HashMap::new(),
             aborted_stream_flushes: HashSet::new(),
+            committing_streams: HashMap::new(),
+            committing_stream_flushes: HashMap::new(),
+            next_committing_stream_id: 0,
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
             next_file_id,

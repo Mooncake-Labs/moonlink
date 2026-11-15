@@ -11,13 +11,16 @@ use more_asserts as ma;
 /// Deletes are more complex,
 /// 1. row belong to stream state memslice, directly delete it.
 /// 2. row belong to stream state flushed file, add to `local_deletions`
-/// 3. row belong to main table's flushed files, directly pushed to snapshot_task.new_deletions and let snapshot handle it.
-/// 4. row belong to main table's memslice, add to `pending_deletions_in_main_mem_slice`, and handle at commit time`
+/// 3. row belong to the main table, add to `pending_deletions_in_main_table`; at commit time they are
+///    applied to the main mem slice, or handed to the snapshot (rows already flushed).
 ///
+/// A transaction's deletions of main-table rows stay here until it commits: postgres can re-send a
+/// transaction under the same xid after a reconnect, and nothing of an attempt that is aborted (or
+/// a re-send that is skipped) may reach the table.
 pub(crate) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
-    pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
+    pending_deletions_in_main_table: Vec<RawDeletionRecord>,
     index_bloom_filter: BloomFilter,
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
@@ -122,7 +125,7 @@ impl TransactionStreamState {
         Self {
             mem_slice: MemSlice::new(schema, batch_size, identity, streaming_counter),
             local_deletions: Vec::new(),
-            pending_deletions_in_main_mem_slice: Vec::new(),
+            pending_deletions_in_main_table: Vec::new(),
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             stream_indices: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
@@ -322,17 +325,25 @@ impl MooncakeTable {
         };
 
         let stream_state = self.get_or_create_stream_state(xact_id);
-        if record.pos.is_some() {
-            stream_state
-                .pending_deletions_in_main_mem_slice
-                .push(record);
-        } else {
-            self.next_snapshot_task.new_deletions.push(record);
-        }
+        stream_state.pending_deletions_in_main_table.push(record);
     }
 
+    /// Whether a streamed transaction with this xid is in progress (not committed or aborted).
     pub(crate) fn has_transaction_stream(&self, xact_id: u32) -> bool {
         self.transaction_stream_states.contains_key(&xact_id)
+    }
+
+    /// Delete what a flush of an aborted attempt wrote; nothing refers to these files.
+    fn delete_aborted_stream_files(&self, data_files: Vec<String>, file_indices: Vec<FileIndex>) {
+        let index_files = file_indices
+            .iter()
+            .flat_map(|index| index.index_blocks.iter())
+            .map(|block| block.index_file.file_path().clone());
+        for path in data_files.into_iter().chain(index_files) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %e, path, "failed to delete a file of an aborted streamed transaction");
+            }
+        }
     }
 
     pub fn abort_in_stream_batch(&mut self, xact_id: u32) {
@@ -345,19 +356,20 @@ impl MooncakeTable {
         }
 
         // Postgres re-sends a transaction under the same xid after a reconnect, so nothing of this
-        // attempt may stay keyed by the xid: drop its state now, and recognize the results of its
-        // flushes still in flight by their event ids.
+        // attempt may stay keyed by the xid: drop its state (with its deletions) now, and recognize
+        // the results of its flushes still in flight by their event ids. Only an attempt in
+        // progress is aborted; a committed one whose flushes are in flight is not keyed by the xid.
         if let Some(stream_state) = self.transaction_stream_states.remove(&xact_id) {
             self.aborted_stream_flushes
                 .extend(stream_state.ongoing_flushes);
+            let data_files = stream_state
+                .flushed_files
+                .keys()
+                .map(|file| file.file_path().clone())
+                .collect();
+            self.delete_aborted_stream_files(data_files, stream_state.stream_indices.file_indices);
         }
 
-        // Its deletions not handed to a snapshot yet go now; a re-sent attempt's carry the same
-        // pending tag. Those already in the snapshot's uncommitted log go when it applies the abort.
-        let pending_xact_lsn = get_lsn_for_pending_xact(xact_id);
-        self.next_snapshot_task
-            .new_deletions
-            .retain(|deletion| deletion.lsn != pending_xact_lsn);
         self.next_snapshot_task
             .new_streaming_xact
             .push(TransactionStreamOutput::Abort(xact_id));
@@ -434,6 +446,41 @@ impl MooncakeTable {
 
         // A flush of an aborted attempt: its rows are gone with it.
         if self.aborted_stream_flushes.remove(&flush_event_id) {
+            let data_files = disk_slice
+                .output_files()
+                .iter()
+                .map(|(file, _)| file.file_path().clone())
+                .collect();
+            let file_indices = disk_slice.take_index().into_iter().collect();
+            self.delete_aborted_stream_files(data_files, file_indices);
+            return;
+        }
+
+        // Transaction committed while stream was flushing. Add disk slice to snapshot task and let snapshot handle it.
+        // Drop the stream state once its last flush is in.
+        if let Some(commit_id) = self.committing_stream_flushes.remove(&flush_event_id) {
+            let stream_state = self
+                .committing_streams
+                .get_mut(&commit_id)
+                .expect("committing stream state not found");
+            assert!(stream_state.ongoing_flushes.remove(&flush_event_id));
+            let commit_lsn = stream_state
+                .commit_lsn
+                .expect("Committed transaction must have commit_lsn");
+
+            // If there's no writer_lsn, it means this is a periodic flush before commit.
+            // In this case we assign the commit_lsn as writer_lsn.
+            if disk_slice.writer_lsn.is_none() {
+                disk_slice.writer_lsn = Some(commit_lsn);
+            }
+
+            let should_remove = stream_state.ongoing_flushes.is_empty();
+            self.remove_ongoing_flush_lsn(commit_lsn);
+            self.try_set_next_flush_lsn(commit_lsn);
+            self.next_snapshot_task.new_disk_slices.push(disk_slice);
+            if should_remove {
+                self.committing_streams.remove(&commit_id);
+            }
             return;
         }
 
@@ -446,31 +493,6 @@ impl MooncakeTable {
             stream_state.ongoing_flushes.remove(&flush_event_id),
             "unknown flush {flush_event_id} for xact_id {xact_id}"
         );
-
-        // Transaction committed while stream was flushing. Add disk slice to snapshot task and let snapshot handle it.
-        // Drop the stream state since the transaction is over.
-        if stream_state.status == TransactionStreamStatus::Committed {
-            let commit_lsn = stream_state
-                .commit_lsn
-                .expect("Committed transaction must have commit_lsn");
-
-            // If there's no writer_lsn, it means this is a periodic flush before commit.
-            // In this case we assign the commit_lsn as writer_lsn.
-            if disk_slice.writer_lsn.is_none() {
-                disk_slice.writer_lsn = Some(commit_lsn);
-            }
-
-            let should_remove = stream_state.ongoing_flushes.is_empty();
-            let _ = stream_state;
-
-            self.remove_ongoing_flush_lsn(commit_lsn);
-            self.try_set_next_flush_lsn(commit_lsn);
-            self.next_snapshot_task.new_disk_slices.push(disk_slice);
-            if should_remove {
-                self.transaction_stream_states.remove(&xact_id);
-            }
-            return;
-        }
 
         // Append state so we can find deletes during tx
         for (file, file_attrs) in disk_slice.output_files().iter() {
@@ -640,12 +662,14 @@ impl MooncakeTable {
 
         // We update our delete records with the last lsn of the transaction
         // Note that in the stream case we dont have this until commit time
-        for deletion in stream_state.pending_deletions_in_main_mem_slice.iter_mut() {
-            let pos = deletion.pos.unwrap();
+        for deletion in stream_state.pending_deletions_in_main_table.iter_mut() {
             // If the row is no longer in memslice, it must be flushed, let snapshot task find it.
-            if !self.mem_slice.try_delete_at_pos(pos) {
-                deletion.pos = None;
+            if let Some(pos) = deletion.pos {
+                if !self.mem_slice.try_delete_at_pos(pos) {
+                    deletion.pos = None;
+                }
             }
+            deletion.lsn = lsn - 1;
         }
 
         for deletion in stream_state.local_deletions.iter_mut() {
@@ -663,9 +687,7 @@ impl MooncakeTable {
             flushed_file_index: stream_state.stream_indices.clone(),
             flushed_files: stream_state.flushed_files.clone(),
             local_deletions: std::mem::take(&mut stream_state.local_deletions),
-            pending_deletions: std::mem::take(
-                &mut stream_state.pending_deletions_in_main_mem_slice,
-            ),
+            pending_deletions: std::mem::take(&mut stream_state.pending_deletions_in_main_table),
         };
         self.next_snapshot_task
             .new_streaming_xact
@@ -674,6 +696,22 @@ impl MooncakeTable {
         stream_state.status = TransactionStreamStatus::Committed;
         // We may have pending flushes that we need to stamp with this commit LSN so we store it in stream_state.
         stream_state.commit_lsn = Some(lsn);
+
+        // The transaction is over: a re-send of the same xid starts a new state, and the flushes
+        // still in flight find this one by their event ids.
+        let stream_state = self
+            .transaction_stream_states
+            .remove(&xact_id)
+            .expect("stream state of the committed transaction");
+        if !stream_state.ongoing_flushes.is_empty() {
+            let commit_id = self.next_committing_stream_id;
+            self.next_committing_stream_id += 1;
+            for flush_event_id in stream_state.ongoing_flushes.iter() {
+                self.committing_stream_flushes
+                    .insert(*flush_event_id, commit_id);
+            }
+            self.committing_streams.insert(commit_id, stream_state);
+        }
 
         Ok(())
     }

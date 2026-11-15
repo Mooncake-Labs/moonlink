@@ -826,17 +826,21 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
         verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
     }
 
+    // The committed transaction is no longer keyed by its xid.
+    assert!(!table.transaction_stream_states.contains_key(&xact_id));
+
     // Apply the flush
     table.apply_stream_flush_result(xact_id, disk_slice1, disk_slice1_flush_id);
 
     // Make sure the stream state is still present since we have outstanding flush
-    assert!(table.transaction_stream_states.contains_key(&xact_id));
+    assert_eq!(table.committing_streams.len(), 1);
 
     // Apply the second flush
     table.apply_stream_flush_result(xact_id, disk_slice2, disk_slice2_flush_id);
 
     // Assert the stream state is removed
-    assert!(!table.transaction_stream_states.contains_key(&xact_id));
+    assert!(table.committing_streams.is_empty());
+    assert!(table.committing_stream_flushes.is_empty());
 
     // Make sure we can still read the rows after flush
     // (Should still use the in memory file)
@@ -1315,6 +1319,376 @@ async fn test_stale_flush_of_aborted_stream_does_not_touch_resent_attempt() {
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
 
     verify_snapshot_ids(&mut table, &[1, 2, 3]).await;
+}
+
+/// A keyed table holding `ids` (committed at LSN 1, flushed and in a mooncake snapshot).
+async fn streamed_test_table(
+    name: &str,
+    ids: &[i32],
+) -> (TestContext, MooncakeTable, mpsc::Receiver<TableEvent>) {
+    let context = TestContext::new(name);
+    let mut table = test_table(&context, "table", IdentityProp::Keys(vec![0])).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    append_rows(
+        &mut table,
+        ids.iter().map(|id| test_row(*id, "base", 20)).collect(),
+    )
+    .unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    (context, table, event_completion_rx)
+}
+
+/// The disk slice of the next flush result, which the caller applies when it chooses.
+async fn next_flush_result(rx: &mut mpsc::Receiver<TableEvent>) -> DiskSliceWriter {
+    match rx.recv().await.unwrap() {
+        TableEvent::FlushResult {
+            flush_result: Some(Ok(disk_slice)),
+            ..
+        } => disk_slice,
+        _ => panic!("expected a flush result"),
+    }
+}
+
+/// Testing scenario: an applied streamed DELETE is re-sent, and a mooncake snapshot runs before
+/// its re-sent commit is skipped. The re-sent delete must not reach the snapshot (its row is gone).
+#[tokio::test]
+async fn test_resent_applied_streamed_delete_with_snapshot_before_skip() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (_context, mut table, mut rx) =
+            streamed_test_table("resent_delete_snapshot", &[1, 2]).await;
+        let xact_id = 7;
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+        table.abort_in_stream_batch(xact_id);
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        verify_snapshot_ids(&mut table, &[2]).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+/// Testing scenario: the same with an UPDATE whose old row is gone, so the re-sent delete has
+/// nothing to match.
+#[tokio::test]
+async fn test_resent_applied_streamed_update_with_snapshot_before_skip() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (_context, mut table, mut rx) =
+            streamed_test_table("resent_update_snapshot", &[1, 2]).await;
+        let xact_id = 7;
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        table
+            .append_in_stream_batch(test_row(1, "new", 30), xact_id)
+            .unwrap();
+        commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        table
+            .append_in_stream_batch(test_row(1, "new", 30), xact_id)
+            .unwrap();
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+        table.abort_in_stream_batch(xact_id);
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        verify_snapshot_ids(&mut table, &[1, 2]).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+/// Testing scenario: a streamed DELETE commits, and before any mooncake snapshot picks the commit
+/// up, the transaction is re-sent and its commit skipped. Skipping the re-send must keep the
+/// committed deletion.
+#[tokio::test]
+async fn test_skipping_resent_streamed_delete_keeps_committed_delete() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (_context, mut table, mut rx) = streamed_test_table("skip_keeps_delete", &[1, 2]).await;
+        let xact_id = 7;
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        table.abort_in_stream_batch(xact_id);
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        verify_snapshot_ids(&mut table, &[2]).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+/// Testing scenario: the same with a committed UPDATE (delete and insert of the same key).
+#[tokio::test]
+async fn test_skipping_resent_streamed_update_keeps_committed_update() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (_context, mut table, mut rx) = streamed_test_table("skip_keeps_update", &[1, 2]).await;
+        let xact_id = 7;
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        table
+            .append_in_stream_batch(test_row(1, "new", 30), xact_id)
+            .unwrap();
+        commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        table
+            .append_in_stream_batch(test_row(1, "new", 30), xact_id)
+            .unwrap();
+        table.abort_in_stream_batch(xact_id);
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        verify_snapshot_ids(&mut table, &[1, 2]).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+/// Testing scenario: an attempt's delete, a mooncake snapshot, then the attempt is aborted and the
+/// re-sent attempt deletes two rows and commits. Exactly the re-sent attempt's deletions apply,
+/// and a later commit does not bring the aborted one back.
+#[tokio::test]
+async fn test_aborted_streamed_delete_stays_unapplied() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (_context, mut table, mut rx) =
+            streamed_test_table("aborted_delete", &[1, 2, 3, 4]).await;
+        let xact_id = 7;
+        table
+            .delete_in_stream_batch(test_row(4, "base", 20), xact_id)
+            .await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+        table.abort_in_stream_batch(xact_id);
+
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        table
+            .delete_in_stream_batch(test_row(2, "base", 20), xact_id)
+            .await;
+        commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+        verify_snapshot_ids(&mut table, &[3, 4]).await;
+
+        append_rows(&mut table, vec![test_row(5, "later", 20)]).unwrap();
+        table.commit(/*lsn=*/ 10);
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+        verify_snapshot_ids(&mut table, &[3, 4, 5]).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+/// Testing scenario: the commit-time flush of a streamed transaction is still in flight when the
+/// transaction is re-sent and its commit skipped. The committed rows stay, and the flush is
+/// accounted for, so the table can persist past the commit.
+#[tokio::test]
+async fn test_skipping_resent_commit_keeps_in_flight_commit_flush() {
+    let (_context, mut table, mut rx) = streamed_test_table("skip_keeps_flush", &[1, 2]).await;
+    let xact_id = 7;
+    table
+        .append_in_stream_batch(test_row(3, "C", 22), xact_id)
+        .unwrap();
+    let commit_flush_id = uuid::Uuid::new_v4();
+    table
+        .commit_transaction_stream(xact_id, /*lsn=*/ 5, commit_flush_id)
+        .unwrap();
+    let commit_flush = next_flush_result(&mut rx).await;
+
+    table
+        .append_in_stream_batch(test_row(3, "C", 22), xact_id)
+        .unwrap();
+    table.abort_in_stream_batch(xact_id);
+    table.apply_stream_flush_result(xact_id, commit_flush, commit_flush_id);
+
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[1, 2, 3]).await;
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
+}
+
+/// Testing scenario: as above, but the re-sent attempt is large enough to flush on its own before
+/// its commit is skipped; both flush results arrive afterwards.
+#[tokio::test]
+async fn test_resent_attempt_flushing_while_commit_flush_in_flight() {
+    let (_context, mut table, mut rx) = streamed_test_table("resent_flush", &[1, 2]).await;
+    let xact_id = 7;
+    table
+        .append_in_stream_batch(test_row(3, "C", 22), xact_id)
+        .unwrap();
+    let commit_flush_id = uuid::Uuid::new_v4();
+    table
+        .commit_transaction_stream(xact_id, /*lsn=*/ 5, commit_flush_id)
+        .unwrap();
+    let commit_flush = next_flush_result(&mut rx).await;
+
+    table
+        .append_in_stream_batch(test_row(3, "C", 22), xact_id)
+        .unwrap();
+    let resent_flush_id = uuid::Uuid::new_v4();
+    table.flush_stream(xact_id, None, resent_flush_id).unwrap();
+    let resent_flush = next_flush_result(&mut rx).await;
+    table.abort_in_stream_batch(xact_id);
+    table.apply_stream_flush_result(xact_id, commit_flush, commit_flush_id);
+    table.apply_stream_flush_result(xact_id, resent_flush, resent_flush_id);
+
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[1, 2, 3]).await;
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
+}
+
+/// Testing scenario: a streamed transaction is committed with its flush in flight (flush first,
+/// then commit); its re-send is skipped before the flush completes. The flush is still applied.
+#[tokio::test]
+async fn test_skipping_resent_commit_after_flush_then_commit() {
+    let (_context, mut table, mut rx) = streamed_test_table("skip_after_flush_commit", &[]).await;
+    let xact_id = 7;
+    table
+        .append_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .unwrap();
+    table
+        .append_in_stream_batch(test_row(2, "B", 21), xact_id)
+        .unwrap();
+    let (commit_slice, commit_flush_id) =
+        flush_stream_and_sync_no_apply(&mut table, &mut rx, xact_id, Some(5))
+            .await
+            .unwrap();
+    table.commit_transaction_stream_impl(xact_id, 5).unwrap();
+
+    table
+        .append_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .unwrap();
+    assert!(table.has_transaction_stream(xact_id));
+    table.abort_in_stream_batch(xact_id);
+    table.apply_stream_flush_result(xact_id, commit_slice, commit_flush_id);
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+    assert!(!table.has_ongoing_flush());
+    verify_snapshot_ids(&mut table, &[1, 2]).await;
+}
+
+/// Testing scenario: as above, but the re-sent attempt flushes, and both flush results are applied
+/// before its commit is skipped. The re-sent rows are not committed a second time.
+#[tokio::test]
+async fn test_resent_attempt_flush_applied_before_skip() {
+    let (_context, mut table, mut rx) = streamed_test_table("resent_flush_before_skip", &[]).await;
+    let xact_id = 7;
+    table
+        .append_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .unwrap();
+    table
+        .append_in_stream_batch(test_row(2, "B", 21), xact_id)
+        .unwrap();
+    let (commit_slice, commit_flush_id) =
+        flush_stream_and_sync_no_apply(&mut table, &mut rx, xact_id, Some(5))
+            .await
+            .unwrap();
+    table.commit_transaction_stream_impl(xact_id, 5).unwrap();
+
+    table
+        .append_in_stream_batch(test_row(1, "A", 20), xact_id)
+        .unwrap();
+    table
+        .append_in_stream_batch(test_row(2, "B", 21), xact_id)
+        .unwrap();
+    let (resent_slice, resent_flush_id) =
+        flush_stream_and_sync_no_apply(&mut table, &mut rx, xact_id, None)
+            .await
+            .unwrap();
+    table.apply_stream_flush_result(xact_id, commit_slice, commit_flush_id);
+    table.apply_stream_flush_result(xact_id, resent_slice, resent_flush_id);
+    assert!(table.has_transaction_stream(xact_id));
+    table.abort_in_stream_batch(xact_id);
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+    assert!(!table.has_ongoing_flush());
+    verify_snapshot_ids(&mut table, &[1, 2]).await;
+}
+
+/// Testing scenario: an attempt's delete is in the stream when a mooncake snapshot runs, then the
+/// attempt is aborted; the re-sent attempt's same delete applies at its commit.
+#[tokio::test]
+async fn test_resent_delete_after_snapshot_and_abort_is_applied() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (_context, mut table, mut rx) =
+            streamed_test_table("resent_after_abort", &[1, 2]).await;
+        let xact_id = 7;
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+        table.abort_in_stream_batch(xact_id);
+        table
+            .delete_in_stream_batch(test_row(1, "base", 20), xact_id)
+            .await;
+        commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+        verify_snapshot_ids(&mut table, &[2]).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+fn files_in(dir: &std::path::Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+/// Testing scenario: files written by flushes of an aborted streamed attempt, applied before the
+/// abort or arriving after it, are deleted.
+#[tokio::test]
+async fn test_files_of_aborted_streamed_attempt_are_deleted() {
+    let (context, mut table, mut rx) = streamed_test_table("aborted_files", &[1, 2]).await;
+    let before = files_in(&context.path());
+    let xact_id = 7;
+    for round in 0..3 {
+        table
+            .append_in_stream_batch(test_row(10 + round, "A", 20), xact_id)
+            .unwrap();
+        let (applied, applied_id) =
+            flush_stream_and_sync_no_apply(&mut table, &mut rx, xact_id, None)
+                .await
+                .unwrap();
+        table.apply_stream_flush_result(xact_id, applied, applied_id);
+        table
+            .append_in_stream_batch(test_row(20 + round, "B", 20), xact_id)
+            .unwrap();
+        let (in_flight, in_flight_id) =
+            flush_stream_and_sync_no_apply(&mut table, &mut rx, xact_id, None)
+                .await
+                .unwrap();
+        table.abort_in_stream_batch(xact_id);
+        table.apply_stream_flush_result(xact_id, in_flight, in_flight_id);
+    }
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    assert_eq!(files_in(&context.path()), before);
+    verify_snapshot_ids(&mut table, &[1, 2]).await;
 }
 
 /// ===================================
