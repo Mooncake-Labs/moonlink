@@ -52,6 +52,9 @@ pub enum Error {
 
     #[error("{0}")]
     InsufficientDiskSpace(ErrorStruct),
+
+    #[error("{0}")]
+    RecoveryPanicked(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -81,6 +84,14 @@ impl Error {
         Self::InsufficientDiskSpace(ErrorStruct::new(message, ErrorStatus::Permanent))
     }
 
+    #[track_caller]
+    pub fn recovery_panicked(reason: &str) -> Self {
+        Self::RecoveryPanicked(ErrorStruct::new(
+            format!("recovery panicked: {reason}"),
+            ErrorStatus::Permanent,
+        ))
+    }
+
     pub fn get_status(&self) -> ErrorStatus {
         match self {
             Error::ParseIntError(es) => es.status,
@@ -96,6 +107,7 @@ impl Error {
             Error::DataCorruptionError(es) => es.status,
             Error::InvalidConfig(es) => es.status,
             Error::InsufficientDiskSpace(es) => es.status,
+            Error::RecoveryPanicked(es) => es.status,
         }
     }
 

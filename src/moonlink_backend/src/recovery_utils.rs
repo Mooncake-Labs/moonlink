@@ -4,7 +4,10 @@ use moonlink::ReadStateFilepathRemap;
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::{MetadataStoreTrait, TableMetadataEntry};
 
+use futures::FutureExt;
 use std::collections::HashSet;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use tracing::{error, warn};
 
 /// Backend related attributes used for recovery.
@@ -35,6 +38,22 @@ async fn recover_table(
         )
         .await?;
     Ok(())
+}
+
+/// Run one table's recovery, turning a panic into an error so that table is errored instead of
+/// aborting startup for every mirror.
+async fn recover_isolated(recovery: impl Future<Output = Result<()>>) -> Result<()> {
+    match AssertUnwindSafe(recovery).catch_unwind().await {
+        Ok(result) => result,
+        Err(panic) => {
+            let reason = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            Err(crate::Error::recovery_panicked(reason))
+        }
+    }
 }
 
 /// Load persisted metadata, and return recovered metadata storage clients.
@@ -85,11 +104,11 @@ pub(super) async fn recover_all_tables(
             continue;
         }
         unique_uris.insert(cur_metadata_entry.src_table_uri.clone());
-        if let Err(e) = recover_table(
+        if let Err(e) = recover_isolated(recover_table(
             cur_metadata_entry,
             replication_manager,
             read_state_filepath_remap.clone(),
-        )
+        ))
         .await
         {
             error!(error = ?e, table = %mooncake_table_id, "failed to recover mirror");
@@ -108,4 +127,18 @@ pub(super) async fn recover_all_tables(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn panicking_recovery_is_an_error() {
+        let err = recover_isolated(async { panic!("index rebuild failed") })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("index rebuild failed"), "{err}");
+        assert!(recover_isolated(async { Ok(()) }).await.is_ok());
+    }
 }
