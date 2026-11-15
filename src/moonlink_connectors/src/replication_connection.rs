@@ -10,38 +10,6 @@ use std::hash::Hash;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-pub enum SourceType {
-    Postgres(PostgresConnection),
-}
-
-impl SourceType {
-    async fn spawn_task(&mut self) -> JoinHandle<Result<()>> {
-        match self {
-            SourceType::Postgres(conn) => conn.spawn_replication_task().await,
-        }
-    }
-
-    async fn shutdown_task(&mut self) -> Result<()> {
-        match self {
-            SourceType::Postgres(conn) => conn.shutdown_replication().await,
-        }
-    }
-
-    async fn drop_table(&mut self, src_table_id: u32, table_name: &str) -> Result<()> {
-        match self {
-            SourceType::Postgres(conn) => conn.drop_table(src_table_id, table_name).await,
-        }
-    }
-
-    /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
-    /// which allows for recovery from the PostgreSQL replication slot.
-    async fn finalize(&mut self, postgres_drop_all: bool) -> Result<()> {
-        match self {
-            SourceType::Postgres(conn) => conn.shutdown(postgres_drop_all).await,
-        }
-    }
-}
-
 struct TableState {
     src_table_name: String,
     reader: ReadStateManager,
@@ -59,8 +27,8 @@ struct UniqueTableId {
 /// Manages replication for table(s) within a database from PostgreSQL CDC.
 pub struct ReplicationConnection {
     table_base_path: String,
-    // Source-specific connections
-    source: SourceType,
+    /// Postgres logical replication source.
+    source: PostgresConnection,
     // Common fields
     handle: Option<JoinHandle<Result<()>>>,
     /// Maps from unique table id to its table states.
@@ -77,7 +45,7 @@ impl ReplicationConnection {
         table_base_path: String,
         object_storage_cache: ObjectStorageCache,
     ) -> Result<Self> {
-        let source = SourceType::Postgres(PostgresConnection::new(uri).await?);
+        let source = PostgresConnection::new(uri).await?;
 
         Ok(Self {
             source,
@@ -160,7 +128,7 @@ impl ReplicationConnection {
 
         debug!("starting replication");
 
-        let handle = self.source.spawn_task().await;
+        let handle = self.source.spawn_replication_task().await;
         self.replication_started = true;
 
         self.handle = Some(handle);
@@ -177,10 +145,10 @@ impl ReplicationConnection {
         read_state_filepath_remap: ReadStateFilepathRemap,
         is_recovery: bool,
     ) -> Result<SrcTableId> {
-        let SourceType::Postgres(conn) = &mut self.source;
         debug!(src_table_name, "adding PostgreSQL table for replication");
 
-        let (src_table_id, table_resources) = conn
+        let (src_table_id, table_resources) = self
+            .source
             .add_table(
                 src_table_name,
                 mooncake_table_id,
@@ -250,7 +218,7 @@ impl ReplicationConnection {
         tokio::spawn(async move {
             // Stop the replication event loop
             if self.replication_started {
-                self.source.shutdown_task().await?;
+                self.source.shutdown_replication().await?;
                 if let Some(handle) = self.handle.take() {
                     if let Err(e) = handle.await {
                         warn!(error = ?e, "task join error during shutdown");
@@ -260,7 +228,7 @@ impl ReplicationConnection {
             }
 
             // Finalize the source connection
-            self.source.finalize(postgres_drop_all).await?;
+            self.source.shutdown(postgres_drop_all).await?;
 
             debug!("replication connection shutdown complete");
             Ok(())
