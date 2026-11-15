@@ -335,7 +335,8 @@ mod group_selection {
     };
     use crate::create_data_file;
 
-    const MIB: usize = 1024 * 1024;
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
 
     fn group(file_id: u64, file_size: usize, deletion_percentage: usize) -> CompactionGroup {
         CompactionGroup {
@@ -401,9 +402,123 @@ mod group_selection {
     }
 
     #[test]
-    fn test_deletion_heavy_files_still_need_min_files() {
+    fn test_deletion_heavy_files_below_min_files_need_enough_deleted_bytes() {
+        // Too few files to top up: the large file's 210 MiB of deleted rows are reclaimed alone.
         let groups = vec![group(1, 300 * MIB, 70), group(2, MIB, 0), group(3, MIB, 0)];
         let chosen = choose_similar_sized_compaction_groups(groups, 4, 8, 50);
+        assert_eq!(chosen_ids(chosen), vec![1]);
+        // A few KiB of deleted rows wait until a size tier fills up.
+        let groups = vec![group(1, 64 * KIB, 70), group(2, MIB, 0), group(3, MIB, 0)];
+        let chosen = choose_similar_sized_compaction_groups(groups, 4, 8, 50);
         assert!(chosen.is_empty());
+    }
+
+    #[test]
+    fn test_deletion_heavy_small_files_leave_a_large_output_alone() {
+        // An earlier output, 15 small files that lost half their rows to updates, one new file.
+        let mut groups = vec![group(1, 5 * MIB, 0), group(2, 30 * KIB, 0)];
+        groups.extend((10..25).map(|id| group(id, 30 * KIB, 50)));
+        let chosen = choose_similar_sized_compaction_groups(groups, 16, 32, 50);
+        let ids = chosen_ids(chosen);
+        assert_eq!(ids.len(), 16);
+        assert!(!ids.contains(&1));
+    }
+
+    #[test]
+    fn test_deletion_heavy_files_are_topped_up_to_min_files_only() {
+        // Files 5 times apart in size, so none of them form a size tier of their own.
+        let mut groups = vec![group(1, 300 * MIB, 70)];
+        groups.extend((0..5).map(|i| group(10 + i, 100 * KIB * 5usize.pow(i as u32), 0)));
+        let chosen = choose_similar_sized_compaction_groups(groups, 4, 32, 50);
+        assert_eq!(chosen_ids(chosen), vec![1, 10, 11, 12]);
+    }
+
+    #[test]
+    fn test_deletion_heavy_file_does_not_pull_in_larger_outputs() {
+        // 30 MiB of live rows; the 200 MiB outputs are left for their own tier.
+        let mut groups = vec![group(1, 300 * MIB, 90)];
+        groups.extend((10..25).map(|id| group(id, 200 * MIB, 0)));
+        let chosen = choose_similar_sized_compaction_groups(groups, 16, 32, 50);
+        assert_eq!(chosen_ids(chosen), vec![1]);
+    }
+
+    /// A row-level simulation of a CDC mirror where every transaction inserts rows and updates the
+    /// rows the previous transaction inserted, so each flushed file ends up half deleted.
+    /// Background compaction runs with the release limits after every flush. Returns how many
+    /// times each flushed byte was rewritten.
+    fn simulate_insert_then_update(rounds: usize, updated_pct: usize) -> f64 {
+        const ROW_BYTES: usize = 128;
+        const ROWS: usize = 100;
+        struct File {
+            rows: usize,
+            deleted: usize,
+        }
+        let mut files: Vec<Option<File>> = Vec::new();
+        let mut flushed = 0usize;
+        let mut rewritten = 0usize;
+        // File holding the rows inserted by the previous transaction.
+        let mut previous: Option<usize> = None;
+        for _ in 0..rounds {
+            // Updates delete the previous rows and insert their new versions with the new rows.
+            let updated = ROWS * updated_pct / 100;
+            if let Some(f) = previous {
+                files[f].as_mut().unwrap().deleted += updated;
+            }
+            files.push(Some(File {
+                rows: ROWS + if previous.is_some() { updated } else { 0 },
+                deleted: 0,
+            }));
+            flushed += files.last().unwrap().as_ref().unwrap().rows * ROW_BYTES;
+            previous = Some(files.len() - 1);
+            loop {
+                let eligible: Vec<CompactionGroup> = files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(id, f)| {
+                        let f = f.as_ref()?;
+                        Some(CompactionGroup {
+                            files: vec![CompactionGroupFile {
+                                data_file: create_data_file(id as u64, format!("{id}.parquet")),
+                                file_size: f.rows * ROW_BYTES,
+                                deletion_percentage: f.deleted * 100 / f.rows,
+                            }],
+                            file_indices: vec![],
+                        })
+                    })
+                    .collect();
+                let chosen =
+                    chosen_ids(choose_similar_sized_compaction_groups(eligible, 16, 32, 50));
+                if chosen.is_empty() {
+                    break;
+                }
+                let mut live_rows = 0;
+                for id in &chosen {
+                    let f = files[*id as usize].take().unwrap();
+                    live_rows += f.rows - f.deleted;
+                }
+                rewritten += live_rows * ROW_BYTES;
+                files.push(Some(File {
+                    rows: live_rows,
+                    deleted: 0,
+                }));
+                // Rows not yet updated move to the output.
+                if previous.is_some_and(|p| chosen.contains(&(p as u64))) {
+                    previous = Some(files.len() - 1);
+                }
+            }
+        }
+        rewritten as f64 / flushed as f64
+    }
+
+    #[test]
+    fn test_insert_then_update_rewrites_each_byte_a_logarithmic_number_of_times() {
+        // Whether or not the flushed files end up deletion-heavy (50%), the cost stays the same.
+        for updated_pct in [90, 100] {
+            let rewrite_factor = simulate_insert_then_update(3_000, updated_pct);
+            assert!(
+                rewrite_factor < 3.0,
+                "{updated_pct}% updated: each flushed byte was rewritten {rewrite_factor:.1} times"
+            );
+        }
     }
 }
