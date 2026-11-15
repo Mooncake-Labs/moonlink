@@ -124,6 +124,20 @@ Moonlink acknowledges the Postgres replication slot only up to what is persisted
 
 After upgrading, or after a crash, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again). Old `_wal` directories from earlier versions are unused and can be deleted.
 
+## What mirrors do not follow
+
+A mirror that can no longer follow its source table enters the errored state: queries on it fail with a message that names the reason, every other mirror keeps replicating, and the remedy is always to drop the mirror and create it again (`CALL mooncake.create_table(...)`). An errored mirror stays errored across restarts.
+
+- **Schema changes.** Any change to the source table's columns (add, drop, rename, change type, drop and re-add, add a generated column) or setting its replica identity to anything but `FULL` errors the mirror, also when made while moonlink is stopped.
+- **Not detected:** `ALTER TABLE ... ALTER COLUMN ... TYPE <same type> USING <expression>` rewrites every row without replicating the change. Re-create the mirror after running one.
+- **`TRUNCATE`** of the source table errors the mirror.
+- **Partitioned tables** need a primary key. A new partition is followed if it is still empty when moonlink first sees it, so create partitions ahead of use. A partition that already holds rows when it is added (attached, or created and filled at once), and detaching or dropping any partition (including routine retention), error the mirror. An `UPDATE` or `DELETE` in a new partition within about 5 seconds of its creation can error the mirror too.
+- **Refused at `create_table`:** tables with generated columns, inheritance parents, partitioned tables without a primary key, and column types moonlink cannot store exactly (for example `interval`, `timetz`, enums, multi-dimensional arrays, `numeric` with a precision above 38 or a scale outside 0..precision).
+- **Values a mirror cannot store** (for example `numeric` `NaN` or `Infinity`, more fractional digits than an unconstrained `numeric` keeps, dates outside the supported range) error the mirror instead of being stored differently.
+- **After upgrading to this version,** mirrors of tables without a primary key that have `json`, `jsonb`, `char(n)`, `"char"`, unconstrained `numeric`, array or composite columns are errored at the first start, because they were stored differently before. Re-create them.
+
+A source that cannot be reached when moonlink starts (restarting, refusing connections) is not an error: its mirrors report that they are not available yet and are restored automatically once it is back. Postgres retains WAL for that database meanwhile.
+
 ## Contributing
 
 We’re grateful for our contributors. If you'd like to help improve Moonlink, join our [community](https://join.slack.com/t/mooncake-devs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA).
