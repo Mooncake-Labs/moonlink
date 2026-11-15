@@ -21,6 +21,7 @@ pub mod table_secret;
 mod table_snapshot;
 pub mod table_status;
 pub mod table_status_reader;
+mod task_notifier;
 mod transaction_stream;
 
 use super::index::{FileIndex, MemIndex, MooncakeIndex};
@@ -51,6 +52,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
     PersistenceSnapshotDataCompactionResult, PersistenceSnapshotImportPayload,
     PersistenceSnapshotIndexMergePayload, PersistenceSnapshotPayload, PersistenceSnapshotResult,
 };
+use crate::storage::mooncake_table::task_notifier::{InFlightTasks, TaskNotifier};
 use crate::storage::mooncake_table_config::MooncakeTableConfig;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
@@ -500,6 +502,21 @@ pub struct MooncakeTable {
 
     /// Table replay sender.
     event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
+
+    /// Everything needed to build a fresh iceberg table manager from the catalog, used when the
+    /// current one is unavailable (lost by a failed task) or must be reloaded after a failure.
+    /// None for tables built with an injected (mock) table manager.
+    table_manager_factory: Option<IcebergTableManagerFactory>,
+
+    /// Background tasks (flush, snapshot, maintenance, persistence) that have not reported back.
+    in_flight_tasks: InFlightTasks,
+}
+
+#[derive(Clone)]
+struct IcebergTableManagerFactory {
+    iceberg_table_config: IcebergTableConfig,
+    object_storage_cache: Arc<dyn CacheTrait>,
+    filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
 }
 
 /// Postgres can re-send transactions that were already applied (e.g. after a restart, the slot
@@ -538,6 +555,7 @@ impl MooncakeTable {
             config: table_config.clone(),
             path: base_path,
         });
+        let iceberg_table_config_for_factory = iceberg_table_config.clone();
         let iceberg_table_manager = Box::new(
             IcebergTableManager::new(
                 metadata.clone(),
@@ -548,13 +566,20 @@ impl MooncakeTable {
             .await?,
         );
 
-        Self::new_with_table_manager(
+        let factory = IcebergTableManagerFactory {
+            iceberg_table_config: iceberg_table_config_for_factory,
+            object_storage_cache: object_storage_cache.clone(),
+            filesystem_accessor: table_filesystem_accessor.clone(),
+        };
+        let mut table = Self::new_with_table_manager(
             metadata,
             iceberg_table_manager,
             object_storage_cache,
             table_filesystem_accessor,
         )
-        .await
+        .await?;
+        table.table_manager_factory = Some(factory);
+        Ok(table)
     }
 
     pub(crate) async fn new_with_table_manager(
@@ -611,6 +636,8 @@ impl MooncakeTable {
             ongoing_flush_lsns: BTreeMap::new(),
             completed_unrecorded_flush_lsns: BTreeSet::new(),
             event_replay_tx: None,
+            table_manager_factory: None,
+            in_flight_tasks: InFlightTasks::default(),
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
         })
     }
@@ -929,28 +956,27 @@ impl MooncakeTable {
         }
 
         let mut disk_slice_clone = disk_slice.clone();
+        let notifier = self.in_flight_tasks.notifier(table_notify_tx);
         tokio::task::spawn(async move {
             let flush_result = disk_slice_clone.write().await;
             match flush_result {
                 Ok(()) => {
-                    table_notify_tx
+                    notifier
                         .send(TableEvent::FlushResult {
                             event_id,
                             xact_id,
                             flush_result: Some(Ok(disk_slice_clone)),
                         })
-                        .await
-                        .unwrap();
+                        .await;
                 }
                 Err(e) => {
-                    table_notify_tx
+                    notifier
                         .send(TableEvent::FlushResult {
                             event_id,
                             xact_id,
                             flush_result: Some(Err(e)),
                         })
-                        .await
-                        .unwrap();
+                        .await;
                 }
             }
         });
@@ -1084,7 +1110,9 @@ impl MooncakeTable {
         let min_ongoing_flush_lsn = self.get_min_ongoing_flush_lsn();
         next_snapshot_task.min_ongoing_flush_lsn = min_ongoing_flush_lsn;
 
-        let table_notify = self.table_notify.as_ref().unwrap().clone();
+        let table_notify = self
+            .in_flight_tasks
+            .notifier(self.table_notify.as_ref().unwrap().clone());
         let snapshot_stats = self.snapshot_stats.clone();
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(async move {
@@ -1120,15 +1148,60 @@ impl MooncakeTable {
         Ok(())
     }
 
-    /// Drop an iceberg table.
+    /// Drop an iceberg table. Works even if the table manager is currently unavailable, so a
+    /// re-created mirror with the same name can never pick up the old iceberg table.
     pub(crate) async fn drop_iceberg_table(&mut self) -> Result<()> {
-        assert!(self.iceberg_table_manager.is_some());
+        if self.iceberg_table_manager.is_none() {
+            match self.create_fresh_table_manager().await {
+                Some(manager) => self.iceberg_table_manager = Some(manager?),
+                // Injected (mock) table manager that is gone: nothing persisted to drop.
+                None => return Ok(()),
+            }
+        }
         self.iceberg_table_manager
             .as_mut()
             .unwrap()
             .drop_table()
             .await?;
         Ok(())
+    }
+
+    /// Build a new iceberg table manager from the catalog configuration, if available.
+    #[allow(clippy::manual_async_fn)]
+    pub(crate) fn create_fresh_table_manager(
+        &self,
+    ) -> impl std::future::Future<Output = Option<Result<Box<dyn TableManager>>>> + Send + 'static
+    {
+        let factory = self.table_manager_factory.clone();
+        let metadata = self.metadata.clone();
+        async move {
+            let factory = factory?;
+            let manager = IcebergTableManager::new(
+                metadata,
+                factory.object_storage_cache,
+                factory.filesystem_accessor,
+                factory.iceberg_table_config,
+            )
+            .await
+            .map(|m| Box::new(m) as Box<dyn TableManager>)
+            .map_err(crate::Error::from);
+            Some(manager)
+        }
+    }
+
+    /// Number of background tasks that may still read or write table files.
+    pub(crate) fn in_flight_background_tasks(&self) -> usize {
+        self.in_flight_tasks.count()
+    }
+
+    /// Give back a table manager returned by a background task.
+    pub(crate) fn restore_table_manager(&mut self, table_manager: Box<dyn TableManager>) {
+        self.iceberg_table_manager = Some(table_manager);
+    }
+
+    /// Identifier used in logs.
+    pub(crate) fn mooncake_table_id(&self) -> &str {
+        &self.metadata.mooncake_table_id
     }
 
     /// Shutdown the current table, which unpins all referenced data files in the global data file.
@@ -1268,15 +1341,15 @@ impl MooncakeTable {
         let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
         if self.mem_slice.is_empty() || self.ongoing_flush_lsns.contains_key(&lsn) {
             self.try_set_next_flush_lsn(lsn);
+            let notifier = self.in_flight_tasks.notifier(table_notify_tx);
             tokio::task::spawn(async move {
-                table_notify_tx
+                notifier
                     .send(TableEvent::FlushResult {
                         event_id,
                         xact_id: None,
                         flush_result: None,
                     })
-                    .await
-                    .unwrap();
+                    .await;
             });
             return Ok(());
         }
@@ -1335,7 +1408,9 @@ impl MooncakeTable {
         let cur_file_id = self.next_file_id as u64;
         self.next_file_id += 1;
         let table_directory = std::path::PathBuf::from(self.metadata.path.to_str().unwrap());
-        let table_notify_tx_copy = self.table_notify.as_ref().unwrap().clone();
+        let table_notify_tx_copy = self
+            .in_flight_tasks
+            .notifier(self.table_notify.as_ref().unwrap().clone());
 
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(async move {
@@ -1359,16 +1434,14 @@ impl MooncakeTable {
                             .send(TableEvent::IndexMergeResult {
                                 index_merge_result: Ok(index_merge_result),
                             })
-                            .await
-                            .unwrap();
+                            .await;
                     }
                     Err(e) => {
                         table_notify_tx_copy
                             .send(TableEvent::IndexMergeResult {
                                 index_merge_result: Err(e),
                             })
-                            .await
-                            .unwrap();
+                            .await;
                     }
                 }
                 Ok(())
@@ -1419,7 +1492,9 @@ impl MooncakeTable {
                 .data_file_final_size,
         };
         let schema_ref = self.metadata.schema.clone();
-        let table_notify_tx_copy = self.table_notify.as_ref().unwrap().clone();
+        let table_notify_tx_copy = self
+            .in_flight_tasks
+            .notifier(self.table_notify.as_ref().unwrap().clone());
 
         // Record data files being compacted.
         assert!(self.next_snapshot_task.compacting_data_files.is_empty());
@@ -1434,8 +1509,7 @@ impl MooncakeTable {
                     .send(TableEvent::DataCompactionResult {
                         data_compaction_result,
                     })
-                    .await
-                    .unwrap();
+                    .await;
             }
             .instrument(info_span!("data_compaction")),
         );
@@ -1456,7 +1530,7 @@ impl MooncakeTable {
         snapshot: Arc<RwLock<SnapshotTableState>>,
         next_snapshot_task: SnapshotTask,
         opt: SnapshotOption,
-        table_notify: Sender<TableEvent>,
+        table_notify: TaskNotifier,
     ) {
         let mooncake_snapshot_result = snapshot
             .write()
@@ -1469,15 +1543,14 @@ impl MooncakeTable {
             .send(TableEvent::MooncakeTableSnapshotResult {
                 mooncake_snapshot_result,
             })
-            .await
-            .unwrap();
+            .await;
     }
 
     /// Persist an iceberg snapshot.
     async fn persist_iceberg_snapshot_impl(
         mut iceberg_table_manager: Box<dyn TableManager>,
         snapshot_payload: PersistenceSnapshotPayload,
-        table_notify: Sender<TableEvent>,
+        table_notify: TaskNotifier,
         table_auto_incr_ids: std::ops::Range<u32>,
         table_event_id: uuid::Uuid,
     ) {
@@ -1533,8 +1606,7 @@ impl MooncakeTable {
                 .send(TableEvent::PersistenceSnapshotResult {
                     persistence_snapshot_result: Err(err),
                 })
-                .await
-                .unwrap();
+                .await;
             return;
         }
 
@@ -1601,8 +1673,7 @@ impl MooncakeTable {
             .send(TableEvent::PersistenceSnapshotResult {
                 persistence_snapshot_result: Ok(snapshot_result),
             })
-            .await
-            .unwrap();
+            .await;
     }
 
     /// Create an iceberg snapshot.
@@ -1643,7 +1714,8 @@ impl MooncakeTable {
             Self::persist_iceberg_snapshot_impl(
                 iceberg_table_manager,
                 snapshot_payload,
-                self.table_notify.as_ref().unwrap().clone(),
+                self.in_flight_tasks
+                    .notifier(self.table_notify.as_ref().unwrap().clone()),
                 table_auto_incr_ids,
                 table_event_id,
             )

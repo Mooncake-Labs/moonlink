@@ -21,13 +21,33 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
-use tracing::{debug, error, info_span};
+use tracing::{debug, error, info_span, warn};
 pub(crate) mod table_handler_state;
 use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
 };
 
 const MAX_BUFFERED_TABLE_EVENTS: usize = 32_768;
+
+/// How long the DROP of an errored table waits for in-flight background tasks before deleting
+/// the table files anyway.
+const ERRORED_DROP_BACKGROUND_TASK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// DROP of an errored table: requested once, completed when no background task can touch the
+/// table files any more (or after a timeout).
+struct ErroredDrop {
+    pending: bool,
+    background_task_wait: std::time::Duration,
+}
+
+impl Default for ErroredDrop {
+    fn default() -> Self {
+        Self {
+            pending: false,
+            background_task_wait: ERRORED_DROP_BACKGROUND_TASK_WAIT,
+        }
+    }
+}
 
 /// Handler for table operations
 pub struct TableHandler {
@@ -131,7 +151,10 @@ impl TableHandler {
             event_sync_sender.force_snapshot_completion_tx.clone(),
             /*initial_persistence_lsn=*/ persistence_snapshot_lsn,
             persistence_snapshot_lsn,
-        );
+        )
+        .with_table_status_tx(event_sync_sender.table_status_tx.clone());
+        // DROP progress of an errored table.
+        let mut errored_drop = ErroredDrop::default();
 
         // Used to clean up mooncake table status, and send completion notification.
         let drop_table = async |table: &mut MooncakeTable, event_sync_sender: EventSyncSender| {
@@ -189,6 +212,35 @@ impl TableHandler {
                 if let Some(replay_tx) = &handler_event_replay_tx {
                     replay_tx.send(event.clone()).unwrap();
                 }
+
+                #[cfg(test)]
+                if let TableEvent::SetErroredDropWaitForTest { wait } = event {
+                    errored_drop.background_task_wait = wait;
+                    continue;
+                }
+
+                // ==============================
+                // Errored state
+                // ==============================
+                //
+                if table_handler_state.is_errored()
+                    || matches!(event, TableEvent::EnterErrored { .. })
+                {
+                    let drop_now = Self::process_errored_table_event(
+                        event,
+                        &mut table,
+                        &mut table_handler_state,
+                        &mut errored_drop,
+                        &table_handler_event_sender,
+                    )
+                    .await;
+                    if drop_now {
+                        Self::drop_errored_table(&mut table, event_sync_sender).await;
+                        return;
+                    }
+                    continue;
+                }
+
                 match event {
                     event if event.is_ingest_event() => {
                         Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
@@ -755,6 +807,177 @@ impl TableHandler {
         debug!("all event senders dropped, shutting down table handler");
     }
 
+    /// Enter the errored state; returns whether a DROP was already pending (None if the table
+    /// was already errored).
+    fn enter_errored(
+        table_handler_state: &mut TableHandlerState,
+        table: &MooncakeTable,
+        reason: String,
+    ) -> Option<bool> {
+        error!(
+            table = table.mooncake_table_id(),
+            reason = %reason,
+            "mirror table entered the errored state; it must be dropped and re-created"
+        );
+        table_handler_state.enter_errored(table.mooncake_table_id(), reason)
+    }
+
+    fn errored_message(table_handler_state: &TableHandlerState, table: &MooncakeTable) -> String {
+        match &table_handler_state.special_table_state {
+            SpecialTableState::Errored { reason } => {
+                crate::Error::errored_table_message(table.mooncake_table_id(), reason)
+            }
+            _ => unreachable!("table is not errored"),
+        }
+    }
+
+    /// Handle one event of an errored table, or the event that makes it errored. Nothing is
+    /// applied to the table any more: waiters get the errored message, and results of background
+    /// tasks that were in flight only release what they hold. Returns whether the table must be
+    /// dropped now.
+    async fn process_errored_table_event(
+        event: TableEvent,
+        table: &mut MooncakeTable,
+        table_handler_state: &mut TableHandlerState,
+        errored_drop: &mut ErroredDrop,
+        table_handler_event_sender: &Sender<TableEvent>,
+    ) -> bool {
+        match event {
+            TableEvent::EnterErrored { reason } => {
+                if Self::enter_errored(table_handler_state, table, reason) == Some(true) {
+                    Self::request_errored_drop(errored_drop, table_handler_event_sender);
+                }
+            }
+            TableEvent::DropTable => {
+                Self::request_errored_drop(errored_drop, table_handler_event_sender);
+            }
+            TableEvent::ErroredDropTimeout => {
+                if errored_drop.pending {
+                    warn!(
+                        table = table.mooncake_table_id(),
+                        in_flight = table.in_flight_background_tasks(),
+                        "dropping errored table while background tasks are still running"
+                    );
+                    return true;
+                }
+            }
+            TableEvent::ForceSnapshot { .. } => {
+                let message = Self::errored_message(table_handler_state, table);
+                let _ = table_handler_state
+                    .force_snapshot_completion_tx
+                    .send(Some(Err(crate::Error::table_errored(&message))));
+            }
+            TableEvent::ForceRegularIndexMerge
+            | TableEvent::ForceRegularDataCompaction
+            | TableEvent::ForceFullMaintenance => {
+                let message = Self::errored_message(table_handler_state, table);
+                let _ = table_handler_state
+                    .table_maintenance_completion_tx
+                    .send(Err(crate::Error::table_errored(&message)));
+            }
+            TableEvent::MooncakeTableSnapshotResult {
+                mut mooncake_snapshot_result,
+            } => {
+                table_handler_state.mooncake_snapshot_ongoing = false;
+                let mut evicted =
+                    std::mem::take(&mut mooncake_snapshot_result.evicted_data_files_to_delete);
+                if let Some(payload) = mooncake_snapshot_result
+                    .data_compaction_payload
+                    .take_payload()
+                {
+                    evicted.extend(payload.unpin_referenced_compaction_payload().await);
+                }
+                Self::delete_evicted_files(evicted);
+            }
+            TableEvent::IndexMergeResult { .. } => {
+                table_handler_state.table_maintenance_process_status =
+                    MaintenanceProcessStatus::Unrequested;
+            }
+            TableEvent::DataCompactionResult {
+                data_compaction_result,
+            } => {
+                table_handler_state.table_maintenance_process_status =
+                    MaintenanceProcessStatus::Unrequested;
+                if let Ok(res) = data_compaction_result {
+                    Self::delete_evicted_files(res.evicted_files_to_delete);
+                }
+            }
+            TableEvent::PersistenceSnapshotResult {
+                persistence_snapshot_result,
+            } => {
+                table_handler_state.persistence_snapshot_ongoing = false;
+                if let Ok(mut res) = persistence_snapshot_result {
+                    if let Some(manager) = res.table_manager.take() {
+                        table.restore_table_manager(manager);
+                    }
+                    Self::delete_evicted_files(std::mem::take(&mut res.evicted_files_to_delete));
+                }
+            }
+            TableEvent::EvictedFilesToDelete { evicted_files } => {
+                Self::delete_evicted_files(evicted_files.files);
+            }
+            // CDC events, periodic events and flush results are dropped: nothing is applied to an
+            // errored table any more. Unapplied flush output stays in the table directory, which
+            // DROP deletes.
+            _ => {}
+        }
+        // A background task still running could write into the warehouse after the drop (which a
+        // re-created mirror with the same name would then load) or fail on files deleted under it.
+        errored_drop.pending && table.in_flight_background_tasks() == 0
+    }
+
+    fn request_errored_drop(
+        errored_drop: &mut ErroredDrop,
+        table_handler_event_sender: &Sender<TableEvent>,
+    ) {
+        if errored_drop.pending {
+            return;
+        }
+        errored_drop.pending = true;
+        let sender = table_handler_event_sender.clone();
+        let wait = errored_drop.background_task_wait;
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let _ = sender.send(TableEvent::ErroredDropTimeout).await;
+        });
+    }
+
+    /// Best-effort deletion of evicted cache files in a detached task.
+    fn delete_evicted_files(files: Vec<String>) {
+        if files.is_empty() {
+            return;
+        }
+        tokio::task::spawn(async move {
+            if let Err(err) = io_utils::delete_local_files(&files).await {
+                error!(error = ?err, "failed to delete evicted cache files of errored table");
+            }
+        });
+    }
+
+    /// Best-effort cleanup of an errored table; always acknowledges the drop so users can
+    /// re-create the mirror. Failures are logged, except an iceberg drop failure, which would let a
+    /// re-created mirror load stale data and is therefore reported.
+    async fn drop_errored_table(table: &mut MooncakeTable, event_sync_sender: EventSyncSender) {
+        if let Err(e) = table.shutdown().await {
+            error!(error = ?e, table = table.mooncake_table_id(), "failed to release caches of errored table");
+        }
+        let mut dropped = table.drop_iceberg_table().await;
+        if let Err(e) = &dropped {
+            warn!(error = ?e, table = table.mooncake_table_id(), "failed to drop iceberg table of errored table; retrying once");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            dropped = table.drop_iceberg_table().await;
+        }
+        if let Err(e) = dropped {
+            error!(error = ?e, table = table.mooncake_table_id(), "failed to drop iceberg table of errored table");
+            let _ = event_sync_sender.drop_table_completion_tx.send(Err(e));
+            return;
+        }
+        if let Err(e) = table.drop_mooncake_table().await {
+            error!(error = ?e, table = table.mooncake_table_id(), "failed to delete local files of errored table");
+        }
+        let _ = event_sync_sender.drop_table_completion_tx.send(Ok(()));
+    }
+
     async fn process_cdc_table_event(
         event: TableEvent,
         table: &mut MooncakeTable,
@@ -965,3 +1188,9 @@ mod regression;
 
 #[cfg(feature = "profile-test")]
 pub mod profile_test;
+
+#[cfg(test)]
+mod errored_state_tests;
+
+#[cfg(test)]
+mod errored_drop_tests;

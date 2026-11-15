@@ -11,7 +11,7 @@ pub(crate) mod table_notify;
 mod union_read;
 
 pub use error::*;
-pub use event_sync::EventSyncSender;
+pub use event_sync::{EventSyncSender, TableStatus};
 pub use lsn_state::{CommitState, ReplicationState};
 pub use mooncake_table_id::MooncakeTableId;
 pub use storage::mooncake_table::batch_id_counter::BatchIdCounter;
