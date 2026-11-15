@@ -1,7 +1,7 @@
 <div align="center">
 
 # Moonlink 🥮
-managed ingestion engine for Apache Iceberg
+Postgres-to-Iceberg mirroring engine for pg_mooncake
 
 [![License](https://img.shields.io/badge/License-BSL-blue)](https://github.com/Mooncake-Labs/moonlink/blob/main/LICENSE)
 [![Slack](https://img.shields.io/badge/Mooncake%20Devs-purple?logo=slack)](https://join.slack.com/t/mooncake-devs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA)
@@ -12,22 +12,20 @@ managed ingestion engine for Apache Iceberg
 
 ## Overview
 
-Moonlink is an Iceberg-native ingestion engine bringing streaming inserts and upserts to your lakehouse.
+Moonlink is the engine behind [`pg_mooncake`](https://github.com/Mooncake-Labs/pg_mooncake): it mirrors Postgres tables into Iceberg (columnstore) tables via logical replication, **without** separate maintenance and compaction jobs.
 
-Ingest Postgres CDC and event streams (Kafka) into Iceberg **without** complex maintenance and compaction. 
-
-Moonlink buffers, caches, and indexes data so Iceberg tables stay read-optimized.
+It runs inside a Postgres background worker started by pg_mooncake and is controlled over a unix socket (`moonlink_rpc`). Moonlink buffers, caches, and indexes data so Iceberg tables stay read-optimized.
 
 ```
 
              ┌──────────moonlink───────────┐                         
              │  ┌───────────────────────┐  │  ┌───────Iceberg───────┐
              │  │                       │  │  │      obj. store     │
-Postgres ───►│  │┌ ─ ─ ─ ─ ┐ ┌ ─ ─ ─ ─ ┐│  │  │┌───────┐ ┌─────────┐│
+             │  │┌ ─ ─ ─ ─ ┐ ┌ ─ ─ ─ ─ ┐│  │  │┌───────┐ ┌─────────┐│
              │  │                       │  │  ││       │ │         ││
-Kafka    ───►│  ││  index  │ │  cache  ││  ├──►│ index │ │ parquet ││
+Postgres ───►│  ││  index  │ │  cache  ││  ├──►│ index │ │ parquet ││
              │  │                       │  │  ││       │ │         ││
-Events   ───►│  │└ ─ ─ ─ ─ ┘ └ ─ ─ ─ ─ ┘│  │  │└───────┘ └─────────┘│
+             │  │└ ─ ─ ─ ─ ┘ └ ─ ─ ─ ─ ┘│  │  │└───────┘ └─────────┘│
              │  │                  nvme │  │  │                     │
              │  └───────────────────────┘  │  └─────────────────────┘
              └─────────────────────────────┘                         
@@ -72,112 +70,50 @@ raw deletes│              │   │              │
            └──────────────┘   └──────────────┘
 ```
 
-## Write Paths
+## Write Path
 
-Moonlink supports multiple input sources for ingest:
-
-1. **PostgreSQL CDC** — ingest via logical replication with millisecond-level latency  
-2. **REST API** — simple HTTP endpoint for direct event ingestion  
-3. **Kafka** — sink support coming soon  
+**PostgreSQL CDC**: tables are initially copied, then kept in sync via logical replication with millisecond-level latency. The source Postgres needs `wal_level = logical`.
 
 ## Read Path
 
-Moonlink commits data as **Iceberg v3 tables with deletion vectors**. These tables can be queried from any Iceberg-compatible engine.
+Moonlink commits data as **Iceberg v3 tables with deletion vectors** (filesystem catalog), which can be queried from any Iceberg-compatible engine.
 
-**Engines**
-1. **DuckDB**   
-2. **Apache Spark**
-3. **Postgres** with `pg_duckdb` or  `pg_mooncake`
+For sub-second freshness, readers ask moonlink for the current table state over the unix socket:
 
-**Catalogs**
-1. **AWS Glue** — coming soon  
-2. **Unity Catalog** — coming soon  
+1. **Postgres**: with the [`pg_mooncake`](https://github.com/Mooncake-Labs/pg_mooncake) extension.
+2. **DuckDB**: with the [`duckdb_mooncake`](https://github.com/Mooncake-Labs/duckdb_mooncake) extension (also used by pg_mooncake).
 
----
+## Embedding
 
-### Real-Time Reads (<s freshness)
+pg_mooncake starts moonlink from its background worker:
 
-For workloads requiring sub-second visibility into new data, Moonlink supports real-time querying:
-
-1. **DuckDB** — with the [`duckdb_mooncake`](https://github.com/Mooncake-Labs/duckdb_mooncake) extension.
-2. **Postgres** — with the [`pg_mooncake`](https://github.com/Mooncake-Labs/pg_mooncake) extension.
-
- 
-## Quick Start
-
-### 1. Clone & Build
-
-Clone the repository and build the service binary:
-
-```bash
-git clone https://github.com/Mooncake-Labs/moonlink.git
-cd moonlink
-cargo build --release --bin moonlink_service
+```rust
+moonlink_service::start_with_config(moonlink_service::ServiceConfig {
+    base_path: "pg_mooncake".to_owned(),
+})
+.await
 ```
 
-## 2. Start the Moonlink Service
+The service listens on `{base_path}/moonlink.sock` and stores tables, caches and its SQLite metadata under `base_path`. Logs go to stdout (the Postgres server log).
 
-Start the Moonlink service, which will store data in the `./data` directory:
+The RPC wire format (`src/moonlink_rpc`, and the `ScanTableBegin` payload in `src/moonlink_table_metadata`) is shared with prebuilt duckdb_mooncake binaries that pin `moonlink_rpc` by git, so it is append-only. `tests/wire_golden.rs` in both crates holds byte-level goldens.
 
-```bash
-./target/release/moonlink_service ./data
-```
-
-### 3. Verify Service Health
-
-Check that the service is running properly:
+## Development
 
 ```bash
-curl http://localhost:3030/health
+cargo build
+cargo clippy --all-targets --all-features -- -D warnings
+cargo nextest run --lib --workspace              # unit tests
+
+# Postgres-backed tests need a Postgres with wal_level=logical.
+# They share one replication slot, so run them with cargo test (one process), not nextest.
+export DATABASE_URL=postgresql://<user>:<password>@localhost:5432/postgres
+cargo test -p moonlink_connectors --lib --features connector-pg
+cargo test -p moonlink_backend --test '*'
+cargo test -p moonlink_service --lib --features postgres-integration
 ```
 
-### 4. Create a Table
-
-Create a table with a defined schema. Here's an example creating a `users` table:
-
-```bash
-curl -X POST http://localhost:3030/tables/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "database": "my_database",
-    "table": "users",
-    "schema": [
-      {"name": "id", "data_type": "int32", "nullable": false},
-      {"name": "name", "data_type": "string", "nullable": false},
-      {"name": "email", "data_type": "string", "nullable": true},
-      {"name": "age", "data_type": "int32", "nullable": true},
-      {"name": "created_at", "data_type": "date32", "nullable": true}
-    ],
-    "table_config": {"mooncake": {"append_only": true}}
-  }'
-```
-
-### 5. Insert Data
-
-Insert data into the created table:
-
-```bash
-curl -X POST http://localhost:3030/ingest/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "operation": "insert",
-    "request_mode": "async",
-    "data": {
-      "id": 1,
-      "name": "Alice Johnson",
-      "email": "alice@example.com",
-      "age": 30,
-      "created_at": "2024-01-01"
-    }
-  }'
-```
-
-## Roadmap and Contributing
-Roadmap (near‑term):
-1. Kafka sink preview
-2. Schema evolution from Postgres and Kafka
-3. Catalog integrations (AWS Glue, Unity Catalog)
-4. REST API stabilization (Insert, Upsert into Iceberg directly)
+## Contributing
 
 We’re grateful for our contributors. If you'd like to help improve Moonlink, join our [community](https://join.slack.com/t/mooncake-devs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA).
 

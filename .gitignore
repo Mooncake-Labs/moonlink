@@ -2,4 +2,3 @@
 /target/
 .vscode/
 .devcontainer/certs/
-.shared-nginx/
