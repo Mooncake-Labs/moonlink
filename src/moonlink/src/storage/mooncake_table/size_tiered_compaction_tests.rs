@@ -241,6 +241,35 @@ async fn test_background_compaction_takes_deletion_heavy_large_file() {
     assert!(payload.disk_files.iter().any(|f| f.filepath == large_file));
 }
 
+/// A table with fewer files than the compaction minimum still reclaims a mostly deleted file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_background_compaction_reclaims_deleted_rows_below_min_files() {
+    let context = TestContext::new("tiered_compaction_reclaim");
+    let (mut table, mut rx) =
+        create_table_with(&context, compaction_config(8, 50), no_index_merge()).await;
+    flush_wide_files(&mut table, &mut rx, 1..5).await;
+    let payload = snapshot_and_persist(&mut table, &mut rx, best_effort())
+        .await
+        .take_payload()
+        .expect("four similar files are compacted");
+    perform_data_compaction_for_test(&mut table, &mut rx, payload).await;
+    snapshot_and_persist(&mut table, &mut rx, MaintenanceOption::Skip).await;
+    assert_eq!(data_file_sizes(&table).await.len(), 1);
+
+    // One file, three quarters deleted: more than 256 KiB of deleted rows.
+    for id in 1..4 {
+        table.delete(test_row(id, &wide_name(id), id), 41).await;
+    }
+    table.commit(42);
+    flush_table_and_sync(&mut table, &mut rx, 42).await.unwrap();
+    snapshot_and_persist(&mut table, &mut rx, MaintenanceOption::Skip).await;
+    let payload = snapshot_and_persist(&mut table, &mut rx, best_effort())
+        .await
+        .take_payload()
+        .expect("the mostly deleted file is compacted on its own");
+    assert_eq!(payload.disk_files.len(), 1);
+}
+
 async fn merge_best_effort(
     table: &mut MooncakeTable,
     rx: &mut mpsc::Receiver<TableEvent>,
