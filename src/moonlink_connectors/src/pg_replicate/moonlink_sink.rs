@@ -397,6 +397,8 @@ impl Sink {
             } => {
                 self.fail_table(src_table_id, reason).await;
             }
+            // Checked by the replication loop, which has a connection to the source.
+            CdcEvent::RelationSeen { .. } => {}
             CdcEvent::Truncate {
                 src_table_ids,
                 xact_id,

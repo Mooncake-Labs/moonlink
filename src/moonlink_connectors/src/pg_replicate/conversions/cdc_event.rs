@@ -317,4 +317,10 @@ pub enum CdcEvent {
         src_table_id: SrcTableId,
         reason: String,
     },
+    /// A Relation message for a mirrored table that matched its schema. pgoutput sends one after
+    /// any change to the table's definition or partitions, so its source fingerprint is checked
+    /// before the table's next change is applied.
+    RelationSeen {
+        src_table_id: SrcTableId,
+    },
 }

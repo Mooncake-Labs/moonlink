@@ -15,14 +15,23 @@ use tracing::warn;
 
 const MARKER_DIRECTORY: &str = "errored_tables";
 
-/// Marker file of a mirror, named by its hex-encoded id so any database or table name is safe.
-fn marker_path(base_path: &str, mooncake_table_id: &MooncakeTableId) -> PathBuf {
+/// Per-mirror file under `<base>/<directory>`, named by the hex-encoded mirror id so any database
+/// or table name is safe.
+pub(crate) fn table_file_path(
+    base_path: &str,
+    directory: &str,
+    mooncake_table_id: &MooncakeTableId,
+) -> PathBuf {
     let encoded: String = mooncake_table_id
         .to_string()
         .bytes()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Path::new(base_path).join(MARKER_DIRECTORY).join(encoded)
+    Path::new(base_path).join(directory).join(encoded)
+}
+
+fn marker_path(base_path: &str, mooncake_table_id: &MooncakeTableId) -> PathBuf {
+    table_file_path(base_path, MARKER_DIRECTORY, mooncake_table_id)
 }
 
 /// Persist that a mirror is errored, with the user-facing message.

@@ -6,6 +6,7 @@ use moonlink::{
 };
 
 use crate::errored_tables;
+use crate::pg_replicate::source_fingerprint;
 use moonlink::TableStatus;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -264,6 +265,7 @@ impl ReplicationConnection {
         }
 
         errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;
+        source_fingerprint::remove(&self.table_base_path, mooncake_table_id).await;
         debug!(src_table_id, "table dropped");
         Ok(())
     }

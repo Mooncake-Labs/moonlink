@@ -1,4 +1,5 @@
 use crate::errored_tables::{self, ErroredTable};
+use crate::pg_replicate::source_fingerprint;
 use crate::pg_replicate::table::SrcTableId;
 use crate::pg_replicate::{PostgresConnection, SourceIdentity};
 use crate::ReplicationConnection;
@@ -247,6 +248,7 @@ impl ReplicationManager {
             // Best effort: the mirror is gone from moonlink either way.
             let _ = errored_tables::drop_iceberg_table_files(&errored.iceberg_table_config).await;
             errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;
+            source_fingerprint::remove(&self.table_base_path, mooncake_table_id).await;
             self.release_errored_source(&errored).await;
             return Ok(true);
         }

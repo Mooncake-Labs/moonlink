@@ -6,6 +6,7 @@ pub mod initial_copy;
 pub mod initial_copy_writer;
 pub mod moonlink_sink;
 pub mod postgres_source;
+pub mod source_fingerprint;
 pub mod table;
 pub mod table_init;
 pub mod util;
@@ -18,7 +19,8 @@ use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
-use crate::pg_replicate::table::{SrcTableId, TableName, TableSchema};
+use crate::pg_replicate::source_fingerprint::{Drift, SourceFingerprint};
+use crate::pg_replicate::table::{LookupKey, SrcTableId, TableName, TableSchema};
 use crate::pg_replicate::table_init::{build_table_components, TableComponents};
 use crate::Result;
 use futures::StreamExt;
@@ -90,9 +92,24 @@ pub struct PostgresConnection {
     /// Event senders of the tables registered with the replication loop, so they can be put in
     /// the errored state if the loop ever stops unexpectedly.
     registered_tables: RegisteredTables,
+    /// Source fingerprints of the replicated tables, polled for changes the stream does not show.
+    watched_tables: WatchedTables,
+    fingerprint_watch: Option<JoinHandle<()>>,
 }
 
 type RegisteredTables = Arc<std::sync::Mutex<HashMap<SrcTableId, mpsc::Sender<TableEvent>>>>;
+
+#[derive(Clone)]
+struct WatchedTable {
+    fingerprint: SourceFingerprint,
+    mooncake_table_id: MooncakeTableId,
+    table_base_path: String,
+}
+
+type WatchedTables = Arc<std::sync::Mutex<HashMap<SrcTableId, WatchedTable>>>;
+
+/// How often replicated tables are checked for source changes the stream does not show.
+const FINGERPRINT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Something that tracks an LSN watermark (`CommitState` and `ReplicationState` are both `LsnState`).
 trait LsnMark {
@@ -307,6 +324,8 @@ impl PostgresConnection {
             replication_state: ReplicationState::new(),
             retry_handles: Vec::new(),
             registered_tables: Arc::default(),
+            watched_tables: Arc::default(),
+            fingerprint_watch: None,
         })
     }
 
@@ -456,6 +475,59 @@ impl PostgresConnection {
                     "generated columns ({}) are not replicated",
                     generated.join(", ")
                 ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// At recovery: refuse a mirror whose source changed since it was recorded (while moonlink was
+    /// stopped, or unnoticed before). Returns the recorded fingerprint, None for mirrors written by
+    /// an older version.
+    async fn check_source_unchanged(
+        &mut self,
+        table_name: &str,
+        mooncake_table_id: &MooncakeTableId,
+        table_base_path: &str,
+    ) -> Result<Option<SourceFingerprint>> {
+        let Some(recorded) = source_fingerprint::read(table_base_path, mooncake_table_id).await
+        else {
+            return Ok(None);
+        };
+        match source_fingerprint::drift(&self.postgres_client, &recorded)
+            .await
+            .map_err(PostgresSourceError::from)?
+        {
+            Drift::Unchanged | Drift::NewEmptyPartitions { .. } => Ok(Some(recorded)),
+            Drift::Changed(reason) => Err(crate::Error::source_table_changed(table_name, &reason)),
+        }
+    }
+
+    /// Refuse partitioned tables without a primary key: their partitions need REPLICA IDENTITY
+    /// FULL, which a partition created later does not inherit, and until moonlink sets it postgres
+    /// rejects UPDATE and DELETE on that partition for the user.
+    async fn check_partitioned_source_has_key(
+        &mut self,
+        table_name: &str,
+        table_schema: &TableSchema,
+    ) -> Result<()> {
+        if !matches!(table_schema.lookup_key, LookupKey::FullRow) {
+            return Ok(());
+        }
+        let query = format!(
+            "SELECT 1 FROM pg_class WHERE oid = {} AND relkind = 'p';",
+            table_schema.src_table_id
+        );
+        let partitioned = self
+            .run_control_query(&query)
+            .await?
+            .iter()
+            .any(|m| matches!(m, SimpleQueryMessage::Row(_)));
+        if partitioned {
+            return Err(crate::Error::unsupported_source_table(
+                table_name,
+                "it is partitioned and has no primary key (postgres would reject updates and \
+                 deletes on partitions created later until their replica identity is set); add a \
+                 primary key",
             ));
         }
         Ok(())
@@ -650,6 +722,7 @@ impl PostgresConnection {
     /// Drop table from PostgreSQL replication
     pub async fn drop_table_from_replication(&self, src_table_id: SrcTableId) -> Result<()> {
         self.registered_tables.lock().unwrap().remove(&src_table_id);
+        self.watched_tables.lock().unwrap().remove(&src_table_id);
         let cmd = PostgresReplicationCommand::DropTable { src_table_id };
         self.cmd_tx.send(cmd).await?;
         Ok(())
@@ -725,15 +798,60 @@ impl PostgresConnection {
     ) -> Result<(SrcTableId, crate::pg_replicate::table_init::TableResources)> {
         debug!(table_name, "adding table");
         self.check_not_inheritance_parent(table_name).await?;
-        if !is_recovery {
+        // A mirror whose source changed since it was recorded is not resumed.
+        let recorded_fingerprint = if is_recovery {
+            self.check_source_unchanged(table_name, mooncake_table_id, table_base_path)
+                .await?
+        } else {
             self.check_no_generated_columns(table_name).await?;
-        }
+            None
+        };
         // TODO: We should not naively alter the replica identity of a table. We should only do this if we are sure that the table does not already have a FULL replica identity. [https://github.com/Mooncake-Labs/moonlink/issues/104]
         self.alter_table_replica_identity(table_name).await?;
         let table_schema = self
             .source
             .fetch_table_schema(None, Some(table_name), None)
             .await?;
+        if is_recovery {
+            match &recorded_fingerprint {
+                Some(recorded) if recorded.relid != table_schema.src_table_id => {
+                    return Err(crate::Error::source_table_changed(
+                        table_name,
+                        "it was dropped and re-created (or replaced by another table of that name)",
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    let columns =
+                        source_fingerprint::columns_with_changed_value_format(&table_schema);
+                    if !columns.is_empty() {
+                        return Err(crate::Error::source_table_changed(
+                            table_name,
+                            &format!(
+                                "its mirror was written by an older moonlink version that stored \
+                                 columns {} differently, and without a primary key its rows are \
+                                 matched by value, so later updates and deletes would miss them",
+                                columns.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+        } else {
+            self.check_partitioned_source_has_key(table_name, &table_schema)
+                .await?;
+        }
+        let fingerprint =
+            source_fingerprint::fetch(&self.postgres_client, table_schema.src_table_id)
+                .await
+                .map_err(PostgresSourceError::from)?
+                .ok_or_else(|| {
+                    crate::Error::source_table_changed(
+                        table_name,
+                        "it was dropped while being added",
+                    )
+                })?;
+
         // One mirror per source table: changes are routed by source table id.
         if self
             .registered_tables
@@ -824,6 +942,20 @@ impl PostgresConnection {
             "initial copy should not be performed during recovery"
         );
 
+        if let Err(e) =
+            source_fingerprint::write(table_base_path, mooncake_table_id, &fingerprint).await
+        {
+            warn!(error = %e, table_name, "failed to persist source fingerprint");
+        }
+        self.watched_tables.lock().unwrap().insert(
+            table_schema.src_table_id,
+            WatchedTable {
+                fingerprint,
+                mooncake_table_id: mooncake_table_id.clone(),
+                table_base_path: table_base_path.to_string(),
+            },
+        );
+
         debug!(src_table_id = table_schema.src_table_id, "table added");
 
         Ok((table_schema.src_table_id, table_resources))
@@ -893,6 +1025,9 @@ impl PostgresConnection {
     /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
     /// which allows for recovery from the PostgreSQL replication slot.
     pub async fn shutdown(&mut self, drop_all: bool) -> Result<()> {
+        if let Some(watch) = self.fingerprint_watch.take() {
+            watch.abort();
+        }
         if drop_all {
             self.drop_publication().await?;
             self.drop_replication_slot().await?;
@@ -912,9 +1047,163 @@ impl PostgresConnection {
         let cfg = self.source.get_cdc_stream_config().unwrap();
         let source = self.source.clone();
 
-        let event_loop = tokio::spawn(run_event_loop(cfg, sink, receiver, source));
+        let checker = FingerprintChecker::new(self.uri.clone(), &self.watched_tables);
+        let event_loop = tokio::spawn(run_event_loop(cfg, sink, receiver, source, checker));
+        self.fingerprint_watch = Some(spawn_fingerprint_watch(
+            self.uri.clone(),
+            &self.watched_tables,
+            self.registered_tables.clone(),
+        ));
         supervise_replication(event_loop, self.registered_tables.clone())
     }
+}
+
+/// A control connection for background checks, with the same session settings as the main one.
+async fn connect_control_client(uri: &str) -> Result<Client> {
+    let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+    let (client, connection) = connect(uri, tls).await.map_err(PostgresSourceError::from)?;
+    tokio::spawn(
+        async move {
+            if let Err(e) = connection.await {
+                warn!("connection error: {}", e);
+            }
+        }
+        .instrument(info_span!("postgres_connection_monitor")),
+    );
+    client.simple_query("SET lock_timeout = '100ms';").await?;
+    Ok(client)
+}
+
+/// Checks watched tables' source fingerprints (see [`source_fingerprint`]) over its own control
+/// connection. Failing to reach the source is not a change: it is logged and retried later.
+struct FingerprintChecker {
+    uri: String,
+    watched: std::sync::Weak<std::sync::Mutex<HashMap<SrcTableId, WatchedTable>>>,
+    client: Option<Client>,
+}
+
+impl FingerprintChecker {
+    fn new(uri: String, watched: &WatchedTables) -> Self {
+        Self {
+            uri,
+            watched: Arc::downgrade(watched),
+            client: None,
+        }
+    }
+
+    /// Ids of the watched tables, or None once the connection is gone.
+    fn watched_ids(&self) -> Option<Vec<SrcTableId>> {
+        let watched = self.watched.upgrade()?;
+        let ids = watched.lock().unwrap().keys().copied().collect();
+        Some(ids)
+    }
+
+    /// Why the table's mirror can no longer follow its source, if it cannot. Adopts new partitions
+    /// that hold nothing the mirror lacks, setting their replica identity.
+    async fn check(&mut self, src_table_id: SrcTableId) -> Option<String> {
+        let table = self
+            .watched
+            .upgrade()?
+            .lock()
+            .unwrap()
+            .get(&src_table_id)
+            .cloned()?;
+        if self.client.is_none() {
+            match connect_control_client(&self.uri).await {
+                Ok(client) => self.client = Some(client),
+                Err(e) => {
+                    warn!(error = ?e, "cannot check source table for changes; retrying later");
+                    return None;
+                }
+            }
+        }
+        let client = self.client.as_ref().unwrap();
+        let drift = match source_fingerprint::drift(client, &table.fingerprint).await {
+            Ok(drift) => drift,
+            Err(e) => {
+                warn!(error = ?e, "cannot check source table for changes; retrying later");
+                self.client = None;
+                return None;
+            }
+        };
+        match drift {
+            Drift::Unchanged => None,
+            Drift::NewEmptyPartitions {
+                current,
+                new_partitions,
+            } => {
+                if let Err(e) = set_replica_identity_full(client, &new_partitions).await {
+                    warn!(error = ?e, ?new_partitions, "cannot set replica identity of new partitions yet");
+                    return None;
+                }
+                if let Err(e) = source_fingerprint::write(
+                    &table.table_base_path,
+                    &table.mooncake_table_id,
+                    &current,
+                )
+                .await
+                {
+                    warn!(error = %e, "failed to persist source fingerprint");
+                }
+                if let Some(watched) = self.watched.upgrade() {
+                    if let Some(entry) = watched.lock().unwrap().get_mut(&src_table_id) {
+                        entry.fingerprint = current;
+                    }
+                }
+                None
+            }
+            Drift::Changed(reason) => {
+                if let Some(watched) = self.watched.upgrade() {
+                    watched.lock().unwrap().remove(&src_table_id);
+                }
+                Some(format!("the source table changed: {reason}"))
+            }
+        }
+    }
+}
+
+/// Poll the watched tables until the connection is gone, for changes no Relation message shows
+/// (or not until the table's next change). A table that can no longer be followed is errored.
+fn spawn_fingerprint_watch(
+    uri: String,
+    watched: &WatchedTables,
+    registered_tables: RegisteredTables,
+) -> JoinHandle<()> {
+    let mut checker = FingerprintChecker::new(uri, watched);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(FINGERPRINT_POLL_INTERVAL);
+        loop {
+            interval.tick().await;
+            let Some(ids) = checker.watched_ids() else {
+                return;
+            };
+            for src_table_id in ids {
+                if let Some(reason) = checker.check(src_table_id).await {
+                    let sender = registered_tables
+                        .lock()
+                        .unwrap()
+                        .get(&src_table_id)
+                        .cloned();
+                    if let Some(sender) = sender {
+                        error!(src_table_id, %reason, "mirror can no longer follow its source table");
+                        let _ = sender.send(TableEvent::EnterErrored { reason }).await;
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn set_replica_identity_full(
+    client: &Client,
+    relations: &[String],
+) -> std::result::Result<(), tokio_postgres::Error> {
+    for relation in relations {
+        client
+            .simple_query(&format!("ALTER TABLE {relation} REPLICA IDENTITY FULL;"))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
@@ -1060,6 +1349,7 @@ pub async fn run_event_loop(
     mut sink: Sink,
     mut cmd_rx: mpsc::Receiver<PostgresReplicationCommand>,
     postgres_source: Arc<PostgresSource>,
+    mut fingerprint_checker: FingerprintChecker,
 ) -> Result<()> {
     // Persist across reconnects
     let mut saved_schemas: Vec<TableSchema> = Vec::new();
@@ -1257,6 +1547,13 @@ pub async fn run_event_loop(
                                 error!(error = ?e, "cdc stream error, reconnecting");
                                 reconnect = true;
                                 break;
+                            }
+                            // Before the table's next change: a definition or partition change
+                            // that the Relation message itself does not show.
+                            Ok(CdcEvent::RelationSeen { src_table_id }) => {
+                                if let Some(reason) = fingerprint_checker.check(src_table_id).await {
+                                    sink.fail_table(src_table_id, reason).await;
+                                }
                             }
                             Ok(event) => {
                                 let Ok(()) = sink.process_cdc_event(event).await;

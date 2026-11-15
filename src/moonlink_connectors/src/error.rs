@@ -90,6 +90,19 @@ impl Error {
         })
     }
 
+    /// A source table changed in a way its existing mirror cannot follow.
+    #[track_caller]
+    pub fn source_table_changed(src_table_name: &str, reason: &str) -> Self {
+        Error::UnsupportedSourceTable(ErrorStruct {
+            message: format!(
+                "source table {src_table_name} changed in a way its mirror cannot follow: {reason}"
+            ),
+            status: ErrorStatus::Permanent,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
     /// A second mirror of a source table that is already mirrored.
     #[track_caller]
     pub fn source_already_mirrored(src_table_name: &str) -> Self {

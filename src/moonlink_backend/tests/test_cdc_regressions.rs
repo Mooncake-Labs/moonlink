@@ -1004,7 +1004,6 @@ async fn errored_mirror_stays_errored_after_restart_until_recreated() {
 /// deletes replicate (with a primary key) and are not rejected on the source (without one).
 #[rstest::rstest]
 #[case::with_primary_key("id BIGINT PRIMARY KEY, v TEXT")]
-#[case::without_primary_key("id BIGINT, v TEXT")]
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn partitioned_source_replicates_updates_and_deletes(#[case] columns: &str) {
@@ -1890,4 +1889,309 @@ async fn dropping_an_errored_placeholder_releases_the_source(#[case] keep_live_m
     } else {
         wait_for_no_slots(&client).await;
     }
+}
+
+/// Restart moonlink (keeping its data) with `ddl` run on the source while it is down.
+async fn restart_with(
+    backend: MoonlinkBackend,
+    tmp: &TempDir,
+    client: &Client,
+    uri: &str,
+    ddl: &str,
+) -> MoonlinkBackend {
+    backend.shutdown_connection(uri, false).await;
+    drop(backend);
+    client.simple_query(ddl).await.unwrap();
+    new_backend(tmp).await.unwrap()
+}
+
+/// A change to the source table made while moonlink is stopped is caught at recovery: that
+/// mirror is errored instead of resuming on a schema its stored data does not have (or bound to
+/// a different table of the same name). Other mirrors are unaffected.
+#[rstest::rstest]
+#[case::rename_column("ALTER TABLE rv_down RENAME COLUMN a TO c;")]
+#[case::retype_column("ALTER TABLE rv_down ALTER COLUMN a TYPE BIGINT;")]
+#[case::add_column("ALTER TABLE rv_down ADD COLUMN c INT;")]
+#[case::drop_and_readd_column(
+    "ALTER TABLE rv_down DROP COLUMN a; ALTER TABLE rv_down ADD COLUMN a INT;"
+)]
+#[case::recreate_table("DROP TABLE rv_down; CREATE TABLE rv_down (id BIGINT PRIMARY KEY, a INT);")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn schema_change_while_stopped_errors_the_mirror(#[case] ddl: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_down, rv_bystander;
+         CREATE TABLE rv_down (id BIGINT PRIMARY KEY, a INT);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_down VALUES (1, 1);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_down_mc", "public.rv_down", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_down_mc", lsn).await, None);
+    let backend = restart_with(backend, &tmp, &client, &uri, ddl).await;
+    let err = scan_error(&backend, "rv_down_mc")
+        .await
+        .expect("must be errored");
+    assert!(
+        err.contains("changed in a way its mirror cannot follow"),
+        "{err}"
+    );
+    client
+        .simple_query("INSERT INTO rv_bystander VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+}
+
+/// Changes no Relation message shows (a column dropped and re-added with the same name and type,
+/// a generated column added) error the mirror while replicating, before the table's next change
+/// is applied.
+#[rstest::rstest]
+#[case::drop_and_readd_column(
+    "ALTER TABLE rv_shape DROP COLUMN b; ALTER TABLE rv_shape ADD COLUMN b INT;"
+)]
+#[case::generated_column_added(
+    "ALTER TABLE rv_shape ADD COLUMN g INT GENERATED ALWAYS AS (b * 2) STORED;"
+)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn same_shape_schema_change_errors_the_mirror(#[case] ddl: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_shape;
+         CREATE TABLE rv_shape (id BIGINT PRIMARY KEY, b INT);
+         INSERT INTO rv_shape VALUES (1, 10);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_shape_mc", "public.rv_shape", &uri).await;
+    client
+        .simple_query(&format!(
+            "{ddl} INSERT INTO rv_shape (id, b) VALUES (2, 20);"
+        ))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_shape_mc", lsn)
+        .await
+        .expect("must be errored");
+    assert!(err.contains("source table changed"), "{err}");
+}
+
+/// Partitions attached with rows, or detached or dropped with rows, change the table's contents
+/// without any replicated change: that mirror is errored. Other mirrors keep replicating.
+#[rstest::rstest]
+#[case::attach_with_rows(
+    "CREATE TABLE rv_part_2 (id BIGINT PRIMARY KEY, v TEXT);
+     INSERT INTO rv_part_2 VALUES (150, 'x');
+     ALTER TABLE rv_part ATTACH PARTITION rv_part_2 FOR VALUES FROM (100) TO (200);"
+)]
+#[case::detach_with_rows("ALTER TABLE rv_part DETACH PARTITION rv_part_1;")]
+#[case::drop_partition("DROP TABLE rv_part_1;")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn partition_change_with_rows_errors_the_mirror(#[case] ddl: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part, rv_part_2, rv_part_1, rv_bystander;
+         CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
+         CREATE TABLE rv_part_3 PARTITION OF rv_part FOR VALUES FROM (200) TO (300);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_part VALUES (1, 'a');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query(&format!(
+            "{ddl} INSERT INTO rv_part VALUES (250, 'b'); INSERT INTO rv_bystander VALUES (1);"
+        ))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_part_mc", lsn)
+        .await
+        .expect("must be errored");
+    assert!(err.contains("source table changed"), "{err}");
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    client
+        .simple_query("DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2;")
+        .await
+        .unwrap();
+}
+
+/// New partitions that hold nothing the mirror lacks are adopted: ones created as partitions
+/// (rows included) and empty attached ones. They get REPLICA IDENTITY FULL, so their updates and
+/// deletes replicate exactly, also after a restart.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn new_partitions_are_adopted() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part, rv_part_2, rv_part_3;
+         CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
+         INSERT INTO rv_part VALUES (1, 'a');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    client
+        .simple_query(
+            "CREATE TABLE rv_part_2 PARTITION OF rv_part FOR VALUES FROM (100) TO (200);
+             INSERT INTO rv_part VALUES (150, 'b');
+             CREATE TABLE rv_part_3 (id BIGINT PRIMARY KEY, v TEXT);
+             ALTER TABLE rv_part ATTACH PARTITION rv_part_3 FOR VALUES FROM (200) TO (300);",
+        )
+        .await
+        .unwrap();
+    // Adopted by the poll (or at the next change): REPLICA IDENTITY FULL on both.
+    let mut full = 0i64;
+    for _ in 0..40 {
+        full = client
+            .query_one(
+                "SELECT count(*) FROM pg_class WHERE relname IN ('rv_part_2', 'rv_part_3') AND relreplident = 'f'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if full == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(full, 2, "new partitions did not get REPLICA IDENTITY FULL");
+    client
+        .simple_query(
+            "INSERT INTO rv_part VALUES (250, 'c');
+             UPDATE rv_part SET v = 'z' WHERE id IN (150, 250);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_part_mc", lsn).await, None);
+    let expected = BTreeMap::from([
+        (1, Some("a".to_string())),
+        (150, Some("z".to_string())),
+        (250, Some("z".to_string())),
+    ]);
+    assert_eq!(
+        scan_rows(&backend, "rv_part_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(expected.clone())
+    );
+    let backend = restart_with(backend, &tmp, &client, &uri, "SELECT 1;").await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_rows(&backend, "rv_part_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(expected)
+    );
+    client.simple_query("DROP TABLE rv_part;").await.unwrap();
+}
+
+/// A partitioned table without a primary key is refused: partitions created later do not inherit
+/// REPLICA IDENTITY FULL, and postgres would reject UPDATE and DELETE on them until it is set.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn keyless_partitioned_source_is_refused() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part;
+         CREATE TABLE rv_part (id BIGINT, v TEXT) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    let err = try_mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("add a primary key"), "{err}");
+    wait_for_no_slots(&client).await;
+}
+
+/// A keyless mirror written by an older version stored some values differently (json,
+/// character(n), unconstrained numeric, arrays); its rows are matched by value, so it is errored
+/// at recovery with the re-create message. Mirrors with a primary key, or with only unchanged
+/// value formats, keep replicating.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn keyless_mirror_from_an_older_version_is_errored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_old_json, rv_old_plain, rv_old_keyed;
+         CREATE TABLE rv_old_json (id BIGINT, j JSONB);
+         CREATE TABLE rv_old_plain (id BIGINT, t TEXT);
+         CREATE TABLE rv_old_keyed (id BIGINT PRIMARY KEY, j JSONB);
+         INSERT INTO rv_old_json VALUES (1, '{}'); INSERT INTO rv_old_plain VALUES (1, 'x');
+         INSERT INTO rv_old_keyed VALUES (1, '{}');",
+    )
+    .await;
+    for t in ["rv_old_json", "rv_old_plain", "rv_old_keyed"] {
+        mirror(
+            &backend,
+            &tmp,
+            &format!("{t}_mc"),
+            &format!("public.{t}"),
+            &uri,
+        )
+        .await;
+    }
+    let lsn = current_wal_lsn(&client).await;
+    for t in ["rv_old_json", "rv_old_plain", "rv_old_keyed"] {
+        assert_eq!(
+            snapshot_error(&backend, &format!("{t}_mc"), lsn).await,
+            None
+        );
+    }
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    // What an older version leaves behind: no source fingerprints.
+    std::fs::remove_dir_all(tmp.path().join("source_fingerprints")).unwrap();
+
+    let backend = new_backend(&tmp).await.unwrap();
+    let err = scan_error(&backend, "rv_old_json_mc")
+        .await
+        .expect("must be errored");
+    assert!(
+        err.contains("older moonlink version") && err.contains("re-create"),
+        "{err}"
+    );
+    client
+        .simple_query(
+            "INSERT INTO rv_old_plain VALUES (2, 'y'); INSERT INTO rv_old_keyed VALUES (2, '{}');",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_old_plain_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+    assert_eq!(
+        scan_ids(&backend, "rv_old_keyed_mc", lsn).await,
+        Some(vec![1, 2])
+    );
 }

@@ -657,6 +657,11 @@ impl CdcStream {
                         }));
                         continue;
                     }
+                    if this.table_schemas.contains_key(&relation.rel_id()) {
+                        out.push(Ok(CdcEvent::RelationSeen {
+                            src_table_id: relation.rel_id(),
+                        }));
+                    }
                 }
             }
             match f {
