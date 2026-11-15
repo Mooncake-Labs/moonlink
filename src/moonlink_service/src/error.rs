@@ -22,25 +22,9 @@ pub enum Error {
 
     #[error("{0}")]
     TaskJoin(ErrorStruct),
-
-    #[error("{0}")]
-    Http(ErrorStruct),
-
-    #[error("{0}")]
-    HttpRequest(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
-
-impl From<reqwest::Error> for Error {
-    #[track_caller]
-    fn from(source: reqwest::Error) -> Self {
-        let status = ErrorStatus::Permanent;
-        Error::HttpRequest(
-            ErrorStruct::new("HTTP request error".to_string(), status).with_source(source),
-        )
-    }
-}
 
 impl From<ArrowError> for Error {
     #[track_caller]

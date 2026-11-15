@@ -1,8 +1,6 @@
 use clap::Parser;
 use moonlink_service::{start_with_config, Result, ServiceConfig};
 
-/// Default REST API port
-const DEFAULT_REST_PORT: u16 = 3030;
 /// Default moonlink TCP API port.
 const DEFAULT_TCP_PORT: u16 = 3031;
 
@@ -12,13 +10,6 @@ const DEFAULT_TCP_PORT: u16 = 3031;
 struct Cli {
     /// Base path for Moonlink data storage
     base_path: String,
-
-    /// Port for REST API server (optional, defaults to 3030)
-    #[arg(long, short = 'p')]
-    rest_api_port: Option<u16>,
-    /// Disable REST API server
-    #[arg(long)]
-    no_rest_api: bool,
 
     /// Port for moonlink standalone server (optional, defaults to 3031).
     #[arg(long)]
@@ -46,11 +37,6 @@ pub async fn main() -> Result<()> {
     let config = ServiceConfig {
         base_path: cli.base_path,
         data_server_uri: cli.data_server_uri,
-        rest_api_port: if cli.no_rest_api {
-            None
-        } else {
-            Some(cli.rest_api_port.unwrap_or(DEFAULT_REST_PORT))
-        },
         tcp_port: if cli.no_tcp_api {
             None
         } else {

@@ -851,12 +851,10 @@ jobs:
         timeout-minutes: 10
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-          MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
-          NGINX_ADDR: http://nginx.local:80
         run: |
           RUST_BACKTRACE=1 cargo test --package moonlink_connectors --lib --features connector-pg
           RUST_BACKTRACE=1 cargo test --package moonlink_metadata_store --tests --features "metadata-all test-utils storage-s3 storage-gcs"
-          RUST_BACKTRACE=1 cargo test --package moonlink_service test_create_table_from_postgres_endpoint --features=standalone-test,postgres-integration -- --nocapture
+          RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features postgres-integration -- --nocapture
 
       - name: Run Backend integration tests
         timeout-minutes: 10
@@ -873,81 +871,3 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           RUST_BACKTRACE=1 cargo test test_bulk_insert_multiple_iterations --features=bulk-ingestion-test -p moonlink_backend -- --nocapture
-
-  # ───────────── 17 · Moonlink Service Integration Tests ─────────────
-  moonlink_service_tests:
-    name: Moonlink Service Integration Tests
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        type: [integration, stress]
-        include:
-          - type: integration
-            name: REST server integration test
-            timeout: 10
-            command: RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features standalone-test -- --nocapture
-          - type: stress
-            name: REST server stress test
-            timeout: 25
-            command: RUST_BACKTRACE=1 cargo test stress_test --release --package moonlink_service --lib --features standalone-test,stress-test -- --nocapture
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        id: toolchain
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ steps.toolchain.outputs.cachekey }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 2.40.3
-          make-default: true
-
-      # ────────────────────── Create backend directory ─────────────────────────
-      - name: Create backend directory
-        run: |
-          mkdir -p ${{ github.workspace }}/.shared-nginx
-          chmod 755 ${{ github.workspace }}/.shared-nginx
-          echo "nginx ok" > ${{ github.workspace }}/.shared-nginx/index.html
-
-      # ─────────────────────── Start nginx manually ──────────────────────────
-      - name: Start nginx
-        timeout-minutes: 2
-        run: |
-          docker run -d \
-            --name nginx \
-            -p 80:80 \
-            -v ${{ github.workspace }}/.shared-nginx:/usr/share/nginx/html:ro \
-            nginx:latest
-
-      # ─────────────── Add hostnames to /etc/hosts ──────────────────────────
-      - name: Add nginx.local to /etc/hosts
-        run: |
-          echo "127.0.0.1 nginx.local" | sudo tee -a /etc/hosts
-
-      # ───────────────────── Wait for nginx to be ready ───────────────────
-      - name: Wait for nginx
-        timeout-minutes: 2
-        run: |
-          set -euo pipefail
-          for i in {1..10}; do
-            if curl -sf http://localhost:80; then
-              echo "Nginx is ready!"
-              exit 0
-            fi
-            echo "Waiting for nginx..."
-            sleep 2
-          done
-          echo "ERROR: nginx failed to start."
-          exit 1
-
-      - name: Run ${{ matrix.name }} tests
-        timeout-minutes: ${{ matrix.timeout }}
-        env:
-          MOONLINK_BACKEND_DIR: ${{ github.workspace }}/.shared-nginx
-          NGINX_ADDR: http://nginx.local:80
-        run: ${{ matrix.command }}

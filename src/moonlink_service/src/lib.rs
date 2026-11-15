@@ -1,6 +1,5 @@
 mod error;
 mod logging;
-pub(crate) mod rest_api;
 mod rpc_server;
 
 pub use error::Error;
@@ -32,8 +31,6 @@ pub struct ServiceConfig {
     pub base_path: String,
     /// Data server URI, if assigned, all table scan file path should be remapped to conform data server.
     pub data_server_uri: Option<String>,
-    /// Used for REST API as ingestion source.
-    pub rest_api_port: Option<u16>,
     /// Used for moonlink standalone deployment.
     pub tcp_port: Option<u16>,
     /// Log persistence directory.
@@ -43,7 +40,7 @@ pub struct ServiceConfig {
 impl ServiceConfig {
     /// Whether moonlink is deployed as a standalone service.
     pub fn in_standalone_deployment_mode(&self) -> bool {
-        self.rest_api_port.is_some() || self.tcp_port.is_some()
+        self.tcp_port.is_some()
     }
 }
 
@@ -90,16 +87,12 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
     let sqlite_metadata_accessor = SqliteMetadataStore::new_with_directory(&config.base_path)
         .await
         .unwrap();
-    let mut backend = MoonlinkBackend::new(
+    let backend = MoonlinkBackend::new(
         config.base_path.clone(),
         config.data_server_uri.clone(),
         Box::new(sqlite_metadata_accessor),
     )
     .await?;
-
-    if config.rest_api_port.is_some() {
-        backend.initialize_event_api().await?;
-    }
 
     let backend = Arc::new(backend);
 
@@ -111,20 +104,6 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
             error!("RPC server failed: {}", e);
         }
     });
-
-    // Optionally start REST API
-    let (rest_api_handle, rest_api_shutdown_signal) = if let Some(port) = config.rest_api_port {
-        let api_state = rest_api::ApiState::new(backend.clone());
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(async move {
-            if let Err(e) = rest_api::start_server(api_state, port, shutdown_rx).await {
-                error!("REST API server failed: {}", e);
-            }
-        });
-        (Some(handle), Some(shutdown_tx))
-    } else {
-        (None, None)
-    };
 
     // Optionally start TCP server.
     let tcp_api_handle = if let Some(port) = config.tcp_port {
@@ -153,14 +132,6 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
     info!("Received SIGTERM, shutting down...");
 
     // Clean shutdown: abort background servers
-    if let Some(handle) = rest_api_handle {
-        rest_api_shutdown_signal
-            .expect("REST API shutdown sender supposed to be valid")
-            .send(())
-            .unwrap();
-        handle.await?;
-    }
-
     if let Some(handle) = tcp_api_handle {
         handle.abort();
     }
@@ -171,11 +142,8 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, feature = "standalone-test"))]
-mod test_guard;
-
-#[cfg(all(test, feature = "standalone-test"))]
+#[cfg(test)]
 mod test_utils;
 
-#[cfg(all(test, feature = "standalone-test"))]
+#[cfg(test)]
 mod test;

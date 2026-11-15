@@ -8,12 +8,8 @@ license = { workspace = true }
 profiling = ["console-subscriber"]
 
 default = ["storage-fs"]
-rest_api_demo = []
-standalone-test = []
 postgres-integration = []
 log-rotation-test = []
-# make sure the tests are also named with stress_test prefix
-stress-test = []
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
@@ -21,7 +17,6 @@ storage-fs = ["moonlink/storage-fs"]
 
 [dependencies]
 anyhow = { workspace = true }
-apache-avro = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 axum = "0.8"
@@ -30,37 +25,19 @@ console-subscriber = { version = "0.4", optional = true }
 flexi_logger = { version = "0.31", features = ["trc"] }
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
-moonlink_connectors = { workspace = true }
 moonlink_error = { workspace = true }
 moonlink_metadata_store = { workspace = true }
-moonlink_proto = { workspace = true }
 moonlink_rpc = { workspace = true }
-prost = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-arrow = { workspace = true }
-arrow-array = { workspace = true }
-arrow-buffer = { workspace = true }
-async-recursion = "1"
-bytes = { workspace = true }
-const_format = { workspace = true }
 more-asserts = { workspace = true }
 parquet = { workspace = true }
-reqwest = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
-
-[[example]]
-name = "rest_api_demo"
-required-features = ["rest_api_demo"]
