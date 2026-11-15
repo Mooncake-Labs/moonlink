@@ -3128,12 +3128,17 @@ async fn stream_txns(client: &Client) -> i64 {
         .get(0)
 }
 
-/// Dropping an errored placeholder never drops a slot while a mirror is pending, whatever
-/// connection string that mirror uses (here: same database, another role that cannot log in for
-/// now): once restored, it replays everything written while it was pending.
+/// Dropping the last other mirror of a database, errored placeholder or live, never drops the slot
+/// while a mirror of that database is pending, whatever connection string it uses (here: another
+/// role that cannot log in for now): once restored, it replays everything written while pending.
+#[rstest::rstest]
+#[case::errored_placeholder(true)]
+#[case::live_mirror(false)]
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn dropping_a_placeholder_keeps_the_slot_of_a_pending_mirror() {
+async fn dropping_the_last_other_mirror_keeps_the_slot_of_a_pending_mirror(
+    #[case] errored_first: bool,
+) {
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(
         "DROP TABLE IF EXISTS rv_pa, rv_pb;
@@ -3151,9 +3156,14 @@ async fn dropping_a_placeholder_keeps_the_slot_of_a_pending_mirror() {
     let uri2 = uri_for_user(&uri, "rv_role2", "pw2");
     mirror(&backend, &tmp, "rv_s1_pa", "public.rv_pa", &uri).await;
     mirror(&backend, &tmp, "rv_s2_pb", "public.rv_pb", &uri2).await;
-    client.simple_query("TRUNCATE rv_pa;").await.unwrap();
+    if errored_first {
+        client.simple_query("TRUNCATE rv_pa;").await.unwrap();
+    }
     let lsn = current_wal_lsn(&client).await;
-    assert!(snapshot_error(&backend, "rv_s1_pa", lsn).await.is_some());
+    assert_eq!(
+        snapshot_error(&backend, "rv_s1_pa", lsn).await.is_some(),
+        errored_first
+    );
     assert_eq!(snapshot_error(&backend, "rv_s2_pb", lsn).await, None);
     tokio::time::sleep(Duration::from_millis(500)).await;
     backend.shutdown_connection(&uri, false).await;
@@ -3177,13 +3187,17 @@ async fn dropping_a_placeholder_keeps_the_slot_of_a_pending_mirror() {
             .is_some_and(|e| e.contains("not available yet")),
         "expected a pending mirror: {pending:?}"
     );
+    if !errored_first {
+        let lsn = current_wal_lsn(&client).await;
+        assert_eq!(scan_ids(&backend, "rv_s1_pa", lsn).await, Some(vec![1]));
+    }
     backend
         .drop_table(DB.to_string(), "rv_s1_pa".to_string())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
     let slots_after_drop = slot_count(&client).await;
-    eprintln!("rv10 slots after dropping the placeholder: {slots_after_drop}");
+    eprintln!("rv10 slots after dropping the other mirror: {slots_after_drop}");
 
     client
         .simple_query("ALTER ROLE rv_role2 LOGIN;")
@@ -3211,7 +3225,123 @@ async fn dropping_a_placeholder_keeps_the_slot_of_a_pending_mirror() {
     assert_eq!(
         (slots_after_drop, rows),
         (1, Some(vec![1, 2, 3])),
-        "placeholder drop released the slot a pending mirror of the same database waited for"
+        "dropping the other mirror released the slot a pending mirror of the same database waited for"
+    );
+}
+
+const PENDING_OTHER_DB: &str = "cdc_regressions_pending_other";
+
+async fn slots_in_database(client: &Client, database: &str) -> i64 {
+    client
+        .query_one(
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%' AND database = $1",
+            &[&database],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// A mirror pending in one database keeps only that database's slot: dropping the last mirror
+/// (errored placeholder or live) of another database meanwhile drops that database's slot, or
+/// nothing would ever release it.
+#[rstest::rstest]
+#[case::errored_placeholder(true)]
+#[case::live_mirror(false)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pending_mirror_keeps_only_its_own_database_slot(#[case] errored_other: bool) {
+    let uri = get_database_uri();
+    let (admin, _) = connect_to_postgres(&uri).await;
+    for statement in [
+        format!("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '{PENDING_OTHER_DB}'"),
+        format!("DROP DATABASE IF EXISTS {PENDING_OTHER_DB} WITH (FORCE)"),
+        format!("CREATE DATABASE {PENDING_OTHER_DB}"),
+    ] {
+        admin.simple_query(&statement).await.unwrap();
+    }
+    let other_uri = uri_for_database(&uri, PENDING_OTHER_DB);
+    {
+        let (other, _) = connect_to_postgres(&other_uri).await;
+        other
+            .simple_query("CREATE TABLE rv_x (id BIGINT PRIMARY KEY); INSERT INTO rv_x VALUES (1);")
+            .await
+            .unwrap();
+    }
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_p;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_role3') THEN
+             EXECUTE 'DROP OWNED BY rv_role3'; DROP ROLE rv_role3;
+           END IF;
+         END $$;
+         CREATE ROLE rv_role3 LOGIN SUPERUSER PASSWORD 'pw3';
+         CREATE TABLE rv_p (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_p VALUES (1);",
+    )
+    .await;
+    let uri3 = uri_for_user(&uri, "rv_role3", "pw3");
+    mirror(&backend, &tmp, "rv_s1_x", "public.rv_x", &other_uri).await;
+    mirror(&backend, &tmp, "rv_s2_p", "public.rv_p", &uri3).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_s2_p", lsn).await, Some(vec![1]));
+    if errored_other {
+        let (other, _) = connect_to_postgres(&other_uri).await;
+        other.simple_query("TRUNCATE rv_x;").await.unwrap();
+        let other_lsn = current_wal_lsn(&other).await;
+        assert!(snapshot_error(&backend, "rv_s1_x", other_lsn)
+            .await
+            .is_some());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    backend.shutdown_connection(&other_uri, false).await;
+    backend.shutdown_connection(&uri3, false).await;
+    drop(backend);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    client
+        .simple_query("ALTER ROLE rv_role3 NOLOGIN;")
+        .await
+        .unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    let pending = scan_error(&backend, "rv_s2_p").await;
+    assert!(
+        pending
+            .as_deref()
+            .is_some_and(|e| e.contains("not available yet")),
+        "expected a pending mirror: {pending:?}"
+    );
+    backend
+        .drop_table(DB.to_string(), "rv_s1_x".to_string())
+        .await
+        .unwrap();
+    let mut other_slots = slots_in_database(&client, PENDING_OTHER_DB).await;
+    for _ in 0..40 {
+        if other_slots == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        other_slots = slots_in_database(&client, PENDING_OTHER_DB).await;
+    }
+    let own_slots = slot_count(&client).await;
+    client
+        .simple_query("ALTER ROLE rv_role3 LOGIN;")
+        .await
+        .unwrap();
+    let _ = backend
+        .drop_table(DB.to_string(), "rv_s2_p".to_string())
+        .await;
+    // Do not leak the slot into later tests.
+    admin
+        .simple_query(&format!(
+            "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '{PENDING_OTHER_DB}' AND NOT active;"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        (other_slots, own_slots),
+        (0, 1),
+        "(slots of the database without mirrors, slots of the pending mirror's database)"
     );
 }
 

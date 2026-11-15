@@ -163,9 +163,7 @@ impl ReplicationManager {
                 // source's WAL forever (unless a mirror waiting to be restored needs it).
                 let connection = self.connections.get(&key).unwrap();
                 if connection.table_count() == 0 && !is_recovery {
-                    // Keep every slot while a mirror waits to be restored (see
-                    // release_errored_source).
-                    let drop_all = self.pending_recoveries.is_empty();
+                    let drop_all = !self.pending_mirror_needs_slot(&key);
                     self.shutdown_connection_by_key(&key, drop_all);
                 }
                 return Err(e);
@@ -351,15 +349,18 @@ impl ReplicationManager {
         self.refresh_slot_holds();
     }
 
+    /// Whether a mirror waiting to be restored may replay from the slot of the source `key`: it
+    /// must be neither advanced nor dropped meanwhile.
+    fn pending_mirror_needs_slot(&self, key: &str) -> bool {
+        self.pending_recoveries
+            .values()
+            .any(|uri| self.uri_matches_key(uri, key))
+    }
+
     /// Hold the slot of every connection whose database has a pending mirror; release the rest.
     fn refresh_slot_holds(&self) {
         for (key, connection) in &self.connections {
-            let hold = self.hold_all_slots
-                || self
-                    .pending_recoveries
-                    .values()
-                    .any(|uri| self.uri_matches_key(uri, key));
-            connection.set_slot_hold(hold);
+            connection.set_slot_hold(self.hold_all_slots || self.pending_mirror_needs_slot(key));
         }
     }
 
@@ -367,13 +368,15 @@ impl ReplicationManager {
     /// mirror of its database remains, drop the database's slot and publication as dropping the
     /// last live mirror would (placeholders never resume, so nothing needs them). Best effort.
     async fn release_errored_source(&mut self, errored: &ErroredTable) {
-        let live_connection = match self.source_key(&errored.src_uri).await {
-            Ok(key) => self.connections.get_mut(&key),
+        let key = match self.source_key(&errored.src_uri).await {
+            Ok(key) => key,
             Err(e) => {
                 warn!(error = ?e, "source of the dropped mirror is unreachable; slot left in place");
                 return;
             }
         };
+        let needed_by_pending_mirror = self.pending_mirror_needs_slot(&key);
+        let live_connection = self.connections.get_mut(&key);
         if let Some(connection) = live_connection {
             // The same source table can be mirrored again (re-created) while the placeholder
             // exists; that mirror still needs it published.
@@ -396,9 +399,7 @@ impl ReplicationManager {
             }
             return;
         }
-        // A mirror waiting to be restored replays from its slot; which connection string reaches
-        // which database is not known for every one of them, so keep every slot meanwhile.
-        if !self.pending_recoveries.is_empty() {
+        if needed_by_pending_mirror {
             return;
         }
         let cleanup = async {
@@ -459,7 +460,8 @@ impl ReplicationManager {
                 // Clear manager mapping after successful drop
                 self.table_info.remove(mooncake_table_id);
                 if repl_conn.table_count() == 0 {
-                    self.shutdown_connection_by_key(&table_uri, true);
+                    let drop_all = !self.pending_mirror_needs_slot(&table_uri);
+                    self.shutdown_connection_by_key(&table_uri, drop_all);
                 }
 
                 debug!(src_table_id, "table dropped through manager");
