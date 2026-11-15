@@ -46,7 +46,6 @@ pub struct TableResources {
     pub commit_state: Option<Arc<CommitState>>,
     pub replication_state: Arc<ReplicationState>,
     pub flush_lsn_rx: Option<watch::Receiver<u64>>,
-    pub last_persistence_snapshot_lsn: Option<u64>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -171,7 +170,6 @@ pub async fn build_table_components(
         commit_state: Some(commit_state),
         replication_state: table_replication_state,
         flush_lsn_rx: Some(flush_lsn_rx),
-        last_persistence_snapshot_lsn,
     };
     Ok(table_resource)
 }
