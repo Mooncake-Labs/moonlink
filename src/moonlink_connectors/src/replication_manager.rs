@@ -125,6 +125,9 @@ impl ReplicationManager {
 
         let key = self.source_key(src_uri).await?;
         let replication_connection = self.get_or_create_connection(src_uri).await?;
+        if replication_connection.uri() != src_uri {
+            crate::pg_replicate::check_role_can_read_table(src_uri, table_name).await?;
+        }
         if !replication_connection.replication_started() {
             replication_connection.start_replication().await?;
         }

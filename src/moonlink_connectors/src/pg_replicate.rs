@@ -1057,6 +1057,31 @@ impl PostgresConnection {
     }
 }
 
+/// Refuse to mirror `table_name` for a connection string whose role cannot read it. Tables are
+/// added through the database's one shared connection, i.e. with the role of the connection string
+/// that opened it; without this check another role could mirror (and read through the mirror) a
+/// table it has no access to.
+pub async fn check_role_can_read_table(uri: &str, table_name: &str) -> Result<()> {
+    let client = connect_control_client(uri).await?;
+    let query = format!(
+        "SELECT has_table_privilege({}::regclass, 'SELECT');",
+        regclass_literal(table_name)
+    );
+    let allowed = client
+        .simple_query(&query)
+        .await
+        .map_err(PostgresSourceError::from)?
+        .iter()
+        .any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("t")));
+    if !allowed {
+        return Err(crate::Error::unsupported_source_table(
+            table_name,
+            "the role of this connection string has no SELECT privilege on it",
+        ));
+    }
+    Ok(())
+}
+
 /// A control connection for background checks, with the same session settings as the main one.
 async fn connect_control_client(uri: &str) -> Result<Client> {
     let tls = build_tls_connector().map_err(PostgresSourceError::from)?;

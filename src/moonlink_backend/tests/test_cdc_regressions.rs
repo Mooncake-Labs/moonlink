@@ -2314,3 +2314,56 @@ async fn slot_advances_while_every_mirror_is_errored() {
     let confirmed = wait_confirmed_at_least(&client, lsn).await;
     assert!(confirmed >= lsn, "slot frozen at {confirmed} (< {lsn})");
 }
+
+/// A table is added through the database's shared connection, i.e. with another connection
+/// string's role; a connection string whose own role cannot read the table must not mirror it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn second_connection_string_needs_its_own_select_privilege() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_open, rv_secret;
+         CREATE TABLE rv_open (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_secret (id BIGINT PRIMARY KEY);
+         DO $$ BEGIN CREATE ROLE rv_reader LOGIN REPLICATION PASSWORD 'rv_reader';
+         EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+         REVOKE ALL ON rv_secret FROM rv_reader;",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_open_mc", "public.rv_open", &uri).await;
+    let reader_uri = uri_for_user(&uri, "rv_reader", "rv_reader");
+    let err = try_mirror(
+        &backend,
+        &tmp,
+        "rv_secret_mc",
+        "public.rv_secret",
+        &reader_uri,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("no SELECT privilege"), "{err}");
+    client
+        .simple_query("GRANT SELECT ON rv_secret TO rv_reader;")
+        .await
+        .unwrap();
+    try_mirror(
+        &backend,
+        &tmp,
+        "rv_secret_mc",
+        "public.rv_secret",
+        &reader_uri,
+    )
+    .await
+    .unwrap();
+    for dst in ["rv_open_mc", "rv_secret_mc"] {
+        backend
+            .drop_table(DB.to_string(), dst.to_string())
+            .await
+            .unwrap();
+    }
+    client
+        .simple_query("DROP TABLE rv_open, rv_secret; DROP ROLE rv_reader;")
+        .await
+        .unwrap();
+}
