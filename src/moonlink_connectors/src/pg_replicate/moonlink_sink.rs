@@ -164,6 +164,11 @@ impl Sink {
         }
     }
 
+    /// Source table name of a registered (or failed) table, for logs.
+    pub fn table_name(&self, table_id: SrcTableId) -> Option<String> {
+        self.table_names.get(&table_id).cloned()
+    }
+
     /// What the stream has applied so far (commits and keepalives).
     pub fn replication_lsn(&self) -> u64 {
         self.replication_state.now()

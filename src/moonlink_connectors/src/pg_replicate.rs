@@ -1278,6 +1278,38 @@ async fn set_replica_identity_full(
     Ok(())
 }
 
+/// Status ticks between warnings about mirrors that receive no changes (about a minute).
+const ERRORED_WARNING_EVERY_TICKS: u64 = 6;
+
+/// Errored mirrors stay errored until dropped and re-created, and a held slot keeps WAL on the
+/// source; say so periodically rather than only once, when it happened.
+fn warn_about_stalled_mirrors(
+    sink: &Sink,
+    table_status_rxs: &HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+    slot_held: bool,
+) {
+    let errored = errored_table_names(sink, table_status_rxs);
+    if !errored.is_empty() {
+        warn!(mirrors = ?errored, "mirrors in the errored state receive no changes; drop and re-create them");
+    }
+    if slot_held {
+        warn!("replication slot is held until every mirror of this database is restored; the source retains WAL meanwhile");
+    }
+}
+
+fn errored_table_names(
+    sink: &Sink,
+    table_status_rxs: &HashMap<SrcTableId, watch::Receiver<TableStatus>>,
+) -> Vec<String> {
+    let mut names: Vec<String> = table_status_rxs
+        .iter()
+        .filter(|(_, status)| *status.borrow() != TableStatus::Healthy)
+        .map(|(id, _)| sink.table_name(*id).unwrap_or_else(|| id.to_string()))
+        .collect();
+    names.sort();
+    names
+}
+
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
 /// Postgres may discard WAL up to this LSN, so it must not exceed what every table has persisted into iceberg;
 /// after a restart, everything past it is replayed from the replication slot.
@@ -1564,10 +1596,15 @@ pub async fn run_event_loop(
         const DEFAULT_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 
         let mut status_interval = tokio::time::interval(DEFAULT_STATUS_INTERVAL);
+        let mut status_ticks: u64 = 0;
 
         loop {
             tokio::select! {
                 _ = status_interval.tick() => {
+                    status_ticks += 1;
+                    if status_ticks % ERRORED_WARNING_EVERY_TICKS == 1 {
+                        warn_about_stalled_mirrors(&sink, &table_status_rxs, slot_hold.load(Ordering::SeqCst));
+                    }
                     // With no healthy table (every one errored) nothing needs the WAL received so far.
                     let lsn_to_send = if slot_hold.load(Ordering::SeqCst) {
                         PgLsn::from(0)
@@ -1753,6 +1790,40 @@ mod supervisor_tests {
                 .is_ok()
         );
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod stalled_mirror_tests {
+    use super::errored_table_names;
+    use crate::pg_replicate::moonlink_sink::Sink;
+    use crate::pg_replicate::table::{LookupKey, TableName, TableSchema};
+    use moonlink::{CommitState, ReplicationState, TableStatus};
+    use std::collections::HashMap;
+    use tokio::sync::{mpsc, watch};
+
+    #[test]
+    fn errored_mirrors_are_listed_by_source_table() {
+        let mut sink = Sink::new(ReplicationState::new());
+        let mut statuses = HashMap::new();
+        for (id, status) in [
+            (1, TableStatus::Healthy),
+            (2, TableStatus::Errored("truncated".to_string())),
+        ] {
+            let (tx, _rx) = mpsc::channel(1);
+            let schema = TableSchema {
+                table_name: TableName {
+                    schema: "public".into(),
+                    name: format!("t{id}"),
+                },
+                src_table_id: id,
+                column_schemas: vec![],
+                lookup_key: LookupKey::FullRow,
+            };
+            sink.add_table(id, tx, CommitState::new(), &schema, false);
+            statuses.insert(id, watch::channel(status).1);
+        }
+        assert_eq!(errored_table_names(&sink, &statuses), vec!["public.t2"]);
     }
 }
 
