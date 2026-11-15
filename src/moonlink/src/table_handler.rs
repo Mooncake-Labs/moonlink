@@ -1129,6 +1129,28 @@ impl TableHandler {
         }
     }
 
+    /// A commit below the table's commit LSN belongs to a transaction re-sent after the table
+    /// applied it, which the replay floors should have skipped. Applying it could duplicate rows,
+    /// so the mirror is errored instead; returns whether it was.
+    fn error_if_commit_behind_table(
+        lsn: u64,
+        table_handler_state: &mut TableHandlerState,
+        table: &MooncakeTable,
+    ) -> bool {
+        let table_commit_lsn = table.get_commit_lsn_baseline();
+        if lsn >= table_commit_lsn {
+            return false;
+        }
+        Self::enter_errored(
+            table_handler_state,
+            table,
+            format!(
+                "a transaction committed at LSN {lsn} arrived after the mirror had applied changes up to LSN {table_commit_lsn}"
+            ),
+        );
+        true
+    }
+
     async fn commit_and_attempt_flush(
         lsn: u64,
         xact_id: Option<u32>,
@@ -1165,12 +1187,19 @@ impl TableHandler {
                         return;
                     }
                 }
+                if Self::error_if_commit_behind_table(lsn, table_handler_state, table) {
+                    table.abort_in_stream_batch(xact_id);
+                    return;
+                }
                 let event_id = uuid::Uuid::new_v4();
                 if let Err(e) = table.commit_transaction_stream(xact_id, lsn, event_id) {
                     error!(error = %e, "stream commit flush failed");
                 }
             }
             None => {
+                if Self::error_if_commit_behind_table(lsn, table_handler_state, table) {
+                    return;
+                }
                 table.commit(lsn);
                 if table.should_flush() || should_force_flush || force_flush_requested {
                     table_handler_state.last_unflushed_commit_lsn = None;

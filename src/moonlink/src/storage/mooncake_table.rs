@@ -526,8 +526,8 @@ struct IcebergTableManagerFactory {
 /// may trail what was applied); the commit LSN must never move backwards, and must not panic.
 pub(crate) fn clamp_commit_lsn(lsn: u64, commit_lsn_baseline: u64) -> u64 {
     if lsn < commit_lsn_baseline {
-        // Re-sent transactions are skipped before they get here; reaching this is a bug that tests
-        // must catch, while a release build keeps the table running.
+        // Re-sent transactions are skipped before they get here, and the table handler errors the
+        // mirror for one that is not; reaching this is a bug that tests must catch.
         debug_assert!(
             false,
             "commit LSN {lsn} is behind the table's commit LSN {commit_lsn_baseline}"
@@ -1052,6 +1052,11 @@ impl MooncakeTable {
         }
         u64::MAX
     }
+    /// LSN of the latest commit applied to the table.
+    pub(crate) fn get_commit_lsn_baseline(&self) -> u64 {
+        self.next_snapshot_task.commit_lsn_baseline
+    }
+
     pub fn get_last_flush_lsn(&self) -> u64 {
         self.last_flush_lsn.unwrap_or(0)
     }

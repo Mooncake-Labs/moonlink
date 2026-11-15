@@ -6,6 +6,7 @@ use tokio::sync::watch;
 
 use super::test_utils::*;
 use super::TableEvent;
+use super::TableHandler;
 use crate::row::IdentityProp;
 use crate::row::{MoonlinkRow, RowValue};
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
@@ -2014,6 +2015,38 @@ fn test_finish_initial_copy_keeps_higher_floor() {
     state.finish_initial_copy(/*lsn=*/ 100);
     assert_eq!(state.initial_persistence_lsn, Some(200));
     assert_eq!(state.latest_commit_lsn, Some(200));
+}
+
+/// Testing scenario: a commit behind the table's commit LSN (a re-sent transaction the replay
+/// floors missed) errors the mirror instead of being applied; a streamed one is aborted too.
+#[rstest::rstest]
+#[case::non_streamed(None)]
+#[case::streamed(Some(7))]
+#[tokio::test]
+async fn test_commit_behind_table_errors_the_mirror(#[case] xact_id: Option<u32>) {
+    use crate::storage::mooncake_table::test_utils::{test_row, test_table, TestContext};
+    let context = TestContext::new("commit_behind_table");
+    let mut table = test_table(&context, "table", IdentityProp::Keys(vec![0])).await;
+    table.append(test_row(1, "A", 20)).unwrap();
+    table.commit(/*lsn=*/ 100);
+    let mut state = new_table_handler_state(None, None);
+
+    match xact_id {
+        Some(xact_id) => table
+            .append_in_stream_batch(test_row(2, "B", 21), xact_id)
+            .unwrap(),
+        None => table.append(test_row(2, "B", 21)).unwrap(),
+    }
+    TableHandler::commit_and_attempt_flush(
+        /*lsn=*/ 50, xact_id, &mut state, &mut table, /*force_flush_requested=*/ false,
+    )
+    .await;
+
+    assert!(state.is_errored());
+    assert_eq!(table.get_commit_lsn_baseline(), 100);
+    if let Some(xact_id) = xact_id {
+        assert!(!table.has_transaction_stream(xact_id));
+    }
 }
 
 /// ---- Util functions unit test ----
