@@ -1456,3 +1456,46 @@ async fn arrays_followed_by_null_keep_their_elements() {
         ]))
     );
 }
+
+/// A table without a primary key (full-row identity) with array and composite columns: the
+/// copied rows are indexed, so later updates and deletes of them apply.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn keyless_table_with_nested_columns_replicates() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_keyless;
+         DROP TYPE IF EXISTS rv_pair;
+         CREATE TYPE rv_pair AS (x INT, y TEXT);
+         CREATE TABLE rv_keyless (id BIGINT, a INT[], c rv_pair);
+         INSERT INTO rv_keyless VALUES (1, '{1,2}', ROW(1, 'x')), (2, '{3}', ROW(2, 'y')),
+                                       (3, NULL, NULL), (4, '{}', ROW(NULL, NULL));",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_keyless_mc", "public.rv_keyless", &uri).await;
+    client
+        .simple_query(
+            "UPDATE rv_keyless SET id = 10 WHERE id = 1;
+             DELETE FROM rv_keyless WHERE id IN (2, 4);
+             INSERT INTO rv_keyless VALUES (5, '{5}', ROW(5, 'z'));
+             DELETE FROM rv_keyless WHERE id = 5;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let timeout = Duration::from_secs(30);
+    let a = scan_rows(&backend, "rv_keyless_mc", lsn, "a", timeout)
+        .await
+        .unwrap();
+    let c = scan_rows(&backend, "rv_keyless_mc", lsn, "c", timeout)
+        .await
+        .unwrap();
+    assert_eq!(a.keys().copied().collect::<Vec<_>>(), vec![3, 10]);
+    assert_eq!(a[&10].as_deref(), Some("[1, 2]"));
+    assert_eq!(c[&10].as_deref(), Some("{x: 1, y: x}"));
+    assert_eq!((a[&3].as_deref(), c[&3].as_deref()), (None, None));
+    client
+        .simple_query("DROP TABLE rv_keyless; DROP TYPE rv_pair;")
+        .await
+        .unwrap();
+}

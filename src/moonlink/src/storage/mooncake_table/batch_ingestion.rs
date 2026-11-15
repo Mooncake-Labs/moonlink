@@ -176,7 +176,8 @@ impl MooncakeTable {
             let file = tokio::fs::File::open(data_file.file_path()).await?;
             let mut stream_builder = ParquetRecordBatchStreamBuilder::new(file).await?;
             let schema_descr = stream_builder.metadata().file_metadata().schema_descr();
-            let indices = identity.get_key_indices(schema_descr.num_columns());
+            // Root columns: a struct column has several parquet leaves but is one root.
+            let indices = identity.get_key_indices(stream_builder.schema().fields().len());
             let mask = ProjectionMask::roots(schema_descr, indices);
             stream_builder = stream_builder.with_projection(mask);
 

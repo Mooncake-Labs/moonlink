@@ -3,7 +3,7 @@ use crate::row::MoonlinkRow;
 use arrow::array::Array;
 use arrow_array::{
     BinaryArray, BooleanArray, Date32Array, FixedSizeBinaryArray, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray, StructArray,
 };
 
 /// Convert arrow record batch to moonlink rows.
@@ -24,9 +24,8 @@ pub(super) fn record_batch_to_moonlink_row(batch: &RecordBatch) -> Vec<MoonlinkR
     rows
 }
 
-/// From arrow value to moonlink row value.
-///
-/// TODO(hjiang): Add composite and array type support.
+/// From arrow value to moonlink row value. Must produce the same value the CDC path builds for
+/// the row, since full-row identities are hashed and compared on these values.
 fn arrow_value_to_rowvalue(arr: &dyn Array, row_idx: usize) -> RowValue {
     if arr.is_null(row_idx) {
         return RowValue::Null;
@@ -103,6 +102,24 @@ fn arrow_value_to_rowvalue(arr: &dyn Array, row_idx: usize) -> RowValue {
                 let v = a.value(row_idx);
                 RowValue::Decimal(v)
             }
+        }
+        arrow_schema::DataType::List(_) => {
+            let a = arr.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = a.value(row_idx);
+            RowValue::Array(
+                (0..values.len())
+                    .map(|i| arrow_value_to_rowvalue(values.as_ref(), i))
+                    .collect(),
+            )
+        }
+        arrow_schema::DataType::Struct(_) => {
+            let a = arr.as_any().downcast_ref::<StructArray>().unwrap();
+            RowValue::Struct(
+                a.columns()
+                    .iter()
+                    .map(|child| arrow_value_to_rowvalue(child.as_ref(), row_idx))
+                    .collect(),
+            )
         }
         _ => {
             panic!("Unimplemented type {:?}", arr.data_type());
@@ -243,5 +260,60 @@ mod tests {
         for v in &rows[1].values {
             assert_eq!(*v, RowValue::Null);
         }
+    }
+
+    /// Nested values read back from arrow equal the values they were built from, which full-row
+    /// identity hashing relies on.
+    #[test]
+    fn test_nested_values_round_trip() {
+        use crate::row::column_array_builder::ColumnArrayBuilder;
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let struct_type = DataType::Struct(
+            vec![
+                Field::new("a", DataType::Int32, true),
+                Field::new("b", DataType::Utf8, true),
+                Field::new("c", list_type.clone(), true),
+            ]
+            .into(),
+        );
+        let lists = vec![
+            RowValue::Array(vec![RowValue::Int32(1), RowValue::Null, RowValue::Int32(3)]),
+            RowValue::Null,
+            RowValue::Array(vec![]),
+        ];
+        let structs = vec![
+            RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::ByteArray(b"x".to_vec()),
+                RowValue::Array(vec![RowValue::Int32(7)]),
+            ]),
+            RowValue::Struct(vec![RowValue::Null, RowValue::Null, RowValue::Null]),
+            RowValue::Null,
+        ];
+        let build = |data_type: &DataType, values: &[RowValue]| -> ArrayRef {
+            let mut builder = ColumnArrayBuilder::new(data_type, values.len());
+            for v in values {
+                builder.append_value(v).unwrap();
+            }
+            builder.finish(data_type)
+        };
+        let schema = Schema::new(vec![
+            Field::new("l", list_type.clone(), true),
+            Field::new("s", struct_type.clone(), true),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![build(&list_type, &lists), build(&struct_type, &structs)],
+        )
+        .unwrap();
+
+        let rows = MoonlinkRow::from_record_batch(&batch);
+        let read_back: Vec<Vec<RowValue>> = rows.into_iter().map(|r| r.values).collect();
+        let expected: Vec<Vec<RowValue>> = lists
+            .into_iter()
+            .zip(structs)
+            .map(|(l, s)| vec![l, s])
+            .collect();
+        assert_eq!(read_back, expected);
     }
 }
