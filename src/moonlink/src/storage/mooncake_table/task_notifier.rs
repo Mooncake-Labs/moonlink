@@ -24,9 +24,10 @@ impl InFlightTasks {
     }
 }
 
-/// Handed to a background task to report its result. The task stops counting as in flight
-/// right before its result is sent (or when the notifier is dropped, e.g. on panic), so the
-/// table handler sees an up-to-date count whenever it processes a result.
+/// Handed to a background task to report its result. The task stops counting as in flight once
+/// its result is in the handler's queue (or could not be delivered, or the notifier is dropped,
+/// e.g. on panic): a result still waiting for queue space keeps the table from being dropped,
+/// which would discard it together with the cache pins it carries.
 pub(crate) struct TaskNotifier {
     tx: Sender<TableEvent>,
     in_flight: Option<Arc<AtomicUsize>>,
@@ -34,12 +35,12 @@ pub(crate) struct TaskNotifier {
 
 impl TaskNotifier {
     pub(crate) async fn send(mut self, event: TableEvent) {
-        self.release();
         // The handler is gone once the table has been dropped or shut down; nobody needs the
         // result then.
         if self.tx.send(event).await.is_err() {
             tracing::debug!("table handler is gone; dropping background task result");
         }
+        self.release();
     }
 
     fn release(&mut self) {
@@ -73,6 +74,17 @@ mod tests {
         assert!(rx.recv().await.is_some());
 
         drop(dropped);
+        assert_eq!(tasks.count(), 0);
+
+        // A result waiting for queue space still counts as in flight.
+        let (tx_full, mut rx_full) = tokio::sync::mpsc::channel(1);
+        tx_full.send(TableEvent::ErroredDropTimeout).await.unwrap();
+        let blocked = tasks.notifier(tx_full);
+        let send = tokio::spawn(async move { blocked.send(TableEvent::ErroredDropTimeout).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(tasks.count(), 1);
+        rx_full.recv().await.unwrap();
+        send.await.unwrap();
         assert_eq!(tasks.count(), 0);
 
         // A closed handler does not make the task panic.
