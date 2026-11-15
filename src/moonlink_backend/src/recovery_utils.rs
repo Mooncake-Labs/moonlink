@@ -308,7 +308,7 @@ pub(crate) fn retry_pending_recoveries(
 
 /// Every minute (first shortly after startup): warn about mirrors that are not served after a
 /// restart, and advance the slot of each database whose remaining mirrors are all errored
-/// placeholders, which a replication loop would otherwise do (decision: errored mirrors do not
+/// placeholders, which a replication loop would otherwise do (by design, errored mirrors do not
 /// hold WAL). Nothing is advanced while any mirror is pending: it may need any slot.
 pub(crate) fn watch_placeholders(
     replication_manager: Weak<RwLock<ReplicationManager>>,
