@@ -1992,25 +1992,36 @@ async fn same_shape_schema_change_errors_the_mirror(#[case] ddl: &str) {
     assert!(err.contains("source table changed"), "{err}");
 }
 
-/// Partitions attached with rows, or detached or dropped with rows, change the table's contents
-/// without any replicated change: that mirror is errored. Other mirrors keep replicating.
+/// Whether rows of a partition that joins or leaves the table were ever replicated cannot be told
+/// from the catalog, so any partition change other than adding an empty partition errors that
+/// mirror (never silently keeps or misses rows). Other mirrors keep replicating.
 #[rstest::rstest]
 #[case::attach_with_rows(
     "CREATE TABLE rv_part_2 (id BIGINT PRIMARY KEY, v TEXT);
      INSERT INTO rv_part_2 VALUES (150, 'x');
      ALTER TABLE rv_part ATTACH PARTITION rv_part_2 FOR VALUES FROM (100) TO (200);"
 )]
+#[case::create_partition_and_fill_at_once(
+    "CREATE TABLE rv_part_2 PARTITION OF rv_part FOR VALUES FROM (100) TO (200);
+     INSERT INTO rv_part VALUES (150, 'x');"
+)]
 #[case::detach_with_rows("ALTER TABLE rv_part DETACH PARTITION rv_part_1;")]
+#[case::detach_then_delete(
+    "ALTER TABLE rv_part DETACH PARTITION rv_part_1; DELETE FROM rv_part_1;"
+)]
+#[case::detach_then_truncate("ALTER TABLE rv_part DETACH PARTITION rv_part_1; TRUNCATE rv_part_1;")]
+#[case::detach_empty("ALTER TABLE rv_part DETACH PARTITION rv_part_3;")]
 #[case::drop_partition("DROP TABLE rv_part_1;")]
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn partition_change_with_rows_errors_the_mirror(#[case] ddl: &str) {
+async fn partition_change_errors_the_mirror(#[case] ddl: &str) {
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(
-        "DROP TABLE IF EXISTS rv_part, rv_part_2, rv_part_1, rv_bystander;
+        "DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2, rv_part_3, rv_part_4, rv_bystander;
          CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);
          CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
          CREATE TABLE rv_part_3 PARTITION OF rv_part FOR VALUES FROM (200) TO (300);
+         CREATE TABLE rv_part_4 PARTITION OF rv_part FOR VALUES FROM (300) TO (400);
          CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);
          INSERT INTO rv_part VALUES (1, 'a');",
     )
@@ -2026,7 +2037,7 @@ async fn partition_change_with_rows_errors_the_mirror(#[case] ddl: &str) {
     .await;
     client
         .simple_query(&format!(
-            "{ddl} INSERT INTO rv_part VALUES (250, 'b'); INSERT INTO rv_bystander VALUES (1);"
+            "{ddl} INSERT INTO rv_part VALUES (350, 'b'); INSERT INTO rv_bystander VALUES (1);"
         ))
         .await
         .unwrap();
@@ -2040,14 +2051,14 @@ async fn partition_change_with_rows_errors_the_mirror(#[case] ddl: &str) {
         Some(vec![1])
     );
     client
-        .simple_query("DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2;")
+        .simple_query("DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2, rv_part_3, rv_part_4;")
         .await
         .unwrap();
 }
 
-/// New partitions that hold nothing the mirror lacks are adopted: ones created as partitions
-/// (rows included) and empty attached ones. They get REPLICA IDENTITY FULL, so their updates and
-/// deletes replicate exactly, also after a restart.
+/// New partitions that are empty when first seen (created ahead of use, or attached empty) are
+/// adopted with REPLICA IDENTITY FULL, so their rows, updates and deletes replicate exactly, also
+/// after a restart.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn new_partitions_are_adopted() {
@@ -2063,7 +2074,6 @@ async fn new_partitions_are_adopted() {
     client
         .simple_query(
             "CREATE TABLE rv_part_2 PARTITION OF rv_part FOR VALUES FROM (100) TO (200);
-             INSERT INTO rv_part VALUES (150, 'b');
              CREATE TABLE rv_part_3 (id BIGINT PRIMARY KEY, v TEXT);
              ALTER TABLE rv_part ATTACH PARTITION rv_part_3 FOR VALUES FROM (200) TO (300);",
         )
@@ -2088,7 +2098,7 @@ async fn new_partitions_are_adopted() {
     assert_eq!(full, 2, "new partitions did not get REPLICA IDENTITY FULL");
     client
         .simple_query(
-            "INSERT INTO rv_part VALUES (250, 'c');
+            "INSERT INTO rv_part VALUES (150, 'b'), (250, 'c');
              UPDATE rv_part SET v = 'z' WHERE id IN (150, 250);",
         )
         .await
@@ -2364,6 +2374,52 @@ async fn second_connection_string_needs_its_own_select_privilege() {
     }
     client
         .simple_query("DROP TABLE rv_open, rv_secret; DROP ROLE rv_reader;")
+        .await
+        .unwrap();
+}
+
+/// A partition attached by a transaction that got its xid before a concurrent load of the table
+/// committed: no ordering of transaction ids tells whether those rows were published. A partition
+/// holding rows when it is first seen errors the mirror, whatever the interleaving.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn partition_attached_after_a_concurrent_load_errors_the_mirror() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_part, rv_part_1, rv_part_2, rv_x;
+         CREATE TABLE rv_part (id BIGINT PRIMARY KEY, v TEXT) PARTITION BY RANGE (id);
+         CREATE TABLE rv_part_1 PARTITION OF rv_part FOR VALUES FROM (0) TO (100);
+         CREATE TABLE rv_part_2 (id BIGINT PRIMARY KEY, v TEXT);
+         CREATE TABLE rv_x (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    let (loader, _) = connect_to_postgres(&uri).await;
+    client
+        .simple_query("BEGIN; INSERT INTO rv_x VALUES (1);")
+        .await
+        .unwrap();
+    loader
+        .simple_query("INSERT INTO rv_part_2 VALUES (150, 'never published');")
+        .await
+        .unwrap();
+    client
+        .simple_query(
+            "ALTER TABLE rv_part ATTACH PARTITION rv_part_2 FOR VALUES FROM (100) TO (200); COMMIT;",
+        )
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_part VALUES (2, 'b');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_part_mc", lsn)
+        .await
+        .expect("must be errored");
+    assert!(err.contains("already held rows"), "{err}");
+    client
+        .simple_query("DROP TABLE rv_part, rv_x;")
         .await
         .unwrap();
 }

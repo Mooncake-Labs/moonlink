@@ -6,9 +6,11 @@
 //! or detached, or any change made while moonlink was stopped. The fingerprint records the
 //! source table's oid, every live column (attnum, name, type, typmod, generated) and its
 //! partitions; it is persisted when the mirror is created, compared at recovery, and polled while
-//! replicating. Any difference errors the mirror, except new partitions that hold nothing the
-//! mirror lacks: every row they hold was written after they joined the table, so it was published
-//! through it.
+//! replicating. Any difference errors the mirror, except a new partition that is still empty when
+//! it is first seen (created ahead of use): it is adopted, and its replica identity set. A
+//! partition that already holds rows, or any partition that leaves the table (detached or
+//! dropped), errors the mirror: whether those rows were ever replicated cannot be told from the
+//! catalog.
 
 use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
@@ -49,8 +51,7 @@ pub struct SourceFingerprint {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Drift {
     Unchanged,
-    /// Only new partitions whose rows were all published: adopt `current`. `new_partitions` are
-    /// their names.
+    /// Only new, empty partitions: adopt `current`. `new_partitions` are their names.
     NewEmptyPartitions {
         current: SourceFingerprint,
         new_partitions: Vec<String>,
@@ -152,44 +153,6 @@ async fn emptiness(
     Ok(Some((name, empty)))
 }
 
-/// Name of a partition, and whether it holds rows written before it was attached. Those were never
-/// published through the table; rows written after the attach (in later transactions, or later in
-/// the attaching one) were. None if it is no longer a partition.
-async fn rows_from_before_attach(
-    client: &Client,
-    relid: u32,
-) -> Result<Option<(String, bool)>, tokio_postgres::Error> {
-    let attach = rows(
-        client
-            .simple_query(&format!(
-                "SELECT c.oid::regclass::text, i.xmin::text, i.cmin::text FROM pg_class c \
-                 JOIN pg_inherits i ON i.inhrelid = c.oid WHERE c.oid = {relid};"
-            ))
-            .await?,
-    );
-    let Some(row) = attach.first() else {
-        return Ok(None);
-    };
-    let (name, xmin, cmin) = (
-        row.get(0).unwrap_or_default().to_string(),
-        row.get(1).unwrap_or_default().to_string(),
-        row.get(2).unwrap_or_default().to_string(),
-    );
-    // age() orders transaction ids (frozen rows are the oldest).
-    let older = rows(
-        client
-            .simple_query(&format!(
-                "SELECT EXISTS (SELECT 1 FROM {name} WHERE age(xmin) > age('{xmin}'::xid) \
-                 OR (xmin = '{xmin}'::xid AND cmin::text::bigint < {cmin}));"
-            ))
-            .await?,
-    );
-    Ok(Some((
-        name,
-        older.first().and_then(|r| r.get(0)) == Some("t"),
-    )))
-}
-
 /// Compare the source with `expected`.
 pub async fn drift(
     client: &Client,
@@ -206,32 +169,24 @@ pub async fn drift(
             describe_column_change(&expected.columns, &current.columns)
         )));
     }
-    for removed in expected.partitions.difference(&current.partitions) {
-        match emptiness(client, *removed).await? {
-            Some((_, true)) => {}
-            Some((name, false)) => {
-                return Ok(Drift::Changed(format!(
-                    "partition {name} was detached with its rows"
-                )))
-            }
-            None => {
-                return Ok(Drift::Changed(
-                    "a partition was dropped (its rows left the table without being replicated)"
-                        .to_string(),
-                ))
-            }
-        }
+    if !expected.partitions.is_subset(&current.partitions) {
+        return Ok(Drift::Changed(
+            "a partition was detached or dropped; partition changes other than adding empty \
+             partitions are not supported"
+                .to_string(),
+        ));
     }
     let mut new_partitions = Vec::new();
     for added in current.partitions.difference(&expected.partitions) {
-        match rows_from_before_attach(client, *added).await? {
-            Some((name, false)) => new_partitions.push(name),
-            Some((name, true)) => {
+        match emptiness(client, *added).await? {
+            Some((name, true)) => new_partitions.push(name),
+            Some((name, false)) => {
                 return Ok(Drift::Changed(format!(
-                    "partition {name} was attached with rows that were never replicated"
+                    "partition {name} already held rows when it was added; only empty partitions \
+                     can be added"
                 )))
             }
-            // Attached and dropped again in between: the next comparison sees the final state.
+            // Added and dropped again in between: the next comparison sees the final state.
             None => {}
         }
     }
