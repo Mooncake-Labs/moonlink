@@ -8,6 +8,7 @@ use pg_escape::{quote_identifier, quote_literal};
 use postgres_native_tls::{MakeTlsConnector, TlsStream};
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
     config::ReplicationMode,
@@ -145,8 +146,12 @@ impl ReplicationClient {
             "ALTER PUBLICATION moonlink_pub ADD TABLE {};",
             table_name.as_quoted_identifier()
         );
-        self.postgres_client.simple_query(&query).await?;
-        Ok(())
+        match self.postgres_client.simple_query(&query).await {
+            Ok(_) => Ok(()),
+            // The publication outlives restarts, so recovered tables are usually still members.
+            Err(e) if e.code() == Some(&SqlState::DUPLICATE_OBJECT) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn get_row_count(

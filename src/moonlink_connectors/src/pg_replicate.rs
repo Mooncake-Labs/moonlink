@@ -88,6 +88,30 @@ pub struct PostgresConnection {
     pub retry_handles: Vec<JoinHandle<Result<()>>>,
 }
 
+/// Create `moonlink_pub` unless it already exists. It must never be dropped and re-created while
+/// tables are mirrored: pgoutput filters changes by publication membership as of each change's LSN,
+/// so anything committed between a re-create and the table being added back would never be sent.
+async fn ensure_publication_exists(client: &Client) -> Result<()> {
+    let exists = client
+        .simple_query("SELECT 1 FROM pg_publication WHERE pubname = 'moonlink_pub';")
+        .await
+        .map_err(PostgresSourceError::from)?
+        .iter()
+        .any(|m| matches!(m, SimpleQueryMessage::Row(_)));
+    if exists {
+        return Ok(());
+    }
+    match client
+        .simple_query("CREATE PUBLICATION moonlink_pub WITH (publish_via_partition_root = true);")
+        .await
+    {
+        Ok(_) => Ok(()),
+        // Lost a race with another connection to the same database.
+        Err(e) if e.code() == Some(&SqlState::DUPLICATE_OBJECT) => Ok(()),
+        Err(e) => Err(PostgresSourceError::from(e).into()),
+    }
+}
+
 impl PostgresConnection {
     pub async fn new(uri: String) -> Result<Self> {
         debug!(%uri, "initializing postgres connection");
@@ -110,12 +134,7 @@ impl PostgresConnection {
         postgres_client
             .simple_query("SET lock_timeout = '100ms';")
             .await?;
-        postgres_client
-            .simple_query(
-                "DROP PUBLICATION IF EXISTS moonlink_pub; CREATE PUBLICATION moonlink_pub WITH (publish_via_partition_root = true);",
-            )
-            .await
-            .map_err(PostgresSourceError::from)?;
+        ensure_publication_exists(&postgres_client).await?;
 
         let db_name = uri
             .parse::<Config>()
