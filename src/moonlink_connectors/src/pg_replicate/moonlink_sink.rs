@@ -438,6 +438,17 @@ impl Sink {
                     "stream commit"
                 );
                 self.warn_if_before_keepalive(stream_commit_body.end_lsn(), "stream commit");
+                // Before the commit is marked: marking raises the tables' floors past this
+                // transaction, which would make its own failures look like replay. A failed table
+                // is detached, so its part of the transaction is never committed.
+                for (table_id, reason) in self
+                    .pending_stream_failures
+                    .remove(&xact_id)
+                    .unwrap_or_default()
+                {
+                    self.fail_table_at(table_id, stream_commit_body.commit_lsn(), reason)
+                        .await;
+                }
                 // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 if let Some(tables_in_txn) = self.streaming_transactions_state.remove(&xact_id) {
                     for table_id in tables_in_txn.touched_tables {
@@ -459,14 +470,6 @@ impl Sink {
                     }
                 }
                 self.streaming_last_key = None;
-                for (table_id, reason) in self
-                    .pending_stream_failures
-                    .remove(&xact_id)
-                    .unwrap_or_default()
-                {
-                    self.fail_table_at(table_id, stream_commit_body.commit_lsn(), reason)
-                        .await;
-                }
                 let pg_lsn = PgLsn::from(stream_commit_body.end_lsn());
                 self.mark_replication(pg_lsn.into());
             }

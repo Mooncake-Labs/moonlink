@@ -2807,3 +2807,76 @@ async fn dropping_a_placeholder_keeps_the_live_mirror_of_its_source(#[case] adva
         "live mirror lost its publication membership when the placeholder was dropped"
     );
 }
+
+/// Make every transaction larger than 64 kB of changes stream in progress (or reset that).
+async fn stream_large_transactions(client: &Client, on: bool) {
+    let set = if on {
+        "ALTER SYSTEM SET logical_decoding_work_mem = '64kB';"
+    } else {
+        "ALTER SYSTEM RESET logical_decoding_work_mem;"
+    };
+    client.simple_query(set).await.unwrap();
+    client
+        .simple_query("SELECT pg_reload_conf();")
+        .await
+        .unwrap();
+}
+
+/// A failing change inside a streamed (large) transaction errors that mirror at the commit, like
+/// in any other transaction: an unconvertible value, or the classic reload BEGIN; TRUNCATE;
+/// INSERT ...; COMMIT. The other table of the transaction gets exactly its rows.
+#[rstest::rstest]
+#[case::bad_value(
+    "INSERT INTO rv_st VALUES (10, '2024-01-01'), (11, 'infinity'), (12, '2024-01-02');",
+    "could not be applied"
+)]
+#[case::truncate_and_reload(
+    "INSERT INTO rv_st VALUES (10, '2024-01-01'); TRUNCATE rv_st; INSERT INTO rv_st VALUES (20, '2024-01-02');",
+    "truncated"
+)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn failure_in_a_streamed_transaction_errors_the_mirror(
+    #[case] changes: &str,
+    #[case] reason: &str,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_st, rv_fill;
+         CREATE TABLE rv_st (id BIGINT PRIMARY KEY, ts TIMESTAMP);
+         CREATE TABLE rv_fill (id BIGINT PRIMARY KEY, v TEXT);
+         INSERT INTO rv_st VALUES (1, '2023-01-01'), (2, '2023-01-02');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_st_mc", "public.rv_st", &uri).await;
+    mirror(&backend, &tmp, "rv_fill_mc", "public.rv_fill", &uri).await;
+    stream_large_transactions(&client, true).await;
+    let result = client
+        .simple_query(&format!(
+            "BEGIN;
+             INSERT INTO rv_fill SELECT i, repeat('f', 500) FROM generate_series(1, 400) i;
+             {changes}
+             INSERT INTO rv_fill SELECT i, repeat('g', 500) FROM generate_series(401, 800) i;
+             UPDATE rv_fill SET v = 'u' WHERE id % 7 = 0;
+             COMMIT;"
+        ))
+        .await;
+    stream_large_transactions(&client, false).await;
+    result.unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_st_mc", lsn)
+        .await
+        .expect("mirror must be errored");
+    assert!(err.contains(reason), "{err}");
+    let source: BTreeMap<i64, Option<String>> = client
+        .query("SELECT id, v FROM rv_fill", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        scan_rows(&backend, "rv_fill_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source)
+    );
+}
