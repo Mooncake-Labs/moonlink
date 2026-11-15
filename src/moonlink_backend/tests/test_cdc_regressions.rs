@@ -1,6 +1,8 @@
 //! Regression tests for the Postgres CDC ingest path. Run serially against a local Postgres with
 //! wal_level=logical (DATABASE_URL), e.g.:
 //! cargo test -p moonlink_backend --features test-utils --test test_cdc_regressions -- --test-threads=1
+//! Tests that stop and start the source Postgres run only with MOONLINK_TEST_PG_CTL set to a
+//! command taking `stop` or `start` (for example a script around pg_ctl).
 mod common;
 
 use arrow::array::{Array, ArrayRef, Int64Array, StringArray};
@@ -2446,13 +2448,23 @@ async fn partition_attached_after_a_concurrent_load_errors_the_mirror() {
         .unwrap();
 }
 
-fn local_postgres(action: &str) {
-    let script = format!("{}/work/scripts/pg.sh", std::env::var("HOME").unwrap());
-    assert!(std::process::Command::new(script)
+/// The command that stops and starts the test Postgres (`$MOONLINK_TEST_PG_CTL stop|start`, for
+/// example a script around pg_ctl); tests that need it are skipped without one.
+fn postgres_control() -> Option<String> {
+    std::env::var("MOONLINK_TEST_PG_CTL")
+        .ok()
+        .filter(|command| !command.is_empty())
+}
+
+fn local_postgres(control: &str, action: &str) {
+    let status = std::process::Command::new(control)
         .arg(action)
         .status()
-        .unwrap()
-        .success());
+        .unwrap_or_else(|e| panic!("MOONLINK_TEST_PG_CTL {control} {action}: {e}"));
+    assert!(
+        status.success(),
+        "MOONLINK_TEST_PG_CTL {control} {action}: {status}"
+    );
 }
 
 /// A source that cannot be reached at startup (restarting, refusing connections) is a transient
@@ -2461,6 +2473,10 @@ fn local_postgres(action: &str) {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn mirror_is_restored_once_an_unreachable_source_is_back() {
+    let Some(control) = postgres_control() else {
+        eprintln!("skipped: set MOONLINK_TEST_PG_CTL to a command taking stop|start for the test Postgres");
+        return;
+    };
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(
         "DROP TABLE IF EXISTS rv_down;
@@ -2475,7 +2491,7 @@ async fn mirror_is_restored_once_an_unreachable_source_is_back() {
     drop(backend);
     drop(client);
 
-    local_postgres("stop");
+    local_postgres(&control, "stop");
     let backend = new_backend(&tmp).await.expect("startup must not fail");
     let err = scan_error(&backend, "rv_down_mc")
         .await
@@ -2484,7 +2500,7 @@ async fn mirror_is_restored_once_an_unreachable_source_is_back() {
     // Not persisted: a restart while the source is still down retries again.
     drop(backend);
     let backend = new_backend(&tmp).await.unwrap();
-    local_postgres("start");
+    local_postgres(&control, "start");
 
     let (client, _) = connect_to_postgres(&uri).await;
     client
