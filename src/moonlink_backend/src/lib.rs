@@ -185,6 +185,7 @@ impl MoonlinkBackend {
 
     /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
     /// If the requested database or table doesn't exist, return [`TableNotFound`] error.
+    /// Only the wait for replication to reach `lsn` is bounded ([`LSN_WAIT_TIMEOUT_ENV`]).
     pub async fn create_snapshot(&self, database: String, table: String, lsn: u64) -> Result<()> {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
@@ -216,6 +217,9 @@ impl MoonlinkBackend {
             let writer = manager.get_table_event_manager(&mooncake_table_id)?;
             writer.initiate_snapshot(target_lsn).await
         };
+        // Not bounded: persisting a large backlog to Iceberg legitimately takes long. The wait
+        // ends when the snapshot is persisted, or with an error once the mirror is errored or
+        // dropped; a stuck-but-healthy table handler keeps the caller waiting.
         TableEventManager::synchronize_force_snapshot_request(rx, target_lsn).await?;
         Ok(())
     }
