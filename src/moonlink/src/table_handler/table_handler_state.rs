@@ -225,12 +225,17 @@ impl TableHandlerState {
         if event.is_streaming_update() {
             return false;
         }
-        // For non-streaming events, discard if LSN is less than flush LSN.
         let initial_persistence_lsn = self.initial_persistence_lsn.unwrap();
-        if let Some(lsn) = event.get_lsn_for_ingest_event() {
-            lsn <= initial_persistence_lsn
-        } else {
-            false
+        match event {
+            // Commits carry the commit's end LSN, which is what persistence LSNs are made of.
+            TableEvent::Commit { lsn, .. } | TableEvent::CommitFlush { lsn, .. } => {
+                *lsn <= initial_persistence_lsn
+            }
+            // Row events carry the start LSN of their commit record, and the next transaction's
+            // commit record can start exactly at the persisted commit's end LSN.
+            _ => event
+                .get_lsn_for_ingest_event()
+                .is_some_and(|lsn| lsn < initial_persistence_lsn),
         }
     }
 

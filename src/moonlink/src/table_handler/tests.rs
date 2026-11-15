@@ -1725,6 +1725,67 @@ async fn test_discard_duplicate_writes() {
     env.verify_snapshot(40, &[30, 40]).await;
 }
 
+/// Testing scenario: after recovery from a snapshot persisted at a commit's end LSN, a transaction
+/// whose commit record starts exactly at that LSN (row events carry that start LSN) is not dropped.
+#[tokio::test]
+async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
+    let temp_dir = tempdir().unwrap();
+    let mooncake_table_config =
+        MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
+    let mooncake_table_metadata = Arc::new(MooncakeTableMetadata {
+        mooncake_table_id: "table_name".to_string(),
+        table_id: 0,
+        schema: create_test_arrow_schema(),
+        config: mooncake_table_config.clone(),
+        path: temp_dir.path().to_path_buf(),
+    });
+    let mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
+    let mut mock_table_manager = MockTableManager::new();
+    mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
+    mock_table_manager
+        .expect_load_snapshot_from_table()
+        .times(1)
+        .returning(move || {
+            let mock_mooncake_snapshot_copy = mock_mooncake_snapshot.clone();
+            Box::pin(async move {
+                Ok((/*next_file_id=*/ 0, mock_mooncake_snapshot_copy))
+            })
+        });
+    let mut mooncake_table = MooncakeTable::new_with_table_manager(
+        mooncake_table_metadata,
+        Box::new(mock_table_manager),
+        create_test_object_storage_cache(&temp_dir),
+        FileSystemAccessor::default_for_test(&temp_dir),
+    )
+    .await
+    .unwrap();
+    // The snapshot holds a transaction whose commit record spans [5, 10).
+    mooncake_table.set_persistence_snapshot_lsn(10);
+    let env = TestEnvironment::new_with_mooncake_table(temp_dir, mooncake_table).await;
+
+    // Replayed persisted transaction: discarded.
+    env.append_row(
+        /*id=*/ 1, /*name=*/ "John", /*age=*/ 30, /*lsn=*/ 5,
+        /*xact_id=*/ None,
+    )
+    .await;
+    env.commit(/*lsn=*/ 10).await;
+    // Next transaction, whose commit record starts right at the persisted end LSN: kept.
+    env.append_row(
+        /*id=*/ 2, /*name=*/ "Bob", /*age=*/ 20, /*lsn=*/ 10,
+        /*xact_id=*/ None,
+    )
+    .await;
+    env.commit(/*lsn=*/ 20).await;
+
+    env.set_table_commit_lsn(20);
+    env.set_replication_lsn(20);
+    env.verify_snapshot(20, &[2]).await;
+}
+
 /// ---- Util functions unit test ----
 #[test]
 fn test_get_persisted_table_lsn() {
