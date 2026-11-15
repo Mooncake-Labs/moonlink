@@ -105,6 +105,11 @@ impl Sink {
         }
     }
 
+    /// What the stream has applied so far (commits and keepalives).
+    pub fn replication_lsn(&self) -> u64 {
+        self.replication_state.now()
+    }
+
     /// Advance the replication LSN, first publishing the deferred commit LSNs it now covers.
     fn mark_replication(&mut self, lsn: u64) {
         let commit_lsn_txs = &self.commit_lsn_txs;

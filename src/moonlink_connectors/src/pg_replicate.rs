@@ -1487,7 +1487,9 @@ pub async fn run_event_loop(
         loop {
             tokio::select! {
                 _ = status_interval.tick() => {
-                    let lsn_to_send = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs).unwrap_or(PgLsn::from(0));
+                    // With no healthy table (every one errored) nothing needs the WAL received so far.
+                    let lsn_to_send = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs)
+                        .unwrap_or_else(|| PgLsn::from(sink.replication_lsn()));
                     if let Err(e) = stream
                         .as_mut()
                         .send_status_update(lsn_to_send)

@@ -2286,3 +2286,31 @@ async fn empty_copy_with_commits_at_the_boundary_stays_readable(#[case] write: b
         "scan of the idle empty mirror did not complete"
     );
 }
+
+/// While every mirror of a database is errored, nothing needs the WAL the stream has received:
+/// the slot keeps advancing instead of retaining WAL until the mirrors are dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn slot_advances_while_every_mirror_is_errored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_t, rv_unmirrored;
+         CREATE TABLE rv_t (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_unmirrored (id BIGINT);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_t_mc", "public.rv_t", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_t VALUES (1); TRUNCATE rv_t; INSERT INTO rv_t VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_t_mc", lsn).await.is_some());
+    client
+        .simple_query("INSERT INTO rv_unmirrored SELECT generate_series(1, 1000);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let confirmed = wait_confirmed_at_least(&client, lsn).await;
+    assert!(confirmed >= lsn, "slot frozen at {confirmed} (< {lsn})");
+}
