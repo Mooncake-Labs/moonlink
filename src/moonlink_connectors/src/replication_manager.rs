@@ -1,17 +1,16 @@
 use crate::errored_tables::{self, ErroredTable};
 use crate::pg_replicate::table::SrcTableId;
-use crate::pg_replicate::SourceIdentity;
+use crate::pg_replicate::{PostgresConnection, SourceIdentity};
 use crate::ReplicationConnection;
 use crate::{Error, Result};
 use moonlink::{
-    IcebergTableConfig, MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager,
-    TableEventManager,
+    MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
 };
 use moonlink::{ReadStateFilepathRemap, TableStatusReader};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Manage replication sources, one per source database.
 ///
@@ -169,20 +168,57 @@ impl ReplicationManager {
     }
 
     /// Register a recovered mirror that is not served: every request on it returns `message`, and
-    /// dropping it deletes its data.
-    pub fn add_errored_table(
+    /// dropping it deletes its data. With `persist`, it stays errored across restarts.
+    pub async fn add_errored_table(
         &mut self,
         mooncake_table_id: MooncakeTableId,
-        message: String,
-        iceberg_table_config: IcebergTableConfig,
+        errored: ErroredTable,
+        persist: bool,
     ) {
-        self.errored_tables.insert(
-            mooncake_table_id,
-            ErroredTable {
-                message,
-                iceberg_table_config,
-            },
-        );
+        if persist {
+            if let Err(e) = errored_tables::write_marker(
+                &self.table_base_path,
+                &mooncake_table_id,
+                &errored.message,
+            )
+            .await
+            {
+                warn!(error = %e, table = %mooncake_table_id, "failed to persist errored-table marker");
+            }
+        }
+        self.errored_tables.insert(mooncake_table_id, errored);
+    }
+
+    /// After dropping a placeholder: take its table out of the publication, and if no live
+    /// mirror of its database remains, drop the database's slot and publication as dropping the
+    /// last live mirror would (placeholders never resume, so nothing needs them). Best effort.
+    async fn release_errored_source(&mut self, errored: &ErroredTable) {
+        let live_connection = match self.source_key(&errored.src_uri).await {
+            Ok(key) => self.connections.get_mut(&key),
+            Err(e) => {
+                warn!(error = ?e, "source of the dropped mirror is unreachable; slot left in place");
+                return;
+            }
+        };
+        if let Some(connection) = live_connection {
+            if let Err(e) = connection
+                .remove_table_from_publication(&errored.src_table_name)
+                .await
+            {
+                warn!(error = ?e, "failed to remove the dropped mirror's table from the publication");
+            }
+            return;
+        }
+        let cleanup = async {
+            let mut source = PostgresConnection::new(errored.src_uri.clone()).await?;
+            source
+                .remove_table_from_publication(&errored.src_table_name)
+                .await?;
+            source.shutdown(/*drop_all=*/ true).await
+        };
+        if let Err(e) = cleanup.await {
+            warn!(error = ?e, "failed to drop the slot and publication of the dropped mirror's source");
+        }
     }
 
     fn check_not_errored(&self, mooncake_table_id: &MooncakeTableId) -> Result<()> {
@@ -211,6 +247,7 @@ impl ReplicationManager {
             // Best effort: the mirror is gone from moonlink either way.
             let _ = errored_tables::drop_iceberg_table_files(&errored.iceberg_table_config).await;
             errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;
+            self.release_errored_source(&errored).await;
             return Ok(true);
         }
         let (table_uri, src_table_id) = match self.table_info.get(mooncake_table_id) {

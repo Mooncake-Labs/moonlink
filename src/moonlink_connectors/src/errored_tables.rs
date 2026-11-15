@@ -3,8 +3,9 @@
 //! A mirror that entered the errored state stays errored across restarts: a marker file records
 //! it, and recovery registers such a table as a placeholder instead of resuming replication into
 //! it (the slot has moved on, so it would silently look healthy with stale data). Tables that fail
-//! to recover are registered as placeholders too, without a marker, so the next restart retries.
-//! Placeholders reject every request with their message and can always be dropped.
+//! to recover get a marker too: while they are down the slot advances for the other mirrors of
+//! their database, so a later start could not resume them faithfully either. Placeholders reject
+//! every request with their message and can always be dropped.
 
 use crate::Result;
 use moonlink::{BaseFileSystemAccess, FileSystemAccessor, IcebergTableConfig, MooncakeTableId};
@@ -80,4 +81,7 @@ pub struct ErroredTable {
     /// User-facing message returned for every request.
     pub message: String,
     pub iceberg_table_config: IcebergTableConfig,
+    /// Connection string and table of its source, to clean up the source when it is dropped.
+    pub src_uri: String,
+    pub src_table_name: String,
 }

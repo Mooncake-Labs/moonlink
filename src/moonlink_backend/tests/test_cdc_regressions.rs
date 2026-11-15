@@ -1748,3 +1748,146 @@ async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
         .await
         .unwrap();
 }
+
+async fn confirmed_flush(client: &Client) -> u64 {
+    let row = client
+        .query_one(
+            "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%' AND database = current_database()",
+            &[],
+        )
+        .await
+        .unwrap();
+    row.get::<_, tokio_postgres::types::PgLsn>(0).into()
+}
+
+async fn wait_confirmed_at_least(client: &Client, lsn: u64) -> u64 {
+    let mut c = 0;
+    for _ in 0..40 {
+        c = confirmed_flush(client).await;
+        if c >= lsn {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    c
+}
+
+/// A mirror that fails recovery while the other mirrors of its database recover is errored for
+/// good: the slot advances past its changes from then on, so a later start that could restore it
+/// must not resume it as healthy with a gap.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn mirror_that_failed_recovery_is_not_resumed_with_a_gap() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_a, rv_b, rv_b_tmp;
+         CREATE TABLE rv_a (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_b (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_a_mc", "public.rv_a", &uri).await;
+    mirror(&backend, &tmp, "rv_b_mc", "public.rv_b", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_a VALUES (1); INSERT INTO rv_b VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_b_mc", lsn).await, Some(vec![1]));
+    assert_eq!(snapshot_error(&backend, "rv_a_mc", lsn).await, None);
+    assert_eq!(snapshot_error(&backend, "rv_b_mc", lsn).await, None);
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    // Start 1: rv_b cannot be restored; rv_a keeps replicating and moves the slot on.
+    client
+        .simple_query("ALTER TABLE rv_b RENAME TO rv_b_tmp;")
+        .await
+        .unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    assert!(scan_error(&backend, "rv_b_mc").await.is_some());
+    client
+        .simple_query("INSERT INTO rv_b_tmp VALUES (2); INSERT INTO rv_a VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_a_mc", lsn).await, None);
+    assert!(wait_confirmed_at_least(&client, lsn).await >= lsn);
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    // Start 2: the cause is gone, but rv_b missed row 2 for good.
+    client
+        .simple_query("ALTER TABLE rv_b_tmp RENAME TO rv_b;")
+        .await
+        .unwrap();
+    let backend = new_backend(&tmp).await.unwrap();
+    let err = scan_error(&backend, "rv_b_mc")
+        .await
+        .expect("must stay errored");
+    assert!(
+        err.contains("could not be restored") && err.contains("re-create"),
+        "{err}"
+    );
+    mirror(&backend, &tmp, "rv_b2_mc", "public.rv_b", &uri).await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_b2_mc", lsn).await, Some(vec![1, 2]));
+}
+
+/// Dropping an errored placeholder releases what it held on the source: its table leaves the
+/// publication, and when it was the database's last mirror the slot and publication are dropped
+/// (otherwise the source retains WAL forever).
+#[rstest::rstest]
+#[case::last_mirror(false)]
+#[case::database_still_has_a_live_mirror(true)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dropping_an_errored_placeholder_releases_the_source(#[case] keep_live_mirror: bool) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_t, rv_live;
+         CREATE TABLE rv_t (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_live (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_t_mc", "public.rv_t", &uri).await;
+    if keep_live_mirror {
+        mirror(&backend, &tmp, "rv_live_mc", "public.rv_live", &uri).await;
+    }
+    client
+        .simple_query("INSERT INTO rv_t VALUES (1); TRUNCATE rv_t; INSERT INTO rv_t VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_t_mc", lsn).await.is_some());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+
+    let backend = new_backend(&tmp).await.unwrap();
+    assert!(scan_error(&backend, "rv_t_mc").await.is_some());
+    assert_eq!(slot_count(&client).await, 1);
+    backend
+        .drop_table(DB.to_string(), "rv_t_mc".to_string())
+        .await
+        .unwrap();
+    let published: i64 = client
+        .query_one(
+            "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'moonlink_pub' AND tablename = 'rv_t'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(published, 0, "dropped mirror's table is still published");
+    if keep_live_mirror {
+        assert_eq!(slot_count(&client).await, 1);
+        client
+            .simple_query("INSERT INTO rv_live VALUES (1);")
+            .await
+            .unwrap();
+        let lsn = current_wal_lsn(&client).await;
+        assert_eq!(scan_ids(&backend, "rv_live_mc", lsn).await, Some(vec![1]));
+    } else {
+        wait_for_no_slots(&client).await;
+    }
+}

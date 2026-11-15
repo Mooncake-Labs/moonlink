@@ -1,6 +1,7 @@
 use crate::error::Result;
 use moonlink::MooncakeTableId;
 use moonlink::ReadStateFilepathRemap;
+use moonlink_connectors::errored_tables::ErroredTable;
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::{MetadataStoreTrait, TableMetadataEntry};
 
@@ -91,19 +92,31 @@ pub(super) async fn recover_all_tables(
             database: cur_metadata_entry.database.clone(),
             table: cur_metadata_entry.table.clone(),
         };
-        let iceberg_table_config = cur_metadata_entry
-            .moonlink_table_config
-            .iceberg_table_config
-            .clone();
+        let errored_table = |message: String| ErroredTable {
+            message,
+            iceberg_table_config: cur_metadata_entry
+                .moonlink_table_config
+                .iceberg_table_config
+                .clone(),
+            src_uri: cur_metadata_entry.src_table_uri.clone(),
+            src_table_name: cur_metadata_entry.src_table_name.clone(),
+        };
         if let Some(message) = replication_manager
             .persisted_errored_message(&mooncake_table_id)
             .await
         {
             warn!(table = %mooncake_table_id, "mirror is errored; not resuming replication into it");
-            replication_manager.add_errored_table(mooncake_table_id, message, iceberg_table_config);
+            replication_manager
+                .add_errored_table(
+                    mooncake_table_id,
+                    errored_table(message),
+                    /*persist=*/ false,
+                )
+                .await;
             continue;
         }
         unique_uris.insert(cur_metadata_entry.src_table_uri.clone());
+        let failed = errored_table(String::new());
         if let Err(e) = recover_isolated(recover_table(
             cur_metadata_entry,
             replication_manager,
@@ -112,11 +125,19 @@ pub(super) async fn recover_all_tables(
         .await
         {
             error!(error = ?e, table = %mooncake_table_id, "failed to recover mirror");
+            // Persisted: the other mirrors of its database move the slot past its changes from
+            // now on, so it could not be resumed faithfully at a later start.
             let message = moonlink::Error::errored_table_message(
                 &mooncake_table_id.to_string(),
-                &format!("it could not be restored at startup ({e}); restarting retries"),
+                &format!("it could not be restored at startup ({e})"),
             );
-            replication_manager.add_errored_table(mooncake_table_id, message, iceberg_table_config);
+            replication_manager
+                .add_errored_table(
+                    mooncake_table_id,
+                    ErroredTable { message, ..failed },
+                    /*persist=*/ true,
+                )
+                .await;
         }
     }
 

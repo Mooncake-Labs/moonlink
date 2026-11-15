@@ -220,6 +220,13 @@ impl ReplicationConnection {
         Ok(src_table_id)
     }
 
+    /// Take a source table out of the publication (for a mirror this connection does not serve).
+    pub async fn remove_table_from_publication(&mut self, src_table_name: &str) -> Result<()> {
+        self.source
+            .remove_table_from_publication(src_table_name)
+            .await
+    }
+
     /// Remove the given table from connection.
     pub async fn drop_table(
         &mut self,
