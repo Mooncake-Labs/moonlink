@@ -47,8 +47,8 @@ pub enum FromTextError {
     #[error("'{0}' (infinite date or timestamp) cannot be stored")]
     InfiniteDateTime(String),
 
-    #[error("year out of the supported range")]
-    YearOutOfRange,
+    #[error("invalid date or timestamp '{0}'")]
+    InvalidDateTime(String),
 
     #[error("invalid array: {0}")]
     InvalidArray(#[from] ArrayParseError),
@@ -76,7 +76,7 @@ fn chrono_date_text(text: &str) -> Result<String, FromTextError> {
     let digits = text.find('-').unwrap_or(text.len());
     let year: i32 = text[..digits]
         .parse()
-        .map_err(|_| FromTextError::YearOutOfRange)?;
+        .map_err(|_| FromTextError::InvalidDateTime(text.to_string()))?;
     let year = if bc { 1 - year } else { year };
     Ok(format!("{year:+05}{}", &text[digits..]))
 }
@@ -1252,6 +1252,14 @@ mod tests {
         }
         // Postgres dates reach year 5874897, beyond chrono's range.
         assert!(parse_date("5874897-12-31").is_err());
+        // Malformed text names itself.
+        assert!(
+            matches!(parse_date("20x0-01-01"), Err(FromTextError::InvalidDateTime(t)) if t == "20x0-01-01")
+        );
+        assert!(matches!(
+            parse_timestamp("99999999999-01-01 00:00:00"),
+            Err(FromTextError::InvalidDateTime(_))
+        ));
         assert!(parse_timestamp("294276-12-31 23:59:59").is_err());
     }
 }
