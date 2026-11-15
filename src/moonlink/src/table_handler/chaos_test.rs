@@ -1,10 +1,3 @@
-/// This file implements chaos test for table handler.
-///
-/// System invariants:
-/// - Begin events happen only after end events
-/// - End events happen only after begin events
-/// - Rows to delete comes from committed appended ones
-/// - LSN always increases
 use crate::event_sync::create_table_event_syncer;
 use crate::row::{MoonlinkRow, RowValue};
 #[cfg(feature = "storage-gcs")]
@@ -23,6 +16,14 @@ use crate::table_handler::chaos_table_metadata::ReplayTableMetadata;
 use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
+/// This file implements chaos test for table handler.
+///
+/// System invariants:
+/// - Begin events happen only after end events
+/// - End events happen only after begin events
+/// - Rows to delete comes from committed appended ones
+/// - LSN always increases
+use crate::union_read::always_healthy_table_status;
 use crate::union_read::ReadStateManager;
 use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
@@ -840,13 +841,14 @@ impl TestEnvironment {
         let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
         let read_state_filepath_remap =
             std::sync::Arc::new(|local_filepath: String| local_filepath);
+        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let read_state_manager = ReadStateManager::new(
             &table,
             replication_lsn_rx.clone(),
             last_commit_lsn_rx,
+            table_event_sync_receiver.table_status_rx.clone(),
             read_state_filepath_remap,
         );
-        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let (handler_event_replay_tx, handler_event_replay_rx) = mpsc::unbounded_channel();
         let (table_event_replay_tx, table_event_replay_rx) = mpsc::unbounded_channel();
         let table_handler = TableHandler::new(
@@ -986,6 +988,7 @@ async fn validate_persisted_iceberg_table(
         &table,
         replication_lsn_rx.clone(),
         last_commit_lsn_rx,
+        always_healthy_table_status(),
         read_state_filepath_remap,
     );
     check_read_snapshot(

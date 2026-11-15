@@ -87,13 +87,14 @@ impl TestEnvironment {
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (last_commit_tx, last_commit_rx) = watch::channel(0u64);
         let snapshot_lsn_tx = table.get_snapshot_watch_sender().clone();
+        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let read_state_manager = Some(Arc::new(ReadStateManager::new(
             &table,
             replication_rx.clone(),
             last_commit_rx,
+            table_event_sync_receiver.table_status_rx.clone(),
             get_read_state_filepath_remap(),
         )));
-        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let force_snapshot_completion_rx = table_event_sync_receiver
             .force_snapshot_completion_rx
             .clone();

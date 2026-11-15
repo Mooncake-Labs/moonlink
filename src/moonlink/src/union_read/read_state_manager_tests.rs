@@ -2,6 +2,7 @@
 //! production reaches through concurrency between the replication sink, the table handler and
 //! readers.
 
+use crate::union_read::always_healthy_table_status;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +49,7 @@ impl Env {
             &table,
             replication_rx,
             commit_rx,
+            always_healthy_table_status(),
             get_read_state_filepath_remap(),
         ));
         Self {
@@ -277,15 +279,13 @@ async fn errored_table_fails_reads_immediately_and_wakes_waiters() {
     env.commit_and_snapshot(&[1], 100, /*flush=*/ false).await;
     env.publish(100, 100, 100);
     let (status_tx, status_rx) = watch::channel(TableStatus::Healthy);
-    let rsm = Arc::new(
-        ReadStateManager::new(
-            &env.table,
-            env.replication_tx.subscribe(),
-            env.commit_tx.subscribe(),
-            get_read_state_filepath_remap(),
-        )
-        .with_table_status(status_rx),
-    );
+    let rsm = Arc::new(ReadStateManager::new(
+        &env.table,
+        env.replication_tx.subscribe(),
+        env.commit_tx.subscribe(),
+        status_rx,
+        get_read_state_filepath_remap(),
+    ));
     assert_rows(&rsm.try_read(Some(100)).await.unwrap(), &[1]).await;
 
     let waiting = tokio::spawn({

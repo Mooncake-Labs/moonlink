@@ -144,9 +144,9 @@ pub async fn build_table_components(
         &table,
         replication_lsn_rx,
         commit_lsn_rx,
+        event_sync_receiver.table_status_rx.clone(),
         table_components.read_state_filepath_remap,
-    )
-    .with_table_status(event_sync_receiver.table_status_rx.clone());
+    );
     let table_status_reader = TableStatusReader::new(
         &table_components.moonlink_table_config.iceberg_table_config,
         &table,
