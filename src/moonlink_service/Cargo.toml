@@ -9,7 +9,6 @@ profiling = ["console-subscriber"]
 
 default = ["storage-fs"]
 postgres-integration = []
-log-rotation-test = []
 
 storage-s3 = ["moonlink/storage-s3"]
 storage-gcs = ["moonlink/storage-gcs"]
@@ -19,10 +18,7 @@ storage-fs = ["moonlink/storage-fs"]
 anyhow = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
-axum = "0.8"
-clap = { workspace = true }
 console-subscriber = { version = "0.4", optional = true }
-flexi_logger = { version = "0.31", features = ["trc"] }
 moonlink = { workspace = true }
 moonlink_backend = { workspace = true }
 moonlink_error = { workspace = true }
@@ -35,7 +31,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-more-asserts = { workspace = true }
 parquet = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }

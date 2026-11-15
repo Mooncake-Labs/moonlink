@@ -19,9 +19,6 @@ impl TestService {
         let base_dir = tempfile::tempdir().unwrap();
         let config = ServiceConfig {
             base_path: base_dir.path().to_str().unwrap().to_string(),
-            data_server_uri: None,
-            tcp_port: None,
-            log_directory: None,
         };
         tokio::spawn(async move {
             start_with_config(config).await.unwrap();

@@ -7,80 +7,19 @@ pub use error::Result;
 
 use moonlink_backend::MoonlinkBackend;
 use moonlink_metadata_store::SqliteMetadataStore;
-use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
-use std::sync::{atomic::Ordering, Arc};
-use tokio::{
-    net::TcpListener,
-    signal::unix::{signal, SignalKind},
-};
+use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info};
-
-/// Default readiness probe port number.
-pub(crate) const READINESS_PROBE_PORT: u16 = 5050;
-
-/// Service initiation and execution status.
-struct ServiceStatus {
-    /// Whether the service starts up successfully.
-    ready: AtomicBool,
-}
 
 #[derive(Debug)]
 pub struct ServiceConfig {
     /// Base location for moonlink storage (including cache files, iceberg tables, etc).
+    /// The RPC server listens on `{base_path}/moonlink.sock`.
     pub base_path: String,
-    /// Data server URI, if assigned, all table scan file path should be remapped to conform data server.
-    pub data_server_uri: Option<String>,
-    /// Used for moonlink standalone deployment.
-    pub tcp_port: Option<u16>,
-    /// Log persistence directory.
-    pub log_directory: Option<String>,
-}
-
-impl ServiceConfig {
-    /// Whether moonlink is deployed as a standalone service.
-    pub fn in_standalone_deployment_mode(&self) -> bool {
-        self.tcp_port.is_some()
-    }
-}
-
-async fn service_ready(
-    axum::extract::State(state): axum::extract::State<Arc<ServiceStatus>>,
-) -> impl axum::response::IntoResponse {
-    if !state.ready.load(Ordering::SeqCst) {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready");
-    }
-    (axum::http::StatusCode::OK, "ready")
-}
-
-/// Setup readiness probe for moonlink backend service.
-fn setup_readiness_probe() -> Arc<ServiceStatus> {
-    let service_status = Arc::new(ServiceStatus {
-        ready: AtomicBool::new(false),
-    });
-    let service_status_clone = service_status.clone();
-    tokio::spawn(async move {
-        let app = axum::Router::new()
-            .route("/ready", axum::routing::get(service_ready))
-            .with_state(service_status_clone);
-        let addr = SocketAddr::from(([0, 0, 0, 0], READINESS_PROBE_PORT));
-        let listener = TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
-        info!("health server on {addr}");
-    });
-    service_status
 }
 
 pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
-    // Set logging config before service start.
-    let _guard = logging::init_logging(config.log_directory.clone());
-
-    // Register HTTP endpoint for readiness probe.
-    let service_status = if config.in_standalone_deployment_mode() {
-        Some(setup_readiness_probe())
-    } else {
-        None
-    };
+    logging::init_logging();
 
     // Initialize moonlink backend.
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
@@ -89,53 +28,24 @@ pub async fn start_with_config(config: ServiceConfig) -> Result<()> {
         .unwrap();
     let backend = MoonlinkBackend::new(
         config.base_path.clone(),
-        config.data_server_uri.clone(),
+        /*data_server_uri=*/ None,
         Box::new(sqlite_metadata_accessor),
     )
     .await?;
-
     let backend = Arc::new(backend);
 
     // Start RPC server on Unix socket
     let socket_path = std::path::PathBuf::from(&config.base_path).join("moonlink.sock");
-    let rpc_backend = backend.clone();
     let rpc_handle = tokio::spawn(async move {
-        if let Err(e) = rpc_server::start_unix_server(rpc_backend, socket_path).await {
+        if let Err(e) = rpc_server::start_unix_server(backend, socket_path).await {
             error!("RPC server failed: {}", e);
         }
     });
-
-    // Optionally start TCP server.
-    let tcp_api_handle = if let Some(port) = config.tcp_port {
-        let backend_clone = backend.clone();
-        let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-        // TODO(hjiang): Implement graceful shutdown for TCP server.
-        let handle = tokio::spawn(async move {
-            if let Err(e) = rpc_server::start_tcp_server(backend_clone, addr).await {
-                error!("TCP rpc server failed: {}", e);
-            }
-            println!("TCP rpc server starts at port {port}");
-        });
-        Some(handle)
-    } else {
-        None
-    };
-
-    // Moonlink and backend services have started.
-    if let Some(service_status) = service_status {
-        service_status.ready.store(true, Ordering::SeqCst);
-    }
     info!("Moonlink service started successfully");
 
     // Wait for termination signal
     let _ = sigterm.recv().await;
     info!("Received SIGTERM, shutting down...");
-
-    // Clean shutdown: abort background servers
-    if let Some(handle) = tcp_api_handle {
-        handle.abort();
-    }
-
     rpc_handle.abort();
 
     info!("Moonlink service shut down complete");

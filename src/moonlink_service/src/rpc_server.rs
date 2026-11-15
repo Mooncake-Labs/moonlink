@@ -5,11 +5,10 @@ use moonlink_error::{ErrorStatus, ErrorStruct};
 use moonlink_rpc::{read, write, Request, RpcResult, Table};
 use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::UnixListener;
 use tracing::info;
 
 fn is_disconnect(io: &std::io::Error) -> bool {
@@ -66,24 +65,6 @@ pub async fn start_unix_server(
             match handle_stream(backend, stream).await {
                 Err(e) if is_closed_connection(&e) => {}
                 Err(e) => panic!("Unexpected Unix RPC server error: {e}"),
-                Ok(()) => {}
-            }
-        });
-    }
-}
-
-/// Start the TCP socket RPC server and serve requests until the task is aborted.
-pub async fn start_tcp_server(backend: Arc<MoonlinkBackend>, addr: SocketAddr) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    info!("Moonlink RPC server listening on TCP: {}", addr);
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let backend = Arc::clone(&backend);
-        tokio::spawn(async move {
-            match handle_stream(backend, stream).await {
-                Err(e) if is_closed_connection(&e) => {}
-                Err(e) => panic!("Unexpected TCP RPC server error: {e}"),
                 Ok(()) => {}
             }
         });
