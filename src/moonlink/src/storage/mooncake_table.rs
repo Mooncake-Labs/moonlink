@@ -2214,6 +2214,9 @@ mod deleted_batch_flush_tests;
 mod stream_delete_tests;
 
 #[cfg(test)]
+mod commit_failure_tests;
+
+#[cfg(test)]
 mod lookup_key_tests;
 
 #[cfg(test)]
