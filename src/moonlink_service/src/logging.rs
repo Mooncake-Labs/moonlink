@@ -15,11 +15,5 @@ pub fn init_logging() {
         .with_ansi(false)
         .with_filter(env_filter);
 
-    // Compose the subscriber.
-    let subscriber = Registry::default().with(fmt_layer);
-
-    #[cfg(feature = "profiling")]
-    let subscriber = subscriber.with(console_subscriber::spawn());
-
-    let _ = subscriber.try_init();
+    let _ = Registry::default().with(fmt_layer).try_init();
 }
