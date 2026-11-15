@@ -120,7 +120,7 @@ cargo test -p moonlink_service --lib --features postgres-integration
 
 ## Waiting for replication
 
-A query at an LSN (and `mooncake.create_snapshot`) first waits until replication reaches that LSN. The Postgres backend cannot be cancelled while it waits, so the wait is bounded: after 30 seconds the query fails with a retryable error that names the requested and replicated LSNs. If your replication is often slower than that, raise the bound by setting `MOONLINK_LSN_WAIT_TIMEOUT_SECS` (whole seconds) in the environment Postgres is started with.
+A query at an LSN (and `mooncake.create_snapshot`) first waits until replication reaches that LSN. The Postgres backend cannot be cancelled while it waits, so the wait is bounded: after 30 seconds the query fails with a retryable error that names the requested and replicated LSNs. If your replication is often slower than that, raise the bound by setting `MOONLINK_LSN_WAIT_TIMEOUT_SECS` (whole seconds, at most one day) in the environment Postgres is started with.
 
 ## Durability and Recovery
 

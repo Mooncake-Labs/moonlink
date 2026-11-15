@@ -33,13 +33,28 @@ const DEFAULT_LSN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Environment variable overriding [`DEFAULT_LSN_WAIT_TIMEOUT`], in whole seconds.
 pub const LSN_WAIT_TIMEOUT_ENV: &str = "MOONLINK_LSN_WAIT_TIMEOUT_SECS";
 
+/// Larger LSN wait timeouts are clamped to this; it also keeps the value far from wrapping.
+const MAX_LSN_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn clamp_lsn_wait_timeout(timeout: Duration) -> Duration {
+    if timeout > MAX_LSN_WAIT_TIMEOUT {
+        tracing::warn!(
+            ?timeout,
+            "LSN wait timeout clamped to {}s",
+            MAX_LSN_WAIT_TIMEOUT.as_secs()
+        );
+        return MAX_LSN_WAIT_TIMEOUT;
+    }
+    timeout
+}
+
 /// The LSN wait timeout for a value of [`LSN_WAIT_TIMEOUT_ENV`]; unset or invalid gives the default.
 fn parse_lsn_wait_timeout(value: Option<&str>) -> Duration {
     let Some(value) = value else {
         return DEFAULT_LSN_WAIT_TIMEOUT;
     };
     match value.trim().parse::<u64>() {
-        Ok(secs) if secs > 0 => Duration::from_secs(secs),
+        Ok(secs) if secs > 0 => clamp_lsn_wait_timeout(Duration::from_secs(secs)),
         _ => {
             tracing::warn!(
                 value,
@@ -175,8 +190,10 @@ impl MoonlinkBackend {
     /// Override how long [`Self::scan_table`] and [`Self::create_snapshot`] wait for replication
     /// to reach the requested LSN.
     pub fn set_lsn_wait_timeout(&self, timeout: Duration) {
-        self.lsn_wait_timeout_ms
-            .store(timeout.as_millis() as u64, Ordering::Relaxed);
+        self.lsn_wait_timeout_ms.store(
+            clamp_lsn_wait_timeout(timeout).as_millis() as u64,
+            Ordering::Relaxed,
+        );
     }
 
     fn lsn_wait_timeout(&self) -> Duration {
@@ -592,6 +609,15 @@ mod lsn_wait_timeout_tests {
             Duration::from_secs(120)
         );
         assert_eq!(parse_lsn_wait_timeout(Some(" 5 ")), Duration::from_secs(5));
+        // Clamped instead of wrapping when converted to milliseconds.
+        for huge in ["86401", "18446744073709551615"] {
+            assert_eq!(parse_lsn_wait_timeout(Some(huge)), MAX_LSN_WAIT_TIMEOUT);
+        }
+        assert_eq!(clamp_lsn_wait_timeout(Duration::MAX), MAX_LSN_WAIT_TIMEOUT);
+        assert_eq!(
+            clamp_lsn_wait_timeout(Duration::from_secs(3600)),
+            Duration::from_secs(3600)
+        );
         for invalid in ["0", "-1", "30s", ""] {
             assert_eq!(
                 parse_lsn_wait_timeout(Some(invalid)),
