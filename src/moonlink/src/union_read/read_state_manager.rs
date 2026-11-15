@@ -191,11 +191,13 @@ impl ReadStateManager {
             };
 
             let snapshot_read_output = table_state_snapshot.request_read().await?;
-
-            self.last_read_lsn.store(effective_lsn, Ordering::Release);
-            *last_read_state_guard = snapshot_read_output
+            let read_state = snapshot_read_output
                 .take_as_read_state(self.read_state_filepath_remap.clone())
                 .await?;
+            // Advance the cached LSN only once the new state exists; otherwise a failed resolve
+            // would leave the previous snapshot cached under the new LSN.
+            *last_read_state_guard = read_state;
+            self.last_read_lsn.store(effective_lsn, Ordering::Release);
         }
         Ok(last_read_state_guard.clone())
     }
