@@ -436,6 +436,70 @@ mod tests {
         streamed_updates(false).await;
     }
 
+    /// Restart with streamed transactions (logical_decoding_work_mem 64kB) in the slot backlog
+    /// that one mirror already persisted and the other did not: postgres re-sends them, the first
+    /// mirror skips them below its recovered snapshot, the second applies them, each exactly once
+    /// (an INSERT and an UPDATE of every row).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn restart_replays_streamed_transactions_once_per_mirror() {
+        let (ctl, _h) = connect_to_postgres(&get_database_uri()).await;
+        ctl.simple_query("ALTER SYSTEM SET logical_decoding_work_mem = '64kB'")
+            .await
+            .unwrap();
+        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+        const N: i64 = 20_000;
+        client
+            .simple_query(&format!(
+                "BEGIN; INSERT INTO rr_a SELECT g, g::text FROM generate_series(1,{N}) g; \
+                 INSERT INTO rr_b SELECT g, g::text FROM generate_series(1,{N}) g; COMMIT;"
+            ))
+            .await
+            .unwrap();
+        let inserted = current_wal_lsn(&client).await;
+        persist(&backend, TABLE_A, inserted).await;
+        client
+            .simple_query(
+                "BEGIN; UPDATE rr_a SET name = 'updated'; UPDATE rr_b SET name = 'updated'; COMMIT;",
+            )
+            .await
+            .unwrap();
+        let updated = current_wal_lsn(&client).await;
+        // Only A persists both transactions; the slot stays behind them for B.
+        persist(&backend, TABLE_A, updated).await;
+
+        backend
+            .shutdown_connection(&get_database_uri(), false)
+            .await;
+        drop(backend);
+        let base_path = tmp.path().to_str().unwrap().to_string();
+        let backend = create_backend_from_base_path(base_path).await;
+        let mut got = Vec::new();
+        for t in [TABLE_A, TABLE_B] {
+            let state = tokio::time::timeout(
+                Duration::from_secs(120),
+                backend.scan_table(DATABASE.to_string(), t.to_string(), Some(updated)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{t} stopped applying changes"))
+            .unwrap();
+            got.push(id_counts_from_state_with_deletes(&state).await);
+        }
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        ctl.simple_query("ALTER SYSTEM RESET logical_decoding_work_mem")
+            .await
+            .unwrap();
+        ctl.simple_query("SELECT pg_reload_conf()").await.unwrap();
+        assert_eq!(got[0], counts(1, N), "table A (persisted) after restart");
+        assert_eq!(got[1], counts(1, N), "table B (replayed) after restart");
+    }
+
     /// After a restart, an errored mirror is restored as a placeholder and named by the periodic
     /// warning; a healthy mirror of the same database is not.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
