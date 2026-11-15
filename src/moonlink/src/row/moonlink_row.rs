@@ -218,33 +218,29 @@ impl MoonlinkRow {
         identity: &IdentityProp,
     ) -> bool {
         assert!(self.is_extracted_identity_row(identity));
-        let file = tokio::fs::File::open(file_name).await.unwrap();
-        let stream_builder = ParquetRecordBatchStreamBuilder::new(file).await.unwrap();
-        let row_groups = stream_builder.metadata().row_groups();
-        let mut target_row_group = 0;
-        let mut row_count: usize = 0;
-        for row_group in row_groups {
-            if row_count + row_group.num_rows() as usize > offset {
-                break;
-            }
-            row_count += row_group.num_rows() as usize;
-            target_row_group += 1;
-        }
-        let proj_mask = ProjectionMask::roots(
-            stream_builder.metadata().file_metadata().schema_descr(),
-            identity.get_key_indices(self.values.len()),
-        );
-        let mut reader = stream_builder
-            .with_row_groups(vec![target_row_group])
-            .with_offset(offset - row_count)
-            .with_limit(1)
-            .with_batch_size(1)
-            .with_projection(proj_mask.clone())
-            .build()
-            .unwrap();
-        let mut batch_reader = reader.next_row_group().await.unwrap().unwrap();
-        let batch = batch_reader.next().unwrap().unwrap();
+        let batch = read_parquet_row_at_offset(
+            file_name,
+            offset,
+            Some(identity.get_key_indices(self.values.len())),
+        )
+        .await;
         self.equals_record_batch_at_offset_impl(&batch, 0)
+    }
+
+    /// The row at `offset` of a parquet data file.
+    pub async fn read_from_parquet_at_offset(file_name: &str, offset: usize) -> MoonlinkRow {
+        let batch = read_parquet_row_at_offset(file_name, offset, /*columns=*/ None).await;
+        Self::from_record_batch(&batch).pop().unwrap()
+    }
+
+    /// A hash of the whole row independent of [`IdentityProp::get_lookup_key`], which tells apart
+    /// rows whose lookup keys collide without keeping the row.
+    pub fn full_row_fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for value in self.values.iter() {
+            value.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     pub fn equals_moonlink_row(&self, other: &Self, identity: &IdentityProp) -> bool {
@@ -264,6 +260,43 @@ impl MoonlinkRow {
             }
         }
     }
+}
+
+/// The row at `offset` of a parquet data file, with only `columns` (all when none).
+async fn read_parquet_row_at_offset(
+    file_name: &str,
+    offset: usize,
+    columns: Option<Vec<usize>>,
+) -> RecordBatch {
+    let file = tokio::fs::File::open(file_name).await.unwrap();
+    let stream_builder = ParquetRecordBatchStreamBuilder::new(file).await.unwrap();
+    let row_groups = stream_builder.metadata().row_groups();
+    let mut target_row_group = 0;
+    let mut row_count: usize = 0;
+    for row_group in row_groups {
+        if row_count + row_group.num_rows() as usize > offset {
+            break;
+        }
+        row_count += row_group.num_rows() as usize;
+        target_row_group += 1;
+    }
+    let proj_mask = match columns {
+        Some(columns) => ProjectionMask::roots(
+            stream_builder.metadata().file_metadata().schema_descr(),
+            columns,
+        ),
+        None => ProjectionMask::all(),
+    };
+    let mut reader = stream_builder
+        .with_row_groups(vec![target_row_group])
+        .with_offset(offset - row_count)
+        .with_limit(1)
+        .with_batch_size(1)
+        .with_projection(proj_mask)
+        .build()
+        .unwrap();
+    let mut batch_reader = reader.next_row_group().await.unwrap().unwrap();
+    batch_reader.next().unwrap().unwrap()
 }
 
 /// Identity for a single row.

@@ -838,17 +838,14 @@ impl SnapshotTableState {
             let mut processed_deletions = Vec::new();
             assert_eq!(deletions.len(), 1);
             let deletion = deletions.first().unwrap();
-            if deletion.row_identity.is_none() {
+            if deletion.row_identity.is_none() && deletion.identity_fingerprint.is_none() {
                 let candidate = candidates.pop();
                 if let Some(candidate) = candidate {
                     processed_deletions.push(Self::build_processed_deletion(deletion, candidate));
                 }
             } else {
                 for loc in &candidates {
-                    if self
-                        .matches_identity(loc, deletion.row_identity.as_ref().unwrap())
-                        .await
-                    {
+                    if self.deletion_matches(loc, deletion).await {
                         processed_deletions
                             .push(Self::build_processed_deletion(deletion, loc.clone()));
                         break;
@@ -856,6 +853,16 @@ impl SnapshotTableState {
                 }
             }
             return processed_deletions;
+        }
+        // A deletion of a streamed transaction that has not committed can find its row already
+        // deleted: postgres re-sends a transaction the table applied, and the table only skips the
+        // re-send at its commit. Such deletions resolve to what is left; the rest are dropped.
+        if super::transaction_stream::is_pending_streamed_lsn(deletions.first().unwrap().lsn)
+            && candidates.len() < deletions.len()
+        {
+            return self
+                .match_pending_deletions_to_fewer_candidates(deletions, candidates)
+                .await;
         }
         // This optimization is important when working with table without primary key.
         // Postgres never distinguish row with same value, so they will almost always be processed together.
@@ -873,15 +880,10 @@ impl SnapshotTableState {
                 let mut processed_deletions = Vec::new();
                 // multiple candidates → disambiguate via full row identity comparison.
                 for deletion in deletions.iter() {
-                    assert!(deletion.row_identity.is_some(), "deletion: {deletion:?}, candidates: {candidates:?}, batch_id_to_lsn: {batch_id_to_lsn:?}, file_id_to_lsn: {file_id_to_lsn:?}");
-                    let identity = deletion
-                        .row_identity
-                        .as_ref()
-                        .expect("row_identity required when multiple matches");
+                    assert!(deletion.row_identity.is_some() || deletion.identity_fingerprint.is_some(), "deletion: {deletion:?}, candidates: {candidates:?}, batch_id_to_lsn: {batch_id_to_lsn:?}, file_id_to_lsn: {file_id_to_lsn:?}");
                     let mut target_position: Option<RecordLocation> = None;
                     for (idx, loc) in candidates.iter().enumerate() {
-                        let matches = self.matches_identity(loc, identity).await;
-                        if matches {
+                        if self.deletion_matches(loc, deletion).await {
                             target_position = Some(candidates.swap_remove(idx));
                             break;
                         }
@@ -894,6 +896,36 @@ impl SnapshotTableState {
                 processed_deletions
             }
         }
+    }
+
+    /// Match uncommitted streamed deletions to the rows left for them, fewer than the deletions.
+    async fn match_pending_deletions_to_fewer_candidates(
+        &self,
+        deletions: &[RawDeletionRecord],
+        mut candidates: Vec<RecordLocation>,
+    ) -> Vec<ProcessedDeletionRecord> {
+        let mut processed_deletions = Vec::new();
+        for deletion in deletions {
+            if candidates.is_empty() {
+                break;
+            }
+            let mut target = None;
+            for (idx, loc) in candidates.iter().enumerate() {
+                if self.deletion_matches(loc, deletion).await {
+                    target = Some(candidates.swap_remove(idx));
+                    break;
+                }
+            }
+            if let Some(target) = target {
+                processed_deletions.push(Self::build_processed_deletion(deletion, target));
+            }
+        }
+        tracing::debug!(
+            deletions = deletions.len(),
+            resolved = processed_deletions.len(),
+            "uncommitted streamed deletions found rows already deleted (a re-sent transaction)"
+        );
+        processed_deletions
     }
 
     #[inline]
@@ -946,6 +978,38 @@ impl SnapshotTableState {
     }
 
     /// Verifies that `loc` matches the provided `identity`.
+    /// Whether the row at `loc` is the one `deletion` deletes, among rows with its lookup key.
+    async fn deletion_matches(&self, loc: &RecordLocation, deletion: &RawDeletionRecord) -> bool {
+        if let Some(identity) = &deletion.row_identity {
+            return self.matches_identity(loc, identity).await;
+        }
+        match deletion.identity_fingerprint {
+            Some(fingerprint) => self.read_row(loc).await.full_row_fingerprint() == fingerprint,
+            None => true,
+        }
+    }
+
+    /// The row at `loc`.
+    async fn read_row(&self, loc: &RecordLocation) -> MoonlinkRow {
+        match loc {
+            RecordLocation::MemoryBatch(batch_id, row_id) => {
+                let batch = self.batches.get(batch_id).expect("missing batch");
+                let data = batch.data.as_ref().expect("batch missing data");
+                MoonlinkRow::from_record_batch(&data.slice(*row_id, 1))
+                    .pop()
+                    .unwrap()
+            }
+            RecordLocation::DiskFile(file_id, row_id) => {
+                let (file, _) = self
+                    .current_snapshot
+                    .disk_files
+                    .get_key_value(file_id)
+                    .expect("missing disk file");
+                MoonlinkRow::read_from_parquet_at_offset(file.file_path(), *row_id).await
+            }
+        }
+    }
+
     async fn matches_identity(&self, loc: &RecordLocation, identity: &MoonlinkRow) -> bool {
         match loc {
             RecordLocation::MemoryBatch(batch_id, row_id) => {

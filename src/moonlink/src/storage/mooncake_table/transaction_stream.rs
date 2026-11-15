@@ -11,16 +11,20 @@ use more_asserts as ma;
 /// Deletes are more complex,
 /// 1. row belong to stream state memslice, directly delete it.
 /// 2. row belong to stream state flushed file, add to `local_deletions`
-/// 3. row belong to the main table, add to `pending_deletions_in_main_table`; at commit time they are
-///    applied to the main mem slice, or handed to the snapshot (rows already flushed).
+/// 3. row belong to main table's flushed files, directly pushed to snapshot_task.new_deletions and let snapshot handle it.
+/// 4. row belong to main table's memslice, add to `pending_deletions_in_main_mem_slice`, and handle at commit time
 ///
-/// A transaction's deletions of main-table rows stay here until it commits: postgres can re-send a
-/// transaction under the same xid after a reconnect, and nothing of an attempt that is aborted (or
-/// a re-send that is skipped) may reach the table.
+/// Postgres can re-send a transaction under the same xid after a reconnect, so each attempt has an
+/// id of its own: the deletions handed to the snapshot carry it as their pending LSN (see
+/// [`get_lsn_for_pending_attempt`]), and committing or aborting an attempt stamps or purges only its
+/// own. Handing them to the snapshot early keeps memory bounded: it resolves them to positions and
+/// drops their row identity (the whole row for a table without a key).
 pub(crate) struct TransactionStreamState {
+    /// Id of this attempt of the transaction.
+    attempt_id: u32,
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
-    pending_deletions_in_main_table: Vec<RawDeletionRecord>,
+    pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
     index_bloom_filter: BloomFilter,
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
@@ -45,6 +49,7 @@ pub enum TransactionStreamStatus {
 
 pub enum TransactionStreamOutput {
     Commit(TransactionStreamCommit),
+    /// Abort of the attempt with this id.
     Abort(u32),
 }
 
@@ -59,7 +64,8 @@ impl TransactionStreamOutput {
 }
 
 pub struct TransactionStreamCommit {
-    xact_id: u32,
+    /// Attempt of the streamed transaction; none for a batch ingestion.
+    attempt_id: Option<u32>,
     commit_lsn: u64,
     flushed_file_index: MooncakeIndex,
     flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
@@ -74,7 +80,7 @@ impl TransactionStreamCommit {
         lsn: u64,
     ) -> Self {
         Self {
-            xact_id: 0, // Unused.
+            attempt_id: None,
             commit_lsn: lsn,
             flushed_file_index: MooncakeIndex {
                 in_memory_index: HashSet::new(),
@@ -117,15 +123,17 @@ impl TransactionStreamCommit {
 
 impl TransactionStreamState {
     pub(crate) fn new(
+        attempt_id: u32,
         schema: Arc<Schema>,
         batch_size: usize,
         identity: IdentityProp,
         streaming_counter: Arc<BatchIdCounter>,
     ) -> Self {
         Self {
+            attempt_id,
             mem_slice: MemSlice::new(schema, batch_size, identity, streaming_counter),
             local_deletions: Vec::new(),
-            pending_deletions_in_main_table: Vec::new(),
+            pending_deletions_in_main_mem_slice: Vec::new(),
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             stream_indices: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
@@ -139,25 +147,35 @@ impl TransactionStreamState {
 
 pub(crate) const LSN_START_FOR_STREAMING_XACT: u64 = 0xFFFF_FFFF_0000_0000;
 // DevNote:
-// This is a trick to track xact of uncommitted deletions
+// This is a trick to track the attempt of uncommitted deletions
 // we set first 32 bits to 1, so it will be 'uncommitted' as the value is larger than any possible lsn.
-// And we use the last 32 bits to store the xact_id, so we can find deletion for a given xact_id.
-fn get_lsn_for_pending_xact(xact_id: u32) -> u64 {
-    LSN_START_FOR_STREAMING_XACT | xact_id as u64
+// And we use the last 32 bits to store the attempt id, so we can find deletion for a given attempt.
+fn get_lsn_for_pending_attempt(attempt_id: u32) -> u64 {
+    LSN_START_FOR_STREAMING_XACT | attempt_id as u64
+}
+
+/// Whether `lsn` is the pending LSN of a streamed transaction that has not committed.
+pub(crate) fn is_pending_streamed_lsn(lsn: u64) -> bool {
+    lsn >= LSN_START_FOR_STREAMING_XACT
 }
 
 impl MooncakeTable {
     fn get_or_create_stream_state(&mut self, xact_id: u32) -> &mut TransactionStreamState {
         let metadata = self.metadata.clone();
+        let next_attempt_id = &mut self.next_stream_attempt_id;
+        let streaming_batch_id_counter = &self.streaming_batch_id_counter;
 
         self.transaction_stream_states
             .entry(xact_id)
             .or_insert_with(|| {
+                let attempt_id = *next_attempt_id;
+                *next_attempt_id = next_attempt_id.wrapping_add(1);
                 TransactionStreamState::new(
+                    attempt_id,
                     metadata.schema.clone(),
                     metadata.config.batch_size,
                     metadata.config.row_identity.clone(),
-                    Arc::clone(&self.streaming_batch_id_counter),
+                    Arc::clone(streaming_batch_id_counter),
                 )
             })
     }
@@ -215,11 +233,13 @@ impl MooncakeTable {
         // Perform delete operation.
         let lookup_key = self.metadata.config.row_identity.get_lookup_key(&row);
         let row_identity = self.metadata.config.row_identity.clone();
+        let attempt_id = self.get_or_create_stream_state(xact_id).attempt_id;
         let mut record = RawDeletionRecord {
             lookup_key,
-            lsn: get_lsn_for_pending_xact(xact_id), // at commit time we will update this with the actual lsn
+            lsn: get_lsn_for_pending_attempt(attempt_id), // at commit time we will update this with the actual lsn
             pos: None,
             row_identity: row_identity.extract_identity_columns(row),
+            identity_fingerprint: None,
             delete_if_exists: false,
         };
 
@@ -324,8 +344,35 @@ impl MooncakeTable {
                 .await
         };
 
-        let stream_state = self.get_or_create_stream_state(xact_id);
-        stream_state.pending_deletions_in_main_table.push(record);
+        if record.pos.is_some() {
+            self.get_or_create_stream_state(xact_id)
+                .pending_deletions_in_main_mem_slice
+                .push(record);
+        } else {
+            record.compact_full_row_identity(&row_identity);
+            self.next_snapshot_task.new_deletions.push(record);
+        }
+    }
+
+    /// Deletion records no mooncake snapshot has resolved yet (in stream states and the next
+    /// snapshot task), and how many of them hold a whole row.
+    #[cfg(test)]
+    pub(crate) fn unresolved_deletion_records(&self) -> (usize, usize) {
+        let records = self.next_snapshot_task.new_deletions.iter().chain(
+            self.transaction_stream_states
+                .values()
+                .flat_map(|state| state.pending_deletions_in_main_mem_slice.iter()),
+        );
+        let (mut count, mut holding_rows) = (0, 0);
+        for record in records {
+            count += 1;
+            if record.row_identity.is_some()
+                && self.metadata.config.row_identity == IdentityProp::FullRow
+            {
+                holding_rows += 1;
+            }
+        }
+        (count, holding_rows)
     }
 
     /// Whether a streamed transaction with this xid is in progress (not committed or aborted).
@@ -359,20 +406,27 @@ impl MooncakeTable {
         // attempt may stay keyed by the xid: drop its state (with its deletions) now, and recognize
         // the results of its flushes still in flight by their event ids. Only an attempt in
         // progress is aborted; a committed one whose flushes are in flight is not keyed by the xid.
-        if let Some(stream_state) = self.transaction_stream_states.remove(&xact_id) {
-            self.aborted_stream_flushes
-                .extend(stream_state.ongoing_flushes);
-            let data_files = stream_state
-                .flushed_files
-                .keys()
-                .map(|file| file.file_path().clone())
-                .collect();
-            self.delete_aborted_stream_files(data_files, stream_state.stream_indices.file_indices);
-        }
+        let Some(stream_state) = self.transaction_stream_states.remove(&xact_id) else {
+            return;
+        };
+        self.aborted_stream_flushes
+            .extend(stream_state.ongoing_flushes);
+        let data_files = stream_state
+            .flushed_files
+            .keys()
+            .map(|file| file.file_path().clone())
+            .collect();
+        self.delete_aborted_stream_files(data_files, stream_state.stream_indices.file_indices);
 
+        // The attempt's deletions not handed to a snapshot yet go now; those already resolved go
+        // when the snapshot applies the abort.
+        let pending_lsn = get_lsn_for_pending_attempt(stream_state.attempt_id);
+        self.next_snapshot_task
+            .new_deletions
+            .retain(|deletion| deletion.lsn != pending_lsn);
         self.next_snapshot_task
             .new_streaming_xact
-            .push(TransactionStreamOutput::Abort(xact_id));
+            .push(TransactionStreamOutput::Abort(stream_state.attempt_id));
     }
 
     /// Drains the current mem slice and prepares a disk slice for flushing.
@@ -662,14 +716,22 @@ impl MooncakeTable {
 
         // We update our delete records with the last lsn of the transaction
         // Note that in the stream case we dont have this until commit time
-        for deletion in stream_state.pending_deletions_in_main_table.iter_mut() {
+        for deletion in stream_state.pending_deletions_in_main_mem_slice.iter_mut() {
+            let pos = deletion.pos.unwrap();
             // If the row is no longer in memslice, it must be flushed, let snapshot task find it.
-            if let Some(pos) = deletion.pos {
-                if !self.mem_slice.try_delete_at_pos(pos) {
-                    deletion.pos = None;
-                }
+            if !self.mem_slice.try_delete_at_pos(pos) {
+                deletion.pos = None;
+                deletion.compact_full_row_identity(&self.metadata.config.row_identity);
             }
             deletion.lsn = lsn - 1;
+        }
+        // Deletions of flushed rows not picked up by a snapshot yet; the snapshot stamps those it
+        // already resolved when it applies the commit.
+        let pending_lsn = get_lsn_for_pending_attempt(stream_state.attempt_id);
+        for deletion in self.next_snapshot_task.new_deletions.iter_mut() {
+            if deletion.lsn == pending_lsn {
+                deletion.lsn = lsn - 1;
+            }
         }
 
         for deletion in stream_state.local_deletions.iter_mut() {
@@ -682,12 +744,14 @@ impl MooncakeTable {
         }
 
         let commit = TransactionStreamCommit {
-            xact_id,
+            attempt_id: Some(stream_state.attempt_id),
             commit_lsn: lsn,
             flushed_file_index: stream_state.stream_indices.clone(),
             flushed_files: stream_state.flushed_files.clone(),
             local_deletions: std::mem::take(&mut stream_state.local_deletions),
-            pending_deletions: std::mem::take(&mut stream_state.pending_deletions_in_main_table),
+            pending_deletions: std::mem::take(
+                &mut stream_state.pending_deletions_in_main_mem_slice,
+            ),
         };
         self.next_snapshot_task
             .new_streaming_xact
@@ -788,26 +852,25 @@ impl SnapshotTableState {
                     // add pending deletions
                     task.new_deletions
                         .extend(commit.pending_deletions.into_iter());
-                    // set lsn for pending deletions
-                    self.uncommitted_deletion_log.iter_mut().for_each(|row| {
-                        if let Some(deletion) = row {
-                            if deletion.lsn == get_lsn_for_pending_xact(commit.xact_id) {
-                                deletion.lsn = commit.commit_lsn - 1;
+                    // set lsn for the attempt's deletions resolved by earlier snapshots (those
+                    // still in this task were stamped at the commit)
+                    if let Some(attempt_id) = commit.attempt_id {
+                        let pending_lsn = get_lsn_for_pending_attempt(attempt_id);
+                        self.uncommitted_deletion_log.iter_mut().for_each(|row| {
+                            if let Some(deletion) = row {
+                                if deletion.lsn == pending_lsn {
+                                    deletion.lsn = commit.commit_lsn - 1;
+                                }
                             }
-                        }
-                    });
-                    task.new_deletions.iter_mut().for_each(|deletion| {
-                        if deletion.lsn == get_lsn_for_pending_xact(commit.xact_id) {
-                            deletion.lsn = commit.commit_lsn - 1;
-                        }
-                    });
+                        });
+                    }
                 }
-                // The aborted attempt's deletions in this task were dropped at the abort; any left
-                // belong to a re-sent attempt of the same xid.
-                TransactionStreamOutput::Abort(xact_id) => {
-                    self.uncommitted_deletion_log.retain(|deletion| {
-                        deletion.as_ref().unwrap().lsn != get_lsn_for_pending_xact(xact_id)
-                    });
+                // The attempt's deletions resolved by earlier snapshots; those still in this task
+                // were dropped at the abort.
+                TransactionStreamOutput::Abort(attempt_id) => {
+                    let pending_lsn = get_lsn_for_pending_attempt(attempt_id);
+                    self.uncommitted_deletion_log
+                        .retain(|deletion| deletion.as_ref().unwrap().lsn != pending_lsn);
                 }
             }
         }

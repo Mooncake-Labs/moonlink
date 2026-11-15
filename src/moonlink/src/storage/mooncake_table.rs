@@ -482,6 +482,9 @@ pub struct MooncakeTable {
     committing_stream_flushes: HashMap<uuid::Uuid, u64>,
     next_committing_stream_id: u64,
 
+    /// Id of the next streamed transaction attempt (see [`TransactionStreamState`]).
+    next_stream_attempt_id: u32,
+
     /// Auto increment id for generating unique file ids.
     /// Note, these ids is only used locally, and not persisted.
     next_file_id: u32,
@@ -649,6 +652,7 @@ impl MooncakeTable {
             committing_streams: HashMap::new(),
             committing_stream_flushes: HashMap::new(),
             next_committing_stream_id: 0,
+            next_stream_attempt_id: 0,
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
             next_file_id,
@@ -1313,12 +1317,14 @@ impl MooncakeTable {
                 .row_identity
                 .extract_identity_columns(row),
             delete_if_exists,
+            identity_fingerprint: None,
         };
         let pos = self
             .mem_slice
             .delete(&record, &self.metadata.config.row_identity)
             .await;
         record.pos = pos;
+        record.compact_full_row_identity(&self.metadata.config.row_identity);
         self.next_snapshot_task.new_deletions.push(record);
     }
 

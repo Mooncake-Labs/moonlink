@@ -1652,6 +1652,201 @@ async fn test_resent_delete_after_snapshot_and_abort_is_applied() {
     .expect("a mooncake snapshot never completed (snapshot task died)");
 }
 
+/// Stream-deletes the rows `ids` of `table` under `xact_id` (rows are `id` with a 200-byte name),
+/// running a mooncake snapshot after every `snapshot_every` deletions if set, as the table handler's
+/// tick does when it keeps up. Returns the most deletion records the table held unresolved at once,
+/// and the most of those holding a whole row.
+async fn stream_delete_rows(
+    table: &mut MooncakeTable,
+    rx: &mut mpsc::Receiver<TableEvent>,
+    xact_id: u32,
+    ids: std::ops::Range<i32>,
+    snapshot_every: Option<usize>,
+) -> (usize, usize) {
+    let name = "x".repeat(200);
+    let (mut most_records, mut most_holding_rows) = (0, 0);
+    for (n, id) in ids.enumerate() {
+        table
+            .delete_in_stream_batch(test_row(id, &name, id), xact_id)
+            .await;
+        let (records, holding_rows) = table.unresolved_deletion_records();
+        most_records = most_records.max(records);
+        most_holding_rows = most_holding_rows.max(holding_rows);
+        if snapshot_every.is_some_and(|every| (n + 1) % every == 0) {
+            create_mooncake_snapshot_for_test(table, rx).await;
+        }
+    }
+    (most_records, most_holding_rows)
+}
+
+/// A table without a key (REPLICA IDENTITY FULL) whose `count` rows are flushed and snapshotted.
+async fn full_identity_table_with_rows(
+    name: &str,
+    count: i32,
+) -> (TestContext, MooncakeTable, mpsc::Receiver<TableEvent>) {
+    let context = TestContext::new(name);
+    let mut table = test_table(&context, "table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    let row_name = "x".repeat(200);
+    append_rows(
+        &mut table,
+        (0..count).map(|id| test_row(id, &row_name, id)).collect(),
+    )
+    .unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    (context, table, rx)
+}
+
+/// Testing scenario: a large streamed DELETE of a table without a key, with no snapshot while it
+/// streams (snapshots falling behind). Its deletion records wait for a snapshot, but none of them
+/// keeps the deleted row; at its commit every row is deleted.
+#[tokio::test]
+async fn test_streamed_delete_keeps_no_rows_until_resolved() {
+    const ROWS: i32 = 20_000;
+    let (_context, mut table, mut rx) = full_identity_table_with_rows("compact_delete", ROWS).await;
+    let xact_id = 7;
+    let (most_records, most_holding_rows) = stream_delete_rows(
+        &mut table,
+        &mut rx,
+        xact_id,
+        0..ROWS,
+        /*snapshot_every=*/ None,
+    )
+    .await;
+    assert_eq!(most_records, ROWS as usize);
+    assert_eq!(most_holding_rows, 0, "deletion records held whole rows");
+    commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[]).await;
+}
+
+/// Testing scenario: as above with the snapshots keeping up: they resolve the deletions as they
+/// stream, so the unresolved records are bounded by the snapshot interval.
+#[tokio::test]
+async fn test_streamed_delete_records_are_resolved_while_streaming() {
+    const ROWS: i32 = 20_000;
+    let (_context, mut table, mut rx) = full_identity_table_with_rows("bounded_delete", ROWS).await;
+    let xact_id = 7;
+    let (most_records, _) =
+        stream_delete_rows(&mut table, &mut rx, xact_id, 0..ROWS, Some(1000)).await;
+    assert!(
+        most_records <= 1000,
+        "{most_records} deletion records unresolved at once"
+    );
+    commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[]).await;
+}
+
+/// Testing scenario: postgres re-sends an applied streamed DELETE after a reconnect, with snapshots
+/// while it streams; its deletions find their rows gone. Skipping it at its commit leaves the
+/// table as the first attempt left it.
+#[tokio::test]
+async fn test_resent_streamed_delete_resolved_while_streaming_is_inert() {
+    const ROWS: i32 = 5_000;
+    let (_context, mut table, mut rx) =
+        full_identity_table_with_rows("resend_resolved", ROWS + 2).await;
+    let xact_id = 7;
+    stream_delete_rows(&mut table, &mut rx, xact_id, 0..ROWS, Some(1000)).await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        stream_delete_rows(&mut table, &mut rx, xact_id, 0..ROWS, Some(1000)).await;
+        table.abort_in_stream_batch(xact_id);
+        create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    })
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+    verify_snapshot_ids(&mut table, &[ROWS, ROWS + 1]).await;
+}
+
+/// Testing scenario: streamed and non-streamed deletions of a table without a key, of identical
+/// rows among others with the same values elsewhere: each deletes exactly one of its copies, in
+/// memory and on disk, with their rows replaced by fingerprints.
+#[tokio::test]
+async fn test_compacted_deletions_of_duplicate_rows() {
+    let context = TestContext::new("compacted_duplicates");
+    let mut table = test_table(&context, "table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    // Three copies of row 1 and one of row 2 on disk.
+    append_rows(
+        &mut table,
+        vec![
+            test_row(1, "a", 1),
+            test_row(1, "a", 1),
+            test_row(1, "a", 1),
+            test_row(2, "b", 2),
+        ],
+    )
+    .unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+
+    table.delete_in_stream_batch(test_row(1, "a", 1), 7).await;
+    table.delete_in_stream_batch(test_row(2, "b", 2), 7).await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, 7, /*lsn=*/ 5).await;
+    table.delete(test_row(1, "a", 1), /*lsn=*/ 6).await;
+    table.commit(/*lsn=*/ 7);
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[1]).await;
+}
+
+/// The fingerprint of a row read back from a flushed data file or an in-memory batch is the one
+/// of the row as it was written, which is what tells rows with colliding lookup keys apart.
+#[tokio::test]
+async fn test_row_fingerprints_survive_flush() {
+    let context = TestContext::new("fingerprint_round_trip");
+    let mut table = test_table(&context, "table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    // Batches hold two rows; the third leaves the first batch complete in memory.
+    let rows = vec![test_row(1, "a", 10), test_row(2, &"z".repeat(300), -3)];
+    append_rows(&mut table, rows.clone()).unwrap();
+    append_rows(&mut table, vec![test_row(3, "c", 0)]).unwrap();
+    table.commit(/*lsn=*/ 1);
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    {
+        let snapshot = table.snapshot.read().await;
+        let batch = snapshot
+            .batches
+            .values()
+            .find_map(|batch| batch.data.clone())
+            .expect("an in-memory batch");
+        let read_back = MoonlinkRow::from_record_batch(&batch);
+        for (written, read) in rows.iter().zip(read_back.iter()) {
+            assert_eq!(written.full_row_fingerprint(), read.full_row_fingerprint());
+        }
+    }
+    flush_table_and_sync(&mut table, &mut rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    let snapshot = table.snapshot.read().await;
+    let file = snapshot.current_snapshot.disk_files.keys().next().unwrap();
+    let mut read_back = Vec::new();
+    for offset in 0..3 {
+        let read = MoonlinkRow::read_from_parquet_at_offset(file.file_path(), offset).await;
+        read_back.push(read.full_row_fingerprint());
+    }
+    for written in rows.iter() {
+        assert!(read_back.contains(&written.full_row_fingerprint()));
+    }
+    assert_ne!(
+        rows[0].full_row_fingerprint(),
+        rows[1].full_row_fingerprint()
+    );
+}
+
 fn files_in(dir: &std::path::Path) -> std::collections::BTreeSet<std::path::PathBuf> {
     std::fs::read_dir(dir)
         .unwrap()

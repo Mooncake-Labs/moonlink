@@ -511,6 +511,78 @@ mod tests {
         restart_replays_streamed_transactions(false).await;
     }
 
+    /// Reset the peak resident memory of the process (VmHWM) to its current size.
+    fn reset_peak_rss() {
+        std::fs::write("/proc/self/clear_refs", "5").unwrap();
+    }
+
+    /// Peak resident memory of the process since the last reset.
+    fn peak_rss_bytes() -> u64 {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let line = status.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
+        line.split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            * 1024
+    }
+
+    /// Measurement, not run by default (set MOONLINK_MEASURE_STREAMED_DELETE_ROWS): the peak memory a
+    /// streamed DELETE of every row of a table without a key (REPLICA IDENTITY FULL, 200-byte rows)
+    /// adds to the process until the mirror has applied it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn streamed_delete_peak_memory() {
+        let Some(rows) = std::env::var("MOONLINK_MEASURE_STREAMED_DELETE_ROWS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+        else {
+            eprintln!("skipped: set MOONLINK_MEASURE_STREAMED_DELETE_ROWS to measure");
+            return;
+        };
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        client
+            .simple_query(&format!(
+                "INSERT INTO rr_a SELECT g, repeat('x', 200) || g FROM generate_series(1, {rows}) g;"
+            ))
+            .await
+            .unwrap();
+        let inserted = current_wal_lsn(&client).await;
+        persist(&backend, TABLE_A, inserted).await;
+
+        let _work_mem = LogicalDecodingWorkMem::set("64kB").await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        reset_peak_rss();
+        let rss_before = peak_rss_bytes();
+        let start = std::time::Instant::now();
+        client.simple_query("DELETE FROM rr_a;").await.unwrap();
+        let deleted = current_wal_lsn(&client).await;
+        let state = tokio::time::timeout(
+            Duration::from_secs(3600),
+            backend.scan_table(DATABASE.to_string(), TABLE_A.to_string(), Some(deleted)),
+        )
+        .await
+        .expect("the mirror stopped applying changes")
+        .unwrap();
+        let elapsed = start.elapsed();
+        let peak = peak_rss_bytes();
+        let left = id_counts_from_state_with_deletes(&state).await;
+        drop(state);
+        cleanup(&backend, &[TABLE_A]).await;
+        eprintln!(
+            "STREAMED_DELETE_MEMORY rows={rows} peak_rss={} MiB before={} MiB growth={} MiB ({} B/row) applied_in={:.1}s",
+            peak >> 20,
+            rss_before >> 20,
+            peak.saturating_sub(rss_before) >> 20,
+            peak.saturating_sub(rss_before) / rows as u64,
+            elapsed.as_secs_f64()
+        );
+        assert!(left.is_empty(), "{} rows left", left.len());
+    }
+
     /// After a restart, an errored mirror is restored as a placeholder and named by the periodic
     /// warning; a healthy mirror of the same database is not.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -189,6 +189,7 @@ mod tests {
         let record_loc = mem_index.fast_delete(&RawDeletionRecord {
             lookup_key: 0,
             row_identity: None,
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -199,6 +200,7 @@ mod tests {
         let deletion_record = RawDeletionRecord {
             lookup_key: 10,
             row_identity: None,
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -238,6 +240,7 @@ mod tests {
         let record_loc = mem_index.fast_delete(&RawDeletionRecord {
             lookup_key: 0,
             row_identity: Some(non_existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -248,6 +251,7 @@ mod tests {
         let record_loc = mem_index.fast_delete(&RawDeletionRecord {
             lookup_key: 10,
             row_identity: Some(non_existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -258,6 +262,7 @@ mod tests {
         let deletion_record = RawDeletionRecord {
             lookup_key: 10,
             row_identity: Some(existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -286,6 +291,7 @@ mod tests {
         let record_locs = mem_index.find_record(&RawDeletionRecord {
             lookup_key: 0,
             row_identity: None,
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -296,6 +302,7 @@ mod tests {
         let deletion_record = RawDeletionRecord {
             lookup_key: 10,
             row_identity: None,
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -329,6 +336,7 @@ mod tests {
         let record_loc = mem_index.find_record(&RawDeletionRecord {
             lookup_key: 0,
             row_identity: Some(non_existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -339,6 +347,7 @@ mod tests {
         let record_loc = mem_index.find_record(&RawDeletionRecord {
             lookup_key: 10,
             row_identity: Some(non_existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -349,6 +358,7 @@ mod tests {
         let deletion_record = RawDeletionRecord {
             lookup_key: 10,
             row_identity: Some(existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -382,6 +392,7 @@ mod tests {
         let record_loc = mem_index.find_record(&RawDeletionRecord {
             lookup_key: 0,
             row_identity: Some(non_existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,
@@ -392,6 +403,7 @@ mod tests {
         let deletion_record = RawDeletionRecord {
             lookup_key: 10,
             row_identity: Some(existent_row.clone()),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0,
             delete_if_exists: false,

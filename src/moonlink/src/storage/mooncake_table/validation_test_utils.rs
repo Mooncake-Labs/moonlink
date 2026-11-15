@@ -154,6 +154,7 @@ pub(crate) async fn check_row_index_nonexistent(snapshot: &Snapshot, row: &Moonl
                 .config
                 .row_identity
                 .extract_identity_for_key(row),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0, // LSN has nothing to do with deletion record search
             delete_if_exists: false,
@@ -181,6 +182,7 @@ pub(crate) async fn check_row_index_on_disk(
                 .config
                 .row_identity
                 .extract_identity_for_key(row),
+            identity_fingerprint: None,
             pos: None,
             lsn: 0, // LSN has nothing to do with deletion record search
             delete_if_exists: false,
