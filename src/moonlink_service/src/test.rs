@@ -390,21 +390,34 @@ mod postgres {
         pg::drop_source_table(&pg_client, table).await;
     }
 
-    /// A second ScanTableBegin for the same table on one connection replaces the first scan
-    /// instead of killing the connection, and the files of the returned scan stay readable.
+    /// Files of a scan's payload, decoded the way duckdb_mooncake reads them.
+    fn payload_files(serialized_read_state: &[u8]) -> Vec<String> {
+        let (data_files, puffin_files, _, _) =
+            decode_serialized_read_state_for_testing(serialized_read_state.to_vec());
+        data_files.into_iter().chain(puffin_files).collect()
+    }
+
+    /// Two overlapping scans of one table on one connection (two transactions of a catalog
+    /// connection) across a snapshot change: neither Begin nor the first End releases the files
+    /// of the scan that is still open, and the last End releases everything.
     #[tokio::test]
     #[serial]
-    async fn test_duplicate_scan_begin_supersedes_previous_scan() {
+    async fn test_overlapping_scans_of_one_table_keep_their_files() {
         let pg_client = pg::connect().await;
-        let table = "service_duplicate_scan_test";
+        let table = "service_overlapping_scans_test";
         pg::create_source_table(&pg_client, table, 3).await;
 
         let service = TestService::start().await;
         let mut stream = service.connect().await;
         create_mirror_table(&mut stream, table, "{}").await.unwrap();
-        let lsn = pg::current_wal_lsn(&pg_client).await;
 
-        let _first = moonlink_rpc::scan_table_begin(
+        // Unflushed rows, so each scan gets its own in-memory temp parquet.
+        let insert = |ids: &str| {
+            format!("INSERT INTO {table} SELECT i, 'n' FROM generate_series({ids}) AS i;")
+        };
+        pg_client.simple_query(&insert("4, 5")).await.unwrap();
+        let lsn = pg::current_wal_lsn(&pg_client).await;
+        let first = moonlink_rpc::scan_table_begin(
             &mut stream,
             DATABASE.to_string(),
             table.to_string(),
@@ -412,6 +425,11 @@ mod postgres {
         )
         .await
         .unwrap();
+        assert_eq!(count_rows_in_read_state(first.clone()), 5);
+        let first_files = payload_files(&first);
+
+        pg_client.simple_query(&insert("6, 7")).await.unwrap();
+        let lsn = pg::current_wal_lsn(&pg_client).await;
         let second = moonlink_rpc::scan_table_begin(
             &mut stream,
             DATABASE.to_string(),
@@ -420,11 +438,50 @@ mod postgres {
         )
         .await
         .unwrap();
-        assert_eq!(count_rows_in_read_state(second), 3);
+        assert_eq!(count_rows_in_read_state(second.clone()), 7);
+        let only_first: Vec<String> = first_files
+            .iter()
+            .filter(|f| !payload_files(&second).contains(f))
+            .cloned()
+            .collect();
+        assert!(
+            !only_first.is_empty(),
+            "precondition: the first scan has files of its own"
+        );
+        let all_exist = |files: &[String]| files.iter().all(|f| std::path::Path::new(f).exists());
+
+        // Releases happen in spawned tasks; give them time to run before checking.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            all_exist(&first_files),
+            "a second ScanTableBegin released the first scan's files"
+        );
         moonlink_rpc::scan_table_end(&mut stream, DATABASE.to_string(), table.to_string())
             .await
             .unwrap();
-        assert_eq!(scan_row_count(&mut stream, table, lsn).await, 3);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            all_exist(&first_files) || all_exist(&payload_files(&second)),
+            "one ScanTableEnd released both open scans"
+        );
+        moonlink_rpc::scan_table_end(&mut stream, DATABASE.to_string(), table.to_string())
+            .await
+            .unwrap();
+        assert_eq!(scan_row_count(&mut stream, table, lsn).await, 7);
+
+        // With both scans ended and the cache on the newer snapshot, the first scan's own files go.
+        let mut released = false;
+        for _ in 0..100 {
+            if only_first.iter().all(|f| !std::path::Path::new(f).exists()) {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            released,
+            "files of ended scans were never released: {only_first:?}"
+        );
 
         moonlink_rpc::drop_table(&mut stream, DATABASE.to_string(), table.to_string())
             .await

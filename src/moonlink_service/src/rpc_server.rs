@@ -77,6 +77,9 @@ pub async fn start_unix_server(
     }
 }
 
+/// Bound on concurrently open scans of one table per connection.
+const MAX_OPEN_SCANS_PER_TABLE: usize = 64;
+
 /// Largest request frame accepted. Real requests are a few hundred bytes; the cap stops a
 /// garbage length prefix from allocating up to 4 GiB.
 const MAX_REQUEST_FRAME_BYTES: usize = 64 << 20;
@@ -168,7 +171,9 @@ where
 {
     // Split so a pending ScanTableBegin can notice the peer closing while it waits for an LSN.
     let (mut reader, mut stream) = tokio::io::split(stream);
-    let mut map = HashMap::new();
+    // Open scans per table. A client may overlap scans of one table (two transactions on one
+    // connection); each ScanTableEnd releases one of them, which one does not matter.
+    let mut open_scans: HashMap<(String, String), Vec<_>> = HashMap::new();
     loop {
         let request = match read_request(&mut reader).await? {
             Incoming::Request(request) => request,
@@ -297,13 +302,15 @@ where
                     Ok(state) => {
                         let res: RpcResult<ScanTableBeginResponse> = Ok(state.data.clone());
                         // Register before replying so the files stay pinned while the client reads them.
-                        if map
-                            .insert((database.clone(), table.clone()), state)
-                            .is_some()
-                        {
-                            // The client lost track of its previous scan; the new one supersedes it.
-                            warn!("duplicate ScanTableBegin for {database}.{table}; releasing the previous scan");
+                        let scans = open_scans
+                            .entry((database.clone(), table.clone()))
+                            .or_default();
+                        if scans.len() >= MAX_OPEN_SCANS_PER_TABLE {
+                            // A client that never ends its scans would otherwise pin files forever.
+                            warn!("more than {MAX_OPEN_SCANS_PER_TABLE} open scans of {database}.{table} on one connection; releasing the oldest");
+                            scans.remove(0);
                         }
+                        scans.push(state);
                         write(&mut stream, &res).await?;
                     }
                     Err(err) => {
@@ -314,8 +321,18 @@ where
             }
             Request::ScanTableEnd { database, table } => {
                 // Idempotent: duckdb_mooncake ignores ScanTableEnd errors anyway.
-                if map.remove(&(database.clone(), table.clone())).is_none() {
-                    debug!("ScanTableEnd for {database}.{table} without a matching ScanTableBegin");
+                let key = (database, table);
+                match open_scans.get_mut(&key) {
+                    Some(scans) => {
+                        scans.pop();
+                        if scans.is_empty() {
+                            open_scans.remove(&key);
+                        }
+                    }
+                    None => debug!(
+                        "ScanTableEnd for {}.{} without a matching ScanTableBegin",
+                        key.0, key.1
+                    ),
                 }
                 write(&mut stream, &RpcResult::<ScanTableEndResponse>::Ok(())).await?;
             }
