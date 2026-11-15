@@ -118,6 +118,7 @@ impl MoonlinkBackend {
         )
         .await?;
         let replication_manager = Arc::new(RwLock::new(replication_manager));
+        recovery_utils::watch_placeholders(Arc::downgrade(&replication_manager));
         if !pending_recoveries.is_empty() {
             recovery_utils::retry_pending_recoveries(
                 Arc::downgrade(&replication_manager),

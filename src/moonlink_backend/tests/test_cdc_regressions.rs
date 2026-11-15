@@ -3214,3 +3214,53 @@ async fn dropping_a_placeholder_keeps_the_slot_of_a_pending_mirror() {
         "placeholder drop released the slot a pending mirror of the same database waited for"
     );
 }
+
+/// Once every mirror of a database is errored, its slot keeps advancing (errored mirrors never
+/// apply changes again): at runtime through the replication loop, and after a restart, when they
+/// are placeholders without a loop, through the placeholder watcher.
+#[rstest::rstest]
+#[case::after_restart(true)]
+#[case::runtime(false)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn database_whose_mirrors_are_all_errored_does_not_pin_its_slot(#[case] restart: bool) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ae, rv_ae_noise;
+         CREATE TABLE rv_ae (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_ae_noise (id BIGINT);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ae_mc", "public.rv_ae", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_ae VALUES (1); TRUNCATE rv_ae;")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(snapshot_error(&backend, "rv_ae_mc", lsn).await.is_some());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let backend = if restart {
+        backend.shutdown_connection(&uri, false).await;
+        drop(backend);
+        let backend = new_backend(&tmp).await.unwrap();
+        assert!(scan_error(&backend, "rv_ae_mc").await.is_some());
+        backend
+    } else {
+        backend
+    };
+    let before = confirmed_flush(&client).await;
+    client
+        .simple_query("INSERT INTO rv_ae_noise SELECT g FROM generate_series(1, 1000) g;")
+        .await
+        .unwrap();
+    let target = current_wal_lsn(&client).await;
+    let after = wait_confirmed_at_least(&client, target).await;
+    let _ = before;
+    let _ = backend
+        .drop_table(DB.to_string(), "rv_ae_mc".to_string())
+        .await;
+    assert!(
+        after >= target,
+        "slot pinned at {after} (< {target}) although every mirror of the database is errored"
+    );
+}

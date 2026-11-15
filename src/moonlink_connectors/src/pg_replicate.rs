@@ -1140,6 +1140,24 @@ pub async fn check_role_can_read_table(uri: &str, table_name: &str) -> Result<()
     Ok(())
 }
 
+/// Advance an unused slot of the source to its current WAL position. For a database whose
+/// remaining mirrors are all errored: they never apply changes again, and without a replication
+/// loop nothing else confirms the slot. A slot in use (a mirror was just created) is left alone.
+pub async fn advance_unused_slot(uri: &str) -> Result<()> {
+    let identity = SourceIdentity::identify(uri).await?;
+    let client = connect_control_client(uri).await?;
+    let slot_name = choose_slot_name(&client, uri, &identity.database).await?;
+    client
+        .simple_query(&format!(
+            "SELECT pg_replication_slot_advance(slot_name, pg_current_wal_lsn()) \
+             FROM pg_replication_slots WHERE slot_name = {} AND NOT active;",
+            quote_literal(&slot_name)
+        ))
+        .await
+        .map_err(PostgresSourceError::from)?;
+    Ok(())
+}
+
 /// A control connection for background checks, with the same session settings as the main one.
 async fn connect_control_client(uri: &str) -> Result<Client> {
     let tls = build_tls_connector().map_err(PostgresSourceError::from)?;

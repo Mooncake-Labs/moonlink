@@ -306,6 +306,53 @@ pub(crate) fn retry_pending_recoveries(
     })
 }
 
+/// Every minute (first shortly after startup): warn about mirrors that are not served after a
+/// restart, and advance the slot of each database whose remaining mirrors are all errored
+/// placeholders, which a replication loop would otherwise do (decision: errored mirrors do not
+/// hold WAL). Nothing is advanced while any mirror is pending: it may need any slot.
+pub(crate) fn watch_placeholders(
+    replication_manager: Weak<RwLock<ReplicationManager>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        loop {
+            let Some(manager) = replication_manager.upgrade() else {
+                return;
+            };
+            let placeholders = manager.read().await.placeholders();
+            let (pending, errored): (Vec<_>, Vec<_>) =
+                placeholders.iter().partition(|(_, _, pending)| *pending);
+            if !errored.is_empty() {
+                let names: Vec<String> = errored.iter().map(|(id, _, _)| id.to_string()).collect();
+                warn!(mirrors = ?names, "mirrors in the errored state receive no changes; drop and re-create them");
+            }
+            if !pending.is_empty() {
+                let names: Vec<String> = pending.iter().map(|(id, _, _)| id.to_string()).collect();
+                warn!(mirrors = ?names, "mirrors not available yet are retried; their databases' slots are held, so the source retains WAL meanwhile");
+            } else {
+                let uris: HashSet<String> = errored.iter().map(|(_, uri, _)| uri.clone()).collect();
+                for uri in uris {
+                    let Ok(identity) =
+                        moonlink_connectors::pg_replicate::SourceIdentity::identify(&uri).await
+                    else {
+                        continue;
+                    };
+                    if manager.read().await.has_connection(&identity.key()) {
+                        continue;
+                    }
+                    if let Err(e) =
+                        moonlink_connectors::pg_replicate::advance_unused_slot(&uri).await
+                    {
+                        warn!(error = ?e, "could not advance the slot of a database whose mirrors are all errored");
+                    }
+                }
+            }
+            drop(manager);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -271,6 +271,28 @@ impl ReplicationManager {
         self.pending_recoveries.keys().cloned().collect()
     }
 
+    /// Mirrors that are not served after a restart: (id, connection string, pending).
+    pub fn placeholders(&self) -> Vec<(MooncakeTableId, String, bool)> {
+        let mut placeholders: Vec<_> = self
+            .errored_tables
+            .iter()
+            .map(|(id, errored)| {
+                (
+                    id.clone(),
+                    errored.src_uri.clone(),
+                    self.pending_recoveries.contains_key(id),
+                )
+            })
+            .collect();
+        placeholders.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        placeholders
+    }
+
+    /// Whether a replication connection is open for the source `key`.
+    pub fn has_connection(&self, key: &str) -> bool {
+        self.connections.contains_key(key)
+    }
+
     /// Unregister a pending mirror's placeholder so it can be added again; its slot stays held
     /// until [`Self::end_retry`].
     pub fn begin_retry(&mut self, mooncake_table_id: &MooncakeTableId) -> Option<ErroredTable> {
