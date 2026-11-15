@@ -418,7 +418,7 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
         ArrayCell::Json(values) => values
             .into_iter()
             .map(|v| {
-                v.map(|j| RowValue::ByteArray(j.to_string().as_bytes().to_vec()))
+                v.map(|j| RowValue::ByteArray(j.into_bytes()))
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
@@ -465,7 +465,7 @@ impl From<Cell> for RowValue {
             Cell::TimeStamp(value) => RowValue::Int64(value.and_utc().timestamp_micros()),
             Cell::TimeStampTz(value) => RowValue::Int64(value.timestamp_micros()),
             Cell::Uuid(value) => RowValue::FixedLenByteArray(*value.as_bytes()),
-            Cell::Json(value) => RowValue::ByteArray(value.to_string().as_bytes().to_vec()),
+            Cell::Json(value) => RowValue::ByteArray(value.into_bytes()),
             Cell::Bytes(value) => RowValue::ByteArray(value),
             Cell::Array(value) => RowValue::Array(convert_array_cell(value)),
             Cell::Composite(value) => {
@@ -1018,7 +1018,7 @@ mod tests {
                         .with_timezone(&Utc),
                 ),
                 Cell::Uuid(uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap()),
-                Cell::Json(serde_json::from_str(r#"{"name":"Alice"}"#).unwrap()),
+                Cell::Json(r#"{"name":"Alice"}"#.to_string()),
                 Cell::Null,
             ],
         });

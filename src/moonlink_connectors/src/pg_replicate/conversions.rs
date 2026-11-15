@@ -28,7 +28,9 @@ pub enum Cell {
     TimeStamp(NaiveDateTime),
     TimeStampTz(DateTime<Utc>),
     Uuid(Uuid),
-    Json(serde_json::Value),
+    /// json / jsonb exactly as postgres prints it: re-serializing would reorder keys, drop
+    /// duplicate keys and round large numbers.
+    Json(String),
     Bytes(Vec<u8>),
     Array(ArrayCell),
     /// Represents a PostgreSQL composite type (custom type with multiple fields)
@@ -53,7 +55,7 @@ pub enum ArrayCell {
     TimeStamp(Vec<Option<NaiveDateTime>>),
     TimeStampTz(Vec<Option<DateTime<Utc>>>),
     Uuid(Vec<Option<Uuid>>),
-    Json(Vec<Option<serde_json::Value>>),
+    Json(Vec<Option<String>>),
     Bytes(Vec<Option<Vec<u8>>>),
     /// Represents an array of PostgreSQL composite types
     /// Vec<Option<Vec<Cell>>> structure:

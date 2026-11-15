@@ -269,13 +269,10 @@ impl TextFormatConverter {
                 |str| Ok(Some(Uuid::parse_str(str)?)),
                 ArrayCell::Uuid,
             ),
-            Type::JSON | Type::JSONB => {
-                let val = serde_json::from_str(str)?;
-                Ok(Cell::Json(val))
-            }
+            Type::JSON | Type::JSONB => Ok(Cell::Json(str.to_string())),
             Type::JSON_ARRAY | Type::JSONB_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(serde_json::from_str(str)?)),
+                |str| Ok(Some(str.to_string())),
                 ArrayCell::Json,
             ),
             Type::OID => {

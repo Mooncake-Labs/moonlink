@@ -1588,3 +1588,40 @@ async fn table_with_generated_column_is_refused() {
     assert!(err.contains("generated columns (\"twice\")"), "{err}");
     wait_for_no_slots(&client).await;
 }
+
+/// json keeps its text and jsonb its postgres form, on the copy and via CDC: key order,
+/// duplicate keys, whitespace and numbers that do not fit a double survive.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn json_values_are_stored_as_postgres_prints_them() {
+    let uri = get_database_uri();
+    let values = r#"('{"b": 1,  "a": [1.10, 12345678901234567890123]}', '{"b": 1,  "a": [1.10, 12345678901234567890123]}'),
+                    ('{"k": 1, "k": 2}', '{"k": 1, "k": 2}')"#;
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_json;
+         CREATE TABLE rv_json (id BIGSERIAL PRIMARY KEY, j JSON, jb JSONB);
+         INSERT INTO rv_json (j, jb) VALUES {values};"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_json_mc", "public.rv_json", &uri).await;
+    client
+        .simple_query(&format!("INSERT INTO rv_json (j, jb) VALUES {values};"))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    for column in ["j", "jb"] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {column}::text FROM rv_json"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(source.len(), 4);
+        assert_eq!(
+            scan_rows(&backend, "rv_json_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "{column}"
+        );
+    }
+}
