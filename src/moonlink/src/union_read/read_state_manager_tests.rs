@@ -697,4 +697,55 @@ mod gc {
         }
         assert_rows(&env.rsm.try_read(None).await.unwrap(), &[2, 3, 4]).await;
     }
+
+    /// A read state build that is stuck holds the cache lock, so later reads of the table queue
+    /// behind it; they stay bounded by the caller's timeout (scan_table's LSN wait), the timeout
+    /// is diagnosed as a slow read rather than missing replication, and reads work once the build
+    /// finishes, without leaked pins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_behind_a_stuck_build_are_bounded_by_the_caller_timeout() {
+        use crate::union_read::read_state_manager::test_hooks::block_next_materialize;
+
+        let (mut env, cache) = production_cache_env("gc_stuck").await;
+        for id in 1..=2 {
+            append_rows(&mut env.table, vec![test_row(id, "r", id)]).unwrap();
+        }
+        commit_flush_and_persist(&mut env, 10).await;
+        env.table.delete(test_row(1, "r", 1), 15).await;
+        commit_flush_and_persist(&mut env, 20).await;
+        env.publish(20, 20, 20);
+        let baseline = pinned_refs(&cache).await;
+
+        let (reached_rx, release_tx) = block_next_materialize(&env.rsm);
+        let rsm = env.rsm.clone();
+        let stuck = tokio::spawn(async move { rsm.try_read(Some(20)).await.map(|_| ()) });
+        reached_rx.await.unwrap();
+
+        // A newer snapshot, so the next read cannot reuse the stuck build's result.
+        append_rows(&mut env.table, vec![test_row(3, "r", 3)]).unwrap();
+        env.table.commit(30);
+        create_mooncake_snapshot_for_test(&mut env.table, &mut env.notify_rx).await;
+        env.publish(30, 30, 30);
+        let queued =
+            tokio::time::timeout(Duration::from_millis(300), env.rsm.try_read(Some(30))).await;
+        assert!(queued.is_err(), "a read behind a stuck build must wait");
+        assert!(
+            env.rsm.lsn_reached(Some(30)),
+            "the wait is the build, not replication"
+        );
+
+        release_tx.send(()).unwrap();
+        stuck.await.unwrap().unwrap();
+        assert_rows(&env.rsm.try_read(Some(30)).await.unwrap(), &[2, 3]).await;
+
+        drop(env.rsm);
+        let released = async {
+            while pinned_refs(&cache).await != baseline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), released)
+            .await
+            .expect("reads that timed out behind a stuck build leaked cache pins");
+    }
 }

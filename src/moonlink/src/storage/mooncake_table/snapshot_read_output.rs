@@ -11,7 +11,7 @@ use moonlink_table_metadata::{DeletionVector, PositionDelete};
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc::error::SendError;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
 /// Maximum number of parallel remote file operations to prevent excessive resource usage
@@ -118,16 +118,20 @@ impl ReadOutput {
         if files.is_empty() {
             return;
         }
-        let sent = self
-            .table_notifier
-            .as_mut()
-            .unwrap()
-            .send(TableEvent::EvictedFilesToDelete {
-                evicted_files: EvictedFiles { files },
-            })
-            .await;
-        // The table handler is gone (table dropped or shut down): delete the files here instead.
-        if let Err(SendError(TableEvent::EvictedFilesToDelete { evicted_files })) = sent {
+        let sent =
+            self.table_notifier
+                .as_mut()
+                .unwrap()
+                .try_send(TableEvent::EvictedFilesToDelete {
+                    evicted_files: EvictedFiles { files },
+                });
+        // The table handler is busy (its queue is full) or gone: delete the files here instead
+        // of waiting for it, so a read never depends on the handler making progress.
+        if let Err(
+            TrySendError::Full(TableEvent::EvictedFilesToDelete { evicted_files })
+            | TrySendError::Closed(TableEvent::EvictedFilesToDelete { evicted_files }),
+        ) = sent
+        {
             if let Err(err) = io_utils::delete_local_files(&evicted_files.files).await {
                 tracing::warn!(error = ?err, "failed to delete evicted cache files");
             }
@@ -320,6 +324,40 @@ mod tests {
     use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccessor;
     use crate::storage::filesystem::accessor_config::AccessorConfig;
     use crate::storage::filesystem::storage_config::StorageConfig;
+
+    /// Evicted files are deleted right away when the table handler's queue is full or the
+    /// handler is gone, instead of the read waiting for the handler.
+    #[tokio::test]
+    async fn evicted_files_are_deleted_when_the_handler_cannot_take_them() {
+        let dir = tempdir().unwrap();
+        for handler_gone in [false, true] {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let mut keep_rx = Some(rx);
+            if handler_gone {
+                keep_rx = None;
+            } else {
+                // Fill the queue; a busy handler does not drain it.
+                tx.try_send(TableEvent::EvictedFilesToDelete {
+                    evicted_files: EvictedFiles { files: vec![] },
+                })
+                .unwrap();
+            }
+            let file = dir.path().join(format!("evicted_{handler_gone}"));
+            std::fs::write(&file, b"x").unwrap();
+            let mut output = ReadOutput {
+                table_notifier: Some(tx),
+                ..Default::default()
+            };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                output.notify_evicted_files(vec![file.to_string_lossy().to_string()]),
+            )
+            .await
+            .expect("a read waited for the table handler");
+            assert!(!file.exists(), "handler_gone={handler_gone}");
+            drop(keep_rx);
+        }
+    }
 
     #[tokio::test]
     async fn test_take_as_read_state_notifies_files_to_delete_on_success() {

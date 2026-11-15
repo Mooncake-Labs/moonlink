@@ -245,6 +245,16 @@ impl ReadStateManager {
         }
     }
 
+    /// Whether the table's LSNs already allow a read at `lsn`, i.e. a read that has not finished
+    /// is waiting for its read state build rather than for replication. For diagnostics.
+    pub fn lsn_reached(&self, lsn: Option<u64>) -> bool {
+        // Same order as `LsnView::observe`.
+        let replication = *self.replication_lsn_rx.borrow();
+        let commit = *self.last_commit_lsn_rx.borrow();
+        let snapshot = *self.table_snapshot_watch_receiver.borrow();
+        LsnView::normalize(replication, commit, snapshot).can_satisfy(lsn)
+    }
+
     /// Current (snapshot, commit, replication) LSNs, for diagnostics.
     pub fn lsn_status(&self) -> (u64, u64, u64) {
         (
@@ -322,6 +332,10 @@ impl ReadStateManager {
         // owned by values only a complete ReadState releases. Build in a task of its own, so a
         // cancelled caller (client disconnect, LSN-wait timeout) cannot interrupt that window;
         // an abandoned build still publishes its state to the cache, which releases it normally.
+        // The build's cleanup (error, panic) never waits for the table handler. A stuck build
+        // holds the cache lock, so later reads of the table queue behind it; callers bound their
+        // wait (scan_table's LSN-wait timeout), and a queued build that finally runs re-checks
+        // the cache first.
         let build = Self::build_read_state(
             self.cache.clone(),
             self.snapshot_seq.clone(),

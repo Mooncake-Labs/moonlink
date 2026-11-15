@@ -2,13 +2,14 @@ use super::data_batches::create_batch_from_rows;
 use crate::error::Result;
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+use crate::storage::io_utils;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
 use crate::storage::mooncake_table::snapshot_read_output::{
     release_abandoned_read, DataFileForRead, ReadOutput as SnapshotReadOutput,
 };
 use crate::storage::mooncake_table::table_status::TableSnapshotStatus;
 use crate::storage::storage_utils::RecordLocation;
-use crate::table_notify::{EvictedFiles, TableEvent};
+use crate::table_notify::TableEvent;
 use crate::NonEvictableHandle;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
@@ -262,20 +263,20 @@ impl PendingRead {
         if !self.in_memory_batches.is_empty() {
             let path = self.temp_file_path.to_string_lossy().to_string();
             if let Err(e) = self.write_in_memory_file().await {
-                // Unpin deletion vectors and drop the partial file, then surface the error.
+                // Unpin deletion vectors and drop the partial file, then surface the error. Done
+                // here rather than through the table handler, which may be busy or gone.
                 let mut files_to_delete = vec![path];
                 for handle in self.puffin_cache_handles.drain(..) {
                     files_to_delete.extend(handle.unreference().await);
                 }
                 self.handed_over = true;
-                let _ = self
-                    .table_notifier
-                    .send(TableEvent::EvictedFilesToDelete {
-                        evicted_files: EvictedFiles {
-                            files: files_to_delete,
-                        },
-                    })
-                    .await;
+                if let Err(delete_error) = io_utils::delete_local_files(&files_to_delete).await {
+                    tracing::warn!(
+                        ?files_to_delete,
+                        ?delete_error,
+                        "failed to delete files of a failed read"
+                    );
+                }
                 return Err(e);
             }
             self.data_file_paths

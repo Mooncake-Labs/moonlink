@@ -482,6 +482,16 @@ impl MoonlinkBackend {
                 } else {
                     snapshot_lsn.to_string()
                 };
+                let requested = lsn.unwrap_or_default();
+                if table_reader.lsn_reached(lsn) {
+                    // Replication is there; building the read (another scan's, which this one
+                    // queues behind, or its own) is what did not finish.
+                    return Err(Error::lsn_wait_timeout(format!(
+                        "reading mirror {mooncake_table_id} at LSN {requested} did not finish within \
+                         {timeout:?} (replicated up to {replication_lsn}, snapshot {snapshot_lsn}); \
+                         reading its files is slow or stuck. Retry."
+                    )));
+                }
                 Err(Error::lsn_wait_timeout(format!(
                     "mirror {mooncake_table_id} did not reach LSN {} within {timeout:?} \
                      (replicated up to {replication_lsn}, committed {commit_lsn}, snapshot {snapshot_lsn}); \
