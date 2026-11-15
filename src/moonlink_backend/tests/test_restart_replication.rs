@@ -360,6 +360,37 @@ mod tests {
         reconnect_mid_transaction(true).await;
     }
 
+    /// After a restart, an errored mirror is restored as a placeholder and named by the periodic
+    /// warning; a healthy mirror of the same database is not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn errored_placeholders_are_reported_after_restart() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        recreate_src_table(&client, "rr_a").await;
+        recreate_src_table(&client, "rr_b").await;
+        create_mirror(&backend, &tmp, TABLE_A, "rr_a").await;
+        create_mirror(&backend, &tmp, TABLE_B, "rr_b").await;
+        insert_range(&client, "rr_a", 1, 10).await;
+        client.simple_query("TRUNCATE rr_a;").await.unwrap();
+        // Once this is persisted, the TRUNCATE before it has errored the other mirror.
+        let lsn = insert_range(&client, "rr_b", 1, 10).await;
+        persist(&backend, TABLE_B, lsn).await;
+
+        backend
+            .shutdown_connection(&get_database_uri(), false)
+            .await;
+        drop(backend);
+        let base_path = tmp.path().to_str().unwrap().to_string();
+        let backend = create_backend_from_base_path(base_path).await;
+        let reported = backend.placeholder_mirror_names().await;
+        cleanup(&backend, &[TABLE_A, TABLE_B]).await;
+        assert_eq!(
+            reported,
+            (vec![format!("{DATABASE}.{TABLE_A}")], vec![]),
+            "errored and pending mirrors named after the restart"
+        );
+    }
+
     /// Restart dedup: a multi-table transaction persisted in only one of its tables, and two
     /// interleaved transactions whose second commit record starts at the persisted LSN of the first.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

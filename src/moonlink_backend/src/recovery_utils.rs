@@ -337,6 +337,19 @@ pub(crate) fn retry_pending_recoveries(
     })
 }
 
+/// Names of the errored and of the pending mirrors among `placeholders`, as the placeholder
+/// watcher reports them.
+pub(crate) fn placeholder_names(
+    placeholders: &[(MooncakeTableId, String, bool)],
+) -> (Vec<String>, Vec<String>) {
+    let (pending, errored): (Vec<_>, Vec<_>) =
+        placeholders.iter().partition(|(_, _, pending)| *pending);
+    let names = |mirrors: Vec<&(MooncakeTableId, String, bool)>| {
+        mirrors.iter().map(|(id, _, _)| id.to_string()).collect()
+    };
+    (names(errored), names(pending))
+}
+
 /// Every minute (first shortly after startup): warn about mirrors that are not served after a
 /// restart, and advance the slot of each database whose remaining mirrors are all errored
 /// placeholders, which a replication loop would otherwise do (by design, errored mirrors do not
@@ -351,17 +364,18 @@ pub(crate) fn watch_placeholders(
                 return;
             };
             let placeholders = manager.read().await.placeholders();
-            let (pending, errored): (Vec<_>, Vec<_>) =
-                placeholders.iter().partition(|(_, _, pending)| *pending);
-            if !errored.is_empty() {
-                let names: Vec<String> = errored.iter().map(|(id, _, _)| id.to_string()).collect();
-                warn!(mirrors = ?names, "mirrors in the errored state receive no changes; drop and re-create them");
+            let (errored_names, pending_names) = placeholder_names(&placeholders);
+            if !errored_names.is_empty() {
+                warn!(mirrors = ?errored_names, "mirrors in the errored state receive no changes; drop and re-create them");
             }
-            if !pending.is_empty() {
-                let names: Vec<String> = pending.iter().map(|(id, _, _)| id.to_string()).collect();
-                warn!(mirrors = ?names, "mirrors not available yet are retried; their databases' slots are held, so the source retains WAL meanwhile");
+            if !pending_names.is_empty() {
+                warn!(mirrors = ?pending_names, "mirrors not available yet are retried; their databases' slots are held, so the source retains WAL meanwhile");
             } else {
-                let uris: HashSet<String> = errored.iter().map(|(_, uri, _)| uri.clone()).collect();
+                let uris: HashSet<String> = placeholders
+                    .iter()
+                    .filter(|(_, _, pending)| !*pending)
+                    .map(|(_, uri, _)| uri.clone())
+                    .collect();
                 for uri in uris {
                     let Ok(identity) =
                         moonlink_connectors::pg_replicate::SourceIdentity::identify(&uri).await

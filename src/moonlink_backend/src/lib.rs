@@ -283,6 +283,12 @@ impl MoonlinkBackend {
         Ok(table_schema)
     }
 
+    /// The errored and the pending mirrors the periodic warning names after a restart.
+    #[cfg(feature = "test-utils")]
+    pub async fn placeholder_mirror_names(&self) -> (Vec<String>, Vec<String>) {
+        recovery_utils::placeholder_names(&self.replication_manager.read().await.placeholders())
+    }
+
     /// List all tables at moonlink backend, and return their states.
     pub async fn list_tables(&self) -> Result<Vec<TableStatus>> {
         let mut table_statuses = vec![];
