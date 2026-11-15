@@ -451,7 +451,7 @@ mod gc {
 
     /// Table with the production cache setting (cache entries of persisted files point at the
     /// iceberg files in place) and a deletion-vector puffin per committed delete.
-    async fn production_cache_env(name: &str) -> Env {
+    async fn production_cache_env(name: &str) -> (Env, Arc<ObjectStorageCache>) {
         let context = TestContext::new(name);
         let iceberg_table_config = test_iceberg_table_config(&context, name);
         let mut table_config = test_mooncake_table_config(&context);
@@ -472,7 +472,7 @@ mod gc {
             context.path(),
             iceberg_table_config.clone(),
             table_config,
-            cache,
+            cache.clone(),
             create_test_filesystem_accessor(&iceberg_table_config),
         )
         .await
@@ -481,7 +481,7 @@ mod gc {
         table.set_gc_grace_for_test(Duration::ZERO);
         let (notify_tx, notify_rx) = mpsc::channel(100);
         table.register_table_notify(notify_tx).await;
-        Env::wrap(Some(context), table, notify_rx)
+        (Env::wrap(Some(context), table, notify_rx), cache)
     }
 
     async fn commit_flush_and_persist(env: &mut Env, lsn: u64) {
@@ -503,7 +503,7 @@ mod gc {
     /// a read state that lists it is alive, however long ago the replacing commit was.
     #[tokio::test]
     async fn replaced_puffin_is_neither_served_to_new_readers_nor_deleted_under_old_ones() {
-        let mut env = production_cache_env("gc_puffin").await;
+        let (mut env, _cache) = production_cache_env("gc_puffin").await;
         for id in 1..=3 {
             append_rows(&mut env.table, vec![test_row(id, "r", id)]).unwrap();
         }
@@ -570,5 +570,90 @@ mod gc {
         );
         env.publish(50, 50, 50);
         assert_rows(&env.rsm.try_read(Some(50)).await.unwrap(), &[3, 4, 5]).await;
+    }
+
+    /// Sum of the reference counts of all pinned (non-evictable) cache entries.
+    async fn pinned_refs(cache: &ObjectStorageCache) -> u32 {
+        let mut total = 0;
+        for id in cache.get_non_evictable_filenames().await {
+            total += cache.get_non_evictable_entry_ref_count(&id).await;
+        }
+        total
+    }
+
+    fn inmemory_temp_files(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| {
+                        let path = e.path();
+                        if path.is_dir() {
+                            inmemory_temp_files(&path)
+                        } else {
+                            usize::from(e.file_name().to_string_lossy().starts_with("inmemory_"))
+                        }
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// A scan cancelled after its read was prepared (RPC client disconnect, LSN-wait timeout)
+    /// must not leak the cache pins and the temp parquet its read state build took.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_scan_does_not_leak_cache_pins_or_temp_files() {
+        use crate::union_read::read_state_manager::test_hooks::BLOCK_MATERIALIZE;
+        use tokio::sync::oneshot;
+
+        let (mut env, cache) = production_cache_env("gc_cancel").await;
+        for id in 1..=3 {
+            append_rows(&mut env.table, vec![test_row(id, "r", id)]).unwrap();
+        }
+        commit_flush_and_persist(&mut env, 10).await;
+        env.table.delete(test_row(1, "r", 1), 15).await;
+        commit_flush_and_persist(&mut env, 20).await;
+        // An unflushed row, so the read also writes a temp parquet.
+        append_rows(&mut env.table, vec![test_row(4, "r", 4)]).unwrap();
+        env.table.commit(30);
+        create_mooncake_snapshot_for_test(&mut env.table, &mut env.notify_rx).await;
+        env.publish(30, 30, 30);
+        let baseline = pinned_refs(&cache).await;
+
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *BLOCK_MATERIALIZE.lock().unwrap() = Some((reached_tx, release_rx));
+        let rsm = env.rsm.clone();
+        let scan = tokio::spawn(async move { rsm.try_read(None).await.map(|_| ()) });
+        reached_rx.await.unwrap();
+        assert!(
+            pinned_refs(&cache).await > baseline,
+            "precondition: the prepared read holds a cache pin"
+        );
+        scan.abort();
+        assert!(scan.await.unwrap_err().is_cancelled());
+        // The slow materialization the cancelled scan started completes on its own (with the
+        // build tied to the scan, the hook went away with it).
+        let _ = release_tx.send(());
+        assert_rows(&env.rsm.try_read(None).await.unwrap(), &[2, 3, 4]).await;
+
+        // With no reader and no read state manager left, every pin and temp file is released.
+        let temp_dir = env._context.as_ref().unwrap().temp_dir.path().to_path_buf();
+        drop(env.rsm);
+        let released = async {
+            while pinned_refs(&cache).await != baseline || inmemory_temp_files(&temp_dir) != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(5), released)
+            .await
+            .is_err()
+        {
+            panic!(
+                "a cancelled scan leaked: pinned refs {} (baseline {baseline}), temp files {}",
+                pinned_refs(&cache).await,
+                inmemory_temp_files(&temp_dir)
+            );
+        }
     }
 }

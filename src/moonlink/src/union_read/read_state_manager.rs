@@ -321,15 +321,42 @@ impl ReadStateManager {
         }
     }
 
-    #[tracing::instrument(name = "update_read_state", skip_all)]
     async fn read_from_snapshot_and_update_cache(&self, view: LsnView) -> Result<Arc<ReadState>> {
-        let mut cache = self.cache.write().await;
+        // Between prepare_read and the finished ReadState, cache pins and the temp parquet are
+        // owned by values only a complete ReadState releases. Build in a task of its own, so a
+        // cancelled caller (client disconnect, LSN-wait timeout) cannot interrupt that window;
+        // an abandoned build still publishes its state to the cache, which releases it normally.
+        let build = Self::build_read_state(
+            self.cache.clone(),
+            self.snapshot_seq.clone(),
+            self.live_reads.clone(),
+            self.table_snapshot.clone(),
+            self.read_state_filepath_remap.clone(),
+            view,
+        );
+        match tokio::spawn(build).await {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    #[tracing::instrument(name = "update_read_state", skip_all)]
+    async fn build_read_state(
+        cache: Arc<RwLock<CachedRead>>,
+        current_snapshot_seq: Arc<AtomicU64>,
+        live_reads: Arc<LiveReadSeqs>,
+        table_snapshot: Arc<RwLock<SnapshotTableState>>,
+        read_state_filepath_remap: ReadStateFilepathRemap,
+        view: LsnView,
+    ) -> Result<Arc<ReadState>> {
+        let mut cache = cache.write().await;
         // A reader whose view went stale while it waited for the lock: the cached state is newer
         // than its view, so it covers every LSN the view could satisfy.
         let cache_is_newer = cache
             .snapshot_key
             .is_some_and(|key| snapshot_lsn_is_newer(key, view.snapshot));
-        if cache.snapshot_seq == self.snapshot_seq.load(Ordering::SeqCst) {
+        if cache.snapshot_seq == current_snapshot_seq.load(Ordering::SeqCst) {
             if cache.snapshot_key == Some(view.snapshot) {
                 // Same snapshot already materialized; only the label can grow.
                 cache.valid_upto = cache.valid_upto.max(view.valid_upto());
@@ -342,10 +369,10 @@ impl ReadStateManager {
         // Only collection happens under the snapshot lock; the temp parquet is written after it is
         // released. The cache write guard still serializes materialization per table.
         let (pending_read, live_read_guard) = {
-            let mut table_state_snapshot = self.table_snapshot.write().await;
+            let mut table_state_snapshot = table_snapshot.write().await;
             let pending_read = table_state_snapshot.prepare_read().await?;
             // Register under the snapshot lock: from here on GC keeps this snapshot's files.
-            let guard = self.live_reads.register(pending_read.snapshot_seq());
+            let guard = live_reads.register(pending_read.snapshot_seq());
             (pending_read, guard)
         };
         let snapshot_seq = pending_read.snapshot_seq();
@@ -353,7 +380,7 @@ impl ReadStateManager {
         test_hooks::before_materialize().await;
         let snapshot_read_output = pending_read.materialize().await?;
         let state = snapshot_read_output
-            .take_as_read_state(self.read_state_filepath_remap.clone())
+            .take_as_read_state(read_state_filepath_remap)
             .await?;
         state.attach_live_read_guard(live_read_guard);
         // The current snapshot is at least as new as both keys; keep the newer key and its label.
