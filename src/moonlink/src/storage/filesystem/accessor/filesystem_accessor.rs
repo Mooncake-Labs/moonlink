@@ -198,6 +198,11 @@ impl FileSystemAccessor {
             }
             match std::fs::hard_link(&src_path, &dst_path) {
                 Ok(()) => {}
+                // Already the same file (a previous attempt linked it, or both paths resolve to
+                // one): removing the destination would delete the source too.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && is_same_file(&file, &dst_path)? => {}
                 // A previous attempt (e.g. a retried persistence) may have left the destination.
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     std::fs::remove_file(&dst_path)?;
@@ -605,6 +610,14 @@ impl BaseFileSystemAccess for FileSystemAccessor {
     }
 }
 
+/// Whether `path` names the same inode as the open `file`.
+#[cfg(feature = "storage-fs")]
+fn is_same_file(file: &std::fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (a, b) = (file.metadata()?, std::fs::metadata(path)?);
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -969,6 +982,36 @@ mod tests {
             std::fs::metadata(&src_filepath).unwrap().ino(),
             std::fs::metadata(&dst_filepath).unwrap().ino()
         );
+    }
+
+    /// A destination that already is the source (a retried link, or a path resolving to the
+    /// source itself) is kept, not deleted.
+    #[tokio::test]
+    async fn test_copy_from_local_to_remote_keeps_destination_that_is_the_source() {
+        use std::os::unix::fs::MetadataExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let filesystem_accessor = fs_accessor_for_test(&root_directory);
+        let src_filepath = format!("{root_directory}/src");
+        std::fs::write(&src_filepath, b"parquet bytes").unwrap();
+        let ino = std::fs::metadata(&src_filepath).unwrap().ino();
+
+        let dst_filepath = format!("{root_directory}/dst");
+        for _ in 0..2 {
+            let metadata = filesystem_accessor
+                .copy_from_local_to_remote(&src_filepath, &dst_filepath)
+                .await
+                .unwrap();
+            assert_eq!(metadata.size, 13);
+            assert_eq!(std::fs::metadata(&dst_filepath).unwrap().ino(), ino);
+        }
+        let metadata = filesystem_accessor
+            .copy_from_local_to_remote(&src_filepath, "src")
+            .await
+            .unwrap();
+        assert_eq!(metadata.size, 13);
+        assert_eq!(std::fs::read(&src_filepath).unwrap(), b"parquet bytes");
+        assert_eq!(std::fs::metadata(&src_filepath).unwrap().ino(), ino);
     }
 
     /// When linking isn't possible (e.g. the store is on another filesystem) the bytes are copied.
