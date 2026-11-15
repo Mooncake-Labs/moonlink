@@ -27,8 +27,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-arrow-array = { workspace = true }
-moonlink_backend = { workspace = true, features = ["test-utils"] }
+# Test helpers for this crate's tests only; never in a normal build.
+moonlink = { workspace = true, features = ["test-utils"] }
 moonlink_connectors = { workspace = true }
 parquet = { workspace = true }
 roaring = { workspace = true }
