@@ -66,6 +66,9 @@ pub(crate) async fn validate_recovered_snapshot(
     warehouse_uri: &str,
     filesystem_accessor: &dyn BaseFileSystemAccess,
 ) {
+    // Readers are told a recovered snapshot is at its persisted LSN.
+    assert_eq!(snapshot.snapshot_version, snapshot.flush_lsn.unwrap_or(0));
+
     let warehouse_directory = std::path::PathBuf::from(warehouse_uri);
     let mut data_filepaths: HashSet<String> = HashSet::new();
 
