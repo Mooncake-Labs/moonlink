@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
 use tokio::sync::{mpsc, watch};
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 #[derive(Default)]
 struct TransactionState {
@@ -27,19 +27,14 @@ struct TransactionState {
     last_touched_table: Option<SrcTableId>,
 }
 
-#[derive(Eq, PartialEq)]
-struct ColumnInfo {
-    name: String,
-    typ: u32,
-    modifier: i32,
-}
 pub struct Sink {
     event_senders: HashMap<SrcTableId, Sender<TableEvent>>,
     commit_lsn_txs: HashMap<SrcTableId, Arc<CommitState>>,
     streaming_transactions_state: HashMap<u32, TransactionState>,
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
-    relation_cache: HashMap<SrcTableId, Vec<ColumnInfo>>,
+    /// Source table names, for logs.
+    table_names: HashMap<SrcTableId, String>,
     /// Cached sender for the last table used on the hot path.
     /// Avoids a HashMap lookup when consecutive rows target the same table.
     cached_event_sender: Option<(SrcTableId, Sender<TableEvent>)>,
@@ -78,7 +73,7 @@ impl Sink {
                 last_touched_table: None,
             },
             replication_state,
-            relation_cache: HashMap::new(),
+            table_names: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
             max_keepalive_lsn_seen: 0,
@@ -110,8 +105,6 @@ impl Sink {
     }
 }
 
-pub struct SchemaChangeRequest(pub SrcTableId);
-
 impl Sink {
     pub fn add_table(
         &mut self,
@@ -122,51 +115,47 @@ impl Sink {
     ) {
         self.event_senders.insert(src_table_id, event_sender);
         self.commit_lsn_txs.insert(src_table_id, commit_lsn_tx);
-        let columns = table_schema
-            .column_schemas
-            .iter()
-            .map(|c| ColumnInfo {
-                name: c.name.clone(),
-                typ: c.typ.oid(),
-                modifier: c.modifier,
-            })
-            .collect();
-        self.relation_cache.insert(src_table_id, columns);
+        self.table_names
+            .insert(src_table_id, table_schema.table_name.to_string());
     }
+
+    /// Stop forwarding events for a table. A table that was failed earlier is already detached.
     pub fn drop_table(&mut self, src_table_id: SrcTableId) {
-        self.event_senders.remove(&src_table_id).unwrap();
-        self.commit_lsn_txs.remove(&src_table_id).unwrap();
+        self.detach_table(src_table_id);
+        self.table_names.remove(&src_table_id);
+    }
+
+    fn detach_table(&mut self, src_table_id: SrcTableId) -> Option<Sender<TableEvent>> {
+        self.commit_lsn_txs.remove(&src_table_id);
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;
             }
         }
+        self.event_senders.remove(&src_table_id)
     }
 
-    pub async fn alter_table(&mut self, src_table_id: SrcTableId, table_schema: &TableSchema) {
-        let new_columns: Vec<ColumnInfo> = table_schema
-            .column_schemas
-            .iter()
-            .map(|c| ColumnInfo {
-                name: c.name.clone(),
-                typ: c.typ.oid(),
-                modifier: c.modifier,
-            })
-            .collect();
-        let old_columns = self.relation_cache.get(&src_table_id).unwrap();
-        let columns_to_drop = old_columns
-            .iter()
-            .filter(|c| !new_columns.contains(c))
-            .map(|c| c.name.clone())
-            .collect();
-        if let Some(event_sender) = self.event_senders.get_mut(&src_table_id) {
-            event_sender
-                .send(TableEvent::AlterTable { columns_to_drop })
-                .await
-                .unwrap();
+    /// Put one mirror into the errored state because CDC can no longer apply its source's changes
+    /// faithfully. Its later events are dropped; every other table keeps replicating.
+    pub async fn fail_table(&mut self, src_table_id: SrcTableId, reason: String) {
+        let table_name = self
+            .table_names
+            .get(&src_table_id)
+            .cloned()
+            .unwrap_or_else(|| src_table_id.to_string());
+        let Some(event_sender) = self.detach_table(src_table_id) else {
+            return;
+        };
+        error!(table = %table_name, %reason, "mirror can no longer follow its source table");
+        if event_sender
+            .send(TableEvent::EnterErrored { reason })
+            .await
+            .is_err()
+        {
+            warn!(table = %table_name, "table handler already stopped");
         }
-        self.relation_cache.insert(src_table_id, new_columns);
     }
+
     /// Get final lsn for the current transaction.
     fn get_final_lsn(&mut self, table_id: SrcTableId, xact_id: Option<u32>) -> u64 {
         match xact_id {
@@ -214,10 +203,7 @@ impl Sink {
         }
     }
 
-    pub async fn process_cdc_event(
-        &mut self,
-        event: CdcEvent,
-    ) -> Result<Option<SchemaChangeRequest>, Infallible> {
+    pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<(), Infallible> {
         match event {
             CdcEvent::Begin(begin_body) => {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
@@ -364,13 +350,13 @@ impl Sink {
                     relation_name = relation_body.name().unwrap_or("unknown"),
                     "Relation"
                 );
-                let src_table_id = relation_body.rel_id();
-                let cache_entry = self.relation_cache.get_mut(&src_table_id);
-                if let Some(cache_entry) = cache_entry {
-                    if cache_entry.len() != relation_body.columns().len() {
-                        return Ok(Some(SchemaChangeRequest(src_table_id)));
-                    }
-                }
+                // Schema changes are detected by the stream, in order, as TableUnsupported.
+            }
+            CdcEvent::TableUnsupported {
+                src_table_id,
+                reason,
+            } => {
+                self.fail_table(src_table_id, reason).await;
             }
             CdcEvent::Type(type_body) => {
                 debug!(
@@ -413,7 +399,7 @@ impl Sink {
                 self.streaming_last_key = None;
             }
         }
-        Ok(None)
+        Ok(())
     }
 }
 

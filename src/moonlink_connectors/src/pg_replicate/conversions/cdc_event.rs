@@ -36,6 +36,13 @@ pub enum CdcEventConversionError {
     #[error("schema missing for table id {0}")]
     MissingSchema(SrcTableId),
 
+    #[error("table id {src_table_id} sent {received} columns, its schema has {expected}")]
+    TupleShapeMismatch {
+        src_table_id: SrcTableId,
+        expected: usize,
+        received: usize,
+    },
+
     #[error("from bytes error: {0}")]
     FromBytes(#[from] FromTextError),
 
@@ -47,9 +54,17 @@ pub struct CdcEventConverter;
 
 impl CdcEventConverter {
     fn try_from_tuple_data_slice(
+        src_table_id: SrcTableId,
         column_schemas: &[ColumnSchema],
         tuple_data: &[TupleData],
     ) -> Result<TableRow, CdcEventConversionError> {
+        if tuple_data.len() != column_schemas.len() {
+            return Err(CdcEventConversionError::TupleShapeMismatch {
+                src_table_id,
+                expected: column_schemas.len(),
+                received: tuple_data.len(),
+            });
+        }
         let mut values = Vec::with_capacity(column_schemas.len());
 
         for (i, column_schema) in column_schemas.iter().enumerate() {
@@ -72,8 +87,11 @@ impl CdcEventConverter {
         column_schemas: &[ColumnSchema],
         insert_body: InsertBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
-        let row =
-            Self::try_from_tuple_data_slice(column_schemas, insert_body.tuple().tuple_data())?;
+        let row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            insert_body.tuple().tuple_data(),
+        )?;
 
         Ok(CdcEvent::Insert((src_table_id, row, insert_body.xid())))
     }
@@ -86,10 +104,15 @@ impl CdcEventConverter {
     ) -> Result<CdcEvent, CdcEventConversionError> {
         let old_row = update_body
             .old_tuple()
-            .map(|tuple| Self::try_from_tuple_data_slice(column_schemas, tuple.tuple_data()))
+            .map(|tuple| {
+                Self::try_from_tuple_data_slice(src_table_id, column_schemas, tuple.tuple_data())
+            })
             .transpose()?;
-        let new_row =
-            Self::try_from_tuple_data_slice(column_schemas, update_body.new_tuple().tuple_data())?;
+        let new_row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            update_body.new_tuple().tuple_data(),
+        )?;
 
         Ok(CdcEvent::Update((
             src_table_id,
@@ -109,7 +132,8 @@ impl CdcEventConverter {
             .or(delete_body.old_tuple())
             .ok_or(CdcEventConversionError::MissingTupleInDeleteBody)?;
 
-        let row = Self::try_from_tuple_data_slice(column_schemas, tuple.tuple_data())?;
+        let row =
+            Self::try_from_tuple_data_slice(src_table_id, column_schemas, tuple.tuple_data())?;
 
         Ok(CdcEvent::Delete((src_table_id, row, delete_body.xid())))
     }
@@ -204,4 +228,9 @@ pub enum CdcEvent {
     StreamStop(StreamStopBody),
     StreamCommit(StreamCommitBody),
     StreamAbort(StreamAbortBody),
+    /// The table can no longer be mirrored (e.g. its schema changed); it enters the errored state.
+    TableUnsupported {
+        src_table_id: SrcTableId,
+        reason: String,
+    },
 }

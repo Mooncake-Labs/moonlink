@@ -164,7 +164,7 @@ fn uri_for_database(uri: &str, database: &str) -> String {
 async fn slot_count(client: &Client) -> i64 {
     client
         .query_one(
-            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%'",
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%' AND database = current_database()",
             &[],
         )
         .await
@@ -423,5 +423,169 @@ async fn initial_copy_and_stream_apply_each_row_exactly_once(#[case] initial_row
         &missing[..missing.len().min(5)],
         counts.len(),
         source_ids.len()
+    );
+}
+
+/// Request a snapshot to probe a mirror's state: errored mirrors reject it with the user-facing
+/// "drop and re-create" message.
+async fn snapshot_error(backend: &MoonlinkBackend, dst: &str, lsn: u64) -> Option<String> {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        backend.create_snapshot(DB.to_string(), dst.to_string(), lsn),
+    )
+    .await
+    .expect("create_snapshot timed out")
+    .err()
+    .map(|e| format!("{e:?}"))
+}
+
+/// Any change to a mirrored table's definition puts that mirror, and only that mirror, into the
+/// errored state; it never panics replication and the mirror can still be dropped.
+#[rstest::rstest]
+#[case::alter_column_type(
+    "ALTER TABLE rv_ddl ALTER COLUMN a TYPE TEXT;",
+    "INSERT INTO rv_ddl VALUES (2, 'two');",
+    "type of column(s) a changed"
+)]
+#[case::add_column(
+    "ALTER TABLE rv_ddl ADD COLUMN b INT DEFAULT 5;",
+    "INSERT INTO rv_ddl VALUES (2, 2, 2);",
+    "columns changed"
+)]
+#[case::drop_column(
+    "ALTER TABLE rv_ddl DROP COLUMN a;",
+    "INSERT INTO rv_ddl VALUES (2);",
+    "columns changed"
+)]
+#[case::rename_column(
+    "ALTER TABLE rv_ddl RENAME COLUMN a TO c;",
+    "INSERT INTO rv_ddl VALUES (2, 2);",
+    "columns changed"
+)]
+#[case::replica_identity_default(
+    "ALTER TABLE rv_ddl REPLICA IDENTITY DEFAULT;",
+    "UPDATE rv_ddl SET a = 9 WHERE id = 1;",
+    "REPLICA IDENTITY"
+)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn source_schema_change_errors_only_that_mirror(
+    #[case] ddl: &str,
+    #[case] dml: &str,
+    #[case] reason: &str,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ddl, rv_bystander;
+         CREATE TABLE rv_ddl (id BIGINT PRIMARY KEY, a INT);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ddl_mc", "public.rv_ddl", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query("INSERT INTO rv_ddl VALUES (1, 1); INSERT INTO rv_bystander VALUES (1);")
+        .await
+        .unwrap();
+    client.simple_query(ddl).await.unwrap();
+    // The changed table's rows and the bystander's rows in one transaction.
+    client
+        .simple_query(&format!(
+            "BEGIN; {dml} INSERT INTO rv_bystander VALUES (2); COMMIT;"
+        ))
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_bystander VALUES (3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1, 2, 3])
+    );
+    let err = snapshot_error(&backend, "rv_ddl_mc", lsn)
+        .await
+        .expect("changed mirror must be errored");
+    assert!(err.contains(reason) && err.contains("re-create"), "{err}");
+    backend
+        .drop_table(DB.to_string(), "rv_ddl_mc".to_string())
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_bystander VALUES (4);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1, 2, 3, 4])
+    );
+    assert_eq!(snapshot_error(&backend, "rv_bystander_mc", lsn).await, None);
+}
+
+/// An errored mirror never persists again, so it must not hold the replication slot back.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn errored_mirror_does_not_hold_back_the_slot() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ddl, rv_bystander;
+         CREATE TABLE rv_ddl (id BIGINT PRIMARY KEY, a INT);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ddl_mc", "public.rv_ddl", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_bystander_mc",
+        "public.rv_bystander",
+        &uri,
+    )
+    .await;
+    client
+        .simple_query(
+            "ALTER TABLE rv_ddl ADD COLUMN b INT; INSERT INTO rv_ddl VALUES (1, 1, 1);
+             INSERT INTO rv_bystander VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    assert!(snapshot_error(&backend, "rv_ddl_mc", lsn).await.is_some());
+    backend
+        .create_snapshot(DB.to_string(), "rv_bystander_mc".to_string(), lsn)
+        .await
+        .unwrap();
+    // Slot feedback is sent every 10 seconds.
+    let mut confirmed = 0u64;
+    for _ in 0..30 {
+        let row = client
+            .query_one(
+                "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%'",
+                &[],
+            )
+            .await
+            .unwrap();
+        confirmed = row.get::<_, tokio_postgres::types::PgLsn>(0).into();
+        if confirmed >= lsn {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(
+        confirmed >= lsn,
+        "slot stuck at {confirmed}, expected >= {lsn}"
     );
 }

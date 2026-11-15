@@ -14,7 +14,7 @@ use crate::pg_replicate::clients::postgres::{build_tls_connector, ReplicationCli
 use crate::pg_replicate::conversions::cdc_event::{CdcEvent, CdcEventConversionError};
 use crate::pg_replicate::initial_copy::copy_table_stream;
 use crate::pg_replicate::initial_copy::{InitialCopyConfig, InitialCopyReaderConfig};
-use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
+use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
 };
@@ -24,7 +24,7 @@ use crate::Result;
 use futures::StreamExt;
 use moonlink::{
     CommitState, MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap,
-    ReplicationState, TableEvent,
+    ReplicationState, TableEvent, TableStatus,
 };
 use native_tls::{Certificate, TlsConnector};
 use pg_escape::{quote_identifier, quote_literal};
@@ -67,6 +67,7 @@ pub enum PostgresReplicationCommand {
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
+        table_status_rx: watch::Receiver<TableStatus>,
         /// Restart the stream once the table is registered, so postgres replays from the slot.
         replay_from_slot: bool,
         ready_tx: oneshot::Sender<()>,
@@ -527,6 +528,7 @@ impl PostgresConnection {
         event_sender: mpsc::Sender<TableEvent>,
         commit_state: Arc<CommitState>,
         flush_lsn_rx: watch::Receiver<u64>,
+        table_status_rx: watch::Receiver<TableStatus>,
         replay_from_slot: bool,
     ) -> Result<oneshot::Receiver<()>> {
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -536,6 +538,7 @@ impl PostgresConnection {
             event_sender,
             commit_state,
             flush_lsn_rx,
+            table_status_rx,
             replay_from_slot,
             ready_tx,
         };
@@ -662,6 +665,7 @@ impl PostgresConnection {
                     .flush_lsn_rx
                     .take()
                     .expect("flush_lsn_rx is None"),
+                table_resources.table_event_manager.subscribe_table_status(),
                 // A recovered table's changes after its iceberg snapshot may already have been
                 // streamed (and dropped) before it was registered.
                 /*replay_from_slot=*/
@@ -761,12 +765,20 @@ impl PostgresConnection {
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
 /// Postgres may discard WAL up to this LSN, so it must not exceed what every table has persisted into iceberg;
 /// after a restart, everything past it is replayed from the replication slot.
+/// Errored tables never apply changes again (they can only be dropped and re-created), so they must
+/// not hold the slot back; otherwise the source would retain WAL forever.
 fn compute_confirmed_flush_lsn(
     flush_lsn_rxs: &HashMap<SrcTableId, watch::Receiver<u64>>,
+    table_status_rxs: &HashMap<SrcTableId, watch::Receiver<TableStatus>>,
 ) -> Option<PgLsn> {
     flush_lsn_rxs
-        .values()
-        .map(|rx| *rx.borrow())
+        .iter()
+        .filter(|(table_id, _)| {
+            table_status_rxs
+                .get(table_id)
+                .is_none_or(|status| *status.borrow() == TableStatus::Healthy)
+        })
+        .map(|(_, rx)| *rx.borrow())
         .min()
         .map(PgLsn::from)
 }
@@ -781,6 +793,7 @@ pub async fn run_event_loop(
     // Persist across reconnects
     let mut saved_schemas: Vec<TableSchema> = Vec::new();
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
+    let mut table_status_rxs: HashMap<SrcTableId, watch::Receiver<TableStatus>> = HashMap::new();
     let mut last_seen_end_lsn: Option<PgLsn> = None;
 
     // Linear backoff parameters
@@ -799,11 +812,13 @@ pub async fn run_event_loop(
                     event_sender,
                     commit_state,
                     flush_lsn_rx,
+                    table_status_rx,
                     replay_from_slot: _,
                     ready_tx,
                 }) => {
                     sink.add_table(src_table_id, event_sender, commit_state, &schema);
                     flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+                    table_status_rxs.insert(src_table_id, table_status_rx);
                     saved_schemas.push(schema);
                     if let Err(e) = ready_tx.send(()) {
                         error!(error = ?e, "failed to send ready signal");
@@ -815,8 +830,8 @@ pub async fn run_event_loop(
         }
 
         // Prepare connection and stream
-        let confirmed_flush_lsn =
-            compute_confirmed_flush_lsn(&flush_lsn_rxs).unwrap_or(PgLsn::from(0));
+        let confirmed_flush_lsn = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs)
+            .unwrap_or(PgLsn::from(0));
 
         let (client, mut connection) = postgres_source.connect_replication().await?;
 
@@ -872,7 +887,7 @@ pub async fn run_event_loop(
         loop {
             tokio::select! {
                 _ = status_interval.tick() => {
-                    let lsn_to_send = compute_confirmed_flush_lsn(&flush_lsn_rxs).unwrap_or(PgLsn::from(0));
+                    let lsn_to_send = compute_confirmed_flush_lsn(&flush_lsn_rxs, &table_status_rxs).unwrap_or(PgLsn::from(0));
                     if let Err(e) = stream
                         .as_mut()
                         .send_status_update(lsn_to_send)
@@ -882,9 +897,10 @@ pub async fn run_event_loop(
                     }
                 },
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, replay_from_slot, ready_tx } => {
+                    PostgresReplicationCommand::AddTable { src_table_id, schema, event_sender, commit_state, flush_lsn_rx, table_status_rx, replay_from_slot, ready_tx } => {
                         sink.add_table(src_table_id, event_sender, commit_state, &schema);
                         flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+                        table_status_rxs.insert(src_table_id, table_status_rx);
                         stream.as_mut().add_table_schema(schema);
                         if let Err(e) = ready_tx.send(()) {
                             error!(error = ?e, "failed to send ready signal");
@@ -898,6 +914,7 @@ pub async fn run_event_loop(
                     PostgresReplicationCommand::DropTable { src_table_id } => {
                         sink.drop_table(src_table_id);
                         flush_lsn_rxs.remove(&src_table_id);
+                        table_status_rxs.remove(&src_table_id);
                         stream.as_mut().remove_table_schema(src_table_id);
                     }
                     PostgresReplicationCommand::Shutdown => {
@@ -926,6 +943,10 @@ pub async fn run_event_loop(
                             Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
                                 continue;
                             }
+                            Err(CdcStreamError::CdcEventConversion(e @ CdcEventConversionError::TupleShapeMismatch { src_table_id, .. })) => {
+                                sink.fail_table(src_table_id, format!("unexpected change from the source table: {e}")).await;
+                                continue;
+                            }
                             Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
                                 // TODO: Add support for Truncate and Origin messages and remove this.
                                 warn!("message not supported");
@@ -940,11 +961,7 @@ pub async fn run_event_loop(
                                 break;
                             }
                             Ok(event) => {
-                                if let Some(SchemaChangeRequest(src_table_id)) = sink.process_cdc_event(event).await.unwrap() {
-                                    let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
-                                    sink.alter_table(src_table_id, &table_schema).await;
-                                    stream.as_mut().update_table_schema(table_schema);
-                                }
+                                let Ok(()) = sink.process_cdc_event(event).await;
                             }
                         }
                     }
