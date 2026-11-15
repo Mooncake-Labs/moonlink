@@ -9,6 +9,7 @@ use postgres_replication::protocol::{
 use thiserror::Error;
 
 use crate::pg_replicate::table::{ColumnSchema, SrcTableId, TableSchema};
+use crate::pg_replicate::util::normalize_numeric_cell;
 
 use super::{table_row::TableRow, text::TextFormatConverter, Cell};
 
@@ -131,8 +132,10 @@ impl CdcEventConverter {
                     let text = str::from_utf8(&bytes[..]).map_err(|e| {
                         invalid(excerpt(&String::from_utf8_lossy(&bytes[..])), e.to_string())
                     })?;
-                    TextFormatConverter::try_from_str(&column_schema.typ, text)
-                        .map_err(|e| invalid(excerpt(text), e.to_string()))?
+                    let cell = TextFormatConverter::try_from_str(&column_schema.typ, text)
+                        .map_err(|e| invalid(excerpt(text), e.to_string()))?;
+                    normalize_numeric_cell(&column_schema.typ, column_schema.modifier, cell)
+                        .map_err(|reason| invalid(excerpt(text), reason))?
                 }
             };
             values.push(cell);

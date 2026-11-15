@@ -6,6 +6,7 @@ use tokio_postgres::types::Type;
 use tracing::error;
 
 use crate::pg_replicate::conversions::text::TextFormatConverter;
+use crate::pg_replicate::util::normalize_numeric_cell;
 
 use super::Cell;
 
@@ -110,7 +111,11 @@ impl TableRowConverter {
                 let value = if val_str == "\\N" {
                     Cell::Null
                 } else {
-                    match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
+                    match TextFormatConverter::try_from_str(&column_schema.typ, &val_str)
+                        .map_err(|e| e.to_string())
+                        .and_then(|cell| {
+                            normalize_numeric_cell(&column_schema.typ, column_schema.modifier, cell)
+                        }) {
                         Ok(value) => value,
                         Err(e) => {
                             error!(
@@ -126,7 +131,7 @@ impl TableRowConverter {
                                 column: column_schema.name.clone(),
                                 type_name: column_schema.typ.name().to_string(),
                                 value,
-                                reason: e.to_string(),
+                                reason: e,
                             });
                         }
                     }

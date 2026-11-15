@@ -29,6 +29,88 @@ fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
     Some((precision, scale))
 }
 
+/// The decimal (precision, scale) a numeric column is stored with: its declared ones, or
+/// Decimal128's maximum precision with arrow's default scale for unconstrained `numeric`.
+fn numeric_storage_precision_scale(modifier: i32) -> (u8, i8) {
+    numeric_precision_scale(modifier).unwrap_or((DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE))
+}
+
+/// Bring a decoded numeric value to the exact decimal it is stored as, or explain why it cannot be
+/// stored faithfully: more fractional digits than the column scale, more digits than the
+/// precision allows, or NaN / Infinity. Values are never rounded or replaced.
+fn normalize_numeric(value: PgNumeric, modifier: i32) -> Result<PgNumeric, String> {
+    let (precision, scale) = numeric_storage_precision_scale(modifier);
+    let value = match value {
+        PgNumeric::Value(value) => value,
+        PgNumeric::NaN => return Err("NaN cannot be stored in a decimal column".to_string()),
+        PgNumeric::PositiveInf | PgNumeric::NegativeInf => {
+            return Err("Infinity cannot be stored in a decimal column".to_string())
+        }
+    };
+    let rescaled = value.with_scale(scale as i64);
+    if rescaled != value {
+        return Err(format!(
+            "it has more than {scale} fractional digits (stored as decimal({precision}, {scale}))"
+        ));
+    }
+    let (digits, _) = rescaled.as_bigint_and_exponent();
+    let max_precision = precision.min(DECIMAL128_MAX_PRECISION) as u32;
+    if digits
+        .to_i128()
+        .is_none_or(|d| d.unsigned_abs() >= 10u128.pow(max_precision))
+    {
+        return Err(format!("it does not fit decimal({max_precision}, {scale})"));
+    }
+    Ok(PgNumeric::Value(rescaled))
+}
+
+/// Normalize the numeric values inside a decoded cell of the given column type (see
+/// [`normalize_numeric`]), including array elements and composite fields.
+pub(crate) fn normalize_numeric_cell(
+    typ: &Type,
+    modifier: i32,
+    cell: Cell,
+) -> Result<Cell, String> {
+    Ok(match cell {
+        Cell::Numeric(value) => Cell::Numeric(normalize_numeric(value, modifier)?),
+        Cell::Array(ArrayCell::Numeric(values)) => Cell::Array(ArrayCell::Numeric(
+            values
+                .into_iter()
+                .map(|v| v.map(|v| normalize_numeric(v, modifier)).transpose())
+                .collect::<Result<_, _>>()?,
+        )),
+        Cell::Composite(values) => Cell::Composite(normalize_composite_fields(typ, values)?),
+        Cell::Array(ArrayCell::Composite(elements)) => {
+            let element_type = match typ.kind() {
+                Kind::Array(inner) => inner,
+                _ => typ,
+            };
+            Cell::Array(ArrayCell::Composite(
+                elements
+                    .into_iter()
+                    .map(|e| {
+                        e.map(|fields| normalize_composite_fields(element_type, fields))
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        other => other,
+    })
+}
+
+fn normalize_composite_fields(typ: &Type, values: Vec<Cell>) -> Result<Vec<Cell>, String> {
+    let Kind::Composite(fields) = typ.kind() else {
+        return Ok(values);
+    };
+    values
+        .into_iter()
+        .zip(fields)
+        // Composite fields carry no type modifier.
+        .map(|(value, field)| normalize_numeric_cell(field.type_(), -1, value))
+        .collect()
+}
+
 enum ArrowExtensionType {
     Uuid,
     Json,
@@ -254,9 +336,13 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
             .into_iter()
             .map(|v| {
                 v.map(|n| match n {
+                    // Normalized when decoded, so the digits fit.
                     PgNumeric::Value(bigdecimal) => {
                         let (int_val, _) = bigdecimal.into_bigint_and_exponent();
-                        RowValue::Decimal(int_val.to_i128().unwrap())
+                        int_val
+                            .to_i128()
+                            .map(RowValue::Decimal)
+                            .unwrap_or(RowValue::Null)
                     }
                     _ => RowValue::Null,
                 })
@@ -363,9 +449,13 @@ impl From<Cell> for RowValue {
             }
             Cell::Numeric(value) => {
                 match value {
+                    // Normalized when decoded, so the digits fit.
                     PgNumeric::Value(bigdecimal) => {
                         let (int_val, _) = bigdecimal.into_bigint_and_exponent();
-                        RowValue::Decimal(int_val.to_i128().unwrap())
+                        int_val
+                            .to_i128()
+                            .map(RowValue::Decimal)
+                            .unwrap_or(RowValue::Null)
                     }
                     _ => {
                         // DevNote:
@@ -396,6 +486,42 @@ mod tests {
     use iceberg::arrow as IcebergArrow;
     use moonlink::row::RowValue;
     use std::str::FromStr;
+
+    #[test]
+    fn numeric_values_are_stored_exactly_or_rejected() {
+        let typmod = |precision: i32, scale: i32| ((precision << 16) | scale) + 4;
+        let decimal = |text: &str, modifier: i32| -> Result<i128, String> {
+            let cell = Cell::Numeric(text.parse::<PgNumeric>().unwrap());
+            match normalize_numeric_cell(&Type::NUMERIC, modifier, cell)? {
+                Cell::Numeric(PgNumeric::Value(v)) => {
+                    Ok(v.into_bigint_and_exponent().0.to_i128().unwrap())
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        // Unconstrained numeric is stored as decimal(38, 10).
+        assert_eq!(decimal("1.5", -1), Ok(15_000_000_000));
+        assert_eq!(decimal("-0.0000000001", -1), Ok(-1));
+        assert_eq!(
+            decimal("123456789012345678.5", -1),
+            Ok(1_234_567_890_123_456_785_000_000_000)
+        );
+        assert!(decimal("1.23456789012", -1)
+            .unwrap_err()
+            .contains("fractional digits"));
+        assert!(decimal("1e39", -1).unwrap_err().contains("does not fit"));
+        assert!(decimal("1e28", -1).unwrap_err().contains("does not fit"));
+        assert!(decimal("NaN", -1).unwrap_err().contains("NaN"));
+        assert!(decimal("Infinity", -1).unwrap_err().contains("Infinity"));
+        // Declared precision and scale.
+        assert_eq!(decimal("12.5", typmod(20, 5)), Ok(1_250_000));
+        assert!(decimal("1.000001", typmod(20, 5)).is_err());
+        // Arrays are normalized element by element.
+        let array = Cell::Array(ArrayCell::Numeric(vec![Some("2.5".parse().unwrap()), None]));
+        assert!(normalize_numeric_cell(&Type::NUMERIC_ARRAY, typmod(10, 2), array).is_ok());
+        let bad = Cell::Array(ArrayCell::Numeric(vec![Some("NaN".parse().unwrap())]));
+        assert!(normalize_numeric_cell(&Type::NUMERIC_ARRAY, -1, bad).is_err());
+    }
 
     #[test]
     fn unsupported_column_type_is_an_error_not_a_panic() {

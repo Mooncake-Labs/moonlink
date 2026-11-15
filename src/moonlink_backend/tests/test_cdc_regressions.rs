@@ -1128,3 +1128,70 @@ async fn idle_empty_mirror_is_readable_at_later_lsn() {
     );
     assert_eq!(snapshot_error(&backend, "rv_empty_mc", lsn).await, None);
 }
+
+/// Numeric values reach the mirror exactly (unconstrained numeric included); values the mirror
+/// cannot store exactly (NaN, too large) put the mirror in the errored state instead of being
+/// shifted, nulled or panicking replication.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn numeric_values_are_exact_or_error_the_mirror() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_num, rv_nan, rv_big, rv_bystander;
+         CREATE TABLE rv_num (id BIGINT PRIMARY KEY, n NUMERIC, f NUMERIC(20, 5));
+         CREATE TABLE rv_nan (id BIGINT PRIMARY KEY, n NUMERIC);
+         CREATE TABLE rv_big (id BIGINT PRIMARY KEY, n NUMERIC);
+         CREATE TABLE rv_bystander (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    for t in ["rv_num", "rv_nan", "rv_big", "rv_bystander"] {
+        mirror(
+            &backend,
+            &tmp,
+            &format!("{t}_mc"),
+            &format!("public.{t}"),
+            &uri,
+        )
+        .await;
+    }
+    client
+        .simple_query(
+            "INSERT INTO rv_num VALUES (1, 1.5, 12.5), (2, 123.456, -0.00001), (3, -0.0000000001, 0);
+             INSERT INTO rv_nan VALUES (1, 'NaN');
+             INSERT INTO rv_big VALUES (1, 1e39);
+             INSERT INTO rv_bystander VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let timeout = Duration::from_secs(30);
+    let n = scan_rows(&backend, "rv_num_mc", lsn, "n", timeout)
+        .await
+        .unwrap();
+    let f = scan_rows(&backend, "rv_num_mc", lsn, "f", timeout)
+        .await
+        .unwrap();
+    let as_f64 = |rows: &BTreeMap<i64, Option<String>>, id: i64| {
+        rows[&id].as_deref().unwrap().parse::<f64>().unwrap()
+    };
+    assert_eq!(
+        (as_f64(&n, 1), as_f64(&n, 2), as_f64(&n, 3)),
+        (1.5, 123.456, -0.0000000001)
+    );
+    assert_eq!(
+        (as_f64(&f, 1), as_f64(&f, 2), as_f64(&f, 3)),
+        (12.5, -0.00001, 0.0)
+    );
+    assert_eq!(
+        scan_ids(&backend, "rv_bystander_mc", lsn).await,
+        Some(vec![1])
+    );
+    let nan = snapshot_error(&backend, "rv_nan_mc", lsn)
+        .await
+        .expect("NaN must error");
+    assert!(nan.contains("NaN"), "{nan}");
+    let big = snapshot_error(&backend, "rv_big_mc", lsn)
+        .await
+        .expect("1e39 must error");
+    assert!(big.contains("does not fit"), "{big}");
+}
