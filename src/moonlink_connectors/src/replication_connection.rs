@@ -40,6 +40,7 @@ fn spawn_errored_marker_writer(
     mooncake_table_id: MooncakeTableId,
     mut table_status: watch::Receiver<TableStatus>,
     replication_stopped: Arc<AtomicBool>,
+    slot_status: Option<watch::Sender<TableStatus>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -52,10 +53,16 @@ fn spawn_errored_marker_writer(
                     warn!(table = %mooncake_table_id, "errored because replication stopped; not persisted, a restart resumes it");
                     return;
                 }
-                if let Err(e) =
-                    errored_tables::write_marker(&base_path, &mooncake_table_id, &message).await
-                {
-                    error!(error = %e, table = %mooncake_table_id, "failed to persist errored state");
+                match errored_tables::write_marker(&base_path, &mooncake_table_id, &message).await {
+                    // Only now may the slot move past what the table did not apply.
+                    Ok(()) => {
+                        if let Some(slot_status) = &slot_status {
+                            let _ = slot_status.send(TableStatus::Errored(message));
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, table = %mooncake_table_id, "failed to persist errored state; the replication slot stays held for this mirror until it is dropped");
+                    }
                 }
                 return;
             }
@@ -203,7 +210,7 @@ impl ReplicationConnection {
     ) -> Result<SrcTableId> {
         debug!(src_table_name, "adding PostgreSQL table for replication");
 
-        let (src_table_id, table_resources) = self
+        let (src_table_id, mut table_resources) = self
             .source
             .add_table(
                 src_table_name,
@@ -221,6 +228,7 @@ impl ReplicationConnection {
             mooncake_table_id.clone(),
             table_resources.table_event_manager.subscribe_table_status(),
             self.source.replication_stopped(),
+            table_resources.slot_status_tx.take(),
         );
         let table_state = TableState {
             src_table_name: src_table_name.to_string(),
@@ -335,28 +343,55 @@ impl ReplicationConnection {
 mod tests {
     use super::*;
 
-    async fn marker_after_error(replication_stopped: bool) -> Option<String> {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().to_str().unwrap().to_string();
+    /// The persisted marker after the table errors, and the status the replication slot sees.
+    async fn marker_after_error(
+        base: &str,
+        replication_stopped: bool,
+    ) -> (Option<String>, TableStatus) {
         let id = MooncakeTableId {
             database: "db".to_string(),
             table: "t".to_string(),
         };
         let (tx, rx) = watch::channel(TableStatus::Healthy);
+        let (slot_status_tx, slot_status_rx) = watch::channel(TableStatus::Healthy);
         let writer = spawn_errored_marker_writer(
-            base.clone(),
+            base.to_string(),
             id.clone(),
             rx,
             Arc::new(AtomicBool::new(replication_stopped)),
+            Some(slot_status_tx),
         );
         tx.send(TableStatus::Errored("broken".to_string())).unwrap();
         writer.await.unwrap();
-        errored_tables::read_marker(&base, &id).await
+        let slot_status = slot_status_rx.borrow().clone();
+        (errored_tables::read_marker(base, &id).await, slot_status)
     }
 
     #[tokio::test]
     async fn errored_state_is_persisted_unless_replication_stopped() {
-        assert_eq!(marker_after_error(false).await.as_deref(), Some("broken"));
-        assert_eq!(marker_after_error(true).await, None);
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_str().unwrap();
+        let (marker, slot_status) = marker_after_error(base, false).await;
+        assert_eq!(marker.as_deref(), Some("broken"));
+        assert_eq!(slot_status, TableStatus::Errored("broken".to_string()));
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_str().unwrap();
+        assert_eq!(
+            marker_after_error(base, true).await,
+            (None, TableStatus::Healthy)
+        );
+    }
+
+    /// Until the errored state is persisted, the slot keeps seeing the table as healthy (holding
+    /// back what it did not apply); a failed write leaves it so.
+    #[tokio::test]
+    async fn slot_is_held_when_the_errored_state_cannot_be_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_directory = dir.path().join("file");
+        std::fs::write(&not_a_directory, "").unwrap();
+        let (marker, slot_status) =
+            marker_after_error(not_a_directory.to_str().unwrap(), false).await;
+        assert_eq!(marker, None);
+        assert_eq!(slot_status, TableStatus::Healthy);
     }
 }

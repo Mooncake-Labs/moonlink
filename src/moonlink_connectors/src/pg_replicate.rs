@@ -944,6 +944,10 @@ impl PostgresConnection {
                 return Err(crate::Error::table_not_found(table_name.to_string()));
             }
         }
+        // An errored table stops holding the slot only once its errored state is persisted: if the
+        // process died before, it would come back healthy and need the changes the slot keeps.
+        let (slot_status_tx, slot_status_rx) = watch::channel(TableStatus::Healthy);
+        table_resources.slot_status_tx = Some(slot_status_tx);
         let ready_rx = self
             .add_table_to_replication(
                 table_schema.src_table_id,
@@ -955,7 +959,7 @@ impl PostgresConnection {
                     .flush_lsn_rx
                     .take()
                     .expect("flush_lsn_rx is None"),
-                table_resources.table_event_manager.subscribe_table_status(),
+                slot_status_rx,
                 /*replay_from_slot=*/ is_recovery,
             )
             .await?;

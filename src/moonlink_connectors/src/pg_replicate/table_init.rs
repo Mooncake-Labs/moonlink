@@ -46,6 +46,9 @@ pub struct TableResources {
     pub commit_state: Option<Arc<CommitState>>,
     pub replication_state: Arc<ReplicationState>,
     pub flush_lsn_rx: Option<watch::Receiver<u64>>,
+    /// Status of the table as the replication slot sees it: errored only once that is persisted
+    /// (see `spawn_errored_marker_writer`). Set when the table is added to replication.
+    pub slot_status_tx: Option<watch::Sender<moonlink::TableStatus>>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -170,6 +173,7 @@ pub async fn build_table_components(
         commit_state: Some(commit_state),
         replication_state: table_replication_state,
         flush_lsn_rx: Some(flush_lsn_rx),
+        slot_status_tx: None,
     };
     Ok(table_resource)
 }
