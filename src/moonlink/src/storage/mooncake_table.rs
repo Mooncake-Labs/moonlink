@@ -287,6 +287,11 @@ pub struct SnapshotTask {
     /// Schema change, or force snapshot.
     force_empty_persistence_payload: bool,
 
+    /// Iceberg commit (see `IcebergGcContext::committed`) whose persisted records this task
+    /// applies; lets garbage collection know when the mooncake snapshot stopped referencing the
+    /// files that commit removed.
+    applied_iceberg_commit: Option<u64>,
+
     /// Committed deletion records, which have been persisted into iceberg, and should be pruned from mooncake snapshot.
     committed_deletion_logs: HashSet<(FileId, usize /*row idx*/)>,
 
@@ -326,6 +331,7 @@ impl SnapshotTask {
             new_commit_point: None,
             new_streaming_xact: Vec::new(),
             force_empty_persistence_payload: false,
+            applied_iceberg_commit: None,
             // Committed deletion logs which have been persisted, and should be pruned from mooncake snapshot.
             committed_deletion_logs: HashSet::new(),
             // Index merge related fields.
@@ -625,6 +631,60 @@ impl MooncakeTable {
         object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
+        Self::new_impl(
+            schema,
+            mooncake_table_id,
+            table_id,
+            base_path,
+            iceberg_table_config,
+            table_config,
+            object_storage_cache,
+            table_filesystem_accessor,
+            /*garbage_collect=*/ true,
+        )
+        .await
+    }
+
+    /// Open a second, read-only view of a table another `MooncakeTable` owns (test validators):
+    /// without garbage collection, which would delete files the owner is still writing.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_without_gc(
+        schema: Schema,
+        mooncake_table_id: String,
+        table_id: u32,
+        base_path: PathBuf,
+        iceberg_table_config: IcebergTableConfig,
+        table_config: MooncakeTableConfig,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    ) -> Result<Self> {
+        Self::new_impl(
+            schema,
+            mooncake_table_id,
+            table_id,
+            base_path,
+            iceberg_table_config,
+            table_config,
+            object_storage_cache,
+            table_filesystem_accessor,
+            /*garbage_collect=*/ false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_impl(
+        schema: Schema,
+        mooncake_table_id: String,
+        table_id: u32,
+        base_path: PathBuf,
+        iceberg_table_config: IcebergTableConfig,
+        table_config: MooncakeTableConfig,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        garbage_collect: bool,
+    ) -> Result<Self> {
         let metadata = Arc::new(TableMetadata {
             mooncake_table_id,
             table_id,
@@ -641,7 +701,9 @@ impl MooncakeTable {
             iceberg_table_config,
         )
         .await?;
-        iceberg_table_manager.gc_context = Some(gc_context.clone());
+        if garbage_collect {
+            iceberg_table_manager.gc_context = Some(gc_context.clone());
+        }
         let iceberg_table_manager = Box::new(iceberg_table_manager);
 
         let factory = IcebergTableManagerFactory {
@@ -659,8 +721,19 @@ impl MooncakeTable {
         )
         .await?;
         table.table_manager_factory = Some(factory);
-        table.gc_context = Some(gc_context);
+        if garbage_collect {
+            table.snapshot.try_write().unwrap().gc_context = Some(gc_context.clone());
+            table.gc_context = Some(gc_context);
+        }
         Ok(table)
+    }
+
+    /// Delete superseded files without waiting for reader information (garbage collection tests).
+    #[cfg(test)]
+    pub(crate) fn set_gc_grace_for_test(&self, grace: std::time::Duration) {
+        if let Some(gc_context) = &self.gc_context {
+            gc_context.set_grace_without_reader_info(grace);
+        }
     }
 
     /// Build a table around an injected table manager (tests use mocks).
@@ -923,6 +996,14 @@ impl MooncakeTable {
 
         assert!(self.iceberg_table_manager.is_none());
         self.iceberg_table_manager = Some(persistence_snapshot_res.table_manager.unwrap());
+        // At most one persistence is in flight, so this is the commit that produced the result.
+        if let Some(gc_context) = &self.gc_context {
+            self.next_snapshot_task.applied_iceberg_commit = Some(
+                gc_context
+                    .committed
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            );
+        }
 
         // ---- Buffer iceberg persisted content to next snapshot task ---
         assert!(self.next_snapshot_task.committed_deletion_logs.is_empty());
@@ -1660,9 +1741,16 @@ impl MooncakeTable {
             .in_flight_tasks
             .notifier(self.table_notify.as_ref().unwrap().clone());
 
+        // The merge reads index blocks of the current snapshot.
+        let maintenance_reader = self
+            .gc_context
+            .as_ref()
+            .map(|gc_context| gc_context.register_maintenance_reader());
+
         // Create a detached task, whose completion will be notified separately.
         let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
         spawn_supervised("index merge", supervisor_notify, async move {
+            let _maintenance_reader = maintenance_reader;
             let result: Result<()> = async move {
                 let mut builder = GlobalIndexBuilder::new();
                 builder.set_directory(table_directory);
@@ -1745,6 +1833,12 @@ impl MooncakeTable {
             .in_flight_tasks
             .notifier(self.table_notify.as_ref().unwrap().clone());
 
+        // The compaction reads data and deletion-vector files of the current snapshot.
+        let maintenance_reader = self
+            .gc_context
+            .as_ref()
+            .map(|gc_context| gc_context.register_maintenance_reader());
+
         // Record data files being compacted.
         assert!(self.next_snapshot_task.compacting_data_files.is_empty());
         self.next_snapshot_task.compacting_data_files = compaction_payload.get_data_files();
@@ -1755,6 +1849,7 @@ impl MooncakeTable {
             "data compaction",
             supervisor_notify,
             async move {
+                let _maintenance_reader = maintenance_reader;
                 let builder = CompactionBuilder::new(compaction_payload, schema_ref, file_params);
                 let data_compaction_result = builder.build().await;
                 table_notify_tx_copy

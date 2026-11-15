@@ -508,6 +508,28 @@ pub(crate) async fn create_mooncake_table(
     table
 }
 
+/// Open a second, read-only view of a table another `MooncakeTable` owns, to validate what it
+/// persisted; it must not garbage-collect the owner's files.
+#[allow(dead_code)]
+pub(crate) async fn create_mooncake_table_for_validation(
+    mooncake_table_metadata: Arc<MooncakeTableMetadata>,
+    iceberg_table_config: IcebergTableConfig,
+    object_storage_cache: Arc<dyn CacheTrait>,
+) -> MooncakeTable {
+    MooncakeTable::new_without_gc(
+        create_test_arrow_schema().as_ref().clone(),
+        ICEBERG_TEST_TABLE.to_string(),
+        /*version=*/ TEST_TABLE_ID.0,
+        mooncake_table_metadata.path.clone(),
+        iceberg_table_config.clone(),
+        mooncake_table_metadata.config.clone(),
+        object_storage_cache,
+        create_test_filesystem_accessor(&iceberg_table_config),
+    )
+    .await
+    .unwrap()
+}
+
 /// Test util function to create mooncake table and table notify.
 pub(crate) async fn create_mooncake_table_and_notify(
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,

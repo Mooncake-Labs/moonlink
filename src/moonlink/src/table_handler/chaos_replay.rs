@@ -164,7 +164,7 @@ async fn validate_persisted_iceberg_table(
     let cache_temp_dir = tempdir().unwrap();
     let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
-    let mut table = create_mooncake_table(
+    let mut table = create_mooncake_table_for_validation(
         mooncake_table_metadata.clone(),
         iceberg_table_config.clone(),
         object_storage_cache,

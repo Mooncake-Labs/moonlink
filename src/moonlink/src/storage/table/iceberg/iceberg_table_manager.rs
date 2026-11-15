@@ -83,9 +83,12 @@ pub struct IcebergTableManager {
 
     /// Set for tables owned by a mooncake table; enables garbage collection.
     pub(crate) gc_context: Option<Arc<crate::storage::table::iceberg::gc::IcebergGcContext>>,
-    /// Data-directory files no longer referenced, with when / at which mooncake snapshot
-    /// sequence they were first seen unreferenced.
+    /// Data-directory files no longer referenced, with when / after which commit (see
+    /// `IcebergGcContext::committed`) they were first seen unreferenced.
     pub(crate) gc_unreferenced_since: HashMap<String, (std::time::Instant, u64)>,
+    /// Files the current version referenced at the last garbage collection, i.e. what its
+    /// successor's predecessor references.
+    pub(crate) gc_previous_referenced: Option<std::collections::HashSet<String>>,
 }
 
 impl IcebergTableManager {
@@ -114,6 +117,7 @@ impl IcebergTableManager {
             persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
             gc_context: None,
             gc_unreferenced_since: HashMap::new(),
+            gc_previous_referenced: None,
         })
     }
 
@@ -146,6 +150,7 @@ impl IcebergTableManager {
             persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
             gc_context: None,
             gc_unreferenced_since: HashMap::new(),
+            gc_previous_referenced: None,
         })
     }
 
@@ -218,6 +223,11 @@ impl TableManager for IcebergTableManager {
             .await
         {
             Ok(result) => {
+                if let Some(gc_context) = &self.gc_context {
+                    gc_context
+                        .committed
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 // Best effort: a failed cleanup only leaves files behind for the next run.
                 if let Err(e) = self.collect_garbage(/*at_load=*/ false).await {
                     tracing::warn!(error = ?e, "iceberg garbage collection failed");

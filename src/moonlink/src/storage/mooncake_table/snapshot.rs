@@ -96,6 +96,9 @@ pub(crate) struct SnapshotTableState {
     /// Mooncake snapshot sequence, incremented at the end of every snapshot update; shared with
     /// the owning table (and its garbage collection) through an `Arc`.
     pub(crate) snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Garbage collection of the owning table's iceberg files, if enabled.
+    pub(crate) gc_context: Option<Arc<crate::storage::table::iceberg::gc::IcebergGcContext>>,
 }
 
 /// A committed deletion that found no row to delete.
@@ -187,6 +190,7 @@ impl SnapshotTableState {
         let table_config = metadata.config.clone();
         Ok(Self {
             snapshot_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            gc_context: None,
             iceberg_warehouse_location,
             table_instance_id: uuid::Uuid::new_v4(),
             mooncake_table_metadata: metadata.clone(),
@@ -673,8 +677,13 @@ impl SnapshotTableState {
         }
 
         // Published after every state change of this update (readers hold the read lock).
-        self.snapshot_seq
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let seq = self
+            .snapshot_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if let (Some(gc_context), Some(commit)) = (&self.gc_context, task.applied_iceberg_commit) {
+            gc_context.mark_applied(commit, seq);
+        }
 
         MooncakeSnapshotOutput {
             uuid: opt.uuid,
