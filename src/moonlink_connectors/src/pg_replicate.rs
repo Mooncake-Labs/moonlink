@@ -126,6 +126,10 @@ const FINGERPRINT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceIdentity {
     pub system_id: String,
+    /// The server's port: physical copies of a cluster (pg_basebackup clones, standbys) share its
+    /// system identifier, and on one host they differ by port. Host names are not used, since one
+    /// server is reachable under several (localhost, 127.0.0.1, a socket).
+    pub port: String,
     pub database: String,
 }
 
@@ -146,15 +150,27 @@ impl SourceIdentity {
         drop(client);
         connection_task.abort();
         let (system_id, database) = identified?;
+        let port = connect_control_client(uri)
+            .await?
+            .simple_query("SELECT current_setting('port');")
+            .await
+            .map_err(PostgresSourceError::from)?
+            .iter()
+            .find_map(|m| match m {
+                SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                _ => None,
+            })
+            .unwrap_or_default();
         Ok(Self {
             system_id,
+            port,
             database,
         })
     }
 
     /// Key used to share one replication connection per source database.
     pub fn key(&self) -> String {
-        format!("{}/{}", self.system_id, self.database)
+        format!("{}/{}/{}", self.system_id, self.port, self.database)
     }
 }
 
@@ -1692,6 +1708,22 @@ mod supervisor_tests {
                 .is_ok()
         );
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::SourceIdentity;
+
+    #[test]
+    fn clones_of_a_cluster_on_other_ports_are_different_sources() {
+        let identity = |port: &str| SourceIdentity {
+            system_id: "7300000000000000001".to_string(),
+            port: port.to_string(),
+            database: "app".to_string(),
+        };
+        assert_ne!(identity("5432").key(), identity("5433").key());
+        assert_eq!(identity("5432").key(), identity("5432").key());
     }
 }
 
