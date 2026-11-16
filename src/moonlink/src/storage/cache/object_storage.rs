@@ -13,4 +13,7 @@ mod local_file_optimization_state_tests;
 mod budget_overflow_tests;
 
 #[cfg(test)]
+mod concurrent_miss_tests;
+
+#[cfg(test)]
 pub(crate) mod test_utils;

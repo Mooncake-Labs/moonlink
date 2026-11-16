@@ -120,6 +120,24 @@ impl ObjectStorageCacheInternal {
         assert_eq!(self.evictable_bytes, sum);
     }
 
+    /// Take a reference to the cached entry of `file_id`, if any, pinning it. Moving an entry from
+    /// evictable to pinned doesn't change the cached bytes, so no eviction is needed; evicting here
+    /// could even drop this very entry when the cache is over budget, leaving the returned handle
+    /// dangling.
+    fn pin_cached_entry(&mut self, file_id: TableUniqueFileId) -> Option<CacheEntry> {
+        if let Some(value) = self.non_evictable_cache.get_mut(&file_id) {
+            ma::assert_gt!(value.reference_count, 0);
+            value.reference_count += 1;
+            return Some(value.cache_entry.clone());
+        }
+        let mut value = self.pop_evictable(&file_id)?;
+        assert_eq!(value.reference_count, 0);
+        value.reference_count += 1;
+        let cache_entry = value.cache_entry.clone();
+        assert!(self.non_evictable_cache.insert(file_id, value).is_none());
+        Some(cache_entry)
+    }
+
     /// Insert into the evictable cache.
     fn push_evictable(
         &mut self,
@@ -332,6 +350,9 @@ pub struct ObjectStorageCache {
     config: ObjectStorageCacheConfig,
     /// Object storage caches.
     pub(crate) cache: Arc<RwLock<ObjectStorageCacheInternal>>,
+    /// Lookups that load a file wait here before caching it, so tests can line up concurrent loads.
+    #[cfg(test)]
+    after_load_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
 // A dummy [`Debug`] trait implementation.
@@ -357,7 +378,16 @@ impl ObjectStorageCache {
                 evictable_bytes: 0,
                 non_evictable_cache: HashMap::new(),
             })),
+            #[cfg(test)]
+            after_load_barrier: None,
         }
+    }
+
+    /// Make lookups that load a file wait for `parties` of them to have loaded it.
+    #[cfg(test)]
+    pub(crate) fn line_up_loads(mut self, parties: usize) -> Self {
+        self.after_load_barrier = Some(Arc::new(tokio::sync::Barrier::new(parties)));
+        self
     }
 
     /// Read from remote [`src`] and write to local cache file, return cache entries.
@@ -394,40 +424,14 @@ impl ObjectStorageCache {
         Option<NonEvictableHandle>,
         InlineEvictedFiles, /*files_to_delete*/
     )> {
-        {
-            let mut guard = self.cache.write().await;
-
-            // Check non-evictable cache.
-            let value = guard.non_evictable_cache.get_mut(&file_id);
-            if let Some(value) = value {
-                ma::assert_gt!(value.reference_count, 0);
-                value.reference_count += 1;
-                let cache_entry = value.cache_entry.clone();
-                let non_evictable_handle =
-                    NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
-                return Ok((
-                    Some(non_evictable_handle),
-                    /*files_to_delete=*/ SmallVec::new(),
-                ));
-            }
-
-            // Check evictable cache.
-            let value = guard.pop_evictable(&file_id);
-            if let Some(mut value) = value {
-                assert_eq!(value.reference_count, 0);
-                value.reference_count += 1;
-                let cache_entry = value.cache_entry.clone();
-                // Moving an entry from evictable to pinned doesn't change the cached bytes, so no
-                // eviction is needed; evicting here could even drop this very entry when the cache
-                // is over budget, leaving the returned handle dangling.
-                assert!(guard.non_evictable_cache.insert(file_id, value).is_none());
-                let non_evictable_handle =
-                    NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
-                return Ok((
-                    Some(non_evictable_handle),
-                    /*files_to_delete=*/ SmallVec::new(),
-                ));
-            }
+        let cached = self.cache.write().await.pin_cached_entry(file_id);
+        if let Some(cache_entry) = cached {
+            let non_evictable_handle =
+                NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
+            return Ok((
+                Some(non_evictable_handle),
+                /*files_to_delete=*/ SmallVec::new(),
+            ));
         }
 
         // Place IO operation out of critical section.
@@ -444,37 +448,50 @@ impl ObjectStorageCache {
             self.cache.clone(),
         );
 
-        let files_to_delete = {
+        #[cfg(test)]
+        if let Some(barrier) = &self.after_load_barrier {
+            barrier.wait().await;
+        }
+
+        let (handle, files_to_delete) = {
             let mut guard = self.cache.write().await;
-            guard.cur_bytes += file_size;
+            // A concurrent lookup of the same file may have cached it while this one was loading:
+            // use that entry, so the file is cached and counted once.
+            if let Some(cache_entry) = guard.pin_cached_entry(file_id) {
+                let handle = NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
+                (Some(handle), Vec::new())
+            } else {
+                guard.cur_bytes += file_size;
 
-            let (cache_succ, files_to_delete) = guard.insert_non_evictable(
-                file_id,
-                cache_entry_wrapper,
-                self.config.max_bytes,
-                /*tolerate_insufficiency=*/ !must_pin,
-            );
-            if cache_succ {
-                return Ok((Some(non_evictable_handle), files_to_delete.into()));
+                let (cache_succ, files_to_delete) = guard.insert_non_evictable(
+                    file_id,
+                    cache_entry_wrapper,
+                    self.config.max_bytes,
+                    /*tolerate_insufficiency=*/ !must_pin,
+                );
+                if cache_succ {
+                    return Ok((Some(non_evictable_handle), files_to_delete.into()));
+                }
+
+                // Otherwise, it means cache entry failed to insert.
+                ma::assert_ge!(guard.cur_bytes, file_size);
+                guard.cur_bytes -= file_size;
+                (None, files_to_delete)
             }
-
-            // Otherwise, it means cache entry failed to insert.
-            ma::assert_ge!(guard.cur_bytes, file_size);
-            guard.cur_bytes -= file_size;
-            files_to_delete
         };
 
-        // Nothing references the download; callers read the remote file instead.
+        // Nothing references the download: callers read the remote file, or the entry another
+        // lookup cached.
         if let Some(downloaded_filepath) = downloaded_filepath {
             if let Err(e) = tokio::fs::remove_file(&downloaded_filepath).await {
                 tracing::warn!(
                     path = downloaded_filepath,
                     error = %e,
-                    "failed to delete a download the object storage cache had no room for"
+                    "failed to delete an unused object storage cache download"
                 );
             }
         }
-        Ok((None, files_to_delete.into()))
+        Ok((handle, files_to_delete.into()))
     }
 
     /// Get cache entry from remote filepath [`src`].
