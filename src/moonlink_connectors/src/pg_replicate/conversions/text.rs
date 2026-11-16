@@ -3,9 +3,11 @@ use std::{
     borrow::Cow,
     fmt::format,
     num::{ParseFloatError, ParseIntError},
+    sync::LazyLock,
 };
 
 use bigdecimal::ParseBigDecimalError;
+use chrono::format::{Item, ParseResult, Parsed, StrftimeItems};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use thiserror::Error;
 use tokio_postgres::types::{Kind, Type};
@@ -92,25 +94,50 @@ fn chrono_date_text(text: &str) -> Result<Cow<'_, str>, FromTextError> {
     Ok(Cow::Owned(format!("{year:+05}{}", &text[digits..])))
 }
 
+/// chrono's items for a format string. Parsed once into these statics: `parse_from_str` parses
+/// its format string again for every value, which costs more than reading the value.
+type ChronoFormat = LazyLock<Vec<Item<'static>>>;
+
+fn chrono_format(format: &'static str) -> Vec<Item<'static>> {
+    StrftimeItems::new(format)
+        .parse()
+        .expect("valid chrono format")
+}
+
+static DATE_FORMAT: ChronoFormat = LazyLock::new(|| chrono_format("%Y-%m-%d"));
+static TIME_FORMAT: ChronoFormat = LazyLock::new(|| chrono_format("%H:%M:%S%.f"));
+static TIMESTAMP_FORMAT: ChronoFormat = LazyLock::new(|| chrono_format("%Y-%m-%d %H:%M:%S%.f"));
+static TIMESTAMPTZ_FORMAT: ChronoFormat =
+    LazyLock::new(|| chrono_format("%Y-%m-%d %H:%M:%S%.f%#z"));
+static TIMESTAMPTZ_COLON_FORMAT: ChronoFormat =
+    LazyLock::new(|| chrono_format("%Y-%m-%d %H:%M:%S%.f%:z"));
+
+/// What `parse_from_str` reads before converting: the fields of `text` in `format`.
+fn parse_fields(format: &ChronoFormat, text: &str) -> ParseResult<Parsed> {
+    let mut parsed = Parsed::new();
+    chrono::format::parse(&mut parsed, text, format.iter())?;
+    Ok(parsed)
+}
+
 pub(crate) fn parse_date(text: &str) -> Result<NaiveDate, FromTextError> {
-    Ok(NaiveDate::parse_from_str(
-        &chrono_date_text(text)?,
-        "%Y-%m-%d",
-    )?)
+    Ok(parse_fields(&DATE_FORMAT, &chrono_date_text(text)?)?.to_naive_date()?)
+}
+
+fn parse_time(text: &str) -> Result<NaiveTime, FromTextError> {
+    Ok(parse_fields(&TIME_FORMAT, text)?.to_naive_time()?)
 }
 
 pub(crate) fn parse_timestamp(text: &str) -> Result<NaiveDateTime, FromTextError> {
-    Ok(NaiveDateTime::parse_from_str(
-        &chrono_date_text(text)?,
-        "%Y-%m-%d %H:%M:%S%.f",
-    )?)
+    // No offset adjustment, as in NaiveDateTime::parse_from_str.
+    Ok(parse_fields(&TIMESTAMP_FORMAT, &chrono_date_text(text)?)?
+        .to_naive_datetime_with_offset(0)?)
 }
 
 pub(crate) fn parse_timestamptz(text: &str) -> Result<DateTime<Utc>, FromTextError> {
     let text = chrono_date_text(text)?;
-    let value = match DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%#z") {
+    let value = match parse_fields(&TIMESTAMPTZ_FORMAT, &text).and_then(|p| p.to_datetime()) {
         Ok(value) => value,
-        Err(_) => DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%:z")?,
+        Err(_) => parse_fields(&TIMESTAMPTZ_COLON_FORMAT, &text)?.to_datetime()?,
     };
     Ok(value.into())
 }
@@ -304,13 +331,10 @@ impl TextFormatConverter {
                 |str| Ok(Some(parse_date(str)?)),
                 ArrayCell::Date,
             ),
-            Type::TIME => {
-                let val = NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?;
-                Ok(Cell::Time(val))
-            }
+            Type::TIME => Ok(Cell::Time(parse_time(str)?)),
             Type::TIME_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?)),
+                |str| Ok(Some(parse_time(str)?)),
                 ArrayCell::Time,
             ),
             Type::TIMESTAMP => Ok(Cell::TimeStamp(parse_timestamp(str)?)),
@@ -1273,8 +1297,8 @@ mod tests {
         }
     }
 
-    /// The date and timestamp parsers before values were borrowed: every year rewritten for
-    /// chrono, and chrono's format strings parsed for each value.
+    /// The date, time and timestamp parsers as they were: every year rewritten for chrono, and
+    /// chrono's format strings parsed for each value.
     mod reference {
         use super::*;
 
@@ -1308,6 +1332,10 @@ mod tests {
             )?)
         }
 
+        pub fn parse_time(text: &str) -> Result<NaiveTime, FromTextError> {
+            Ok(NaiveTime::parse_from_str(text, "%H:%M:%S%.f")?)
+        }
+
         pub fn parse_timestamptz(text: &str) -> Result<DateTime<Utc>, FromTextError> {
             let text = chrono_date_text(text)?;
             let value =
@@ -1322,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn dates_and_timestamps_parse_as_before_values_were_borrowed() {
+    fn dates_times_and_timestamps_parse_as_before() {
         let dates = [
             "2020-01-02",
             "0000-01-01",
@@ -1376,6 +1404,17 @@ mod tests {
             " UTC",
         ];
         let suffixes = ["", " BC"];
+        for time in times {
+            let time = time.trim_start_matches([' ', 'T']);
+            for suffix in ["", "x", ".000001", "+00"] {
+                let text = format!("{time}{suffix}");
+                assert_eq!(
+                    format!("{:?}", parse_time(&text)),
+                    format!("{:?}", reference::parse_time(&text)),
+                    "{text}"
+                );
+            }
+        }
         for date in dates {
             assert_eq!(
                 format!("{:?}", parse_date(date)),
