@@ -281,15 +281,16 @@ impl TableHandlerState {
         let drop_pending = self.special_table_state == SpecialTableState::DropTable;
         let message = crate::Error::errored_table_message(table_name, &reason);
         let err = crate::Error::table_errored(&message);
+        // Status first: a waiter woken by the error below must already see the table errored.
+        if let Some(tx) = &self.table_status_tx {
+            let _ = tx.send(TableStatus::Errored(message));
+        }
         let _ = self
             .force_snapshot_completion_tx
             .send(Some(Err(err.clone())));
         let _ = self.table_maintenance_completion_tx.send(Err(err));
         self.largest_force_snapshot_lsn = None;
         self.initial_copy_buffered_events = Vec::new();
-        if let Some(tx) = &self.table_status_tx {
-            let _ = tx.send(TableStatus::Errored(message));
-        }
         self.special_table_state = SpecialTableState::Errored { reason };
         Some(drop_pending)
     }
