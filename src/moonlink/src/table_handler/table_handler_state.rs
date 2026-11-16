@@ -93,7 +93,9 @@ pub(crate) struct TableHandlerState {
     // This also is used in the initial copy mode to discard cdc events that may be already included in the initial copy.
     // If we have already seen this LSN, we simply discard the event.
     pub(crate) initial_persistence_lsn: Option<u64>,
-    // Record LSN if the last handled table event is a commit operation, which indicates mooncake table stays at a consistent view, so table could be flushed safely.
+    // LSN of a consistent view of the mooncake table, at which it can be flushed safely. A commit
+    // sets it and a write clears it; when a streamed transaction ends without being applied and
+    // no other transaction wrote since the latest commit, it is that commit again.
     pub(crate) table_consistent_view_lsn: Option<u64>,
     // Latest LSN of the table's latest commit.
     pub(crate) latest_commit_lsn: Option<u64>,

@@ -580,17 +580,21 @@ impl ChaosState {
             return;
         }
 
+        // Between transactions the table is at its latest commit, also after an aborted stream, so a
+        // forced snapshot of that commit has to complete.
+        if self.txn_state == TxnState::Empty
+            && self.cur_lsn - self.non_table_update_cmd_call.force_snapshot_lsn
+                >= NON_UPDATE_COMMAND_INTERVAL_LSN
+        {
+            choices.push(EventKind::ForegroundForceSnapshot);
+            self.non_table_update_cmd_call.force_snapshot_lsn = self.cur_lsn;
+        }
+
         // Foreground table maintenance operations happen after a successfully committed transaction.
         if self.uncommitted_inserted_rows.is_empty()
             && self.uncommitted_inserted_rows.is_empty()
             && self.last_txn_is_committed
         {
-            if self.cur_lsn - self.non_table_update_cmd_call.force_snapshot_lsn
-                >= NON_UPDATE_COMMAND_INTERVAL_LSN
-            {
-                choices.push(EventKind::ForegroundForceSnapshot);
-                self.non_table_update_cmd_call.force_snapshot_lsn = self.cur_lsn;
-            }
             if self.cur_lsn - self.non_table_update_cmd_call.force_index_merge_lsn
                 >= NON_UPDATE_COMMAND_INTERVAL_LSN
             {

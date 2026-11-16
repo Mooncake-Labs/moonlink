@@ -2026,6 +2026,19 @@ fn test_stream_ending_without_applying_restores_consistent_view() {
     assert_eq!(state.table_consistent_view_lsn, None);
     assert!(state.skip_resent_event(&commit(90, Some(7))));
     assert_eq!(state.table_consistent_view_lsn, Some(100));
+
+    // A streamed commit at or below an empty copy's boundary that the table has not applied: the
+    // boundary keeps it from moving the LSNs, and the stream's end gives the view back.
+    let mut state = new_table_handler_state(Some(50), Some(50));
+    state.start_initial_copy();
+    state.finish_initial_copy(/*lsn=*/ 100);
+    state.update_table_lsns(&append(Some(7)));
+    assert_eq!(state.table_consistent_view_lsn, None);
+    let streamed_commit = commit(90, Some(7));
+    assert!(!state.skip_resent_event(&streamed_commit));
+    state.update_table_lsns(&streamed_commit);
+    assert_eq!(state.latest_commit_lsn, Some(50));
+    assert_eq!(state.table_consistent_view_lsn, Some(50));
 }
 
 /// Testing scenario: after an empty initial copy the table has applied no commit, so a streamed
