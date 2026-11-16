@@ -1,3 +1,4 @@
+use crate::event_sync::TableStatus;
 /// Table handler state manages table event process states.
 use crate::storage::mooncake_table::AlterTableRequest;
 use crate::storage::mooncake_table::DataCompactionResult;
@@ -19,6 +20,11 @@ pub(crate) enum SpecialTableState {
         alter_table_request: Option<AlterTableRequest>,
     },
     DropTable,
+    /// The table can no longer be kept consistent with its source. It only serves errors and
+    /// DROP from now on; never left within a process.
+    Errored {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -123,6 +129,12 @@ pub(crate) struct TableHandlerState {
     pub(crate) table_maintenance_process_status: MaintenanceProcessStatus,
     /// Notify when data compaction completes.
     pub(crate) table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
+
+    // ================================================
+    // Errored state
+    // ================================================
+    //
+    pub(crate) table_status_tx: Option<watch::Sender<TableStatus>>,
 }
 
 impl TableHandlerState {
@@ -151,7 +163,40 @@ impl TableHandlerState {
             table_maintenance_completion_tx,
             // Initial copy fields.
             initial_copy_buffered_events: Vec::new(),
+            table_status_tx: None,
         }
+    }
+
+    pub(crate) fn with_table_status_tx(mut self, tx: watch::Sender<TableStatus>) -> Self {
+        self.table_status_tx = Some(tx);
+        self
+    }
+
+    pub(crate) fn is_errored(&self) -> bool {
+        matches!(self.special_table_state, SpecialTableState::Errored { .. })
+    }
+
+    /// Move the table into the errored state and fail every pending waiter.
+    /// Returns whether a DROP was pending (it must now be completed by the caller), or None if
+    /// the table was already errored.
+    pub(crate) fn enter_errored(&mut self, table_name: &str, reason: String) -> Option<bool> {
+        if self.is_errored() {
+            return None;
+        }
+        let drop_pending = self.special_table_state == SpecialTableState::DropTable;
+        let message = crate::Error::errored_table_message(table_name, &reason);
+        let err = crate::Error::table_errored(&message);
+        let _ = self
+            .force_snapshot_completion_tx
+            .send(Some(Err(err.clone())));
+        let _ = self.table_maintenance_completion_tx.send(Err(err));
+        self.largest_force_snapshot_lsn = None;
+        self.initial_copy_buffered_events = Vec::new();
+        if let Some(tx) = &self.table_status_tx {
+            let _ = tx.send(TableStatus::Errored(message));
+        }
+        self.special_table_state = SpecialTableState::Errored { reason };
+        Some(drop_pending)
     }
 
     pub(crate) fn update_table_lsns(&mut self, event: &TableEvent) {

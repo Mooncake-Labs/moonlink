@@ -1,7 +1,7 @@
 /// This module interacts with iceberg snapshot status, which corresponds to one mooncake table.
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use crate::event_sync::EventSyncReceiver;
+use crate::event_sync::{EventSyncReceiver, TableStatus};
 use crate::Result;
 use crate::TableEvent;
 
@@ -17,6 +17,8 @@ pub struct TableEventManager {
     force_snapshot_completion_rx: watch::Receiver<Option<Result<u64>>>,
     /// Sender which is used to create notification at latest data compaction completion.
     table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
+    /// Table health; errored tables reject reads and requests.
+    table_status_rx: watch::Receiver<TableStatus>,
 }
 
 impl TableEventManager {
@@ -30,7 +32,35 @@ impl TableEventManager {
             flush_lsn_rx: table_event_sync_rx.flush_lsn_rx,
             force_snapshot_completion_rx: table_event_sync_rx.force_snapshot_completion_rx,
             table_maintenance_completion_tx: table_event_sync_rx.table_maintenance_completion_tx,
+            table_status_rx: table_event_sync_rx.table_status_rx,
         }
+    }
+
+    /// Current table status.
+    pub fn table_status(&self) -> TableStatus {
+        self.table_status_rx.borrow().clone()
+    }
+
+    /// Return an error if the table has entered the errored state.
+    pub fn check_healthy(&self) -> Result<()> {
+        match &*self.table_status_rx.borrow() {
+            TableStatus::Healthy => Ok(()),
+            TableStatus::Errored(message) => Err(crate::Error::table_errored(message)),
+        }
+    }
+
+    /// Request the table to enter the errored state (e.g. CDC saw a change it cannot represent).
+    /// Idempotent; returns an error only if the table handler is gone.
+    pub async fn enter_errored(&self, reason: String) -> Result<()> {
+        self.table_event_tx
+            .send(TableEvent::EnterErrored { reason })
+            .await
+            .map_err(|_| self_stopped_error())
+    }
+
+    /// Subscribe to table status changes.
+    pub fn subscribe_table_status(&self) -> watch::Receiver<TableStatus> {
+        self.table_status_rx.clone()
     }
 
     /// Subscribe to flush LSN updates.
@@ -71,7 +101,9 @@ impl TableEventManager {
 
         // Otherwise falls back to loop until requested LSN is met.
         loop {
-            rx.changed().await.unwrap();
+            if rx.changed().await.is_err() {
+                return Err(self_stopped_error());
+            }
             if Self::is_iceberg_snapshot_ready(&rx.borrow(), requested_lsn)? {
                 break;
             }
@@ -113,10 +145,29 @@ impl TableEventManager {
     /// Drop a mooncake table.
     /// Each table event manager correspond to one mooncake table, so this function should be called at most once.
     pub async fn drop_table(&mut self) -> Result<()> {
-        self.table_event_tx
+        if self
+            .table_event_tx
             .send(TableEvent::DropTable)
             .await
-            .unwrap();
-        self.drop_table_completion_rx.take().unwrap().await.unwrap()
+            .is_err()
+        {
+            return Err(self_stopped_error());
+        }
+        let Some(rx) = self.drop_table_completion_rx.take() else {
+            return Err(crate::Error::table_handler_stopped(
+                "table is already being dropped",
+            ));
+        };
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(self_stopped_error()),
+        }
     }
+}
+
+#[track_caller]
+fn self_stopped_error() -> crate::Error {
+    crate::Error::table_handler_stopped(
+        "table handler stopped unexpectedly; drop and re-create the mirror",
+    )
 }

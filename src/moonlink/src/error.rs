@@ -42,11 +42,44 @@ pub enum Error {
 
     #[error("{0}")]
     PbToMoonlinkRowError(ErrorStruct),
+
+    #[error("{0}")]
+    TableErrored(ErrorStruct),
+
+    /// The table handler is gone (table dropped, or its event loop stopped); unlike
+    /// [`Error::TableErrored`] this does not say anything about the table's data.
+    #[error("{0}")]
+    TableHandlerStopped(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
 
 impl Error {
+    /// User-facing message for an errored mirror table.
+    pub fn errored_table_message(table_name: &str, reason: &str) -> String {
+        format!(
+            "mirror {table_name} is out of sync: {reason}; drop and re-create it with mooncake.create_table"
+        )
+    }
+
+    /// Error returned for any request on a table in the errored state; `message` comes from
+    /// [`Error::errored_table_message`].
+    #[track_caller]
+    pub fn table_errored(message: &str) -> Self {
+        Self::TableErrored(ErrorStruct::new(
+            message.to_string(),
+            ErrorStatus::Permanent,
+        ))
+    }
+
+    #[track_caller]
+    pub fn table_handler_stopped(message: &str) -> Self {
+        Self::TableHandlerStopped(ErrorStruct::new(
+            message.to_string(),
+            ErrorStatus::Permanent,
+        ))
+    }
+
     #[track_caller]
     pub fn pb_conversion_error(message: String) -> Self {
         Self::PbToMoonlinkRowError(ErrorStruct::new(message, ErrorStatus::Permanent))
@@ -210,7 +243,9 @@ impl Error {
             | Error::OpenDal(err)
             | Error::JoinError(err)
             | Error::PbToMoonlinkRowError(err)
-            | Error::Json(err) => err.status,
+            | Error::Json(err)
+            | Error::TableErrored(err)
+            | Error::TableHandlerStopped(err) => err.status,
         }
     }
 }

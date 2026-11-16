@@ -1,5 +1,6 @@
 use crate::storage::cache::object_storage::base_cache::CacheTrait;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+use crate::storage::io_utils;
 use crate::storage::storage_utils::TableUniqueFileId;
 use crate::table_notify::EvictedFiles;
 use crate::table_notify::TableEvent;
@@ -10,6 +11,7 @@ use moonlink_table_metadata::{DeletionVector, PositionDelete};
 
 use std::sync::Arc;
 
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::Sender;
 
 /// Maximum number of parallel remote file operations to prevent excessive resource usage
@@ -74,14 +76,20 @@ impl ReadOutput {
         if files.is_empty() {
             return;
         }
-        self.table_notifier
+        let sent = self
+            .table_notifier
             .as_mut()
             .unwrap()
             .send(TableEvent::EvictedFilesToDelete {
                 evicted_files: EvictedFiles { files },
             })
-            .await
-            .unwrap();
+            .await;
+        // The table handler is gone (table dropped or shut down): delete the files here instead.
+        if let Err(SendError(TableEvent::EvictedFilesToDelete { evicted_files })) = sent {
+            if let Err(err) = io_utils::delete_local_files(&evicted_files.files).await {
+                tracing::warn!(error = ?err, "failed to delete evicted cache files");
+            }
+        }
     }
 
     /// Attempt to download remote files and cache them locally, if possible.

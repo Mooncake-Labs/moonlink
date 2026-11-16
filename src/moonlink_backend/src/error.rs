@@ -98,6 +98,31 @@ impl Error {
             Error::InsufficientDiskSpace(es) => es.status,
         }
     }
+
+    /// The errored-mirror error this error wraps, if any; its message is the user-facing "out of
+    /// sync, drop and re-create" text.
+    pub fn table_errored(&self) -> Option<&ErrorStruct> {
+        match self {
+            Error::MoonlinkError(es) | Error::MoonlinkConnectorError(es) => find_table_errored(es),
+            _ => None,
+        }
+    }
+}
+
+fn find_table_errored(es: &ErrorStruct) -> Option<&ErrorStruct> {
+    let source = es.source()?;
+    if let Some(err) = source.downcast_ref::<MoonlinkError>() {
+        return match err {
+            MoonlinkError::TableErrored(es) => Some(es),
+            _ => None,
+        };
+    }
+    if let Some(MoonlinkConnectorError::MoonlinkError(es)) =
+        source.downcast_ref::<MoonlinkConnectorError>()
+    {
+        return find_table_errored(es);
+    }
+    None
 }
 
 impl From<PostgresSourceError> for Error {

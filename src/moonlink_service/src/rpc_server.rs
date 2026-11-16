@@ -90,6 +90,14 @@ pub(crate) fn encode_table_schema(schema: &Schema) -> anyhow::Result<Vec<u8>> {
 }
 
 fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
+    let e = e.into();
+    // An errored mirror's message tells users what to do, so it goes into the top-level message.
+    if let Some(errored) = e
+        .downcast_ref::<moonlink_backend::Error>()
+        .and_then(moonlink_backend::Error::table_errored)
+    {
+        return ErrorStruct::new(errored.message.clone(), errored.status).with_source(e);
+    }
     ErrorStruct::new("backend error".to_string(), ErrorStatus::Permanent).with_source(e)
 }
 
@@ -287,5 +295,27 @@ mod tests {
         server_handle.abort();
         let _ = server_handle.await;
         std::panic::set_hook(prev_hook);
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::into_error_struct;
+
+    #[test]
+    fn test_errored_mirror_message_is_the_wire_message() {
+        let message = moonlink::Error::errored_table_message("db.public.t", "schema change");
+        let core = moonlink::Error::table_errored(&message);
+        let connector: moonlink_connectors::Error = core.clone().into();
+        for backend in [
+            moonlink_backend::Error::from(connector),
+            moonlink_backend::Error::from(core),
+        ] {
+            let es = into_error_struct(backend);
+            assert_eq!(es.message, message);
+        }
+
+        let other = moonlink_backend::Error::from(moonlink::Error::table_handler_stopped("gone"));
+        assert_eq!(into_error_struct(other).message, "backend error");
     }
 }

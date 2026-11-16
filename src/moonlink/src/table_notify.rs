@@ -135,6 +135,13 @@ pub enum TableEvent {
     ForceFullMaintenance,
     /// Drop table.
     DropTable,
+    /// Put the table into the errored state (requested by any layer, e.g. CDC).
+    EnterErrored { reason: String },
+    /// Internal: an errored table stopped waiting for in-flight background tasks before dropping.
+    ErroredDropTimeout,
+    /// Test-only: how long an errored table waits for background tasks before dropping.
+    #[cfg(test)]
+    SetErroredDropWaitForTest { wait: std::time::Duration },
     /// Alter table,
     AlterTable { columns_to_drop: Vec<String> },
     /// Start initial table copy.
