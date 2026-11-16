@@ -6,6 +6,7 @@ use tokio::sync::watch;
 
 use super::test_utils::*;
 use super::TableEvent;
+use super::TableHandler;
 use crate::row::IdentityProp;
 use crate::row::{MoonlinkRow, RowValue};
 use crate::storage::compaction::compaction_config::DataCompactionConfig;
@@ -1725,10 +1726,8 @@ async fn test_discard_duplicate_writes() {
     env.verify_snapshot(40, &[30, 40]).await;
 }
 
-/// Testing scenario: after recovery from a snapshot persisted at a commit's end LSN, a transaction
-/// whose commit record starts exactly at that LSN (row events carry that start LSN) is not dropped.
-#[tokio::test]
-async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
+/// Test util: a table handler for a table recovered from a persisted snapshot at `persisted_lsn`.
+async fn create_env_recovered_at(persisted_lsn: u64) -> TestEnvironment {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config =
         MooncakeTableConfig::new(temp_dir.path().to_str().unwrap().to_string());
@@ -1739,7 +1738,9 @@ async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
         config: mooncake_table_config.clone(),
         path: temp_dir.path().to_path_buf(),
     });
-    let mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
+    let mut recovered_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
+    recovered_snapshot.flush_lsn = Some(persisted_lsn);
+    recovered_snapshot.snapshot_version = persisted_lsn;
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
         .expect_get_warehouse_location()
@@ -1749,12 +1750,15 @@ async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
         .expect_load_snapshot_from_table()
         .times(1)
         .returning(move || {
-            let mock_mooncake_snapshot_copy = mock_mooncake_snapshot.clone();
+            let snapshot = recovered_snapshot.clone();
             Box::pin(async move {
-                Ok((/*next_file_id=*/ 0, mock_mooncake_snapshot_copy))
+                Ok((/*next_file_id=*/ 0, snapshot))
             })
         });
-    let mut mooncake_table = MooncakeTable::new_with_table_manager(
+    mock_table_manager
+        .expect_sync_snapshot()
+        .returning(|_, _| Box::pin(async { Ok(Default::default()) }));
+    let mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         create_test_object_storage_cache(&temp_dir),
@@ -1762,9 +1766,51 @@ async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
     )
     .await
     .unwrap();
+    TestEnvironment::new_with_mooncake_table(temp_dir, mooncake_table).await
+}
+
+/// Testing scenario: after a restart postgres re-sends transactions that are already persisted.
+/// Skipping them must not leave their LSNs behind as pending flush points; a later flush (here at
+/// a new streamed commit) would otherwise flush at an LSN below the recovered snapshot.
+#[tokio::test]
+async fn test_replayed_persisted_commit_does_not_regress_flush_lsn() {
+    let env = create_env_recovered_at(/*persisted_lsn=*/ 100).await;
+
+    // Re-sent, already persisted non-streamed transaction.
+    env.append_row(
+        /*id=*/ 1, /*name=*/ "John", /*age=*/ 30, /*lsn=*/ 20,
+        /*xact_id=*/ None,
+    )
+    .await;
+    env.commit(/*lsn=*/ 26).await;
+
+    // New streamed transaction; its commit flushes preceding unflushed non-streamed writes.
+    env.append_row(
+        /*id=*/ 2,
+        /*name=*/ "Bob",
+        /*age=*/ 20,
+        /*lsn=*/ 0,
+        /*xact_id=*/ Some(7),
+    )
+    .await;
+    env.stream_commit(/*lsn=*/ 150, /*xact_id=*/ 7).await;
+
+    env.set_table_commit_lsn(150);
+    env.set_replication_lsn(150);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        env.verify_snapshot(150, &[2]),
+    )
+    .await
+    .expect("table handler stopped applying changes (flush LSN regressed below the snapshot)");
+}
+
+/// Testing scenario: after recovery from a snapshot persisted at a commit's end LSN, a transaction
+/// whose commit record starts exactly at that LSN (row events carry that start LSN) is not dropped.
+#[tokio::test]
+async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
     // The snapshot holds a transaction whose commit record spans [5, 10).
-    mooncake_table.set_persistence_snapshot_lsn(10);
-    let env = TestEnvironment::new_with_mooncake_table(temp_dir, mooncake_table).await;
+    let env = create_env_recovered_at(/*persisted_lsn=*/ 10).await;
 
     // Replayed persisted transaction: discarded.
     env.append_row(
@@ -1784,6 +1830,223 @@ async fn test_replay_keeps_transaction_starting_at_persisted_lsn() {
     env.set_table_commit_lsn(20);
     env.set_replication_lsn(20);
     env.verify_snapshot(20, &[2]).await;
+}
+
+/// Testing scenario: a streamed transaction committed at or below the table's replay floor is
+/// skipped, whichever floor applies: the recovered snapshot LSN of a restarted table, or the copy
+/// boundary of a freshly copied (here empty) one. The skipped commit does not move the table's LSNs:
+/// a snapshot forced at the floor completes at once (it would wait forever for a commit LSN no
+/// snapshot reaches). A later streamed transaction is applied.
+#[tokio::test]
+async fn test_streamed_commit_below_either_replay_floor_is_skipped() {
+    // Floor 1: recovered snapshot at LSN 100.
+    let mut env = create_env_recovered_at(/*persisted_lsn=*/ 100).await;
+    env.append_row(
+        /*id=*/ 1,
+        /*name=*/ "John",
+        /*age=*/ 30,
+        /*lsn=*/ 0,
+        /*xact_id=*/ Some(7),
+    )
+    .await;
+    env.stream_commit(/*lsn=*/ 90, /*xact_id=*/ 7).await;
+    env.set_replication_lsn(100);
+    let rx = env
+        .table_event_manager
+        .initiate_snapshot(/*lsn=*/ 100)
+        .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 100),
+    )
+    .await
+    .expect("skipped streamed commit moved the table's LSNs")
+    .unwrap();
+    env.append_row(
+        /*id=*/ 2,
+        /*name=*/ "Bob",
+        /*age=*/ 20,
+        /*lsn=*/ 0,
+        /*xact_id=*/ Some(8),
+    )
+    .await;
+    env.stream_commit(/*lsn=*/ 150, /*xact_id=*/ 8).await;
+    env.set_table_commit_lsn(150);
+    env.set_replication_lsn(150);
+    env.verify_snapshot(150, &[2]).await;
+
+    // Floor 2: empty initial copy with boundary LSN 100.
+    let mut env = TestEnvironment::default().await;
+    let sender = env.handler.get_event_sender();
+    sender.send(TableEvent::StartInitialCopy).await.unwrap();
+    env.append_row(
+        /*id=*/ 1,
+        /*name=*/ "John",
+        /*age=*/ 30,
+        /*lsn=*/ 0,
+        /*xact_id=*/ Some(7),
+    )
+    .await;
+    env.stream_commit(/*lsn=*/ 90, /*xact_id=*/ 7).await;
+    sender
+        .send(TableEvent::FinishInitialCopy { start_lsn: 100 })
+        .await
+        .unwrap();
+    env.set_replication_lsn(100);
+    let rx = env
+        .table_event_manager
+        .initiate_snapshot(/*lsn=*/ 100)
+        .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TableEventManager::synchronize_force_snapshot_request(rx, /*requested_lsn=*/ 100),
+    )
+    .await
+    .expect("skipped streamed commit moved the table's LSNs")
+    .unwrap();
+    env.append_row(
+        /*id=*/ 2,
+        /*name=*/ "Bob",
+        /*age=*/ 20,
+        /*lsn=*/ 0,
+        /*xact_id=*/ Some(8),
+    )
+    .await;
+    env.stream_commit(/*lsn=*/ 150, /*xact_id=*/ 8).await;
+    env.set_table_commit_lsn(150);
+    env.set_replication_lsn(150);
+    env.verify_snapshot(150, &[2]).await;
+}
+
+/// Testing scenario: transactions re-sent after a restart are skipped and counted; the first new
+/// event ends the run of skips.
+#[test]
+fn test_resent_events_are_skipped_and_counted() {
+    let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
+    let (force_snapshot_completion_tx, _) = watch::channel(None);
+    let mut state = TableHandlerState::new(
+        table_maintenance_completion_tx,
+        force_snapshot_completion_tx,
+        /*initial_persistence_lsn=*/ Some(100),
+        /*persistence_snapshot_lsn=*/ Some(100),
+    );
+    let append = |lsn| TableEvent::Append {
+        row: MoonlinkRow::new(vec![RowValue::Int32(1)]),
+        xact_id: None,
+        lsn,
+    };
+    let commit = |lsn| TableEvent::Commit { lsn, xact_id: None };
+
+    for (row_lsn, commit_lsn) in [(20, 26), (40, 60), (90, 100)] {
+        assert!(state.skip_resent_event(&append(row_lsn)));
+        assert!(state.skip_resent_event(&commit(commit_lsn)));
+    }
+    assert_eq!(state.skipped_resent_events, 6);
+    assert_eq!(state.skipped_resent_commits, 3);
+
+    // A new transaction, whose commit record starts at the persisted LSN, is applied.
+    assert!(!state.skip_resent_event(&append(100)));
+    assert!(!state.skip_resent_event(&commit(120)));
+    assert_eq!(state.skipped_resent_events, 6);
+}
+
+fn new_table_handler_state(
+    initial_persistence_lsn: Option<u64>,
+    persistence_snapshot_lsn: Option<u64>,
+) -> TableHandlerState {
+    let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
+    let (force_snapshot_completion_tx, _) = watch::channel(None);
+    TableHandlerState::new(
+        table_maintenance_completion_tx,
+        force_snapshot_completion_tx,
+        initial_persistence_lsn,
+        persistence_snapshot_lsn,
+    )
+}
+
+/// Testing scenario: a recovered table skips a streamed commit at or below its snapshot LSN as
+/// re-sent, and its LSNs stay at the snapshot.
+#[test]
+fn test_streamed_commit_below_recovered_floor_is_skipped() {
+    let mut state = new_table_handler_state(Some(100), Some(100));
+    let commit = TableEvent::Commit {
+        lsn: 90,
+        xact_id: Some(7),
+    };
+    assert!(state.skip_resent_event(&commit));
+    assert_eq!(state.latest_commit_lsn, Some(100));
+    assert_eq!(state.table_consistent_view_lsn, Some(100));
+}
+
+/// Testing scenario: after an empty initial copy the table has applied no commit, so a streamed
+/// commit at or below the copy boundary is not a re-send; the boundary keeps it from moving the
+/// table's LSNs. A streamed commit above the boundary moves them.
+#[test]
+fn test_streamed_commit_below_empty_copy_boundary_does_not_move_lsns() {
+    let mut state = new_table_handler_state(None, None);
+    state.start_initial_copy();
+    state.finish_initial_copy(/*lsn=*/ 100);
+    let commit = TableEvent::Commit {
+        lsn: 90,
+        xact_id: Some(7),
+    };
+    assert!(!state.skip_resent_event(&commit));
+    assert!(!state.should_discard_event(&commit));
+    state.update_table_lsns(&commit);
+    assert_eq!(state.latest_commit_lsn, None);
+    assert_eq!(state.table_consistent_view_lsn, None);
+
+    let commit = TableEvent::Commit {
+        lsn: 150,
+        xact_id: Some(8),
+    };
+    state.update_table_lsns(&commit);
+    assert_eq!(state.latest_commit_lsn, Some(150));
+    assert_eq!(state.table_consistent_view_lsn, Some(150));
+}
+
+/// Testing scenario: finishing an initial copy never lowers a replay floor.
+#[test]
+fn test_finish_initial_copy_keeps_higher_floor() {
+    let mut state = new_table_handler_state(Some(200), None);
+    state.latest_commit_lsn = Some(200);
+    state.start_initial_copy();
+    state.initial_copy_loaded_files = true;
+    state.finish_initial_copy(/*lsn=*/ 100);
+    assert_eq!(state.initial_persistence_lsn, Some(200));
+    assert_eq!(state.latest_commit_lsn, Some(200));
+}
+
+/// Testing scenario: a commit behind the table's commit LSN (a re-sent transaction the replay
+/// floors missed) errors the mirror instead of being applied; a streamed one is aborted too.
+#[rstest::rstest]
+#[case::non_streamed(None)]
+#[case::streamed(Some(7))]
+#[tokio::test]
+async fn test_commit_behind_table_errors_the_mirror(#[case] xact_id: Option<u32>) {
+    use crate::storage::mooncake_table::test_utils::{test_row, test_table, TestContext};
+    let context = TestContext::new("commit_behind_table");
+    let mut table = test_table(&context, "table", IdentityProp::Keys(vec![0])).await;
+    table.append(test_row(1, "A", 20)).unwrap();
+    table.commit(/*lsn=*/ 100);
+    let mut state = new_table_handler_state(None, None);
+
+    match xact_id {
+        Some(xact_id) => table
+            .append_in_stream_batch(test_row(2, "B", 21), xact_id)
+            .unwrap(),
+        None => table.append(test_row(2, "B", 21)).unwrap(),
+    }
+    TableHandler::commit_and_attempt_flush(
+        /*lsn=*/ 50, xact_id, &mut state, &mut table, /*force_flush_requested=*/ false,
+    )
+    .await;
+
+    assert!(state.is_errored());
+    assert_eq!(table.get_commit_lsn_baseline(), 100);
+    if let Some(xact_id) = xact_id {
+        assert!(!table.has_transaction_stream(xact_id));
+    }
 }
 
 /// ---- Util functions unit test ----

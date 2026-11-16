@@ -128,9 +128,25 @@ impl Hash for RecordLocation {
 pub struct RawDeletionRecord {
     pub(crate) lookup_key: u64,
     pub(crate) row_identity: Option<MoonlinkRow>,
+    /// Stands in for a whole-row identity that was dropped to save memory (see
+    /// [`Self::compact_full_row_identity`]).
+    pub(crate) identity_fingerprint: Option<u64>,
     pub(crate) pos: Option<(u64, usize)>,
     pub(crate) lsn: u64,
     pub(crate) delete_if_exists: bool,
+}
+
+impl RawDeletionRecord {
+    /// For a table without a key the identity is the whole row, kept until a snapshot resolves the
+    /// deletion, which can be a while for a large transaction. Keep only a fingerprint of it: it
+    /// tells rows with the same lookup key apart as well (identical rows are interchangeable).
+    pub(crate) fn compact_full_row_identity(&mut self, identity: &crate::row::IdentityProp) {
+        if *identity == crate::row::IdentityProp::FullRow {
+            if let Some(row) = self.row_identity.take() {
+                self.identity_fingerprint = Some(row.full_row_fingerprint());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

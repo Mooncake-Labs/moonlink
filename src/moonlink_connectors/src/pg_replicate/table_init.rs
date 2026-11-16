@@ -44,8 +44,11 @@ pub struct TableResources {
     pub table_event_manager: TableEventManager,
     pub table_status_reader: TableStatusReader,
     pub commit_state: Option<Arc<CommitState>>,
+    pub replication_state: Arc<ReplicationState>,
     pub flush_lsn_rx: Option<watch::Receiver<u64>>,
-    pub last_persistence_snapshot_lsn: Option<u64>,
+    /// Status of the table as the replication slot sees it: errored only once that is persisted
+    /// (see `spawn_errored_marker_writer`). Set when the table is added to replication.
+    pub slot_status_tx: Option<watch::Sender<moonlink::TableStatus>>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -120,14 +123,21 @@ pub async fn build_table_components(
     let last_persistence_snapshot_lsn = table.get_persistence_snapshot_lsn();
 
     let commit_state = CommitState::new();
+    // The replication LSN this table's readers and handler see: everything up to it has been
+    // delivered to the table. Up to its snapshot that holds already; beyond it, only once the
+    // stream gets there (the sink marks it with the shared one). Marking the shared LSN with this
+    // table's snapshot instead would let another recovered table, whose replay from the slot is
+    // still behind, serve stale reads.
+    let table_replication_state = ReplicationState::new();
     // Make a receiver first before possible mark operation, otherwise all receiver initializes with 0.
-    let replication_lsn_rx = replication_state.subscribe();
+    let replication_lsn_rx = table_replication_state.subscribe();
     let commit_lsn_rx = commit_state.subscribe();
     // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
     if let Some(persistence_snapshot_lsn) = last_persistence_snapshot_lsn {
         commit_state.mark(persistence_snapshot_lsn);
-        replication_state.mark(persistence_snapshot_lsn);
+        table_replication_state.mark(persistence_snapshot_lsn);
     }
+    let handler_replication_lsn_rx = table_replication_state.subscribe();
 
     let read_state_manager = ReadStateManager::new(
         &table,
@@ -145,7 +155,7 @@ pub async fn build_table_components(
         table,
         event_sync_sender,
         table_handler_timers,
-        replication_state.subscribe(),
+        handler_replication_lsn_rx,
         /*event_replay_tx=*/ None,
         /*table_event_replay_tx=*/ None,
     )
@@ -161,8 +171,9 @@ pub async fn build_table_components(
         table_status_reader,
         table_event_manager,
         commit_state: Some(commit_state),
+        replication_state: table_replication_state,
         flush_lsn_rx: Some(flush_lsn_rx),
-        last_persistence_snapshot_lsn,
+        slot_status_tx: None,
     };
     Ok(table_resource)
 }

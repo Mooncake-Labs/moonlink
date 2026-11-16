@@ -120,9 +120,29 @@ cargo test -p moonlink_service --lib --features postgres-integration
 
 ## Durability and Recovery
 
-Moonlink acknowledges the Postgres replication slot only up to what is persisted in Iceberg, and replays the rest from the slot after a restart. Expect Postgres to retain more `pg_wal`: changes stay in it until they reach Iceberg (at most about 5 minutes for idle tables, which get a forced snapshot every 300 s).
+> **Before upgrading from pg_mooncake 0.2 (Moonlink with its own WAL), snapshot every mirror, or re-create every mirror after the upgrade.** That version acknowledged changes to Postgres once they were in its `_wal` directory. The new version does not read that directory, and Postgres does not send those changes again, so a mirror silently misses every change that had not reached Iceberg yet. Before upgrading:
+> 1. Stop writes to the mirrored tables.
+> 2. Still on the old version, run `CALL mooncake.create_snapshot('<mirror>');` for every mirror.
+> 3. Upgrade.
+>
+> If you upgraded without these steps, drop and re-create every mirror. Until the old WAL directory, `$PGDATA/pg_mooncake/_wal`, is deleted, Moonlink logs a warning at startup naming the mirrors that have files in it. Delete it once every mirror is snapshotted or re-created; dropping a mirror no longer removes its part of it.
 
-After upgrading, or after a crash, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again). Old `_wal` directories from earlier versions are unused and can be deleted.
+Moonlink acknowledges the Postgres replication slot only up to changes that every mirror has persisted in Iceberg. After a restart or a dropped replication connection, Postgres re-sends everything after that point, and Moonlink skips what it had already applied.
+
+**WAL retention on the source.** Postgres keeps WAL until every mirror has persisted the changes in it:
+- A mirror that is being written persists at least every 5 minutes or so (a forced snapshot every 300 s), sooner when enough rows accumulate.
+- A mirror with no new changes, including an empty one, does not hold WAL back.
+- A mirror in the errored state does not hold WAL back either, even when it is the only mirror of its database. It no longer follows its source; drop and re-create it, which copies the table afresh. Moonlink logs a warning naming the errored mirrors about once a minute until then.
+- After a restart, a mirror that cannot be restored yet (for example, its source is unreachable) holds its database's slot, so that it can replay what it missed; meanwhile the slots of databases whose mirrors are all errored do not advance either. Moonlink retries it and logs a warning naming it about once a minute. After an hour it is errored and its slot is released.
+
+Watch the retained WAL with:
+```sql
+SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn))
+FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%';
+```
+To cap it, set `max_slot_wal_keep_size` on the source. If Moonlink then falls that far behind, Postgres invalidates the slot and every mirror has to be re-created.
+
+**After a crash**, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again).
 
 ## What mirrors do not follow
 

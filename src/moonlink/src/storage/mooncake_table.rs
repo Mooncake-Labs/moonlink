@@ -204,11 +204,17 @@ impl Snapshot {
             .sum()
     }
 
-    pub fn get_name_for_inmemory_file(&self) -> PathBuf {
+    /// File holding this snapshot's committed in-memory rows for reads; reused while it exists.
+    /// `table_instance_id` tells apart tables with the same id in one temporary directory, whose
+    /// snapshots can have the same version (a table recovered at its persisted LSN).
+    pub fn get_name_for_inmemory_file(&self, table_instance_id: uuid::Uuid) -> PathBuf {
         let mut directory = PathBuf::from(&self.metadata.config.temp_files_directory);
         directory.push(format!(
-            "inmemory_{}_{}_{}.parquet",
-            self.metadata.mooncake_table_id, self.metadata.table_id, self.snapshot_version
+            "inmemory_{}_{}_{}_{}.parquet",
+            self.metadata.mooncake_table_id,
+            self.metadata.table_id,
+            table_instance_id,
+            self.snapshot_version
         ));
         directory
     }
@@ -467,6 +473,15 @@ pub struct MooncakeTable {
     /// Stream state per transaction, keyed by xact-id.
     transaction_stream_states: HashMap<u32, TransactionStreamState>,
 
+    /// Event ids of flushes still in flight for aborted streamed transactions.
+    aborted_stream_flushes: HashSet<uuid::Uuid>,
+
+    /// Committed streamed transactions whose flushes are still in flight, by an id of their own
+    /// (their xid may already be in use again by a re-send), and the id for each such flush.
+    committing_streams: HashMap<u64, TransactionStreamState>,
+    committing_stream_flushes: HashMap<uuid::Uuid, u64>,
+    next_committing_stream_id: u64,
+
     /// Auto increment id for generating unique file ids.
     /// Note, these ids is only used locally, and not persisted.
     next_file_id: u32,
@@ -523,6 +538,12 @@ struct IcebergTableManagerFactory {
 /// may trail what was applied); the commit LSN must never move backwards, and must not panic.
 pub(crate) fn clamp_commit_lsn(lsn: u64, commit_lsn_baseline: u64) -> u64 {
     if lsn < commit_lsn_baseline {
+        // Re-sent transactions are skipped before they get here, and the table handler errors the
+        // mirror for one that is not; reaching this is a bug that tests must catch.
+        debug_assert!(
+            false,
+            "commit LSN {lsn} is behind the table's commit LSN {commit_lsn_baseline}"
+        );
         tracing::warn!(
             lsn,
             commit_lsn_baseline,
@@ -624,6 +645,10 @@ impl MooncakeTable {
             background_task_status_for_validation: BackgroundTaskStatus::default(),
             next_snapshot_task: SnapshotTask::new(table_metadata.as_ref().config.clone()),
             transaction_stream_states: HashMap::new(),
+            aborted_stream_flushes: HashSet::new(),
+            committing_streams: HashMap::new(),
+            committing_stream_flushes: HashMap::new(),
+            next_committing_stream_id: 0,
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
             next_file_id,
@@ -1042,6 +1067,11 @@ impl MooncakeTable {
         }
         u64::MAX
     }
+    /// LSN of the latest commit applied to the table.
+    pub(crate) fn get_commit_lsn_baseline(&self) -> u64 {
+        self.next_snapshot_task.commit_lsn_baseline
+    }
+
     pub fn get_last_flush_lsn(&self) -> u64 {
         self.last_flush_lsn.unwrap_or(0)
     }
@@ -1283,12 +1313,14 @@ impl MooncakeTable {
                 .row_identity
                 .extract_identity_columns(row),
             delete_if_exists,
+            identity_fingerprint: None,
         };
         let pos = self
             .mem_slice
             .delete(&record, &self.metadata.config.row_identity)
             .await;
         record.pos = pos;
+        record.compact_full_row_identity(&self.metadata.config.row_identity);
         self.next_snapshot_task.new_deletions.push(record);
     }
 
@@ -1317,7 +1349,6 @@ impl MooncakeTable {
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(
             self.next_snapshot_task.new_deletions.is_empty()
-                || self.next_snapshot_task.new_deletions.last().unwrap().lsn >= transaction_stream::LSN_START_FOR_STREAMING_XACT
                 || self.next_snapshot_task.new_deletions.last().unwrap().lsn < lsn,
             "We expect commit LSN to be strictly greater than the last deletion LSN, but got commit LSN {} and last deletion LSN {}",
             lsn,

@@ -171,7 +171,7 @@ pub(crate) async fn flush_stream_and_sync_no_apply(
     receiver: &mut Receiver<TableEvent>,
     xact_id: u32,
     lsn: Option<u64>,
-) -> Option<DiskSliceWriter> {
+) -> Option<(DiskSliceWriter, uuid::Uuid)> {
     let event_id = uuid::Uuid::new_v4();
     table.flush_stream(xact_id, lsn, event_id).unwrap();
     let flush_result = receiver.recv().await.unwrap();
@@ -181,7 +181,7 @@ pub(crate) async fn flush_stream_and_sync_no_apply(
             xact_id: _,
             flush_result,
         } => match flush_result {
-            Some(Ok(disk_slice)) => Some(disk_slice),
+            Some(Ok(disk_slice)) => Some((disk_slice, event_id)),
             Some(Err(e)) => {
                 error!(error = ?e, "failed to flush disk slice");
                 None

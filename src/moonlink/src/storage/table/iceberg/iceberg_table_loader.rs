@@ -182,14 +182,9 @@ impl IcebergTableManager {
     ) -> MooncakeSnapshot {
         let mut mooncake_snapshot = MooncakeSnapshot::new(self.mooncake_table_metadata.clone());
 
-        // Assign snapshot version.
-        let iceberg_table_metadata = self.iceberg_table.as_ref().unwrap().metadata();
-        mooncake_snapshot.snapshot_version =
-            if let Some(ver) = iceberg_table_metadata.current_snapshot_id() {
-                ver as u64
-            } else {
-                0
-            };
+        // The snapshot version is the LSN readers are told the snapshot is at; the recovered state
+        // is what was persisted, at the flush LSN (the iceberg snapshot id is not an LSN).
+        mooncake_snapshot.snapshot_version = flush_lsn.unwrap_or(0);
 
         // Fill in disk files.
         mooncake_snapshot.disk_files = HashMap::with_capacity(self.persisted_data_files.len());

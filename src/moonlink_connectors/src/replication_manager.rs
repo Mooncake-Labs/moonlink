@@ -421,6 +421,7 @@ impl ReplicationManager {
         }
     }
 
+    /// Start streaming changes from `src_uri` once recovery has registered all its mirrors.
     pub async fn start_replication(&mut self, src_uri: &str) -> Result<()> {
         let key = self.source_key(src_uri).await?;
         let Some(connection) = self.connections.get_mut(&key) else {
@@ -429,7 +430,7 @@ impl ReplicationManager {
         if !connection.replication_started() {
             connection.start_replication().await?;
         }
-        Ok(())
+        connection.start_streaming().await
     }
 
     /// Drop table specified by the given table id.

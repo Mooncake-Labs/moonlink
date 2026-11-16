@@ -137,6 +137,10 @@ pub enum TableEvent {
     DropTable,
     /// Put the table into the errored state (requested by any layer, e.g. CDC).
     EnterErrored { reason: String },
+    /// Every change up to `lsn` has been delivered to this table (all earlier events for it are
+    /// ahead of this one in its channel). Lets a table with nothing left to persist report `lsn`
+    /// as its flush LSN, so it does not hold the replication slot back.
+    ReplicationProgress { lsn: u64 },
     /// Internal: an errored table stopped waiting for in-flight background tasks before dropping.
     ErroredDropTimeout,
     /// Test-only: how long an errored table waits for background tasks before dropping.

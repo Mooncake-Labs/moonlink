@@ -464,6 +464,7 @@ mod tests {
                 &RawDeletionRecord {
                     lookup_key: 2,
                     row_identity: None,
+                    identity_fingerprint: None,
                     pos: Some((0, 1)),
                     lsn: 1,
                     delete_if_exists: false,
@@ -476,6 +477,7 @@ mod tests {
                 &RawDeletionRecord {
                     lookup_key: 4,
                     row_identity: None,
+                    identity_fingerprint: None,
                     pos: Some((0, 3)),
                     lsn: 1,
                     delete_if_exists: false,

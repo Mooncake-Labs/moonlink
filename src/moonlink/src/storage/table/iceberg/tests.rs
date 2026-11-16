@@ -3548,7 +3548,7 @@ async fn test_async_flush_for_streaming_partial_finish_impl(
     table
         .append_in_stream_batch(row2.clone(), /*xact_id=*/ 1)
         .unwrap();
-    let disk_slice = flush_stream_and_sync_no_apply(
+    let (disk_slice, disk_slice_flush_id) = flush_stream_and_sync_no_apply(
         &mut table,
         &mut notify_rx,
         /*xact_id=*/ 1,
@@ -3577,11 +3577,7 @@ async fn test_async_flush_for_streaming_partial_finish_impl(
     let _ = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
 
     // Apply the first flush result to snapshot buffer.
-    table.apply_stream_flush_result(
-        /*xact_id=*/ 1,
-        disk_slice,
-        /*flush_event_id=*/ uuid::Uuid::new_v4(),
-    );
+    table.apply_stream_flush_result(/*xact_id=*/ 1, disk_slice, disk_slice_flush_id);
 
     // Create mooncake and iceberg snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
@@ -3682,13 +3678,9 @@ async fn test_reversed_order_of_completed_streaming_flush_impl(
         .unwrap();
     // Block wait its completion but not apply it to snapshot buffer.
     let disk_slices = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
-    let disk_slice = disk_slices.into_values().next().unwrap();
+    let (disk_slice_flush_id, disk_slice) = disk_slices.into_iter().next().unwrap();
     assert_eq!(*disk_slice.lsn().as_ref().unwrap(), 3);
-    table.apply_stream_flush_result(
-        /*xact_id=*/ 3,
-        disk_slice,
-        /*flush_event_id=*/ uuid::Uuid::new_v4(),
-    );
+    table.apply_stream_flush_result(/*xact_id=*/ 3, disk_slice, disk_slice_flush_id);
 
     // Create mooncake and iceberg snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
@@ -3768,7 +3760,7 @@ async fn test_ordered_completed_streaming_flush_impl(iceberg_table_config: Icebe
         .unwrap();
     // Block wait its completion but not apply it to snapshot buffer.
     let disk_slices = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
-    let disk_slice = disk_slices.into_values().next().unwrap();
+    let (disk_slice_flush_id, disk_slice) = disk_slices.into_iter().next().unwrap();
     assert_eq!(*disk_slice.lsn().as_ref().unwrap(), 2);
 
     // Perform a streaming append, commit, and apply.
@@ -3791,11 +3783,7 @@ async fn test_ordered_completed_streaming_flush_impl(iceberg_table_config: Icebe
     let _ = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
 
     // Apply the first arriving flush result.
-    table.apply_stream_flush_result(
-        /*xact_id=*/ 2,
-        disk_slice,
-        /*flush_event_id=*/ uuid::Uuid::new_v4(),
-    );
+    table.apply_stream_flush_result(/*xact_id=*/ 2, disk_slice, disk_slice_flush_id);
 
     // Create mooncake and iceberg snapshot.
     create_mooncake_and_persist_for_test(&mut table, &mut notify_rx).await;
@@ -3875,14 +3863,10 @@ async fn test_partial_completed_streaming_flush_impl(iceberg_table_config: Icebe
         .unwrap();
     // Block wait its completion but and apply it to snapshot buffer.
     let disk_slices = get_flush_results(&mut notify_rx, /*expected_flushes=*/ 1).await;
-    let disk_slice = disk_slices.into_values().next().unwrap();
+    let (disk_slice_flush_id, disk_slice) = disk_slices.into_iter().next().unwrap();
     assert!(disk_slice.lsn().is_none());
     // Apply the first arriving flush result.
-    table.apply_stream_flush_result(
-        /*xact_id=*/ 2,
-        disk_slice,
-        /*flush_event_id=*/ uuid::Uuid::new_v4(),
-    );
+    table.apply_stream_flush_result(/*xact_id=*/ 2, disk_slice, disk_slice_flush_id);
 
     // Commit streaming transaction, which internally flushes but not wait its completion.
     let row3 = MoonlinkRow::new(vec![

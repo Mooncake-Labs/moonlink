@@ -452,8 +452,9 @@ async fn initial_copy_and_stream_apply_each_row_exactly_once(#[case] initial_row
 /// Request a snapshot to probe a mirror's state: errored mirrors reject it with the user-facing
 /// "drop and re-create" message.
 async fn snapshot_error(backend: &MoonlinkBackend, dst: &str, lsn: u64) -> Option<String> {
+    // Generous: a snapshot on a loaded CI runner can take well over 30 s.
     tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         backend.create_snapshot(DB.to_string(), dst.to_string(), lsn),
     )
     .await
@@ -2456,6 +2457,38 @@ fn postgres_control() -> Option<String> {
         .filter(|command| !command.is_empty())
 }
 
+/// Postgres stopped through `MOONLINK_TEST_PG_CTL`, started again when dropped (also when the
+/// test fails before starting it), so that later tests find it running.
+struct StoppedPostgres {
+    control: String,
+    started: bool,
+}
+
+impl StoppedPostgres {
+    fn stop(control: &str) -> Self {
+        local_postgres(control, "stop");
+        Self {
+            control: control.to_string(),
+            started: false,
+        }
+    }
+
+    fn start(mut self) {
+        self.started = true;
+        local_postgres(&self.control, "start");
+    }
+}
+
+impl Drop for StoppedPostgres {
+    fn drop(&mut self) {
+        if !self.started {
+            let _ = std::process::Command::new(&self.control)
+                .arg("start")
+                .status();
+        }
+    }
+}
+
 fn local_postgres(control: &str, action: &str) {
     let status = std::process::Command::new(control)
         .arg(action)
@@ -2491,7 +2524,7 @@ async fn mirror_is_restored_once_an_unreachable_source_is_back() {
     drop(backend);
     drop(client);
 
-    local_postgres(&control, "stop");
+    let stopped = StoppedPostgres::stop(&control);
     let backend = new_backend(&tmp).await.expect("startup must not fail");
     let err = scan_error(&backend, "rv_down_mc")
         .await
@@ -2500,7 +2533,7 @@ async fn mirror_is_restored_once_an_unreachable_source_is_back() {
     // Not persisted: a restart while the source is still down retries again.
     drop(backend);
     let backend = new_backend(&tmp).await.unwrap();
-    local_postgres(&control, "start");
+    stopped.start();
 
     let (client, _) = connect_to_postgres(&uri).await;
     client

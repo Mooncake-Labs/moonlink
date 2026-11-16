@@ -74,6 +74,13 @@ impl TableHandler {
         // Create channel for events
         let (event_sender, event_receiver) = mpsc::channel(MAX_BUFFERED_TABLE_EVENTS);
 
+        // A recovered table has persisted everything up to its snapshot; report that before the
+        // replication slot is first acknowledged, so the slot never moves past what it still needs.
+        advance_flush_lsn(
+            &event_sync_sender.flush_lsn_tx,
+            table.get_persistence_snapshot_lsn().unwrap_or(0),
+        );
+
         // Register channel for internal control events.
         table.register_table_notify(event_sender.clone()).await;
         // Register channel for mooncake table events replay.
@@ -223,6 +230,21 @@ impl TableHandler {
                 // Errored state
                 // ==============================
                 //
+                if let TableEvent::MooncakeTableSnapshotResult {
+                    mooncake_snapshot_result,
+                } = &event
+                {
+                    if let Some(reason) = &mooncake_snapshot_result.unmatched_deletions {
+                        if Self::enter_errored(&mut table_handler_state, &table, reason.clone())
+                            == Some(true)
+                        {
+                            Self::request_errored_drop(
+                                &mut errored_drop,
+                                &table_handler_event_sender,
+                            );
+                        }
+                    }
+                }
                 if table_handler_state.is_errored()
                     || matches!(event, TableEvent::EnterErrored { .. })
                 {
@@ -246,6 +268,13 @@ impl TableHandler {
                         Self::process_cdc_table_event(event, &mut table, &mut table_handler_state)
                             .await;
                     }
+                    TableEvent::ReplicationProgress { lsn } => {
+                        if table_handler_state
+                            .has_no_unpersisted_commit(table.get_persistence_snapshot_lsn())
+                        {
+                            advance_flush_lsn(&event_sync_sender.flush_lsn_tx, lsn);
+                        }
+                    }
                     // ==============================
                     // Bulk ingestion events
                     // ==============================
@@ -255,9 +284,14 @@ impl TableHandler {
                         lsn,
                     } => {
                         if table_handler_state.special_table_state == SpecialTableState::InitialCopy
-                            && !files.is_empty()
                         {
-                            table_handler_state.initial_copy_loaded_files = true;
+                            if !files.is_empty() {
+                                table_handler_state.initial_copy_loaded_files = true;
+                            }
+                        } else {
+                            // A bulk load is a commit at `lsn` that has to be persisted too.
+                            table_handler_state.latest_commit_lsn =
+                                table_handler_state.latest_commit_lsn.max(Some(lsn));
                         }
                         table.batch_ingest(files, storage_config, lsn).await;
                     }
@@ -402,9 +436,6 @@ impl TableHandler {
                             }
                         }
                         table_handler_state.finish_initial_copy(start_lsn);
-
-                        // Drop any events that have LSN less than the start LSN during apply.
-                        table_handler_state.initial_persistence_lsn = Some(start_lsn);
                         // Apply the buffered events.
                         Self::process_blocked_events(&mut table, &mut table_handler_state).await;
                     }
@@ -668,10 +699,10 @@ impl TableHandler {
 
                                 // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
                                 let iceberg_flush_lsn = snapshot_res.flush_lsn;
-                                event_sync_sender
-                                    .flush_lsn_tx
-                                    .send(iceberg_flush_lsn)
-                                    .unwrap();
+                                advance_flush_lsn(
+                                    &event_sync_sender.flush_lsn_tx,
+                                    iceberg_flush_lsn,
+                                );
                                 table.set_persistence_snapshot_res(snapshot_res);
                                 table_handler_state.persistence_snapshot_result_consumed = false;
 
@@ -998,7 +1029,7 @@ impl TableHandler {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
-        if table_handler_state.is_replayed_applied_event(&event) {
+        if table_handler_state.skip_resent_event(&event) {
             // Streamed rows of a replayed transaction were collected again; drop them.
             if let TableEvent::Commit {
                 xact_id: Some(xact_id),
@@ -1019,26 +1050,8 @@ impl TableHandler {
             return;
         }
 
-        // A streamed transaction is never discarded above (its rows arrive before its LSN); one
-        // committed at or below the persisted/copy boundary is aborted when its commit is
-        // processed, so it must not move the LSNs either.
-        let streamed_below_boundary = match &event {
-            TableEvent::Commit {
-                lsn,
-                xact_id: Some(_),
-            }
-            | TableEvent::CommitFlush {
-                lsn,
-                xact_id: Some(_),
-            } => table_handler_state
-                .initial_persistence_lsn
-                .is_some_and(|boundary| *lsn <= boundary),
-            _ => false,
-        };
         // Don't update the lsn if the event is not processed yet.
-        if !streamed_below_boundary {
-            table_handler_state.update_table_lsns(&event);
-        }
+        table_handler_state.update_table_lsns(&event);
 
         match event {
             TableEvent::Append { row, xact_id, .. } => {
@@ -1131,6 +1144,28 @@ impl TableHandler {
         }
     }
 
+    /// A commit below the table's commit LSN belongs to a transaction re-sent after the table
+    /// applied it, which the replay floors should have skipped. Applying it could duplicate rows,
+    /// so the mirror is errored instead; returns whether it was.
+    fn error_if_commit_behind_table(
+        lsn: u64,
+        table_handler_state: &mut TableHandlerState,
+        table: &MooncakeTable,
+    ) -> bool {
+        let table_commit_lsn = table.get_commit_lsn_baseline();
+        if lsn >= table_commit_lsn {
+            return false;
+        }
+        Self::enter_errored(
+            table_handler_state,
+            table,
+            format!(
+                "a transaction committed at LSN {lsn} arrived after the mirror had applied changes up to LSN {table_commit_lsn}"
+            ),
+        );
+        true
+    }
+
     async fn commit_and_attempt_flush(
         lsn: u64,
         xact_id: Option<u32>,
@@ -1167,12 +1202,19 @@ impl TableHandler {
                         return;
                     }
                 }
+                if Self::error_if_commit_behind_table(lsn, table_handler_state, table) {
+                    table.abort_in_stream_batch(xact_id);
+                    return;
+                }
                 let event_id = uuid::Uuid::new_v4();
                 if let Err(e) = table.commit_transaction_stream(xact_id, lsn, event_id) {
                     error!(error = %e, "stream commit flush failed");
                 }
             }
             None => {
+                if Self::error_if_commit_behind_table(lsn, table_handler_state, table) {
+                    return;
+                }
                 table.commit(lsn);
                 if table.should_flush() || should_force_flush || force_flush_requested {
                     table_handler_state.last_unflushed_commit_lsn = None;
@@ -1184,6 +1226,18 @@ impl TableHandler {
             }
         }
     }
+}
+
+/// The flush LSN feeds the replication slot acknowledgement, so it only moves forward.
+fn advance_flush_lsn(flush_lsn_tx: &watch::Sender<u64>, lsn: u64) {
+    flush_lsn_tx.send_if_modified(|current| {
+        if lsn > *current {
+            *current = lsn;
+            true
+        } else {
+            false
+        }
+    });
 }
 
 #[cfg(test)]

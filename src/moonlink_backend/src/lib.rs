@@ -14,6 +14,8 @@ use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
+#[cfg(feature = "test-utils")]
+pub use recovery_utils::set_recovery_delay_between_tables_for_test;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -109,6 +111,7 @@ impl MoonlinkBackend {
 
         let backend_attributes = BackendAttributes {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
+            base_path: base_path_str.to_string(),
         };
         let pending_recoveries = recovery_utils::recover_all_tables(
             backend_attributes,
@@ -279,6 +282,12 @@ impl MoonlinkBackend {
             table_state_reader.get_current_table_schema().await?
         };
         Ok(table_schema)
+    }
+
+    /// The errored and the pending mirrors the periodic warning names after a restart.
+    #[cfg(feature = "test-utils")]
+    pub async fn placeholder_mirror_names(&self) -> (Vec<String>, Vec<String>) {
+        recovery_utils::placeholder_names(&self.replication_manager.read().await.placeholders())
     }
 
     /// List all tables at moonlink backend, and return their states.

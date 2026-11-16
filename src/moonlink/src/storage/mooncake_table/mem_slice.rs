@@ -214,6 +214,7 @@ mod tests {
                         lsn: 0,
                         pos: None,
                         row_identity: None,
+                        identity_fingerprint: None,
                         delete_if_exists: false,
                     },
                     &IdentityProp::SinglePrimitiveKey(0)
@@ -229,6 +230,7 @@ mod tests {
                         lsn: 0,
                         pos: None,
                         row_identity: None,
+                        identity_fingerprint: None,
                         delete_if_exists: false,
                     },
                     &IdentityProp::SinglePrimitiveKey(0)
@@ -244,6 +246,7 @@ mod tests {
                         lsn: 0,
                         pos: None,
                         row_identity: None,
+                        identity_fingerprint: None,
                         delete_if_exists: false,
                     },
                     &IdentityProp::SinglePrimitiveKey(0)
