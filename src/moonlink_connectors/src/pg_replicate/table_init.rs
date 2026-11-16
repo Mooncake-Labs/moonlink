@@ -123,6 +123,7 @@ pub async fn build_table_components(
     // Make a receiver first before possible mark operation, otherwise all receiver initializes with 0.
     let replication_lsn_rx = replication_state.subscribe();
     let commit_lsn_rx = commit_state.subscribe();
+    // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
     if let Some(persistence_snapshot_lsn) = last_persistence_snapshot_lsn {
         commit_state.mark(persistence_snapshot_lsn);
         replication_state.mark(persistence_snapshot_lsn);

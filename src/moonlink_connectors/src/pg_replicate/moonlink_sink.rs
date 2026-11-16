@@ -232,6 +232,7 @@ impl Sink {
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 ma::assert_ge!(commit_body.end_lsn(), self.max_keepalive_lsn_seen);
+                // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id);
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id) {
@@ -265,6 +266,7 @@ impl Sink {
                     "stream commit"
                 );
                 ma::assert_ge!(stream_commit_body.end_lsn(), self.max_keepalive_lsn_seen);
+                // Readers rely on this order (union_read::LsnView): mark table commit LSNs before the replication LSN.
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id);
