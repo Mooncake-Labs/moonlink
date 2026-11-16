@@ -1988,6 +1988,46 @@ fn test_streamed_commit_below_recovered_floor_is_skipped() {
     assert_eq!(state.table_consistent_view_lsn, Some(100));
 }
 
+/// Testing scenario: a streamed transaction that ends without being applied gives the table back
+/// its latest commit's consistent view, unless another transaction wrote since that commit.
+#[test]
+fn test_stream_ending_without_applying_restores_consistent_view() {
+    let append = |xact_id| TableEvent::Append {
+        row: MoonlinkRow::new(vec![RowValue::Int32(1)]),
+        xact_id,
+        lsn: 21,
+    };
+    let commit = |lsn, xact_id| TableEvent::Commit { lsn, xact_id };
+    let abort = |xact_id| TableEvent::StreamAbort { xact_id };
+
+    // Another streamed transaction still has writes until it ends too.
+    let mut state = new_table_handler_state(None, None);
+    state.update_table_lsns(&commit(20, None));
+    state.update_table_lsns(&append(Some(7)));
+    state.update_table_lsns(&append(Some(8)));
+    state.update_table_lsns(&abort(7));
+    assert_eq!(state.table_consistent_view_lsn, None);
+    state.update_table_lsns(&abort(8));
+    assert_eq!(state.table_consistent_view_lsn, Some(20));
+
+    // An uncommitted non-streamed write keeps the table without a consistent view.
+    let mut state = new_table_handler_state(None, None);
+    state.update_table_lsns(&commit(20, None));
+    state.update_table_lsns(&append(None));
+    state.update_table_lsns(&append(Some(7)));
+    state.update_table_lsns(&abort(7));
+    assert_eq!(state.table_consistent_view_lsn, None);
+    state.update_table_lsns(&commit(22, None));
+    assert_eq!(state.table_consistent_view_lsn, Some(22));
+
+    // A recovered table skips a re-sent streamed commit.
+    let mut state = new_table_handler_state(Some(100), Some(100));
+    state.update_table_lsns(&append(Some(7)));
+    assert_eq!(state.table_consistent_view_lsn, None);
+    assert!(state.skip_resent_event(&commit(90, Some(7))));
+    assert_eq!(state.table_consistent_view_lsn, Some(100));
+}
+
 /// Testing scenario: after an empty initial copy the table has applied no commit, so a streamed
 /// commit at or below the copy boundary is not a re-send; the boundary keeps it from moving the
 /// table's LSNs. A streamed commit above the boundary moves them.
@@ -2080,6 +2120,19 @@ fn test_get_persisted_table_lsn() {
         let persisted_table_lsn =
             table_handler_state.get_persisted_table_lsn(persistence_snapshot_lsn, replication_lsn);
         assert_eq!(persisted_table_lsn, 1);
+    }
+
+    // Case-3, not Case-1: a commit that is not persisted yet, and a write after it clears the
+    // consistent view.
+    {
+        let persistence_snapshot_lsn = None;
+        let replication_lsn = 5;
+        table_handler_state.latest_commit_lsn = Some(4);
+        table_handler_state.table_consistent_view_lsn = None;
+
+        let persisted_table_lsn =
+            table_handler_state.get_persisted_table_lsn(persistence_snapshot_lsn, replication_lsn);
+        assert_eq!(persisted_table_lsn, 0);
     }
 
     // Case-2: table is at a consistent state, but iceberg persistence doesn't catch up.
