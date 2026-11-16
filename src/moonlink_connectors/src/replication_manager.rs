@@ -7,10 +7,11 @@ use crate::{Error, Result};
 use moonlink::{
     MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
 };
-use moonlink::{ReadStateFilepathRemap, TableStatusReader};
+use moonlink::{ReadStateFilepathRemap, TableStatus, TableStatusReader};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -510,6 +511,26 @@ impl ReplicationManager {
             }
         }
         table_state_readers
+    }
+
+    /// Whether `mooncake_table_id` is still the mirror whose status `status` follows, rather than
+    /// gone or replaced by a mirror re-created under its name.
+    pub fn is_same_mirror(
+        &mut self,
+        mooncake_table_id: &MooncakeTableId,
+        status: &watch::Receiver<TableStatus>,
+    ) -> bool {
+        let Some((uri, src_table_id)) = self.table_info.get(mooncake_table_id) else {
+            return false;
+        };
+        let src_table_id = *src_table_id;
+        let Some(connection) = self.connections.get_mut(uri) else {
+            return false;
+        };
+        connection
+            .get_table_event_manager(mooncake_table_id, src_table_id)
+            .subscribe_table_status()
+            .same_channel(status)
     }
 
     pub fn get_table_event_manager(

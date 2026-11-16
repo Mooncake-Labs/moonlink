@@ -8,6 +8,7 @@ mod tests {
         get_serialized_table_config, TestGuard, TestGuardMode, DATABASE, TABLE,
     };
     use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, SqliteMetadataStore};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     use serial_test::serial;
@@ -125,21 +126,29 @@ mod tests {
         .await;
     }
 
-    /// Set in the child process of [`test_restart_right_after_create_table_keeps_copied_rows`]:
-    /// the base path and the table config of the backend that creates the mirror.
+    /// Set in the child process of [`restart_right_after_create_table`]: the base path and the table
+    /// config of the backend that creates the mirror, and how many persistences fail first.
     const CRASH_CHILD_BASE_PATH: &str = "MOONLINK_TEST_CRASH_CHILD_BASE_PATH";
     const CRASH_CHILD_TABLE_CONFIG: &str = "MOONLINK_TEST_CRASH_CHILD_TABLE_CONFIG";
+    const CRASH_CHILD_PERSISTENCE_FAILURES: &str = "MOONLINK_TEST_CRASH_CHILD_PERSISTENCE_FAILURES";
+    /// The child creates a mirror of a small table; it is killed (and the test fails) after this.
+    const CRASH_CHILD_TIMEOUT: Duration = Duration::from_secs(120);
 
-    /// Test scenario: moonlink dies right after create_table returns. Recovery resumes the mirror
-    /// from its iceberg table and the replication slot, which holds no change from before the copy,
-    /// so create_table must not return before the copied rows are persisted. The mirror is created
-    /// in a child process that exits the moment create_table returns: unlike shutting down a backend
-    /// in this process, that also stops its table handlers, as a crash does.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
-    async fn test_restart_right_after_create_table_keeps_copied_rows() {
+    /// Testing scenario: moonlink dies right after create_table returns. Recovery resumes the
+    /// mirror from its iceberg table and the replication slot, which holds no change from before
+    /// the copy, so create_table must not return before the copied rows are persisted. The mirror is
+    /// created in a child process (this test binary, running `test_name`) that exits the moment
+    /// create_table returns: unlike shutting down a backend in this process, that also stops its
+    /// table handlers, as a crash does. The first `persistence_failures` persistences in the child
+    /// fail with a transient error, which create_table has to wait out.
+    async fn restart_right_after_create_table(test_name: &str, persistence_failures: usize) {
         let uri = get_database_uri();
         if let Ok(base_path) = std::env::var(CRASH_CHILD_BASE_PATH) {
+            let failures: usize = std::env::var(CRASH_CHILD_PERSISTENCE_FAILURES)
+                .unwrap()
+                .parse()
+                .unwrap();
+            moonlink::test_hooks::inject_persistence_failures(failures);
             let backend = create_backend_from_base_path(base_path).await;
             backend
                 .create_table(
@@ -152,6 +161,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            assert_eq!(
+                moonlink::test_hooks::injected_persistence_failures_left(),
+                0
+            );
             std::process::exit(0);
         }
 
@@ -176,21 +189,37 @@ mod tests {
             .await
             .unwrap();
 
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-        child
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "tests::test_restart_right_after_create_table_keeps_copied_rows",
+                &format!("tests::{test_name}"),
                 "--test-threads=1",
             ])
             .env(CRASH_CHILD_BASE_PATH, &base_path)
             .env(
                 CRASH_CHILD_TABLE_CONFIG,
                 get_serialized_table_config(&testing_directory),
-            );
-        let status = tokio::task::spawn_blocking(move || child.status().unwrap())
-            .await
+            )
+            .env(
+                CRASH_CHILD_PERSISTENCE_FAILURES,
+                persistence_failures.to_string(),
+            )
+            .spawn()
             .unwrap();
+        let deadline = tokio::time::Instant::now() + CRASH_CHILD_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "the child creating the mirror did not finish within {CRASH_CHILD_TIMEOUT:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         assert!(
             status.success(),
             "the child creating the mirror failed: {status}"
@@ -231,6 +260,28 @@ mod tests {
             .simple_query("DROP TABLE IF EXISTS copy_restart;")
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_restart_right_after_create_table_keeps_copied_rows() {
+        restart_right_after_create_table(
+            "test_restart_right_after_create_table_keeps_copied_rows",
+            /*persistence_failures=*/ 0,
+        )
+        .await;
+    }
+
+    /// Testing scenario: the first persistence of the copy fails with a transient error. The table
+    /// handler retries it, so create_table must keep waiting rather than drop the mirror.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_create_table_waits_out_a_transient_persistence_failure() {
+        restart_right_after_create_table(
+            "test_create_table_waits_out_a_transient_persistence_failure",
+            /*persistence_failures=*/ 1,
+        )
+        .await;
     }
 
     /// Test scenario: perform a few requests on non-existent databases and tables, make sure error is correctly propagated.

@@ -8,6 +8,8 @@ mod storage;
 pub(crate) mod table_handler;
 pub mod table_handler_timer;
 pub(crate) mod table_notify;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_hooks;
 mod union_read;
 
 pub use error::*;

@@ -19,7 +19,7 @@ pub use recovery_utils::set_recovery_delay_between_tables_for_test;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 
 use crate::recovery_utils::BackendAttributes;
 use crate::table_status::TableStatus;
@@ -290,7 +290,7 @@ impl MoonlinkBackend {
         };
 
         // Add mooncake table to replication, and create corresponding mooncake table.
-        let (moonlink_table_config, initial_copy_lsn) = {
+        let (moonlink_table_config, initial_copy_lsn, mirror_status) = {
             let mut manager = self.replication_manager.write().await;
             let mut cur_moonlink_table_config = config_utils::parse_replication_table_config(
                 &table_config,
@@ -309,50 +309,102 @@ impl MoonlinkBackend {
                     /*is_recovery=*/ false,
                 )
                 .await?;
-            (cur_moonlink_table_config, initial_copy_lsn)
+            // Tells this mirror apart from one re-created under its name after a concurrent drop.
+            let mirror_status = manager
+                .get_table_event_manager(&mooncake_table_id)?
+                .subscribe_table_status();
+            (cur_moonlink_table_config, initial_copy_lsn, mirror_status)
         };
 
-        // Recovery resumes a recorded mirror from its iceberg table and the replication slot, which
-        // only holds changes after the copy: copied rows that are not persisted yet would be lost
-        // for good. So the mirror is recorded once they are; a restart before that loses the whole
-        // mirror, and create_table fails instead of returning.
-        if let Some(lsn) = initial_copy_lsn {
-            if let Err(e) = self.wait_for_persistence(&mooncake_table_id, lsn).await {
-                let mut manager = self.replication_manager.write().await;
-                if let Err(drop_error) = manager.drop_table(&mooncake_table_id).await {
-                    tracing::warn!(error = %drop_error, table = %mooncake_table_id, "failed to drop a mirror whose initial copy was not persisted");
-                }
-                return Err(e);
-            }
-        }
-
-        // Create metadata store entry.
-        self.metadata_store_accessor
-            .store_table_metadata(
-                &database,
-                &table,
+        if let Err(e) = self
+            .record_new_mirror(
+                &mooncake_table_id,
+                initial_copy_lsn,
+                &mirror_status,
                 &src_table_name,
                 &src_uri,
                 moonlink_table_config,
             )
-            .await?;
-
+            .await
+        {
+            let mut manager = self.replication_manager.write().await;
+            if manager.is_same_mirror(&mooncake_table_id, &mirror_status) {
+                if let Err(drop_error) = manager.drop_table(&mooncake_table_id).await {
+                    tracing::warn!(error = %drop_error, table = %mooncake_table_id, "failed to drop a mirror that could not be recorded");
+                }
+            }
+            return Err(e);
+        }
         Ok(())
     }
 
-    /// Wait until the mirror has persisted everything up to `lsn` into iceberg.
+    /// Record a new mirror in the metadata store, once its initial copy is persisted. Recovery
+    /// resumes a recorded mirror from its iceberg table and the replication slot, which only holds
+    /// changes after the copy: copied rows that are not persisted yet would be lost for good. A
+    /// restart before the mirror is recorded loses the whole mirror, and create_table fails.
+    async fn record_new_mirror(
+        &self,
+        mooncake_table_id: &MooncakeTableId,
+        initial_copy_lsn: Option<u64>,
+        mirror_status: &watch::Receiver<moonlink::TableStatus>,
+        src_table_name: &str,
+        src_uri: &str,
+        moonlink_table_config: moonlink::MoonlinkTableConfig,
+    ) -> Result<()> {
+        if let Some(lsn) = initial_copy_lsn {
+            self.wait_for_persistence(mooncake_table_id, lsn, mirror_status)
+                .await?;
+        }
+        // Under the manager lock, so a concurrent drop either removes the record afterwards or
+        // finds no mirror to record.
+        let mut manager = self.replication_manager.write().await;
+        if !manager.is_same_mirror(mooncake_table_id, mirror_status) {
+            return Err(mirror_dropped_error(mooncake_table_id));
+        }
+        self.metadata_store_accessor
+            .store_table_metadata(
+                &mooncake_table_id.database,
+                &mooncake_table_id.table,
+                src_table_name,
+                src_uri,
+                moonlink_table_config,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Wait until the mirror has persisted everything up to `lsn` into iceberg. A failed
+    /// persistence is retried by the table handler with backoff, so it does not end the wait; the
+    /// mirror erroring (the handler gives up), stopping, or being dropped does.
     async fn wait_for_persistence(
         &self,
         mooncake_table_id: &MooncakeTableId,
         lsn: u64,
+        mirror_status: &watch::Receiver<moonlink::TableStatus>,
     ) -> Result<()> {
-        let rx = {
-            let mut manager = self.replication_manager.write().await;
-            let writer = manager.get_table_event_manager(mooncake_table_id)?;
-            writer.initiate_snapshot(lsn).await
-        };
-        TableEventManager::synchronize_force_snapshot_request(rx, lsn).await?;
-        Ok(())
+        loop {
+            let rx = {
+                let mut manager = self.replication_manager.write().await;
+                if !manager.is_same_mirror(mooncake_table_id, mirror_status) {
+                    return Err(mirror_dropped_error(mooncake_table_id));
+                }
+                let writer = manager.get_table_event_manager(mooncake_table_id)?;
+                writer.initiate_snapshot(lsn).await
+            };
+            let Err(e) = TableEventManager::synchronize_force_snapshot_request(rx, lsn).await
+            else {
+                return Ok(());
+            };
+            if mirror_status.has_changed().is_err()
+                || *mirror_status.borrow() != moonlink::TableStatus::Healthy
+            {
+                return Err(e.into());
+            }
+            tracing::warn!(error = %e, table = %mooncake_table_id, lsn, "persisting the initial copy failed, waiting for the retry");
+            // Retries follow the handler's backoff; this only keeps an unexpected immediate
+            // failure from spinning.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     pub async fn drop_table(&self, database: String, table: String) -> Result<()> {
@@ -555,6 +607,14 @@ impl MoonlinkBackend {
         let mut manager = self.replication_manager.write().await;
         manager.shutdown_connection(uri, postgres_drop_all);
     }
+}
+
+/// A mirror being created was dropped (or replaced) by a concurrent request.
+fn mirror_dropped_error(mooncake_table_id: &MooncakeTableId) -> Error {
+    moonlink_connectors::Error::table_not_found(format!(
+        "{mooncake_table_id} (dropped while it was being created)"
+    ))
+    .into()
 }
 
 fn validate_not_empty(field: &str, name: &str) -> Result<()> {
