@@ -1835,6 +1835,85 @@ async fn test_aborted_then_resent_streamed_delete_of_identical_row() {
     verify_snapshot_ids(&mut table, &[7, 7, 8]).await;
 }
 
+/// Runs a mooncake snapshot and returns why it found the mirror diverged, if it did, and whether
+/// it offered anything to persist.
+async fn snapshot_unmatched_deletions(
+    table: &mut MooncakeTable,
+    rx: &mut mpsc::Receiver<TableEvent>,
+) -> (Option<String>, bool) {
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        dump_snapshot: false,
+        iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(uuid::Uuid::new_v4()),
+        data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+        index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
+    }));
+    let event = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv())
+        .await
+        .expect("a mooncake snapshot never completed (snapshot task died)")
+        .unwrap();
+    table.mark_mooncake_snapshot_completed();
+    let TableEvent::MooncakeTableSnapshotResult {
+        mooncake_snapshot_result,
+    } = event
+    else {
+        panic!("expected a mooncake snapshot result, got {event:?}");
+    };
+    (
+        mooncake_snapshot_result.unmatched_deletions,
+        mooncake_snapshot_result
+            .persistence_snapshot_payload
+            .is_some(),
+    )
+}
+
+/// Testing scenario: a committed transaction deletes a row the table does not have (a streamed one
+/// deletes twice a row the table has once; a plain one deletes a key that is not there). The
+/// snapshot reports the divergence, offers nothing to persist, and deletes what it could match.
+#[tokio::test]
+async fn test_deletion_without_a_row_is_reported() {
+    let (_context, mut table, mut rx) = identical_flushed_rows("unmatched_streamed", 1).await;
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 42)
+        .await;
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 42)
+        .await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, 42, /*lsn=*/ 20).await;
+    let (unmatched, persists) = snapshot_unmatched_deletions(&mut table, &mut rx).await;
+    let unmatched = unmatched.expect("the missing row was not reported");
+    assert!(
+        unmatched.starts_with("1 deleted row(s) were not found in the mirror"),
+        "{unmatched}"
+    );
+    assert!(unmatched.ends_with("deleted at LSN 19)"), "{unmatched}");
+    assert!(!persists, "a diverged snapshot was offered for persistence");
+    verify_snapshot_ids(&mut table, &[8]).await;
+
+    let context = TestContext::new("unmatched_plain");
+    let mut table = test_table(&context, "table", IdentityProp::Keys(vec![0])).await;
+    let (event_completion_tx, mut rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    append_rows(&mut table, vec![test_row(1, "a", 1)]).unwrap();
+    table.commit(/*lsn=*/ 1);
+    flush_table_and_sync(&mut table, &mut rx, /*lsn=*/ 1)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    table.delete(test_row(2, "b", 2), /*lsn=*/ 2).await;
+    table.commit(/*lsn=*/ 3);
+    let (unmatched, _) = snapshot_unmatched_deletions(&mut table, &mut rx).await;
+    assert!(unmatched.is_some(), "the missing row was not reported");
+
+    // A deletion that finds its row reports nothing.
+    table.delete(test_row(1, "a", 1), /*lsn=*/ 4).await;
+    table.commit(/*lsn=*/ 5);
+    let (unmatched, _) = snapshot_unmatched_deletions(&mut table, &mut rx).await;
+    assert_eq!(unmatched, None);
+    verify_snapshot_ids(&mut table, &[]).await;
+}
+
 /// Testing scenario: streamed and non-streamed deletions of a table without a key, of identical
 /// rows among others with the same values elsewhere: each deletes exactly one of its copies, in
 /// memory and on disk, with their rows replaced by fingerprints.

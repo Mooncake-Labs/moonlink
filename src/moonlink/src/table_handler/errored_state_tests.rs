@@ -189,3 +189,33 @@ fn test_enter_errored_reports_pending_drop() {
     // Already errored.
     assert_eq!(state.enter_errored("t", "other".to_string()), None);
 }
+
+/// A streamed transaction that commits a deletion of a row the mirror does not have errors the
+/// mirror (it no longer matches its source) instead of stopping its snapshots.
+#[tokio::test]
+async fn test_deletion_without_a_row_errors_the_mirror() {
+    let mut env = TestEnvironment::default().await;
+    env.append_row(1, "a", 10, /*lsn=*/ 5, None).await;
+    env.commit(10).await;
+    env.flush_table_and_sync(10, None).await;
+    let mut status_rx = env.table_event_manager.subscribe_table_status();
+
+    let xact_id = 42;
+    env.delete_row(1, "a", 10, /*lsn=*/ 0, Some(xact_id)).await;
+    env.delete_row(1, "a", 10, /*lsn=*/ 0, Some(xact_id)).await;
+    env.stream_commit(20, xact_id).await;
+    let rx = env.table_event_manager.initiate_snapshot(20).await;
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        TableEventManager::synchronize_force_snapshot_request(rx, 20),
+    )
+    .await
+    .expect("create_snapshot hung");
+    assert!(res.unwrap_err().to_string().contains("out of sync"));
+    let message = wait_errored(&mut status_rx).await;
+    assert!(
+        message.contains("1 deleted row(s) were not found in the mirror"),
+        "{message}"
+    );
+    env.drop_table().await.unwrap();
+}

@@ -230,6 +230,21 @@ impl TableHandler {
                 // Errored state
                 // ==============================
                 //
+                if let TableEvent::MooncakeTableSnapshotResult {
+                    mooncake_snapshot_result,
+                } = &event
+                {
+                    if let Some(reason) = &mooncake_snapshot_result.unmatched_deletions {
+                        if Self::enter_errored(&mut table_handler_state, &table, reason.clone())
+                            == Some(true)
+                        {
+                            Self::request_errored_drop(
+                                &mut errored_drop,
+                                &table_handler_event_sender,
+                            );
+                        }
+                    }
+                }
                 if table_handler_state.is_errored()
                     || matches!(event, TableEvent::EnterErrored { .. })
                 {
