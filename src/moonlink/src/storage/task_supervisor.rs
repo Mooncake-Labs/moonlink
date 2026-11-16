@@ -32,3 +32,31 @@ where
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_panicking_task_reports_background_task_failed() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        spawn_supervised("mooncake snapshot", tx, async {
+            panic!("boom");
+        });
+        match rx.recv().await {
+            Some(TableEvent::BackgroundTaskFailed { task, message }) => {
+                assert_eq!(task, "mooncake snapshot");
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected BackgroundTaskFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_finished_task_reports_nothing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        spawn_supervised("mooncake snapshot", tx, async {});
+        // The sender is dropped with the task, so the channel closes without an event.
+        assert!(rx.recv().await.is_none());
+    }
+}

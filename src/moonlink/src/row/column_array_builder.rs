@@ -46,8 +46,8 @@ impl ListBuilderHelper {
     }
 
     pub fn append_null(&mut self) {
-        // A null list starts (and ends) where the child values end; reusing the previous list's
-        // start offset would empty that list.
+        // A NULL list is an empty range starting where the values end now; pushing the previous
+        // row's start instead would leave that row empty.
         self.offsets.push(self.inner.len() as i32);
         self.nulls.append_null();
         self.len += 1;

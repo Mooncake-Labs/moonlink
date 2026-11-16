@@ -7,7 +7,7 @@ use more_asserts as ma;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::ProjectionMask;
 use serde::{Deserialize, Serialize};
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::mem::take;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -229,7 +229,10 @@ impl MoonlinkRow {
     /// The row at `offset` of a parquet data file.
     pub async fn read_from_parquet_at_offset(file_name: &str, offset: usize) -> MoonlinkRow {
         let batch = read_parquet_row_at_offset(file_name, offset, /*columns=*/ None).await;
-        Self::from_record_batch(&batch).pop().unwrap()
+        Self::from_record_batch(&batch)
+            .expect("a data file moonlink wrote converts back to rows")
+            .pop()
+            .unwrap()
     }
 
     /// A hash of the whole row independent of [`IdentityProp::get_lookup_key`], which tells apart

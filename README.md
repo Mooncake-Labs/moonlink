@@ -131,13 +131,45 @@ A query at an LSN (and `mooncake.create_snapshot`) first waits until replication
 >
 > If you upgraded without these steps, drop and re-create every mirror. Until the old WAL directory, `$PGDATA/pg_mooncake/_wal`, is deleted, Moonlink logs a warning at startup naming the mirrors that have files in it. Delete it once every mirror is snapshotted or re-created; dropping a mirror no longer removes its part of it.
 
-After upgrading, or after a crash, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again). Old `_wal` directories from earlier versions are unused and can be deleted. Data files are made durable before the Iceberg commit that references them, but deletion vector and index puffin files are not fsynced into their directory, so a power loss right after a commit can leave a mirror that fails to load and must be re-created.
+Moonlink acknowledges the Postgres replication slot only up to changes that every mirror has persisted in Iceberg. After a restart or a dropped replication connection, Postgres re-sends everything after that point, and Moonlink skips what it had already applied.
+
+**WAL retention on the source.** Postgres keeps WAL until every mirror has persisted the changes in it:
+- A mirror that is being written persists at least every 5 minutes or so (a forced snapshot every 300 s), sooner when enough rows accumulate.
+- A mirror with no new changes, including an empty one, does not hold WAL back.
+- A mirror in the errored state does not hold WAL back either, even when it is the only mirror of its database. It no longer follows its source; drop and re-create it, which copies the table afresh. Moonlink logs a warning naming the errored mirrors about once a minute until then.
+- After a restart, a mirror that cannot be restored yet (for example, its source is unreachable) holds its database's slot, so that it can replay what it missed; meanwhile the slots of databases whose mirrors are all errored do not advance either. Moonlink retries it and logs a warning naming it about once a minute. After an hour it is errored and its slot is released.
+
+Watch the retained WAL with:
+```sql
+SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn))
+FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%';
+```
+To cap it, set `max_slot_wal_keep_size` on the source. If Moonlink then falls that far behind, Postgres invalidates the slot and every mirror has to be re-created.
+
+**After a crash**, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again).
+
+Data files are made durable before the Iceberg commit that references them, but deletion vector and index puffin files are not fsynced into their directory, so a power loss right after a commit can leave a mirror that fails to load and must be re-created.
 
 On the first start after upgrading, every existing mirror rebuilds its lookup indices from its data files (earlier versions hashed rows with a seed that changed on every restart, so updates and deletes of already-flushed rows could fail after a restart). This is a one-time read of each table's key columns, logged as a warning per table. If a table's indices cannot be rebuilt, that mirror is marked out of sync and must be dropped and re-created; other mirrors are not affected.
 
 This version also deletes Iceberg files that neither the current version nor the one before it references (old snapshots, metadata files, manifests, deletion vectors, files replaced by compaction), which earlier versions kept forever. A replaced data or deletion-vector file is kept until no running scan can still read it. On the first start after upgrading, each table's leftover files are removed when the table loads. Set `MOONLINK_ICEBERG_GC=dry-run` to only log what would be deleted (each file once, as a count and size per commit; paths at debug level), or `MOONLINK_ICEBERG_GC=off` to keep every file. Dry-run is meant for a short look: it keeps listing and remembering every superseded file, so its cost grows the longer it runs; use `off` to keep files for good.
 
 If the disk fills up, mirrors stop advancing instead of failing: flushes and Iceberg commits are retried (at most every minute) until space is available, and files of failed attempts are removed. Changes that wait for disk space are held in memory, so a mirror is marked out of sync once a flush cannot be written for 30 minutes, or sooner, once more than 512 MiB of changes are waiting, counted over all mirrors together (busy mirrors on a full disk would otherwise grow the Postgres background worker until it is killed for memory); then the mirror holding the most of them is marked out of sync, and the others keep waiting. A mirror that is marked out of sync or dropped releases its waiting changes at once. Postgres keeps the unconfirmed changes in `pg_wal` meanwhile.
+
+## What mirrors do not follow
+
+A mirror that can no longer follow its source table enters the errored state: queries on it fail with a message that names the reason, every other mirror keeps replicating, and the remedy is always to drop the mirror and then create it again (`CALL mooncake.create_table(...)`); creating a new mirror of the same table while the errored one still exists is refused. An errored mirror stays errored across restarts.
+
+- **Schema changes.** Any change to the source table's columns (add, drop, rename, change type, drop and re-add, add a generated column) or setting its replica identity to anything but `FULL` errors the mirror, also when made while moonlink is stopped.
+- **Not detected:** `ALTER TABLE ... ALTER COLUMN ... TYPE <same type> USING <expression>` rewrites every row without replicating the change, and switching a partition to `UNLOGGED` and back to `LOGGED` within one transaction or within about 5 seconds (for example to load it faster) loses the rows written while it was unlogged. Re-create the mirror after either.
+- **`TRUNCATE`** of the source table errors the mirror.
+- **Rolled-back savepoints in large transactions.** In a transaction large enough for Postgres to stream it before it commits (more changes than `logical_decoding_work_mem`, 64MB by default), `ROLLBACK TO SAVEPOINT` (or a PL/pgSQL exception handler that catches an error after changes) errors the mirrors of the tables the rolled-back part changed, once the transaction commits. Released savepoints, and savepoints in smaller transactions, replicate normally.
+- **Partitioned tables** need a primary key. A new partition is followed if it is still empty when moonlink first sees it, so create partitions ahead of use. A partition that already holds rows when it is added (attached, or created and filled at once), and detaching (even to attach it again) or dropping any partition (including routine retention), error the mirror. An `UPDATE` or `DELETE` in a new partition within about 5 seconds of its creation can error the mirror too. Restoring the source from a dump or upgrading it with `pg_upgrade` rewrites the partition catalog and errors these mirrors; re-create them afterwards. Postgres does not replicate changes of unlogged partitions: creating one, or setting a partition `UNLOGGED`, errors the mirror once moonlink sees it (it checks about every 5 seconds), and a table with one is refused.
+- **Refused at `create_table`:** tables with generated columns, inheritance parents, partitioned tables without a primary key or with an unlogged partition, and column types moonlink cannot store exactly (for example `interval`, `timetz`, enums, multi-dimensional arrays, `numeric` with a precision above 38 or a scale outside 0..precision).
+- **Values a mirror cannot store** (for example `numeric` `NaN` or `Infinity`, more fractional digits than an unconstrained `numeric` keeps, dates outside the supported range) error the mirror instead of being stored differently.
+- **After upgrading to this version,** mirrors of tables without a primary key that have `json`, `jsonb`, `char(n)`, `"char"`, unconstrained `numeric`, array or composite columns are errored at the first start, because they were stored differently before. Re-create them.
+
+A source that cannot be reached when moonlink starts (restarting, refusing connections) is not an error: its mirrors report that they are not available yet and are restored automatically once it is back. Postgres retains WAL for that database meanwhile. If it is still unreachable an hour after moonlink started, its mirrors enter the errored state (drop and re-create them), and the slot is no longer held for them.
 
 ## Contributing
 

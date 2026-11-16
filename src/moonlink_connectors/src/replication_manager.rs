@@ -477,6 +477,7 @@ impl ReplicationManager {
         &self,
         mooncake_table_id: &MooncakeTableId,
     ) -> Result<Arc<ReadStateManager>> {
+        self.check_not_errored(mooncake_table_id)?;
         let (src_table_id, connection) = self.get_replication_connection(mooncake_table_id)?;
         Ok(connection.get_table_reader(mooncake_table_id, src_table_id))
     }

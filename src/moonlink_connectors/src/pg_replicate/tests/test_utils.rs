@@ -162,29 +162,25 @@ async fn drop_type(client: &tokio_postgres::Client, type_name: &str) {
 /// right after the stream ends can fail with "replication slot ... is active for PID n". Terminate the holder
 /// and retry.
 async fn drop_replication_slot(client: &tokio_postgres::Client, slot_name: &str) {
-    // A test's replication stream was just dropped, but Postgres releases its slot only once the
-    // walsender exits; until then the drop fails with "slot is active". Wait for it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let result = client
-            .simple_query(&format!(
-                "SELECT pg_drop_replication_slot('{slot}');",
-                slot = slot_name
-            ))
-            .await;
-        match result {
-            Err(e)
-                if e.code() == Some(&tokio_postgres::error::SqlState::OBJECT_IN_USE)
-                    && std::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let sql = format!(
+        "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots \
+         WHERE slot_name = '{slot_name}' AND active_pid IS NOT NULL; \
+         SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots \
+         WHERE slot_name = '{slot_name}';"
+    );
+    for _ in 0..100 {
+        match client.simple_query(&sql).await {
+            Ok(_) => return,
+            Err(e) if e.code() == Some(&SqlState::OBJECT_IN_USE) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            result => {
-                result.unwrap();
+            Err(e) => {
+                eprintln!("test cleanup: dropping replication slot {slot_name} failed: {e}");
                 return;
             }
         }
     }
+    eprintln!("test cleanup: replication slot {slot_name} still active after 10s, not dropped");
 }
 
 pub struct TestResources {

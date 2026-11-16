@@ -1973,7 +1973,7 @@ async fn test_row_fingerprints_survive_flush() {
             .values()
             .find_map(|batch| batch.data.clone())
             .expect("an in-memory batch");
-        let read_back = MoonlinkRow::from_record_batch(&batch);
+        let read_back = MoonlinkRow::from_record_batch(&batch).unwrap();
         for (written, read) in rows.iter().zip(read_back.iter()) {
             assert_eq!(written.full_row_fingerprint(), read.full_row_fingerprint());
         }

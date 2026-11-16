@@ -12,7 +12,7 @@ use crate::pg_replicate::source_fingerprint;
 use moonlink::TableStatus;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 

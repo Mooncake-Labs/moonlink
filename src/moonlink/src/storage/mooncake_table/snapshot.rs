@@ -34,10 +34,6 @@ pub(crate) struct SnapshotTableState {
     /// Iceberg warehouse location.
     pub(super) iceberg_warehouse_location: String,
 
-    /// Distinguishes this table's temporary read files from those of another table with the same
-    /// id (see [`Snapshot::get_name_for_inmemory_file`]).
-    pub(super) table_instance_id: uuid::Uuid,
-
     /// Mooncake table metadata.
     pub(super) mooncake_table_metadata: Arc<MooncakeTableMetadata>,
 
@@ -196,7 +192,6 @@ impl SnapshotTableState {
             logged_uncompactable_groups: std::sync::atomic::AtomicBool::new(false),
             gc_context: None,
             iceberg_warehouse_location,
-            table_instance_id: uuid::Uuid::new_v4(),
             mooncake_table_metadata: metadata.clone(),
             current_snapshot,
             batches,
@@ -998,6 +993,7 @@ impl SnapshotTableState {
                 let batch = self.batches.get(batch_id).expect("missing batch");
                 let data = batch.data.as_ref().expect("batch missing data");
                 MoonlinkRow::from_record_batch(&data.slice(*row_id, 1))
+                    .expect("a batch moonlink wrote converts back to rows")
                     .pop()
                     .unwrap()
             }

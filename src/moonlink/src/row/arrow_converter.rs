@@ -5,7 +5,7 @@ use arrow::array::{Array, AsArray};
 use arrow::error::ArrowError;
 use arrow_array::{
     BinaryArray, BooleanArray, Date32Array, FixedSizeBinaryArray, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray, StructArray,
+    Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,
 };
 
 /// Convert arrow record batch to moonlink rows.
@@ -277,6 +277,61 @@ mod tests {
         for v in &rows[1].values {
             assert_eq!(*v, RowValue::Null);
         }
+    }
+
+    /// Nested values read back from arrow equal the values they were built from, which full-row
+    /// identity hashing relies on.
+    #[test]
+    fn test_nested_values_round_trip() {
+        use crate::row::column_array_builder::ColumnArrayBuilder;
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let struct_type = DataType::Struct(
+            vec![
+                Field::new("a", DataType::Int32, true),
+                Field::new("b", DataType::Utf8, true),
+                Field::new("c", list_type.clone(), true),
+            ]
+            .into(),
+        );
+        let lists = vec![
+            RowValue::Array(vec![RowValue::Int32(1), RowValue::Null, RowValue::Int32(3)]),
+            RowValue::Null,
+            RowValue::Array(vec![]),
+        ];
+        let structs = vec![
+            RowValue::Struct(vec![
+                RowValue::Int32(1),
+                RowValue::ByteArray(b"x".to_vec()),
+                RowValue::Array(vec![RowValue::Int32(7)]),
+            ]),
+            RowValue::Struct(vec![RowValue::Null, RowValue::Null, RowValue::Null]),
+            RowValue::Null,
+        ];
+        let build = |data_type: &DataType, values: &[RowValue]| -> ArrayRef {
+            let mut builder = ColumnArrayBuilder::new(data_type, values.len());
+            for v in values {
+                builder.append_value(v).unwrap();
+            }
+            builder.finish(data_type)
+        };
+        let schema = Schema::new(vec![
+            Field::new("l", list_type.clone(), true),
+            Field::new("s", struct_type.clone(), true),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![build(&list_type, &lists), build(&struct_type, &structs)],
+        )
+        .unwrap();
+
+        let rows = MoonlinkRow::from_record_batch(&batch).unwrap();
+        let read_back: Vec<Vec<RowValue>> = rows.into_iter().map(|r| r.values).collect();
+        let expected: Vec<Vec<RowValue>> = lists
+            .into_iter()
+            .zip(structs)
+            .map(|(l, s)| vec![l, s])
+            .collect();
+        assert_eq!(read_back, expected);
     }
 
     /// Rows shaped like the ones CDC produces (pg_replicate `From<Cell> for RowValue`: an

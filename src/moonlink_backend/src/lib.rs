@@ -14,6 +14,8 @@ use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
+#[cfg(feature = "test-utils")]
+pub use recovery_utils::set_recovery_delay_between_tables_for_test;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +83,7 @@ pub struct MoonlinkBackend {
     // Metadata storage accessor.
     metadata_store_accessor: Box<dyn MetadataStoreTrait>,
 
-    replication_manager: RwLock<ReplicationManager>,
+    replication_manager: Arc<RwLock<ReplicationManager>>,
 
     /// See [`DEFAULT_LSN_WAIT_TIMEOUT`].
     lsn_wait_timeout_ms: AtomicU64,

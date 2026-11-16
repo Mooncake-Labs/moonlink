@@ -889,7 +889,13 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           MOONLINK_TEST_PG_CTL: ${{ github.workspace }}/.github/scripts/pg_control.sh
         run: |
-          RUST_BACKTRACE=1 cargo test --package moonlink_backend --test '*' --no-fail-fast
+          RUST_BACKTRACE=1 cargo test --package moonlink_backend --test '*' --features test-utils --no-fail-fast
+
+      - name: Make sure PostgreSQL is running after the backend tests
+        if: always()
+        timeout-minutes: 2
+        run: |
+          .github/scripts/pg_control.sh start
 
       - name: Run postgres bulk ingestion integration test
         # TODO(hjiang): Update after we figure out the regression change.
