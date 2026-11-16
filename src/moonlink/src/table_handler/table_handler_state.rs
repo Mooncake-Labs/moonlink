@@ -483,15 +483,19 @@ impl TableHandlerState {
         persistence_snapshot_lsn: Option<u64>,
         replication_lsn: u64,
     ) -> u64 {
-        // Case-1: there're no activities in the current table, replication LSN indicates current status.
-        if persistence_snapshot_lsn.is_none() && self.table_consistent_view_lsn.is_none() {
+        // Case-1: the table has never committed anything, so there is nothing to persist and the
+        // replication LSN indicates current status. A missing consistent view alone doesn't mean
+        // that: any write after the last commit clears it.
+        if persistence_snapshot_lsn.is_none() && self.latest_commit_lsn.is_none() {
             return replication_lsn;
         }
 
         // Case-2: if there're no updates since last iceberg snapshot, replication LSN indicates persisted table LSN.
-        if persistence_snapshot_lsn == self.table_consistent_view_lsn {
-            // Notice: replication LSN comes from replication events, so if all events have been processed (i.e., a clean recovery case), replication LSN is 0.
-            return std::cmp::max(replication_lsn, persistence_snapshot_lsn.unwrap());
+        if let Some(persistence_snapshot_lsn) = persistence_snapshot_lsn {
+            if self.table_consistent_view_lsn == Some(persistence_snapshot_lsn) {
+                // Notice: replication LSN comes from replication events, so if all events have been processed (i.e., a clean recovery case), replication LSN is 0.
+                return std::cmp::max(replication_lsn, persistence_snapshot_lsn);
+            }
         }
 
         // Case-3: iceberg snapshot LSN indicates the persisted table LSN.
