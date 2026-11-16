@@ -575,6 +575,54 @@ impl PostgresConnection {
         Ok(())
     }
 
+    /// Why the table cannot be mirrored next to the partition tree it is in, if it cannot: postgres
+    /// publishes a partition's changes only as those of the topmost partitioned table in the
+    /// publication (publish_via_partition_root), so of a partitioned table and its partition only
+    /// one mirror would receive anything.
+    async fn partition_overlap(
+        &self,
+        src_table_id: SrcTableId,
+    ) -> std::result::Result<Option<String>, tokio_postgres::Error> {
+        const BOTH: &str = "a partitioned table and its partitions cannot both be mirrored \
+                            (postgres publishes a partition's changes only as the partitioned \
+                            table's)";
+        let client = &self.postgres_client;
+        let ancestors = source_fingerprint::published_ancestors(client, src_table_id).await?;
+        let partitions = source_fingerprint::partitions(client, src_table_id).await?;
+        let mirrored: std::collections::HashSet<SrcTableId> = self
+            .registered_tables
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        if let Some((oid, ancestor)) = ancestors.first() {
+            return Ok(Some(if mirrored.contains(oid) {
+                format!(
+                    "it is a partition of {ancestor}, which is already mirrored, and {BOTH}; drop \
+                     that mirror first"
+                )
+            } else {
+                format!(
+                    "it is a partition of {ancestor}, which is in publication moonlink_pub without \
+                     a running mirror, so postgres publishes its changes only as {ancestor}'s; \
+                     drop {ancestor}'s errored mirror, or if it has none, run ALTER PUBLICATION \
+                     moonlink_pub DROP TABLE ONLY {ancestor}"
+                )
+            }));
+        }
+        // A published partition without a running mirror does not matter: nothing reads it.
+        Ok(partitions
+            .iter()
+            .find(|(oid, _)| mirrored.contains(oid))
+            .map(|(_, partition)| {
+                format!(
+                    "its partition {partition} is already mirrored, and {BOTH}; drop that mirror \
+                     first"
+                )
+            }))
+    }
+
     /// Add the table to the publication and, for a new mirror, copy its current contents.
     ///
     /// The table joins the publication before the copy snapshot is taken, so every change after the
@@ -847,6 +895,10 @@ impl PostgresConnection {
         object_storage_cache: ObjectStorageCache,
     ) -> Result<(SrcTableId, crate::pg_replicate::table_init::TableResources)> {
         debug!(table_name, "adding table");
+        // A drop of an earlier mirror of this table may still be retrying in the background: if
+        // it removed the table from the publication after this mirror added it, this mirror would
+        // receive nothing.
+        self.wait_for_pending_retries().await;
         self.check_not_inheritance_parent(table_name).await?;
         // A mirror whose source changed since it was recorded is not resumed.
         let recorded_fingerprint = if is_recovery {
@@ -915,32 +967,12 @@ impl PostgresConnection {
                     &format!("{partition}; only regular (logged) partitions are supported"),
                 ));
             }
-            // Either way round, one of the two mirrors would receive nothing.
-            let ancestor = source_fingerprint::published_ancestor(
-                &self.postgres_client,
-                table_schema.src_table_id,
-            )
-            .await
-            .map_err(PostgresSourceError::from)?;
-            let overlap = match ancestor {
-                Some(ancestor) => Some(format!("it is a partition of {ancestor}, which")),
-                None => source_fingerprint::published_partition(
-                    &self.postgres_client,
-                    table_schema.src_table_id,
-                )
+            if let Some(overlap) = self
+                .partition_overlap(table_schema.src_table_id)
                 .await
                 .map_err(PostgresSourceError::from)?
-                .map(|partition| format!("its partition {partition}")),
-            };
-            if let Some(overlap) = overlap {
-                return Err(crate::Error::unsupported_source_table(
-                    table_name,
-                    &format!(
-                        "{overlap} is already mirrored, and a partitioned table and its partitions \
-                         cannot both be mirrored (postgres publishes a partition's changes only as \
-                         the partitioned table's); drop that mirror first"
-                    ),
-                ));
+            {
+                return Err(crate::Error::unsupported_source_table(table_name, &overlap));
             }
         }
 
@@ -1119,6 +1151,8 @@ impl PostgresConnection {
     pub async fn drop_table(&mut self, src_table_id: u32, table_name: &str) -> Result<()> {
         debug!(src_table_id, "dropping table");
 
+        // Not compared with its source any more: leaving the publication would error it.
+        self.watched_tables.lock().unwrap().remove(&src_table_id);
         // Remove table from publication as the first step, to prevent further events.
         self.remove_table_from_publication(table_name).await?;
 

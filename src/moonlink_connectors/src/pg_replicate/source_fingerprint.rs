@@ -11,8 +11,8 @@
 //! partition that already holds rows, or any partition that leaves the table (detached or
 //! dropped), errors the mirror: whether those rows were ever replicated cannot be told from the
 //! catalog. So does an unlogged or foreign partition, whose changes are never decoded, and an
-//! inheritance child of a regular table, a renamed value of an enum its columns use, and becoming
-//! a partition of a mirrored table (whose mirror then receives the table's changes instead).
+//! inheritance child of a regular table, a renamed value of an enum its columns use, leaving the
+//! publication, and becoming a partition of a published table (which then carries its changes).
 
 use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
@@ -224,54 +224,64 @@ pub async fn unreplicated_partition(
     }))
 }
 
-/// The first member of moonlink's publication (so a mirrored table, or an errored mirror's) among
-/// `relations`, a query of relids, other than the table itself, as a schema-qualified name.
-async fn first_published(
-    client: &Client,
-    relid: SrcTableId,
-    relations: &str,
-) -> Result<Option<String>, tokio_postgres::Error> {
+/// Whether the table is in moonlink's publication. Only then does postgres send its changes.
+async fn in_publication(client: &Client, relid: SrcTableId) -> Result<bool, tokio_postgres::Error> {
     let found = rows(
         client
             .simple_query(&format!(
-                "SELECT format('%I.%I', n.nspname, c.relname) FROM ({relations}) t(relid) \
-                 JOIN pg_publication_rel r ON r.prrelid = t.relid \
-                 JOIN pg_publication p ON p.oid = r.prpubid AND p.pubname = 'moonlink_pub' \
-                 JOIN pg_class c ON c.oid = t.relid JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE t.relid <> {relid}::oid ORDER BY 1 LIMIT 1;"
+                "SELECT 1 FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid \
+                 WHERE p.pubname = 'moonlink_pub' AND r.prrelid = {relid}::oid;"
             ))
             .await?,
     );
-    Ok(found.first().and_then(|row| row.get(0)).map(str::to_string))
+    Ok(!found.is_empty())
 }
 
-/// A partitioned table above the table that is in moonlink's publication. With
-/// publish_via_partition_root, postgres publishes a partition's changes only as those of the
-/// topmost partitioned table in the publication, so the partition's own mirror receives nothing.
-pub async fn published_ancestor(
+/// The members of moonlink's publication among the partitioned tables above the table, by oid,
+/// with schema-qualified names. With publish_via_partition_root, postgres publishes a partition's
+/// changes only as those of the topmost partitioned table in the publication, so the
+/// partition's own mirror receives nothing.
+pub async fn published_ancestors(
     client: &Client,
     relid: SrcTableId,
-) -> Result<Option<String>, tokio_postgres::Error> {
-    first_published(
-        client,
-        relid,
-        &format!("SELECT relid FROM pg_partition_ancestors({relid}::oid::regclass)"),
-    )
-    .await
+) -> Result<Vec<(SrcTableId, String)>, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT c.oid, format('%I.%I', n.nspname, c.relname) \
+                 FROM pg_partition_ancestors({relid}::oid::regclass) a \
+                 JOIN pg_publication_rel r ON r.prrelid = a.relid \
+                 JOIN pg_publication p ON p.oid = r.prpubid AND p.pubname = 'moonlink_pub' \
+                 JOIN pg_class c ON c.oid = a.relid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE a.relid <> {relid}::oid::regclass ORDER BY 2;"
+            ))
+            .await?,
+    );
+    Ok(found
+        .iter()
+        .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+        .collect())
 }
 
-/// A partition (at any depth) of the table that is in moonlink's publication; its mirror would
-/// stop receiving changes once the table joins the publication (see published_ancestor).
-pub async fn published_partition(
+/// The partitions of the table at any depth, by oid, with schema-qualified names.
+pub async fn partitions(
     client: &Client,
     relid: SrcTableId,
-) -> Result<Option<String>, tokio_postgres::Error> {
-    first_published(
-        client,
-        relid,
-        &format!("SELECT relid FROM pg_partition_tree({relid}::oid::regclass)"),
-    )
-    .await
+) -> Result<Vec<(SrcTableId, String)>, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT c.oid, format('%I.%I', n.nspname, c.relname) \
+                 FROM pg_partition_tree({relid}::oid::regclass) t \
+                 JOIN pg_class c ON c.oid = t.relid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE t.relid <> {relid}::oid::regclass ORDER BY 2;"
+            ))
+            .await?,
+    );
+    Ok(found
+        .iter()
+        .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+        .collect())
 }
 
 /// Name of a relation, and whether it holds no rows; None if it no longer exists.
@@ -344,10 +354,21 @@ pub async fn drift(
                 .to_string(),
         ));
     }
-    if let Some(ancestor) = published_ancestor(client, expected.relid).await? {
+    // Removed by hand, or by a drop of an earlier mirror of the table that finished late.
+    if !in_publication(client, expected.relid).await? {
+        return Ok(Drift::Changed(
+            "it is no longer in publication moonlink_pub, so postgres does not send its changes"
+                .to_string(),
+        ));
+    }
+    if let Some((_, ancestor)) = published_ancestors(client, expected.relid)
+        .await?
+        .into_iter()
+        .next()
+    {
         return Ok(Drift::Changed(format!(
-            "it became a partition of {ancestor}, which is mirrored, and postgres now publishes \
-             its changes only as that table's"
+            "it became a partition of {ancestor}, which is in publication moonlink_pub, so \
+             postgres now publishes its changes only as {ancestor}'s"
         )));
     }
     if let Some(partition) = unreplicated_partition(client, expected.relid).await? {

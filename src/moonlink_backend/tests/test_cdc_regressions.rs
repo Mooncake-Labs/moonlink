@@ -4749,6 +4749,32 @@ async fn a_partitioned_table_and_its_partition_are_not_both_mirrored() {
     )
     .await;
     let backend = Arc::new(backend);
+    mirror(
+        &backend,
+        &tmp,
+        "rv_pstandalone_mc",
+        "public.rv_pstandalone",
+        &uri,
+    )
+    .await;
+
+    // A published partitioned table without a mirror would take the partition's changes too.
+    client
+        .simple_query("ALTER PUBLICATION moonlink_pub ADD TABLE ONLY rv_pmid;")
+        .await
+        .unwrap();
+    let err = try_mirror(&backend, &tmp, "rv_pleaf1_mc", "public.rv_pleaf1", &uri)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("in publication moonlink_pub without a running mirror")
+            && err.contains("ALTER PUBLICATION moonlink_pub DROP TABLE ONLY public.rv_pmid"),
+        "{err}"
+    );
+    client
+        .simple_query("ALTER PUBLICATION moonlink_pub DROP TABLE ONLY rv_pmid;")
+        .await
+        .unwrap();
 
     // A partition first: its partitioned tables are refused, and it keeps replicating.
     mirror(&backend, &tmp, "rv_pleaf1_mc", "public.rv_pleaf1", &uri).await;
@@ -4775,9 +4801,14 @@ async fn a_partitioned_table_and_its_partition_are_not_both_mirrored() {
     assert_eq!(snapshot_error(&backend, "rv_pleaf1_mc", lsn).await, None);
     assert_eq!(scan_ids(&backend, "rv_pleaf1_mc", lsn).await, Some(vec![1]));
 
-    // A partitioned table first: its partitions, at any depth, are refused.
+    // A partitioned table first: its partitions, at any depth, are refused. A published
+    // partition without a mirror does not stand in the way.
     backend
         .drop_table(DB.to_string(), "rv_pleaf1_mc".to_string())
+        .await
+        .unwrap();
+    client
+        .simple_query("ALTER PUBLICATION moonlink_pub ADD TABLE ONLY rv_pleaf2;")
         .await
         .unwrap();
     mirror(&backend, &tmp, "rv_proot_mc", "public.rv_proot", &uri).await;
@@ -4798,14 +4829,6 @@ async fn a_partitioned_table_and_its_partition_are_not_both_mirrored() {
     }
 
     // A mirrored table that becomes a partition of a mirrored table no longer gets its changes.
-    mirror(
-        &backend,
-        &tmp,
-        "rv_pstandalone_mc",
-        "public.rv_pstandalone",
-        &uri,
-    )
-    .await;
     client
         .simple_query(
             "ALTER TABLE rv_proot ATTACH PARTITION rv_pstandalone FOR VALUES FROM (200) TO (300);
@@ -4833,6 +4856,96 @@ async fn a_partitioned_table_and_its_partition_are_not_both_mirrored() {
     );
     client
         .simple_query("DROP TABLE rv_proot CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// Set lock_timeout for every new connection to the test database (None resets it).
+async fn set_database_lock_timeout(client: &Client, timeout: Option<&str>) {
+    let action = match timeout {
+        Some(timeout) => format!("SET lock_timeout = ''{timeout}''"),
+        None => "RESET lock_timeout".to_string(),
+    };
+    client
+        .simple_query(&format!(
+            "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I {action}', current_database()); END $$;"
+        ))
+        .await
+        .unwrap();
+}
+
+/// A mirror is replicated only while its table is in the publication. A drop whose removal from
+/// the publication is retried in the background (the table was locked) must finish before the
+/// table's mirror is re-created, or it would take the new mirror's table out; and a table taken
+/// out of the publication by other means errors its mirror rather than leaving it silently stale.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_mirror_re_created_while_its_drop_is_retried_replicates() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_rd, rv_rd_keep;
+         CREATE TABLE rv_rd (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_rd_keep (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_rd VALUES (1);",
+    )
+    .await;
+    set_database_lock_timeout(&client, None).await;
+    let backend = Arc::new(backend);
+    // Keeps the source's replication connection (and its pending retries) alive across the drop.
+    mirror(&backend, &tmp, "rv_rd_keep_mc", "public.rv_rd_keep", &uri).await;
+    mirror(&backend, &tmp, "rv_rd_mc", "public.rv_rd", &uri).await;
+
+    // Each attempt to take the locked table out of the publication times out, so the drop
+    // returns with the removal retried in the background, about once a second.
+    set_database_lock_timeout(&client, Some("50ms")).await;
+    let (locker, _) = connect_to_postgres(&uri).await;
+    locker
+        .simple_query("BEGIN; LOCK TABLE rv_rd IN SHARE UPDATE EXCLUSIVE MODE;")
+        .await
+        .unwrap();
+    backend
+        .drop_table(DB.to_string(), "rv_rd_mc".to_string())
+        .await
+        .unwrap();
+    assert_eq!(published_count(&client, "rv_rd").await, 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    locker.simple_query("COMMIT;").await.unwrap();
+    try_mirror(&backend, &tmp, "rv_rd_mc", "public.rv_rd", &uri)
+        .await
+        .unwrap();
+    set_database_lock_timeout(&client, None).await;
+    // Past every retry.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    client
+        .simple_query("INSERT INTO rv_rd VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(published_count(&client, "rv_rd").await, 1);
+    assert_eq!(snapshot_error(&backend, "rv_rd_mc", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_rd_mc", lsn).await, Some(vec![1, 2]));
+
+    // Taken out of the publication by hand: errored, the other mirror unaffected.
+    client
+        .simple_query(
+            "ALTER PUBLICATION moonlink_pub DROP TABLE ONLY rv_rd;
+             INSERT INTO rv_rd VALUES (3); INSERT INTO rv_rd_keep VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = wait_until_errored(&backend, "rv_rd_mc", lsn).await;
+    assert!(
+        err.contains("no longer in publication moonlink_pub") && err.contains("drop and re-create"),
+        "{err}"
+    );
+    assert_eq!(snapshot_error(&backend, "rv_rd_keep_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_rd_keep_mc", lsn).await,
+        Some(vec![1])
+    );
+    client
+        .simple_query("DROP TABLE rv_rd, rv_rd_keep;")
         .await
         .unwrap();
 }
