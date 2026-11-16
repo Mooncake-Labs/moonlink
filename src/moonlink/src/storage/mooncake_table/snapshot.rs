@@ -854,16 +854,6 @@ impl SnapshotTableState {
             }
             return processed_deletions;
         }
-        // A deletion of a streamed transaction that has not committed can find its row already
-        // deleted: postgres re-sends a transaction the table applied, and the table only skips the
-        // re-send at its commit. Such deletions resolve to what is left; the rest are dropped.
-        if super::transaction_stream::is_pending_streamed_lsn(deletions.first().unwrap().lsn)
-            && candidates.len() < deletions.len()
-        {
-            return self
-                .match_pending_deletions_to_fewer_candidates(deletions, candidates)
-                .await;
-        }
         // This optimization is important when working with table without primary key.
         // Postgres never distinguish row with same value, so they will almost always be processed together.
         // Thus we can avoid full row identity comparison if we also process them together.
@@ -896,36 +886,6 @@ impl SnapshotTableState {
                 processed_deletions
             }
         }
-    }
-
-    /// Match uncommitted streamed deletions to the rows left for them, fewer than the deletions.
-    async fn match_pending_deletions_to_fewer_candidates(
-        &self,
-        deletions: &[RawDeletionRecord],
-        mut candidates: Vec<RecordLocation>,
-    ) -> Vec<ProcessedDeletionRecord> {
-        let mut processed_deletions = Vec::new();
-        for deletion in deletions {
-            if candidates.is_empty() {
-                break;
-            }
-            let mut target = None;
-            for (idx, loc) in candidates.iter().enumerate() {
-                if self.deletion_matches(loc, deletion).await {
-                    target = Some(candidates.swap_remove(idx));
-                    break;
-                }
-            }
-            if let Some(target) = target {
-                processed_deletions.push(Self::build_processed_deletion(deletion, target));
-            }
-        }
-        tracing::debug!(
-            deletions = deletions.len(),
-            resolved = processed_deletions.len(),
-            "uncommitted streamed deletions found rows already deleted (a re-sent transaction)"
-        );
-        processed_deletions
     }
 
     #[inline]
@@ -977,7 +937,6 @@ impl SnapshotTableState {
         }
     }
 
-    /// Verifies that `loc` matches the provided `identity`.
     /// Whether the row at `loc` is the one `deletion` deletes, among rows with its lookup key.
     async fn deletion_matches(&self, loc: &RecordLocation, deletion: &RawDeletionRecord) -> bool {
         if let Some(identity) = &deletion.row_identity {
@@ -1010,6 +969,7 @@ impl SnapshotTableState {
         }
     }
 
+    /// Verifies that `loc` matches the provided `identity`.
     async fn matches_identity(&self, loc: &RecordLocation, identity: &MoonlinkRow) -> bool {
         match loc {
             RecordLocation::MemoryBatch(batch_id, row_id) => {

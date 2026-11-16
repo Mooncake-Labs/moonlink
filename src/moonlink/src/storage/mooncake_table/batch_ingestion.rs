@@ -279,7 +279,7 @@ mod tests {
 
         // Verify commit has files and NO index for append-only
         match &table.next_snapshot_task.new_streaming_xact[0] {
-            TransactionStreamOutput::Abort(_) => panic!("unexpected abort"),
+            TransactionStreamOutput::Abort => panic!("unexpected abort"),
             TransactionStreamOutput::Commit(commit) => {
                 assert_eq!(commit.get_flushed_data_files().len(), 1);
                 assert!(commit.get_file_indices().is_empty());
@@ -326,7 +326,7 @@ mod tests {
         // Commit enqueued and index attached
         let (mut flushed_files, mut indices) = match &table.next_snapshot_task.new_streaming_xact[0]
         {
-            TransactionStreamOutput::Abort(_) => panic!("unexpected abort"),
+            TransactionStreamOutput::Abort => panic!("unexpected abort"),
             TransactionStreamOutput::Commit(commit) => {
                 (commit.get_flushed_data_files(), commit.get_file_indices())
             }
@@ -489,7 +489,7 @@ mod tests {
             .await;
 
         match &table.next_snapshot_task.new_streaming_xact[0] {
-            TransactionStreamOutput::Abort(_) => panic!("unexpected abort"),
+            TransactionStreamOutput::Abort => panic!("unexpected abort"),
             TransactionStreamOutput::Commit(commit) => {
                 assert_eq!(commit.get_flushed_data_files().len(), 1);
                 // Index build should have failed and been skipped
@@ -515,7 +515,7 @@ mod tests {
         table.batch_ingest(vec![], storage_config, 400).await;
 
         match &table.next_snapshot_task.new_streaming_xact[0] {
-            TransactionStreamOutput::Abort(_) => panic!("unexpected abort"),
+            TransactionStreamOutput::Abort => panic!("unexpected abort"),
             TransactionStreamOutput::Commit(commit) => {
                 assert_eq!(commit.get_flushed_data_files().len(), 0);
                 let indices = commit.get_file_indices();

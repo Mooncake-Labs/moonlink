@@ -482,9 +482,6 @@ pub struct MooncakeTable {
     committing_stream_flushes: HashMap<uuid::Uuid, u64>,
     next_committing_stream_id: u64,
 
-    /// Id of the next streamed transaction attempt (see [`TransactionStreamState`]).
-    next_stream_attempt_id: u32,
-
     /// Auto increment id for generating unique file ids.
     /// Note, these ids is only used locally, and not persisted.
     next_file_id: u32,
@@ -652,7 +649,6 @@ impl MooncakeTable {
             committing_streams: HashMap::new(),
             committing_stream_flushes: HashMap::new(),
             next_committing_stream_id: 0,
-            next_stream_attempt_id: 0,
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
             next_file_id,
@@ -1353,7 +1349,6 @@ impl MooncakeTable {
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(
             self.next_snapshot_task.new_deletions.is_empty()
-                || self.next_snapshot_task.new_deletions.last().unwrap().lsn >= transaction_stream::LSN_START_FOR_STREAMING_XACT
                 || self.next_snapshot_task.new_deletions.last().unwrap().lsn < lsn,
             "We expect commit LSN to be strictly greater than the last deletion LSN, but got commit LSN {} and last deletion LSN {}",
             lsn,

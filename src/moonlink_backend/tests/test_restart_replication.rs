@@ -696,4 +696,83 @@ mod tests {
         assert_eq!(after, counts(1, 20), "after recovery");
         assert_eq!(later, counts(1, 25), "replication after recovery");
     }
+
+    /// Deletes one of three identical rows of a table without a key, for rows of many column types
+    /// that are on disk: non-streamed, then inside a streamed transaction. The snapshot must pick a
+    /// copy by reading it back and comparing it with the deleted row (or its fingerprint).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn full_identity_delete_of_one_of_identical_rows_across_types() {
+        let (tmp, backend, client) = setup_backend(None, false).await;
+        client
+            .simple_query(
+                "DROP TABLE IF EXISTS fp_t; CREATE TABLE fp_t (id BIGINT, s SMALLINT, i INT, \
+                 f4 REAL, f8 DOUBLE PRECISION, n NUMERIC(12,3), b BOOL, t TEXT, c CHAR(5), \
+                 vc VARCHAR(10), by BYTEA, d DATE, tm TIME, ts TIMESTAMP, \
+                 tstz TIMESTAMPTZ, u UUID, j JSON, jb JSONB, ia INT[], ta TEXT[], \
+                 pad TEXT);",
+            )
+            .await
+            .unwrap();
+        create_mirror(&backend, &tmp, TABLE_A, "fp_t").await;
+        let row1 =
+            "1, 7, 70000, 1.5, -0.0, 12345.678, true, 'héllo', 'ab', 'v', '\\x00ff'::bytea, \
+                    '2024-02-29', '13:14:15.123456', '2024-01-01 00:00:00.5', \
+                    '2024-01-01 12:00:00+02', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', \
+                    '{\"a\": [1, 2]}', '{\"b\": 1, \"a\": 2}', '{1,NULL,3}', '{\"x\",\"y z\"}', \
+                    ''";
+        let row2 = "2, NULL, -1, 'NaN', '-Infinity', -0.001, false, '', NULL, NULL, '\\x'::bytea, \
+                    '1970-01-01', '00:00:00', '1999-12-31 23:59:59', \
+                    '2000-01-01 00:00:00+00', NULL, 'null', '[]', '{}', '{NULL}', ''";
+        for row in [row1, row2] {
+            for _ in 0..3 {
+                client
+                    .simple_query(&format!("INSERT INTO fp_t VALUES ({row});"))
+                    .await
+                    .unwrap();
+            }
+        }
+        client
+            .simple_query("INSERT INTO fp_t (id, pad) VALUES (3, 'single');")
+            .await
+            .unwrap();
+        let loaded = current_wal_lsn(&client).await;
+        persist(&backend, TABLE_A, loaded).await;
+
+        let delete_one = |id: i64| {
+            format!(
+                "DELETE FROM fp_t WHERE ctid IN (SELECT ctid FROM fp_t WHERE id = {id} LIMIT 1);"
+            )
+        };
+        client
+            .simple_query(&format!("{} {}", delete_one(1), delete_one(2)))
+            .await
+            .unwrap();
+        let after_plain = current_wal_lsn(&client).await;
+        let got = live_id_counts(&backend, TABLE_A, after_plain).await;
+        let want: HashMap<i64, u64> = [(1, 2), (2, 2), (3, 1)].into_iter().collect();
+        assert_eq!(got, want, "non-streamed delete of one identical row");
+        persist(&backend, TABLE_A, after_plain).await;
+
+        let _work_mem = LogicalDecodingWorkMem::set("64kB").await;
+        let streamed_before = streamed_transactions_sent(&client).await;
+        client
+            .simple_query(&format!(
+                "BEGIN; INSERT INTO fp_t (id, pad) SELECT 100 + g, repeat('p', 200) \
+                 FROM generate_series(1, 3000) g; {} {} DELETE FROM fp_t WHERE id > 100; COMMIT;",
+                delete_one(1),
+                delete_one(2)
+            ))
+            .await
+            .unwrap();
+        let after_streamed = current_wal_lsn(&client).await;
+        assert!(
+            streamed_transactions_sent(&client).await > streamed_before,
+            "the transaction was streamed"
+        );
+        let got = live_id_counts(&backend, TABLE_A, after_streamed).await;
+        cleanup(&backend, &[TABLE_A]).await;
+        let want: HashMap<i64, u64> = [(1, 1), (2, 1), (3, 1)].into_iter().collect();
+        assert_eq!(got, want, "streamed delete of one identical row");
+    }
 }

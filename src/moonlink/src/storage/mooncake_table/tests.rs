@@ -1654,8 +1654,8 @@ async fn test_resent_delete_after_snapshot_and_abort_is_applied() {
 
 /// Stream-deletes the rows `ids` of `table` under `xact_id` (rows are `id` with a 200-byte name),
 /// running a mooncake snapshot after every `snapshot_every` deletions if set, as the table handler's
-/// tick does when it keeps up. Returns the most deletion records the table held unresolved at once,
-/// and the most of those holding a whole row.
+/// tick does while a transaction streams. Returns the most deletion records the table held
+/// unresolved at once, and the most of those holding a whole row.
 async fn stream_delete_rows(
     table: &mut MooncakeTable,
     rx: &mut mpsc::Receiver<TableEvent>,
@@ -1702,41 +1702,22 @@ async fn full_identity_table_with_rows(
     (context, table, rx)
 }
 
-/// Testing scenario: a large streamed DELETE of a table without a key, with no snapshot while it
-/// streams (snapshots falling behind). Its deletion records wait for a snapshot, but none of them
-/// keeps the deleted row; at its commit every row is deleted.
+/// Testing scenario: a large streamed DELETE of a table without a key, with snapshots while it
+/// streams. The transaction holds every deletion until its commit, but none of them keeps the
+/// deleted row (each takes at most 96 bytes); at its commit every row is deleted.
 #[tokio::test]
-async fn test_streamed_delete_keeps_no_rows_until_resolved() {
+async fn test_streamed_delete_holds_no_rows_until_commit() {
     const ROWS: i32 = 20_000;
     let (_context, mut table, mut rx) = full_identity_table_with_rows("compact_delete", ROWS).await;
     let xact_id = 7;
-    let (most_records, most_holding_rows) = stream_delete_rows(
-        &mut table,
-        &mut rx,
-        xact_id,
-        0..ROWS,
-        /*snapshot_every=*/ None,
-    )
-    .await;
+    let (most_records, most_holding_rows) =
+        stream_delete_rows(&mut table, &mut rx, xact_id, 0..ROWS, Some(1000)).await;
     assert_eq!(most_records, ROWS as usize);
     assert_eq!(most_holding_rows, 0, "deletion records held whole rows");
-    commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
-    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
-    verify_snapshot_ids(&mut table, &[]).await;
-}
-
-/// Testing scenario: as above with the snapshots keeping up: they resolve the deletions as they
-/// stream, so the unresolved records are bounded by the snapshot interval.
-#[tokio::test]
-async fn test_streamed_delete_records_are_resolved_while_streaming() {
-    const ROWS: i32 = 20_000;
-    let (_context, mut table, mut rx) = full_identity_table_with_rows("bounded_delete", ROWS).await;
-    let xact_id = 7;
-    let (most_records, _) =
-        stream_delete_rows(&mut table, &mut rx, xact_id, 0..ROWS, Some(1000)).await;
     assert!(
-        most_records <= 1000,
-        "{most_records} deletion records unresolved at once"
+        std::mem::size_of::<RawDeletionRecord>() <= 96,
+        "a held deletion takes {} bytes",
+        std::mem::size_of::<RawDeletionRecord>()
     );
     commit_transaction_stream_and_sync(&mut table, &mut rx, xact_id, /*lsn=*/ 5).await;
     create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
@@ -1744,10 +1725,10 @@ async fn test_streamed_delete_records_are_resolved_while_streaming() {
 }
 
 /// Testing scenario: postgres re-sends an applied streamed DELETE after a reconnect, with snapshots
-/// while it streams; its deletions find their rows gone. Skipping it at its commit leaves the
-/// table as the first attempt left it.
+/// while it streams; its rows are gone. Skipping it at its commit leaves the table as the first
+/// attempt left it.
 #[tokio::test]
-async fn test_resent_streamed_delete_resolved_while_streaming_is_inert() {
+async fn test_resent_streamed_delete_with_snapshots_while_streaming_is_inert() {
     const ROWS: i32 = 5_000;
     let (_context, mut table, mut rx) =
         full_identity_table_with_rows("resend_resolved", ROWS + 2).await;
@@ -1764,6 +1745,94 @@ async fn test_resent_streamed_delete_resolved_while_streaming_is_inert() {
     .await
     .expect("a mooncake snapshot never completed (snapshot task died)");
     verify_snapshot_ids(&mut table, &[ROWS, ROWS + 1]).await;
+}
+
+/// `copies` identical rows (7, "dup", 1) and one (8, "other", 2) of a table without a key,
+/// committed at 5, flushed and snapshotted.
+async fn identical_flushed_rows(
+    name: &str,
+    copies: usize,
+) -> (TestContext, MooncakeTable, mpsc::Receiver<TableEvent>) {
+    let context = TestContext::new(name);
+    let mut table = test_table(&context, "table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+    let mut rows = vec![test_row(7, "dup", 1); copies];
+    rows.push(test_row(8, "other", 2));
+    append_rows(&mut table, rows).unwrap();
+    table.commit(/*lsn=*/ 5);
+    flush_table_and_sync(&mut table, &mut rx, /*lsn=*/ 5)
+        .await
+        .unwrap();
+    create_mooncake_snapshot_for_test(&mut table, &mut rx).await;
+    (context, table, rx)
+}
+
+/// Runs a mooncake snapshot, failing instead of hanging if the snapshot task dies.
+async fn snapshot_within_timeout(table: &mut MooncakeTable, rx: &mut mpsc::Receiver<TableEvent>) {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        create_mooncake_snapshot_for_test(table, rx),
+    )
+    .await
+    .expect("a mooncake snapshot never completed (snapshot task died)");
+}
+
+/// Testing scenario: a streamed transaction deletes one of two identical flushed rows, with a
+/// snapshot while it streams; a non-streamed one deletes the other copy and commits first. Each
+/// deletes its own copy.
+#[tokio::test]
+async fn test_streamed_and_plain_deletes_of_identical_rows() {
+    let (_context, mut table, mut rx) = identical_flushed_rows("identical_stream_plain", 2).await;
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 42)
+        .await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    table.delete(test_row(7, "dup", 1), /*lsn=*/ 14).await;
+    table.commit(/*lsn=*/ 15);
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[7, 8]).await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, 42, /*lsn=*/ 20).await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[8]).await;
+}
+
+/// Testing scenario: two streamed transactions each delete one of two identical flushed rows, with
+/// a snapshot while both stream, and commit one after the other.
+#[tokio::test]
+async fn test_two_streamed_deletes_of_identical_rows() {
+    let (_context, mut table, mut rx) = identical_flushed_rows("identical_two_streams", 2).await;
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 42)
+        .await;
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 43)
+        .await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, 42, /*lsn=*/ 20).await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, 43, /*lsn=*/ 21).await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[8]).await;
+}
+
+/// Testing scenario: a streamed deletion of one of three identical rows is aborted mid-stream
+/// (with a snapshot before), and the re-sent attempt commits: one copy is deleted.
+#[tokio::test]
+async fn test_aborted_then_resent_streamed_delete_of_identical_row() {
+    let (_context, mut table, mut rx) = identical_flushed_rows("identical_abort_resend", 3).await;
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 42)
+        .await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    table.abort_in_stream_batch(42);
+    table
+        .delete_in_stream_batch(test_row(7, "dup", 1), 42)
+        .await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    commit_transaction_stream_and_sync(&mut table, &mut rx, 42, /*lsn=*/ 20).await;
+    snapshot_within_timeout(&mut table, &mut rx).await;
+    verify_snapshot_ids(&mut table, &[7, 7, 8]).await;
 }
 
 /// Testing scenario: streamed and non-streamed deletions of a table without a key, of identical
