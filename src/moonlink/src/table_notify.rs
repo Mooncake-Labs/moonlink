@@ -154,6 +154,10 @@ pub enum TableEvent {
     /// Test-only: make the table's handler task die (panic), like an unexpected crash.
     #[cfg(any(test, feature = "test-utils"))]
     KillForTest,
+    /// Test-only: how long garbage collection keeps superseded files when no read path reports
+    /// live readers (harnesses that drive a table handler without a ReadStateManager).
+    #[cfg(test)]
+    SetGcGraceForTest { grace: std::time::Duration },
     /// Alter table,
     AlterTable { columns_to_drop: Vec<String> },
     /// Start initial table copy.
