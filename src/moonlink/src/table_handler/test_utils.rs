@@ -10,7 +10,7 @@ use crate::storage::IcebergTableConfig;
 use crate::storage::{verify_files_and_deletions, MooncakeTable};
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
-use crate::union_read::{decode_read_state_for_testing, ReadStateManager};
+use crate::union_read::{decode_read_state_for_testing, ReadState, ReadStateManager};
 use crate::IcebergCatalogConfig;
 use crate::Result;
 use crate::{IcebergTableManager, MooncakeTableConfig, StorageConfig, TableEventManager};
@@ -381,8 +381,17 @@ pub async fn check_read_snapshot(
     expected_ids: &[i32],
 ) {
     let read_state = read_manager.try_read(target_lsn).await.unwrap();
+    check_read_state(&read_state, target_lsn, expected_ids).await;
+}
+
+/// Verifies a read state against expected row IDs.
+pub async fn check_read_state(
+    read_state: &ReadState,
+    target_lsn: Option<u64>,
+    expected_ids: &[i32],
+) {
     let (data_files, puffin_files, deletion_vectors, position_deletes) =
-        decode_read_state_for_testing(&read_state);
+        decode_read_state_for_testing(read_state);
 
     if data_files.is_empty() && !expected_ids.is_empty() {
         unreachable!(
