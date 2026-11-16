@@ -1,6 +1,6 @@
 pub mod base_iceberg_snapshot_fetcher;
 pub(crate) mod catalog_utils;
-mod data_file_manifest_manager;
+pub(crate) mod data_file_manifest_manager;
 pub(crate) mod deletion_vector;
 mod deletion_vector_manifest_manager;
 pub(crate) mod file_catalog;

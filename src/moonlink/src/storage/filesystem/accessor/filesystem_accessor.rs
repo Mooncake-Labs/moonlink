@@ -18,6 +18,8 @@ use crate::storage::filesystem::accessor::metadata::ObjectMetadata;
 use crate::storage::filesystem::accessor::operator_utils;
 use crate::storage::filesystem::accessor::unbuffered_stream_writer::UnbufferedStreamWriter;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
+#[cfg(feature = "storage-fs")]
+use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::Result;
 
 use std::pin::Pin;
@@ -152,6 +154,74 @@ impl FileSystemAccessor {
         Ok(ObjectMetadata { size: file_size })
     }
 
+    /// Absolute local path of `path` when the accessor is backed by the local filesystem.
+    #[cfg(feature = "storage-fs")]
+    fn local_absolute_path(&self, path: &str) -> Option<std::path::PathBuf> {
+        match &self.config.storage_config {
+            StorageConfig::FileSystem { root_directory, .. } => {
+                if path.starts_with(root_directory.as_str()) {
+                    Some(std::path::PathBuf::from(path))
+                } else {
+                    Some(std::path::Path::new(root_directory).join(path.trim_start_matches('/')))
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// Publish a local file into a local-filesystem store without copying its bytes: make it
+    /// durable, then hard link it under the destination name. Both names refer to the same
+    /// inode. Moonlink never rewrites a data or index file in place, so readers holding the
+    /// source name are unaffected, and that name is removed later by the normal cache eviction.
+    /// Returns `Ok(None)` when linking isn't possible (e.g. another filesystem), so the caller
+    /// falls back to copying.
+    #[cfg(feature = "storage-fs")]
+    async fn try_hard_link_local(&self, src: &str, dst: &str) -> Result<Option<ObjectMetadata>> {
+        let Some(dst_path) = self.local_absolute_path(dst) else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if FORCE_LINK_FAILURE.with(|f| f.get()) {
+            return Ok(None);
+        }
+        let src_path = std::path::PathBuf::from(src);
+        let linked = tokio::task::spawn_blocking(move || -> std::io::Result<Option<u64>> {
+            let file = std::fs::File::open(&src_path)?;
+            file.sync_all()?;
+            let size = file.metadata()?.len();
+            let parent = dst_path.parent().map(|p| p.to_path_buf());
+            if let Some(parent) = &parent {
+                std::fs::create_dir_all(parent)?;
+            }
+            match std::fs::hard_link(&src_path, &dst_path) {
+                Ok(()) => {}
+                // Already the same file (a previous attempt linked it, or both paths resolve to
+                // one): removing the destination would delete the source too.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && is_same_file(&file, &dst_path)? => {}
+                // A previous attempt (e.g. a retried persistence) may have left the destination.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::remove_file(&dst_path)?;
+                    if std::fs::hard_link(&src_path, &dst_path).is_err() {
+                        return Ok(None);
+                    }
+                }
+                // Cross-device, unsupported by the filesystem, link limits, permissions.
+                Err(_) => return Ok(None),
+            }
+            if let Some(parent) = parent {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(Some(size))
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        Ok(linked.map(|size| ObjectMetadata { size }))
+    }
+
+    /// Get option for write options, use default if unspecified.
     fn get_write_option(&self) -> WriteOptions {
         WriteOptions::default()
     }
@@ -186,6 +256,22 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         }
 
         Ok(dirs)
+    }
+
+    async fn list_direct_files(&self, folder: &str) -> Result<Vec<String>> {
+        let sanitized_folder = self.sanitize_path(folder);
+        let prefix = format!("{sanitized_folder}/");
+        let mut files = Vec::new();
+        for cur_entry in self.get_operator().await?.list(&prefix).await?.iter() {
+            if cur_entry.path().ends_with('/') {
+                continue;
+            }
+            let file_name = cur_entry.path().trim_start_matches(&prefix).to_string();
+            if !file_name.is_empty() && !file_name.contains('/') {
+                files.push(file_name);
+            }
+        }
+        Ok(files)
     }
 
     async fn remove_directory(&self, directory: &str) -> Result<()> {
