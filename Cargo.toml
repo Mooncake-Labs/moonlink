@@ -35,15 +35,12 @@ bytes = "1.0"
 chrono = { version = "0.4", default-features = false }
 const_format = "0.2"
 crc32fast = "1"
-deltalake = { version = "0.29", features = ["deltalake-aws", "deltalake-gcp"] }
 fastbloom = "0.14"
 futures = { version = "0.3", default-features = false }
 hashbrown = "0.16"
 iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "4a6ea15a7dd73e7c68b0a24441820b13bdd22a92", default-features = false, features = [
   "storage-fs",
 ] }
-iceberg-catalog-glue = { git = "https://github.com/apache/iceberg-rust", rev = "4a6ea15a7dd73e7c68b0a24441820b13bdd22a92" }
-iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust", rev = "4a6ea15a7dd73e7c68b0a24441820b13bdd22a92" }
 itertools = "0.14"
 lru = "0.16"
 moka = { version = "0.12", features = ["future"] }
@@ -71,9 +68,6 @@ parquet = { version = "56", default-features = false, features = [
 paste = "1"
 postgres-native-tls = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
 postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455" }
-postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "14c8e599f5551a8caa96ff5023685a6f537a1455", features = [
-  "with-serde_json-1",
-] }
 prost = "0.14"
 prost-types = "0.14"
 rand = "0.9"

@@ -36,12 +36,8 @@ You just need to [create a new codespace](https://codespace.new/Mooncake-Labs/pg
 ## Testing
 Moonlink is a standard Rust project, and tests can be run using `cargo test`. By default, this will run all tests that don't require optional features.
 
-Within the devcontainer, local GCS and S3 storage instances have been setup. To run the full test suite, including tests behind optional features such as `storage-gcs` and `storage-s3`, you can specify the features explicitly:
+Within the devcontainer, a local S3-compatible storage instance (MinIO) has been set up. To run the full test suite, including tests behind the optional `storage-s3` feature, enable it explicitly:
 ```sh
-# Run tests with GCS support.
-cargo test --features storage-gcs
-
-# Run tests with S3 support.
 cargo test --features storage-s3
 ```
 

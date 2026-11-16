@@ -6,8 +6,6 @@ use crate::storage::compaction::compaction_config::DataCompactionConfig;
 use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 use crate::storage::filesystem::accessor::factory::create_filesystem_accessor;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-#[cfg(feature = "storage-gcs")]
-use crate::storage::filesystem::gcs::gcs_test_utils;
 #[cfg(feature = "storage-s3")]
 use crate::storage::filesystem::s3::s3_test_utils;
 #[cfg(feature = "chaos-test")]
@@ -15,7 +13,6 @@ use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::test_utils_commons::*;
 use crate::storage::mooncake_table::{MooncakeTableConfig, TableMetadata as MooncakeTableMetadata};
 use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
-use crate::storage::table::deltalake::deltalake_table_config::DeltalakeTableConfig;
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::MooncakeTable;
@@ -37,21 +34,6 @@ impl MooncakeTable {
     #[cfg(test)]
     pub(crate) fn set_persistence_snapshot_lsn(&mut self, lsn: u64) {
         self.last_persistence_snapshot_lsn = Some(lsn);
-    }
-}
-
-/// Test util function to get delta table config for local filesystem.
-pub(crate) fn get_delta_table_config(temp_dir: &TempDir) -> DeltalakeTableConfig {
-    let root_directory = temp_dir.path().to_str().unwrap().to_string();
-    let storage_config = StorageConfig::FileSystem {
-        root_directory: root_directory.clone(),
-        atomic_write_dir: None,
-    };
-    let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
-    DeltalakeTableConfig {
-        table_name: DELTA_TEST_TABLE.to_string(),
-        location: root_directory,
-        data_accessor_config: accessor_config,
     }
 }
 
@@ -133,15 +115,6 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
         {
             panic!("S3 support not enabled. Enable `storage-s3` feature.");
         }
-    } else if warehouse_uri.starts_with("gs://") {
-        #[cfg(feature = "storage-gcs")]
-        {
-            gcs_test_utils::create_gcs_storage_config(&warehouse_uri)
-        }
-        #[cfg(not(feature = "storage-gcs"))]
-        {
-            panic!("GCS support not enabled. Enable `storage-gcs` feature.");
-        }
     } else {
         let storage_config = StorageConfig::FileSystem {
             root_directory: warehouse_uri.clone(),
@@ -162,42 +135,6 @@ pub(crate) fn create_iceberg_table_config(warehouse_uri: String) -> IcebergTable
         data_accessor_config: accessor_config.clone(),
         metadata_accessor_config,
         ..Default::default()
-    }
-}
-
-/// Test util function to create delta table config.
-#[allow(unused)]
-pub(crate) fn create_delta_table_config(warehouse_uri: String) -> DeltalakeTableConfig {
-    let accessor_config = if warehouse_uri.starts_with("s3://") {
-        #[cfg(feature = "storage-s3")]
-        {
-            s3_test_utils::create_s3_storage_config(&warehouse_uri)
-        }
-        #[cfg(not(feature = "storage-s3"))]
-        {
-            panic!("S3 support not enabled. Enable `storage-s3` feature.");
-        }
-    } else if warehouse_uri.starts_with("gs://") {
-        #[cfg(feature = "storage-gcs")]
-        {
-            gcs_test_utils::create_gcs_storage_config(&warehouse_uri)
-        }
-        #[cfg(not(feature = "storage-gcs"))]
-        {
-            panic!("GCS support not enabled. Enable `storage-gcs` feature.");
-        }
-    } else {
-        let storage_config = StorageConfig::FileSystem {
-            root_directory: warehouse_uri.clone(),
-            atomic_write_dir: None,
-        };
-        AccessorConfig::new_with_storage_config(storage_config)
-    };
-
-    DeltalakeTableConfig {
-        table_name: DELTA_TEST_TABLE.to_string(),
-        location: warehouse_uri,
-        data_accessor_config: accessor_config,
     }
 }
 

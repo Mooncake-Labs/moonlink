@@ -438,30 +438,6 @@ pub(crate) async fn generate_parquet_file(tempdir: &TempDir, filename: &str) -> 
     file_path_str
 }
 
-/// Test util function to generate a parquet file to GCS.
-#[cfg(feature = "storage-gcs")]
-pub(crate) async fn generate_parquet_file_in_gcs(
-    storage_config: StorageConfig,
-    gcs_filepath: &str,
-) {
-    let filename = std::path::Path::new(&gcs_filepath)
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    let temp_dir = tempdir().unwrap();
-    let local_parquet_file = generate_parquet_file(&temp_dir, &filename).await;
-    let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
-    use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
-    let filesystem_accessor = crate::FileSystemAccessor::new(accessor_config);
-    filesystem_accessor
-        .copy_from_local_to_remote(&local_parquet_file, gcs_filepath)
-        .await
-        .unwrap();
-}
-
 /// Test util function to generate a parquet file to S3.
 #[cfg(feature = "storage-s3")]
 pub(crate) async fn generate_parquet_file_in_s3(storage_config: StorageConfig, s3_filepath: &str) {

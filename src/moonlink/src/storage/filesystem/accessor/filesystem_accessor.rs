@@ -1,7 +1,5 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
-#[cfg(all(feature = "storage-gcs", test))]
-use futures::TryStreamExt;
 use futures::{Stream, StreamExt};
 use opendal::options::WriteOptions;
 use opendal::Metadata;
@@ -20,7 +18,7 @@ use crate::storage::filesystem::accessor::metadata::ObjectMetadata;
 use crate::storage::filesystem::accessor::operator_utils;
 use crate::storage::filesystem::accessor::unbuffered_stream_writer::UnbufferedStreamWriter;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-#[cfg(any(feature = "storage-gcs", feature = "storage-fs"))]
+#[cfg(feature = "storage-fs")]
 use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::Result;
 
@@ -223,24 +221,9 @@ impl FileSystemAccessor {
         Ok(linked.map(|size| ObjectMetadata { size }))
     }
 
-    /// Get multi-part upload trigger threshold.
-    fn get_multipart_upload_threshold(&self) -> Option<usize> {
-        match &self.config.storage_config {
-            #[cfg(feature = "storage-gcs")]
-            StorageConfig::Gcs {
-                write_option: Some(opt),
-                ..
-            } => opt.multipart_upload_threshold,
-            _ => None,
-        }
-    }
-
     /// Get option for write options, use default if unspecified.
     fn get_write_option(&self) -> WriteOptions {
-        WriteOptions {
-            chunk: self.get_multipart_upload_threshold(),
-            ..Default::default()
-        }
+        WriteOptions::default()
     }
 }
 
@@ -291,42 +274,6 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         Ok(files)
     }
 
-    // TODO(hjiang): Remove this test function once fake-gcs fix the sending empty body will be error issue.
-    #[cfg(all(feature = "storage-gcs", test))]
-    async fn remove_directory(&self, directory: &str) -> Result<()> {
-        let path = if directory.ends_with('/') {
-            directory.to_string()
-        } else {
-            format!("{directory}/")
-        };
-        let sanitized_path = self.sanitize_path(&path);
-
-        let operator = self.get_operator().await?;
-        let mut lister = operator.lister(sanitized_path).await?;
-        let mut entries = Vec::new();
-
-        while let Some(entry) = lister.try_next().await? {
-            // List operation returns target path.
-            if entry.path() != sanitized_path {
-                entries.push(entry.path().to_string());
-            }
-        }
-        for entry_path in entries {
-            if entry_path.ends_with('/') {
-                Box::pin(self.remove_directory(&entry_path)).await?;
-            } else {
-                operator.delete(&entry_path).await?;
-            }
-        }
-
-        if !sanitized_path.is_empty() && sanitized_path != "/" {
-            operator.remove_all(sanitized_path).await?;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(all(feature = "storage-gcs", test)))]
     async fn remove_directory(&self, directory: &str) -> Result<()> {
         let sanitized_directory = self.sanitize_path(directory);
         let op = self.get_operator().await?.clone();

@@ -1,16 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::{Int32Array, RecordBatch, StringArray};
-use parquet::arrow::AsyncArrowWriter;
-use tempfile::TempDir;
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, error};
 
 use crate::row::MoonlinkRow;
 use crate::storage::io_utils;
 use crate::storage::mooncake_table::disk_slice::DiskSliceWriter;
-use crate::storage::mooncake_table::table_creation_test_utils::create_test_arrow_schema;
 use crate::storage::mooncake_table::{
     AlterTableRequest, DataCompactionPayload, DataCompactionResult, FileIndiceMergePayload,
     FileIndiceMergeResult, PersistenceSnapshotPayload, PersistenceSnapshotResult,
@@ -28,39 +24,6 @@ use crate::{ReadState, Result};
 use crate::storage::verify_files_and_deletions;
 #[cfg(test)]
 use crate::union_read::decode_read_state_for_testing;
-
-/// ===============================
-/// Create parquet
-/// ===============================
-async fn write_parquet_file(path: &std::path::Path, batches: &[RecordBatch]) {
-    let file = tokio::fs::File::create(path).await.unwrap();
-    let mut writer =
-        AsyncArrowWriter::try_new(file, create_test_arrow_schema(), /*props=*/ None).unwrap();
-    for batch in batches.iter() {
-        writer.write(batch).await.unwrap();
-    }
-    writer.close().await.unwrap();
-}
-
-/// Create a parquet file in the given temporary directory, and return parquet filepath.
-pub(crate) async fn create_local_parquet_file(tempdir: &TempDir) -> String {
-    let file_path = tempdir
-        .path()
-        .join(format!("{}.parquet", uuid::Uuid::now_v7()));
-    let arrow_schema = create_test_arrow_schema();
-
-    let ids = Int32Array::from(vec![1, 2, 3]);
-    let names = StringArray::from(vec![Some("Alice"), Some("Bob"), None]);
-    let ages = Int32Array::from(vec![10, 20, 30]);
-    let record_batch = RecordBatch::try_new(
-        arrow_schema.clone(),
-        vec![Arc::new(ids), Arc::new(names), Arc::new(ages)],
-    )
-    .unwrap();
-
-    write_parquet_file(file_path.as_path(), &[record_batch]).await;
-    file_path.to_str().unwrap().to_string()
-}
 
 /// ===============================
 /// Flush

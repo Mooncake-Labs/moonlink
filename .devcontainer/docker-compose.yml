@@ -10,9 +10,6 @@ services:
     depends_on:
       - minio
       - postgres
-      - fake-gcs
-      - iceberg-rest
-      - iceberg-glue
     command: sleep infinity
 
   postgres:
@@ -42,43 +39,8 @@ services:
       - "9000:9000"  # S3 API
       - "9001:9001"  # Web UI
 
-  iceberg-rest:
-    image: apache/iceberg-rest-fixture:1.10.1@sha256:f7d679d30ac9c640bdeb2c015dff533cd3c8f1c7d491ebcb5d436f9a42db1d6f
-    networks:
-      shared_network:
-        aliases:
-          - iceberg-rest.local
-    ports:
-      - "8181:8181"
-
-  iceberg-glue:
-    image: motoserver/moto:5.0.3
-    command: ["-H", "0.0.0.0", "-p", "5000"]
-    ports:
-      - "5001:5000"
-    networks:
-      shared_network:
-        aliases:
-          - moto-glue.local
-
-  fake-gcs:
-    image: fsouza/fake-gcs-server:latest
-    hostname: gcs
-    command: -scheme http -port 4443
-    ports:
-      - "4443:4443"
-    networks:
-      shared_network:
-        aliases:
-          - gcs.local
-    environment:
-      - STORAGE_DIR=/data
-    volumes:
-      - fake-gcs-data:/data
-
 volumes:
   minio-data:
-  fake-gcs-data:
 
 networks:
   shared_network:

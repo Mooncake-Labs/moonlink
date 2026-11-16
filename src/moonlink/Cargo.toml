@@ -11,32 +11,17 @@ required-features = ["profile-test"]
 
 [features]
 default = ["storage-fs"]
-storage-all = ["storage-fs", "storage-s3", "storage-gcs"]
+storage-all = ["storage-fs", "storage-s3"]
 test-utils = []
 
 storage-fs = ["opendal/services-fs", "iceberg/storage-fs"]
 storage-s3 = [
     "opendal/services-s3",
     "iceberg/storage-s3",
-    "deltalake/s3",
     "base64",
     "hmac",
     "sha1",
 ]
-
-# iceberg gcs io doesn't support HMAC key, so have to leverage S3 sdk.
-storage-gcs = [
-    "opendal/services-gcs",
-    "opendal/services-s3",
-    "iceberg/storage-gcs",
-    "iceberg/storage-s3",
-    "base64",
-    "hmac",
-    "sha1",
-]
-
-catalog-rest = ["iceberg-catalog-rest"]
-catalog-glue = ["iceberg-catalog-glue"]
 
 bench = []
 
@@ -57,15 +42,12 @@ bitstream-io = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 crc32fast = { workspace = true }
-deltalake = { workspace = true }
 fastbloom = { workspace = true }
 function_name = { version = "0.3", optional = true }
 futures = { workspace = true }
 hashbrown = { workspace = true }
 hmac = { version = "0.12", optional = true }
 iceberg = { workspace = true }
-iceberg-catalog-glue = { workspace = true, optional = true }
-iceberg-catalog-rest = { workspace = true, optional = true }
 itertools = { workspace = true }
 lru = { workspace = true }
 memmap2 = "0.9"
