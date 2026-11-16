@@ -63,7 +63,9 @@ impl TableRowConverter {
             while end < bytes.len() && !matches!(bytes[end], b'\t' | b'\n' | b'\\') {
                 end += 1;
             }
-            let val_str = match bytes.get(end) {
+            // NULL is the field \N as sent, before unescaping: a value that is backslash-N itself is
+            // sent as \\N.
+            let (val_str, is_null) = match bytes.get(end) {
                 Some(b'\\') => {
                     unescaped.clear();
                     unescaped.push_str(&row_str[start..end]);
@@ -75,12 +77,13 @@ impl TableRowConverter {
                         None if row_terminated => break,
                         None => return Err(TableRowConversionError::UnterminatedRow),
                     }
-                    unescaped.as_str()
+                    // Without its one-byte terminator.
+                    (unescaped.as_str(), &row_str[start..pos - 1] == "\\N")
                 }
                 Some(terminator) => {
                     row_terminated |= *terminator == b'\n';
                     pos = end + 1;
-                    &row_str[start..end]
+                    (&row_str[start..end], false)
                 }
                 None if row_terminated => break,
                 None => return Err(TableRowConversionError::UnterminatedRow),
@@ -90,7 +93,7 @@ impl TableRowConverter {
                 return Err(TableRowConversionError::NumColsMismatch);
             };
 
-            let value = if val_str == "\\N" {
+            let value = if is_null {
                 Cell::Null
             } else {
                 match TextFormatConverter::try_from_str(&column_schema.typ, val_str)
@@ -122,6 +125,10 @@ impl TableRowConverter {
             values.push(value);
         }
 
+        // Too few fields would shift every later column's value into the wrong place.
+        if column_schemas_iter.next().is_some() {
+            return Err(TableRowConversionError::NumColsMismatch);
+        }
         Ok(TableRow { values })
     }
 
@@ -133,9 +140,8 @@ impl TableRowConverter {
         for (i, c) in rest.char_indices() {
             match c {
                 c if in_escape => {
+                    // As in COPY FROM: any other escaped char (N included) stands for itself.
                     match c {
-                        // Kept as is: a field that is exactly \N is the null marker.
-                        'N' => out.push_str("\\N"),
                         'b' => out.push(8 as char),
                         'f' => out.push(12 as char),
                         'n' => out.push('\n'),
@@ -160,7 +166,8 @@ mod tests {
     use super::*;
     use crate::pg_replicate::table::ColumnSchema;
 
-    /// The row parser as it was, copying every field char by char.
+    /// The row parser that copied every field char by char, with NULL read from the field as sent
+    /// (not after unescaping), an escaped N standing for N, and too few fields an error.
     mod reference {
         use super::*;
 
@@ -174,6 +181,7 @@ mod tests {
             let mut column_schemas_iter = column_schemas.iter();
             let mut chars = row_str.chars();
             let mut val_str = String::with_capacity(10);
+            let mut raw = String::new();
             let mut in_escape = false;
             let mut row_terminated = false;
             let mut done = false;
@@ -183,10 +191,8 @@ mod tests {
                     match chars.next() {
                         Some(c) => match c {
                             c if in_escape => {
-                                if c == 'N' {
-                                    val_str.push('\\');
-                                    val_str.push(c);
-                                } else if c == 'b' {
+                                raw.push(c);
+                                if c == 'b' {
                                     val_str.push(8 as char);
                                 } else if c == 'f' {
                                     val_str.push(12 as char);
@@ -210,8 +216,12 @@ mod tests {
                                 row_terminated = true;
                                 break;
                             }
-                            '\\' => in_escape = true,
+                            '\\' => {
+                                raw.push(c);
+                                in_escape = true;
+                            }
                             c => {
+                                raw.push(c);
                                 val_str.push(c);
                             }
                         },
@@ -230,7 +240,7 @@ mod tests {
                         return Err(TableRowConversionError::NumColsMismatch);
                     };
 
-                    let value = if val_str == "\\N" {
+                    let value = if raw == "\\N" {
                         Cell::Null
                     } else {
                         match TextFormatConverter::try_from_str(&column_schema.typ, &val_str)
@@ -265,15 +275,19 @@ mod tests {
 
                     values.push(value);
                     val_str.clear();
+                    raw.clear();
                 }
             }
 
+            if column_schemas_iter.next().is_some() {
+                return Err(TableRowConversionError::NumColsMismatch);
+            }
             Ok(TableRow { values })
         }
     }
 
     #[test]
-    fn rows_parse_as_before() {
+    fn rows_parse_as_the_char_by_char_parser() {
         let column = |name: &str, typ: Type| ColumnSchema {
             name: name.into(),
             typ,
@@ -356,6 +370,70 @@ mod tests {
         let parsed = TableRowConverter::try_from(row, &schemas).unwrap();
         assert!(matches!(parsed.values[0], Cell::Null));
         assert!(matches!(parsed.values[1], Cell::String(ref s) if s.starts_with('\\')));
+    }
+
+    fn text_columns(count: usize) -> Vec<ColumnSchema> {
+        (0..count)
+            .map(|i| ColumnSchema {
+                name: format!("c{i}"),
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: true,
+            })
+            .collect()
+    }
+
+    fn texts(row: &[u8], columns: usize) -> Vec<Option<String>> {
+        TableRowConverter::try_from(row, &text_columns(columns))
+            .unwrap()
+            .values
+            .into_iter()
+            .map(|cell| match cell {
+                Cell::Null => None,
+                Cell::String(s) => Some(s),
+                other => panic!("not text: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Only the field \N as sent is NULL. COPY sends the value backslash-N as \\N (as it doubles
+    /// every backslash in a value), which is that text, not NULL.
+    #[test]
+    fn only_the_null_marker_as_sent_is_null() {
+        let text = |s: &str| Some(s.to_string());
+        // NULL, the value \N, and \N inside values.
+        assert_eq!(
+            texts(b"\\N\t\\\\N\ta\\\\Nb\t\\\\N\\\\N\tx\\\\N\n", 5),
+            vec![
+                None,
+                text("\\N"),
+                text("a\\Nb"),
+                text("\\N\\N"),
+                text("x\\N")
+            ]
+        );
+        // NULL next to escapes in other fields, and as the last field.
+        assert_eq!(
+            texts(b"a\\tb\t\\N\t\\\\\t\\N\n", 4),
+            vec![text("a\tb"), None, text("\\"), None]
+        );
+        // COPY never sends an escaped N inside a field; like COPY FROM, it reads as N.
+        assert_eq!(texts(b"\\Nx\tx\\N\n", 2), vec![text("Nx"), text("xN")]);
+    }
+
+    #[test]
+    fn too_few_fields_error() {
+        for row in [&b"1\n"[..], b"\\N\n", b"a\\tb\n"] {
+            assert!(
+                matches!(
+                    TableRowConverter::try_from(row, &text_columns(2)),
+                    Err(TableRowConversionError::NumColsMismatch)
+                ),
+                "{row:?}"
+            );
+        }
+        // One empty field is one column's value.
+        assert_eq!(texts(b"\n", 1), vec![Some(String::new())]);
     }
 
     #[test]

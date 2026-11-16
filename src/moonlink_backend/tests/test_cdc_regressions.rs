@@ -5011,3 +5011,33 @@ async fn a_mirror_re_created_while_its_drop_is_retried_replicates() {
         .await
         .unwrap();
 }
+
+/// The initial copy reads NULL only from the null marker as COPY sends it: a text value that is
+/// backslash-N (sent as \\N) is copied as that text, as are values containing it, and the copy
+/// agrees with what replication later brings for the same values.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn backslash_n_text_is_copied_as_text_not_null() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        r"DROP TABLE IF EXISTS rv_bsn;
+         CREATE TABLE rv_bsn (id BIGINT PRIMARY KEY, v TEXT);
+         INSERT INTO rv_bsn VALUES (1, E'\\N'), (2, E'a\\Nb'), (3, NULL), (4, 'N'), (5, E'\\'),
+           (6, E'\\N\\N'), (7, '');",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_bsn_mc", "public.rv_bsn", &uri).await;
+    client
+        .simple_query(r"INSERT INTO rv_bsn VALUES (11, E'\\N'), (12, E'a\\Nb'), (13, NULL);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let expected = source_rows_of(&client, "rv_bsn").await;
+    assert_eq!(expected.get(&1), Some(&Some(r"\N".to_string())));
+    assert_eq!(expected.get(&3), Some(&None));
+    assert_eq!(
+        scan_rows(&backend, "rv_bsn_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(expected)
+    );
+    client.simple_query("DROP TABLE rv_bsn;").await.unwrap();
+}
