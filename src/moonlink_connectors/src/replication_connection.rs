@@ -235,7 +235,7 @@ impl ReplicationConnection {
         moonlink_table_config: &mut MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
         is_recovery: bool,
-    ) -> Result<SrcTableId> {
+    ) -> Result<(SrcTableId, Option<u64>)> {
         debug!(src_table_name, "adding PostgreSQL table for replication");
 
         let (src_table_id, mut table_resources) = self
@@ -259,6 +259,7 @@ impl ReplicationConnection {
             table_resources.slot_status_tx.take(),
             self.shutdown_tx.subscribe(),
         );
+        let initial_copy_lsn = table_resources.initial_copy_lsn;
         let table_state = TableState {
             src_table_name: src_table_name.to_string(),
             reader: Arc::new(table_resources.read_state_manager),
@@ -275,7 +276,7 @@ impl ReplicationConnection {
         };
         self.table_states.insert(unique_table_id, table_state);
         debug!(src_table_id, "PostgreSQL table added for replication");
-        Ok(src_table_id)
+        Ok((src_table_id, initial_copy_lsn))
     }
 
     /// The oid of a source table, if it exists.

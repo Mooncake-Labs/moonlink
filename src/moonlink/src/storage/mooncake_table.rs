@@ -2189,9 +2189,20 @@ impl MooncakeTable {
             table_auto_incr_ids,
         };
 
-        let iceberg_persistence_res = iceberg_table_manager
-            .sync_snapshot(snapshot_payload, persistence_file_params)
-            .await;
+        #[cfg(any(test, feature = "test-utils"))]
+        let injected_failure = crate::test_hooks::take_injected_persistence_failure();
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let injected_failure = false;
+        let iceberg_persistence_res = if injected_failure {
+            Err(crate::Error::from(iceberg::Error::new(
+                iceberg::ErrorKind::Unexpected,
+                "injected transient persistence failure",
+            )))
+        } else {
+            iceberg_table_manager
+                .sync_snapshot(snapshot_payload, persistence_file_params)
+                .await
+        };
 
         // Notify on event error; hand the table manager back first so the table can retry.
         if let Err(err) = iceberg_persistence_res {

@@ -7,10 +7,11 @@ use crate::{Error, Result};
 use moonlink::{
     MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
 };
-use moonlink::{ReadStateFilepathRemap, TableStatusReader};
+use moonlink::{ReadStateFilepathRemap, TableStatus, TableStatusReader};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -110,6 +111,9 @@ impl ReplicationManager {
     /// If replication for this `uri` is not yet running a new replication
     /// source will be created.
     ///
+    /// Returns the LSN the rows of a new mirror's initial copy are committed at, if it copied any;
+    /// they are lost on a restart until a snapshot at that LSN is persisted.
+    ///
     /// # Arguments
     ///
     /// * secret_entry: secret necessary to access object storage, use local filesystem if not assigned.
@@ -122,7 +126,7 @@ impl ReplicationManager {
         moonlink_table_config: &mut MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
         is_recovery: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         debug!(%src_uri, table_name, "adding table through manager");
 
         // Error handling: don't allow duplicate mooncake table id be registered.
@@ -157,8 +161,8 @@ impl ReplicationManager {
             }
             Err(e) => Err(e),
         };
-        let src_table_id = match added {
-            Ok(src_table_id) => src_table_id,
+        let (src_table_id, initial_copy_lsn) = match added {
+            Ok(added) => added,
             Err(e) => {
                 // A failed first mirror must not leave a replication slot behind that holds the
                 // source's WAL forever (unless a mirror waiting to be restored needs it).
@@ -178,7 +182,7 @@ impl ReplicationManager {
 
         debug!(src_table_id, "table added through manager");
 
-        Ok(())
+        Ok(initial_copy_lsn)
     }
 
     /// Checks before adding a table through the connection of `key`: a second connection string
@@ -507,6 +511,26 @@ impl ReplicationManager {
             }
         }
         table_state_readers
+    }
+
+    /// Whether `mooncake_table_id` is still the mirror whose status `status` follows, rather than
+    /// gone or replaced by a mirror re-created under its name.
+    pub fn is_same_mirror(
+        &mut self,
+        mooncake_table_id: &MooncakeTableId,
+        status: &watch::Receiver<TableStatus>,
+    ) -> bool {
+        let Some((uri, src_table_id)) = self.table_info.get(mooncake_table_id) else {
+            return false;
+        };
+        let src_table_id = *src_table_id;
+        let Some(connection) = self.connections.get_mut(uri) else {
+            return false;
+        };
+        connection
+            .get_table_event_manager(mooncake_table_id, src_table_id)
+            .subscribe_table_status()
+            .same_channel(status)
     }
 
     pub fn get_table_event_manager(
