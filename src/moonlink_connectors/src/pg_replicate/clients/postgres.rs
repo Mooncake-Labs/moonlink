@@ -196,8 +196,10 @@ impl ReplicationClient {
         &mut self,
         table_name: &TableName,
     ) -> Result<(), ReplicationClientError> {
+        // ONLY: without it postgres also adds the table's inheritance children (and fails on a
+        // temporary one); each child that is mirrored is added by its own mirror.
         let query = format!(
-            "ALTER PUBLICATION moonlink_pub ADD TABLE {};",
+            "ALTER PUBLICATION moonlink_pub ADD TABLE ONLY {};",
             table_name.as_quoted_identifier()
         );
         match self.postgres_client.simple_query(&query).await {

@@ -717,7 +717,9 @@ impl PostgresConnection {
             }
             Err(_) => quote_identifier(table_name).into_owned(),
         };
-        let drop_query = format!("ALTER PUBLICATION moonlink_pub DROP TABLE {};", ident);
+        // ONLY: without it postgres also drops the table's inheritance children, which other
+        // mirrors may still need.
+        let drop_query = format!("ALTER PUBLICATION moonlink_pub DROP TABLE ONLY {};", ident);
         self.attempt_drop_else_retry(&drop_query).await?;
         Ok(())
     }
@@ -911,6 +913,33 @@ impl PostgresConnection {
                 return Err(crate::Error::unsupported_source_table(
                     table_name,
                     &format!("{partition}; only regular (logged) partitions are supported"),
+                ));
+            }
+            // Either way round, one of the two mirrors would receive nothing.
+            let ancestor = source_fingerprint::published_ancestor(
+                &self.postgres_client,
+                table_schema.src_table_id,
+            )
+            .await
+            .map_err(PostgresSourceError::from)?;
+            let overlap = match ancestor {
+                Some(ancestor) => Some(format!("it is a partition of {ancestor}, which")),
+                None => source_fingerprint::published_partition(
+                    &self.postgres_client,
+                    table_schema.src_table_id,
+                )
+                .await
+                .map_err(PostgresSourceError::from)?
+                .map(|partition| format!("its partition {partition}")),
+            };
+            if let Some(overlap) = overlap {
+                return Err(crate::Error::unsupported_source_table(
+                    table_name,
+                    &format!(
+                        "{overlap} is already mirrored, and a partitioned table and its partitions \
+                         cannot both be mirrored (postgres publishes a partition's changes only as \
+                         the partitioned table's); drop that mirror first"
+                    ),
                 ));
             }
         }

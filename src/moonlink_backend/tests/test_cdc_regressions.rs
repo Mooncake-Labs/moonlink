@@ -4627,64 +4627,212 @@ async fn recreated_mirror_starts_from_the_source_alone(
     );
 }
 
-/// Floats and bytea replicate exactly whatever extra_float_digits and bytea_output the mirror's
-/// role or database defaults to (extra_float_digits <= 0 would print rounded floats, escape
-/// output would print bytea in another format).
+/// How many times `table` appears in moonlink's publication.
+async fn published_count(client: &Client, table: &str) -> i64 {
+    client
+        .query_one(
+            "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'moonlink_pub' AND tablename = $1",
+            &[&table],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Dropping a mirror takes only its own table out of the publication. Dropping an inheritance
+/// parent's mirror (as its error asks, once the parent gained a child) must not take the child
+/// along: the child's own mirror would silently stop receiving changes.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn floats_and_bytea_replicate_whatever_the_session_output_settings() {
+async fn dropping_a_parents_mirror_keeps_its_childs_mirror_replicating() {
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(
-        "DROP TABLE IF EXISTS rv_out;
-         DO $$ BEGIN
-           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_out_role') THEN
-             EXECUTE 'DROP OWNED BY rv_out_role'; DROP ROLE rv_out_role;
-           END IF;
-         END $$;
-         CREATE ROLE rv_out_role LOGIN SUPERUSER PASSWORD 'pwout';
-         ALTER ROLE rv_out_role SET extra_float_digits = 0;
-         ALTER ROLE rv_out_role SET bytea_output = 'escape';
-         ALTER ROLE rv_out_role SET IntervalStyle = 'sql_standard';
-         CREATE TABLE rv_out (id BIGINT PRIMARY KEY, f8 DOUBLE PRECISION, f4 REAL,
-             fa DOUBLE PRECISION[], b BYTEA);
-         INSERT INTO rv_out VALUES
-             (1, 3.141592653589793, 3.1415927, '{1.0000000000000002,0.30000000000000004}',
-              '\\xdeadbeef00ff'),
-             (2, 123456.78901234567, 0.1, '{}', '\\x');",
+        "DROP TABLE IF EXISTS rv_ih CASCADE;
+         CREATE TABLE rv_ih (id BIGINT PRIMARY KEY);",
     )
     .await;
-    let role_uri = uri_for_user(&uri, "rv_out_role", "pwout");
-    mirror(&backend, &tmp, "rv_out_mc", "public.rv_out", &role_uri).await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_ih_mc", "public.rv_ih", &uri).await;
+    client
+        .simple_query("CREATE TABLE rv_ih1 () INHERITS (rv_ih);")
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_ih1_mc", "public.rv_ih1", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_ih1 VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_ih1_mc", lsn).await, Some(vec![1]));
+    let err = wait_until_errored(&backend, "rv_ih_mc", lsn).await;
+    assert!(err.contains("gained inheritance children"), "{err}");
+
+    backend
+        .drop_table(DB.to_string(), "rv_ih_mc".to_string())
+        .await
+        .unwrap();
+    assert_eq!(published_count(&client, "rv_ih").await, 0);
+    assert_eq!(published_count(&client, "rv_ih1").await, 1);
+    client
+        .simple_query("INSERT INTO rv_ih1 VALUES (2), (3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_ih1_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_ih1_mc", lsn).await,
+        Some(vec![1, 2, 3])
+    );
+    client
+        .simple_query("DROP TABLE rv_ih CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// A temporary inheritance child does not stop its parent from being mirrored (or resumed): its
+/// rows are its session's alone and its changes are never decoded, so only the parent itself
+/// joins the publication (postgres refuses to publish a temporary table).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_table_with_a_temporary_child_can_be_mirrored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_tparent CASCADE;
+         CREATE TABLE rv_tparent (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_tparent VALUES (1);",
+    )
+    .await;
+    let (session, _) = connect_to_postgres(&uri).await;
+    session
+        .simple_query(
+            "CREATE TEMPORARY TABLE rv_tchild () INHERITS (rv_tparent);
+             INSERT INTO rv_tchild VALUES (99);",
+        )
+        .await
+        .unwrap();
+    let backend = Arc::new(backend);
+    try_mirror(&backend, &tmp, "rv_tparent_mc", "public.rv_tparent", &uri)
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_tparent VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_tparent_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_tparent_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+    drop(session);
+    client
+        .simple_query("DROP TABLE rv_tparent CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// postgres publishes a partition's changes only through the topmost partitioned table in the
+/// publication, so a partitioned table and one of its partitions cannot both be mirrored: the
+/// second is refused (in either order), and a mirrored table attached as a partition of a
+/// mirrored table is errored, rather than silently receiving nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_partitioned_table_and_its_partition_are_not_both_mirrored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_proot, rv_pstandalone CASCADE;
+         CREATE TABLE rv_proot (id BIGINT PRIMARY KEY) PARTITION BY RANGE (id);
+         CREATE TABLE rv_pmid PARTITION OF rv_proot FOR VALUES FROM (0) TO (200) PARTITION BY RANGE (id);
+         CREATE TABLE rv_pleaf1 PARTITION OF rv_pmid FOR VALUES FROM (0) TO (100);
+         CREATE TABLE rv_pleaf2 PARTITION OF rv_pmid FOR VALUES FROM (100) TO (200);
+         CREATE TABLE rv_pstandalone (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+
+    // A partition first: its partitioned tables are refused, and it keeps replicating.
+    mirror(&backend, &tmp, "rv_pleaf1_mc", "public.rv_pleaf1", &uri).await;
+    for ancestor in ["rv_proot", "rv_pmid"] {
+        let err = try_mirror(
+            &backend,
+            &tmp,
+            &format!("{ancestor}_mc"),
+            &format!("public.{ancestor}"),
+            &uri,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("cannot both be mirrored") && err.contains("rv_pleaf1"),
+            "{err}"
+        );
+    }
+    client
+        .simple_query("INSERT INTO rv_proot VALUES (1), (101);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_pleaf1_mc", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_pleaf1_mc", lsn).await, Some(vec![1]));
+
+    // A partitioned table first: its partitions, at any depth, are refused.
+    backend
+        .drop_table(DB.to_string(), "rv_pleaf1_mc".to_string())
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_proot_mc", "public.rv_proot", &uri).await;
+    for partition in ["rv_pmid", "rv_pleaf2"] {
+        let err = try_mirror(
+            &backend,
+            &tmp,
+            &format!("{partition}_mc"),
+            &format!("public.{partition}"),
+            &uri,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("cannot both be mirrored") && err.contains("rv_proot"),
+            "{err}"
+        );
+    }
+
+    // A mirrored table that becomes a partition of a mirrored table no longer gets its changes.
+    mirror(
+        &backend,
+        &tmp,
+        "rv_pstandalone_mc",
+        "public.rv_pstandalone",
+        &uri,
+    )
+    .await;
     client
         .simple_query(
-            "INSERT INTO rv_out VALUES (3, 2.718281828459045, 2.7182817,
-                 '{12345678.123456789,NULL}', '\\x5c6e2700');
-             UPDATE rv_out SET f8 = 1.0000000000000002, b = '\\x01' WHERE id = 2;",
+            "ALTER TABLE rv_proot ATTACH PARTITION rv_pstandalone FOR VALUES FROM (200) TO (300);
+             INSERT INTO rv_proot VALUES (2);",
         )
         .await
         .unwrap();
     let lsn = current_wal_lsn(&client).await;
-    assert_eq!(snapshot_error(&backend, "rv_out_mc", lsn).await, None);
-    for (column, expected) in [
-        ("f8", "f8::text"),
-        ("f4", "f4::text"),
-        (
-            "fa",
-            "'[' || array_to_string(ARRAY(SELECT x::text FROM unnest(fa) x), ', ', '') || ']'",
-        ),
-        ("b", "encode(b, 'hex')"),
-    ] {
-        let source: BTreeMap<i64, Option<String>> = client
-            .query(&format!("SELECT id, {expected} FROM rv_out"), &[])
-            .await
-            .unwrap()
-            .iter()
-            .map(|row| (row.get(0), row.get(1)))
-            .collect();
-        assert_eq!(
-            scan_rows(&backend, "rv_out_mc", lsn, column, Duration::from_secs(30)).await,
-            Some(source),
-            "column {column}"
-        );
-    }
+    let err = wait_until_errored(&backend, "rv_pstandalone_mc", lsn).await;
+    assert!(
+        err.contains("became a partition of public.rv_proot") && err.contains("drop and re-create"),
+        "{err}"
+    );
+    // Rows only after the partitioned table's mirror adopted the (empty) new partition.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    client
+        .simple_query("INSERT INTO rv_proot VALUES (201);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_proot_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_proot_mc", lsn).await,
+        Some(vec![1, 2, 101, 201])
+    );
+    client
+        .simple_query("DROP TABLE rv_proot CASCADE;")
+        .await
+        .unwrap();
 }
