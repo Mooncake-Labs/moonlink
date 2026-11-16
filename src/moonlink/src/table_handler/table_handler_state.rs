@@ -8,6 +8,7 @@ use crate::storage::snapshot_options::SnapshotOption;
 use crate::table_notify::TableEvent;
 use crate::Result;
 use more_asserts as ma;
+use std::collections::HashSet;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info};
 
@@ -96,6 +97,10 @@ pub(crate) struct TableHandlerState {
     pub(crate) table_consistent_view_lsn: Option<u64>,
     // Latest LSN of the table's latest commit.
     pub(crate) latest_commit_lsn: Option<u64>,
+    // Transactions with writes since the latest commit (`None` is the non-streamed one), which
+    // keep the table from a consistent view. When a streamed one ends without being applied, the
+    // view comes back once no writer is left.
+    writers_since_latest_commit: HashSet<Option<u32>>,
     /// Re-sent events skipped because the table had already applied them (see [`Self::skip_resent_event`]).
     pub(crate) skipped_resent_events: u64,
     /// Re-sent commits skipped in total, and the commit LSNs of the current run of skips.
@@ -189,6 +194,7 @@ impl TableHandlerState {
             // A recovered table has both at its snapshot LSN, and a copy that loaded files sets
             // both to its boundary; neither floor ever moves down.
             latest_commit_lsn: persistence_snapshot_lsn,
+            writers_since_latest_commit: HashSet::new(),
             skipped_resent_events: 0,
             skipped_resent_commits: 0,
             skipped_run: None,
@@ -294,17 +300,18 @@ impl TableHandlerState {
         // its commit is processed, so it must not move the LSNs either.
         if let TableEvent::Commit {
             lsn,
-            xact_id: Some(_),
+            xact_id: Some(xact_id),
         }
         | TableEvent::CommitFlush {
             lsn,
-            xact_id: Some(_),
+            xact_id: Some(xact_id),
         } = event
         {
             if self
                 .initial_persistence_lsn
                 .is_some_and(|boundary| *lsn <= boundary)
             {
+                self.end_stream_without_applying(*xact_id);
                 return;
             }
         }
@@ -314,6 +321,7 @@ impl TableHandlerState {
                 TableEvent::Commit { lsn, xact_id, .. } => {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
+                    self.writers_since_latest_commit.clear();
                     if xact_id.is_none() {
                         // Unset at flush operation.
                         self.last_unflushed_commit_lsn = Some(*lsn);
@@ -322,16 +330,31 @@ impl TableHandlerState {
                 TableEvent::CommitFlush { lsn, .. } => {
                     self.latest_commit_lsn = Some(*lsn);
                     self.table_consistent_view_lsn = Some(*lsn);
+                    self.writers_since_latest_commit.clear();
                 }
                 // Unset for table write operations.
-                TableEvent::Append { .. }
-                | TableEvent::Delete { .. }
-                | TableEvent::StreamAbort { .. } => {
+                TableEvent::Append { xact_id, .. } | TableEvent::Delete { xact_id, .. } => {
                     self.table_consistent_view_lsn = None;
+                    self.writers_since_latest_commit.insert(*xact_id);
                 }
-                // Doesn't update for [`StreamAbort`] and [`StreamFlush`].
+                TableEvent::StreamAbort { xact_id } => {
+                    self.end_stream_without_applying(*xact_id);
+                }
+                // [`StreamFlush`] writes a streamed transaction's rows to its own files, which
+                // leaves the view as it is.
                 _ => {}
             }
+        }
+    }
+
+    /// A streamed transaction ended without changing the table: aborted, or its commit dropped
+    /// as already applied. Without other writes since the latest commit, the table is back at
+    /// that commit's consistent view, so a pending forced snapshot can flush it instead of
+    /// waiting for the next commit, which never comes on an idle table.
+    fn end_stream_without_applying(&mut self, xact_id: u32) {
+        self.writers_since_latest_commit.remove(&Some(xact_id));
+        if self.writers_since_latest_commit.is_empty() {
+            self.table_consistent_view_lsn = self.latest_commit_lsn;
         }
     }
 
@@ -429,6 +452,13 @@ impl TableHandlerState {
             return false;
         }
         self.skipped_resent_events += 1;
+        if let TableEvent::Commit {
+            xact_id: Some(xact_id),
+            ..
+        } = event
+        {
+            self.end_stream_without_applying(*xact_id);
+        }
         let run = self.skipped_run.get_or_insert(SkippedRun::default());
         run.events += 1;
         if let TableEvent::Commit { lsn, .. } = event {
