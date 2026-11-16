@@ -254,6 +254,11 @@ impl TableHandler {
                         storage_config,
                         lsn,
                     } => {
+                        if table_handler_state.special_table_state == SpecialTableState::InitialCopy
+                            && !files.is_empty()
+                        {
+                            table_handler_state.initial_copy_loaded_files = true;
+                        }
                         table.batch_ingest(files, storage_config, lsn).await;
                     }
 
@@ -1007,12 +1012,32 @@ impl TableHandler {
             return;
         }
 
-        // Don't update the lsn if the event is not processed yet.
-        table_handler_state.update_table_lsns(&event);
-
-        // Discard events that we have already processed.
+        // Discard events that we have already processed (persisted, or in the initial copy). They
+        // must not move the table's LSNs either: an empty copy claims no commit LSN, and a dropped
+        // commit would otherwise become one that no snapshot ever reaches.
         if table_handler_state.should_discard_event(&event) {
             return;
+        }
+
+        // A streamed transaction is never discarded above (its rows arrive before its LSN); one
+        // committed at or below the persisted/copy boundary is aborted when its commit is
+        // processed, so it must not move the LSNs either.
+        let streamed_below_boundary = match &event {
+            TableEvent::Commit {
+                lsn,
+                xact_id: Some(_),
+            }
+            | TableEvent::CommitFlush {
+                lsn,
+                xact_id: Some(_),
+            } => table_handler_state
+                .initial_persistence_lsn
+                .is_some_and(|boundary| *lsn <= boundary),
+            _ => false,
+        };
+        // Don't update the lsn if the event is not processed yet.
+        if !streamed_below_boundary {
+            table_handler_state.update_table_lsns(&event);
         }
 
         match event {

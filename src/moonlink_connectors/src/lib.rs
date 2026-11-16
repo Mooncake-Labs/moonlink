@@ -1,4 +1,5 @@
 pub mod error;
+pub mod errored_tables;
 pub mod pg_replicate;
 mod replication_connection;
 mod replication_manager;

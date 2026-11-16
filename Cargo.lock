@@ -3515,6 +3515,7 @@ dependencies = [
  "thrift",
  "tokio",
  "tokio-postgres",
+ "tracing",
  "tracing-subscriber",
 ]
 

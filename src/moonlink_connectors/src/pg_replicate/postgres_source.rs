@@ -11,7 +11,9 @@ use futures::StreamExt;
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
 use postgres_native_tls::TlsStream;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use postgres_replication::protocol::{
+    LogicalReplicationMessage, RelationBody, ReplicaIdentity, ReplicationMessage,
+};
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
 use tokio_postgres::Error;
@@ -255,7 +257,7 @@ impl PostgresSource {
         &mut self,
     ) -> Result<(String, PgLsn), PostgresSourceError> {
         self.replication_client
-            .export_snapshot_and_lsn()
+            .export_snapshot_and_lsn(&self.uri)
             .await
             .map_err(PostgresSourceError::ReplicationClient)
     }
@@ -332,6 +334,7 @@ impl PostgresSource {
             postgres_epoch,
             message_scratch: Vec::new(),
             skip_before_end_lsn: None,
+            mismatched_tables: HashMap::new(),
         })
     }
 
@@ -412,7 +415,8 @@ impl PostgresSource {
 
             // Build batches and push to writers
             let (arrow_schema, _id) =
-                crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema);
+                crate::pg_replicate::util::postgres_schema_to_moonlink_schema(&table_schema)
+                    .map_err(|e| crate::Error::from(PostgresSourceError::from(e)))?;
             let arrow_schema = std::sync::Arc::new(arrow_schema);
             let mut builder = ArrowBatchBuilder::new(arrow_schema, max_rows_per_batch);
             let mut rows: u64 = 0;
@@ -534,6 +538,10 @@ pin_project! {
         postgres_epoch: SystemTime,
         message_scratch: Vec<Result<ReplicationMessage<LogicalReplicationMessage>, Error>>,
         skip_before_end_lsn: Option<PgLsn>,
+        // Tables whose last Relation message did not match their schema, with the reason. Their
+        // tuples are reported, not decoded, until a matching Relation message: the mismatch can be
+        // replayed history (WAL older than the mirror), which the sink then ignores.
+        mismatched_tables: HashMap<SrcTableId, String>,
     }
 }
 
@@ -589,23 +597,18 @@ impl CdcStream {
 
     pub fn add_table_schema(self: Pin<&mut Self>, schema: TableSchema) {
         let this = self.project();
-        assert!(this
-            .table_schemas
-            .insert(schema.src_table_id, schema)
-            .is_none());
+        let src_table_id = schema.src_table_id;
+        if this.table_schemas.insert(src_table_id, schema).is_some() {
+            // Duplicates are rejected before a table is registered; keep the newest schema.
+            warn!(src_table_id, "table schema registered twice");
+        }
     }
 
-    pub fn update_table_schema(self: Pin<&mut Self>, schema: TableSchema) {
-        let this = self.project();
-        assert!(this
-            .table_schemas
-            .insert(schema.src_table_id, schema)
-            .is_some());
-    }
-
+    /// Stop decoding a table. Its schema is already gone if the table was failed by a schema change.
     pub fn remove_table_schema(self: Pin<&mut Self>, src_table_id: SrcTableId) {
         let this = self.project();
-        assert!(this.table_schemas.remove(&src_table_id).is_some());
+        this.table_schemas.remove(&src_table_id);
+        this.mismatched_tables.remove(&src_table_id);
     }
 
     pub async fn next_batch_msgs(
@@ -645,6 +648,39 @@ impl CdcStream {
 
                 let end_pg_lsn = PgLsn::from(end_u64);
                 last_end_lsn = Some(end_pg_lsn);
+
+                // pgoutput sends a Relation message before the first change after any change to a
+                // table's definition. Check it here, in stream order, so no later tuple of the table
+                // is decoded against a stale schema.
+                if let LogicalReplicationMessage::Relation(relation) = body.data() {
+                    let src_table_id = relation.rel_id();
+                    if let Some(reason) = unsupported_relation_change(relation, this.table_schemas)
+                    {
+                        this.mismatched_tables.insert(src_table_id, reason.clone());
+                        out.push(Ok(CdcEvent::TableUnsupported {
+                            src_table_id,
+                            reason,
+                        }));
+                        continue;
+                    }
+                    this.mismatched_tables.remove(&src_table_id);
+                    if this.table_schemas.contains_key(&src_table_id) {
+                        out.push(Ok(CdcEvent::RelationSeen { src_table_id }));
+                    }
+                }
+                let tuple_table = match body.data() {
+                    LogicalReplicationMessage::Insert(b) => Some(b.rel_id()),
+                    LogicalReplicationMessage::Update(b) => Some(b.rel_id()),
+                    LogicalReplicationMessage::Delete(b) => Some(b.rel_id()),
+                    _ => None,
+                };
+                if let Some(reason) = tuple_table.and_then(|id| this.mismatched_tables.get(&id)) {
+                    out.push(Ok(CdcEvent::TableUnsupported {
+                        src_table_id: tuple_table.unwrap(),
+                        reason: reason.clone(),
+                    }));
+                    continue;
+                }
             }
             match f {
                 Ok(msg) => match CdcEventConverter::try_from(msg, &this.table_schemas) {
@@ -656,6 +692,65 @@ impl CdcStream {
         }
         (out.len(), last_end_lsn)
     }
+}
+
+/// If a Relation message shows that a mirrored table no longer matches the schema the mirror was
+/// created with, describe the change. Mirrors do not follow schema changes, so any difference in
+/// column names, order, types or type modifiers, or a replica identity other than FULL (updates
+/// would no longer carry the old row), makes the table unsupported.
+fn unsupported_relation_change(
+    relation: &RelationBody,
+    table_schemas: &HashMap<SrcTableId, TableSchema>,
+) -> Option<String> {
+    let schema = table_schemas.get(&relation.rel_id())?;
+    if !matches!(relation.replica_identity(), ReplicaIdentity::Full) {
+        return Some("the source table's REPLICA IDENTITY is no longer FULL".to_string());
+    }
+    let new_columns: Vec<(&str, u32, i32)> = relation
+        .columns()
+        .iter()
+        .map(|c| {
+            (
+                c.name().unwrap_or("<invalid name>"),
+                c.type_id() as u32,
+                c.type_modifier(),
+            )
+        })
+        .collect();
+    let old_columns: Vec<(&str, u32, i32)> = schema
+        .column_schemas
+        .iter()
+        .map(|c| (c.name.as_str(), c.typ.oid(), c.modifier))
+        .collect();
+    if new_columns == old_columns {
+        return None;
+    }
+    let names = |columns: &[(&str, u32, i32)]| {
+        columns
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let change = if names(&new_columns) != names(&old_columns) {
+        format!(
+            "its columns changed from ({}) to ({})",
+            names(&old_columns),
+            names(&new_columns)
+        )
+    } else {
+        let changed: Vec<&str> = old_columns
+            .iter()
+            .zip(&new_columns)
+            .filter(|(old, new)| old != new)
+            .map(|(old, _)| old.0)
+            .collect();
+        format!("the type of column(s) {} changed", changed.join(", "))
+    };
+    Some(format!(
+        "source table {} changed: {change}; schema changes are not supported",
+        schema.table_name
+    ))
 }
 
 impl Stream for CdcStream {

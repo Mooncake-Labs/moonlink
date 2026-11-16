@@ -516,14 +516,11 @@ mod tests {
             .await
             .expect("copy_table_stream");
 
-        if let Some(TableEvent::LoadFiles { files, .. }) = rx.recv().await {
-            assert!(
-                files.is_empty(),
-                "empty table should yield empty files list"
-            );
-        } else {
-            panic!("expected LoadFiles event");
-        }
+        // Nothing to load: an empty table must not produce a LoadFiles event.
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "empty table should not yield a LoadFiles event"
+        );
 
         ddl.simple_query(&format!("DROP TABLE IF EXISTS {fqtn};"))
             .await
@@ -955,13 +952,16 @@ mod tests {
         let table = format!("ic_parallel_fail_{suffix}");
         let fqtn = format!("public.{table}");
 
-        // Create and seed enough rows to ensure readers are active when we drop the table
+        // Seed enough rows for several shards. The last row holds a value the copy refuses (numeric
+        // NaN), so exactly one reader, the last shard's, fails while the others copy normally.
+        // (Dropping the table mid-copy is not a reader failure: the readers' COPY locks make the
+        // DROP wait, so whether it broke the copy depended on timing.)
         let rows = 20_000i64;
         ddl.simple_query(&format!(
             "DROP TABLE IF EXISTS {fqtn};
-             CREATE TABLE {fqtn} (id BIGINT PRIMARY KEY, name TEXT);
+             CREATE TABLE {fqtn} (id BIGINT PRIMARY KEY, name TEXT, n NUMERIC);
              INSERT INTO {fqtn}
-             SELECT gs, 'base'
+             SELECT gs, 'base', CASE WHEN gs = {rows} THEN 'NaN'::numeric ELSE gs END
              FROM generate_series(1, {rows}) AS gs;
              ALTER TABLE {fqtn} REPLICA IDENTITY FULL;"
         ))
@@ -993,7 +993,7 @@ mod tests {
         // TableEvent channel (we assert no LoadFiles on failure)
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
 
-        // Start copy in a task; we expect it to fail after we drop the table
+        // Start copy in a task; the last shard's reader fails
         let schema_clone = schema.clone();
         let tx_clone = tx.clone();
         let base_path_string = base_path.to_string();
@@ -1001,24 +1001,14 @@ mod tests {
             copy_table_stream(schema_clone, &tx_clone, &base_path_string, ic_cfg).await
         });
 
-        // Give readers a moment to start streaming
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Induce failure: drop the source table while copy is in progress
-        ddl.simple_query(&format!("DROP TABLE IF EXISTS {fqtn};"))
-            .await
-            .unwrap();
-
         // The copy task should fail promptly (no hang)
         let res = timeout(Duration::from_secs(10), copy_handle).await;
         assert!(res.is_ok(), "copy task timed out (potential hang)");
         let join_res = res.unwrap();
         assert!(join_res.is_ok(), "copy task join failed");
         let stream_res = join_res.unwrap();
-        assert!(
-            stream_res.is_err(),
-            "expected copy_table_stream to return Err"
-        );
+        let err = stream_res.expect_err("expected copy_table_stream to return Err");
+        assert!(err.to_string().contains("NaN"), "{err}");
 
         // Ensure no LoadFiles event was emitted
         let recv_res = timeout(Duration::from_millis(300), rx.recv()).await;
@@ -1027,7 +1017,9 @@ mod tests {
             "no LoadFiles event should be emitted on failure"
         );
 
-        // Cleanup: table already dropped; tempdir cleans up automatically
+        ddl.simple_query(&format!("DROP TABLE IF EXISTS {fqtn};"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

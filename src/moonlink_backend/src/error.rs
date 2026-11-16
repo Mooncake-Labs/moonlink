@@ -52,6 +52,9 @@ pub enum Error {
 
     #[error("{0}")]
     InsufficientDiskSpace(ErrorStruct),
+
+    #[error("{0}")]
+    RecoveryPanicked(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -81,6 +84,33 @@ impl Error {
         Self::InsufficientDiskSpace(ErrorStruct::new(message, ErrorStatus::Permanent))
     }
 
+    #[track_caller]
+    pub fn recovery_panicked(reason: &str) -> Self {
+        Self::RecoveryPanicked(ErrorStruct::new(
+            format!("recovery panicked: {reason}"),
+            ErrorStatus::Permanent,
+        ))
+    }
+
+    pub fn error_struct(&self) -> &ErrorStruct {
+        match self {
+            Error::ParseIntError(es)
+            | Error::PostgresSource(es)
+            | Error::Io(es)
+            | Error::MoonlinkConnectorError(es)
+            | Error::MoonlinkError(es)
+            | Error::MoonlinkMetadataStoreError(es)
+            | Error::InvalidArgumentError(es)
+            | Error::DataCorruptionError(es)
+            | Error::TokioWatchRecvError(es)
+            | Error::Json(es)
+            | Error::MpscChannelSendError(es)
+            | Error::InvalidConfig(es)
+            | Error::InsufficientDiskSpace(es)
+            | Error::RecoveryPanicked(es) => es,
+        }
+    }
+
     pub fn get_status(&self) -> ErrorStatus {
         match self {
             Error::ParseIntError(es) => es.status,
@@ -96,6 +126,7 @@ impl Error {
             Error::DataCorruptionError(es) => es.status,
             Error::InvalidConfig(es) => es.status,
             Error::InsufficientDiskSpace(es) => es.status,
+            Error::RecoveryPanicked(es) => es.status,
         }
     }
 
@@ -117,12 +148,12 @@ fn find_table_errored(es: &ErrorStruct) -> Option<&ErrorStruct> {
             _ => None,
         };
     }
-    if let Some(MoonlinkConnectorError::MoonlinkError(es)) =
-        source.downcast_ref::<MoonlinkConnectorError>()
-    {
-        return find_table_errored(es);
+    match source.downcast_ref::<MoonlinkConnectorError>() {
+        Some(MoonlinkConnectorError::MoonlinkError(es)) => find_table_errored(es),
+        // Recovered mirrors that are not served (moonlink_connectors placeholders).
+        Some(MoonlinkConnectorError::TableErrored(es)) => Some(es),
+        _ => None,
     }
-    None
 }
 
 impl From<PostgresSourceError> for Error {
@@ -247,5 +278,21 @@ impl<T: Send + Sync + 'static> From<tokio::sync::mpsc::error::SendError<T>> for 
             source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod table_errored_tests {
+    use super::*;
+
+    #[test]
+    fn errored_placeholder_message_is_found() {
+        let err = Error::from(MoonlinkConnectorError::table_errored(
+            "mirror x is out of sync",
+        ));
+        assert_eq!(
+            err.table_errored().map(|es| es.message.as_str()),
+            Some("mirror x is out of sync")
+        );
     }
 }

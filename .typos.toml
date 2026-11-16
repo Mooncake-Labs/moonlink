@@ -1,2 +1,8 @@
 [default.extend-words]
 typ = "typ"
+
+# Identifiers that typos splits into misspellings: "INSERTs" (an SQL keyword in
+# the plural) and "caf" from the escaped string "caf\u{e9}" (café).
+[default.extend-identifiers]
+INSERTs = "INSERTs"
+caf = "caf"

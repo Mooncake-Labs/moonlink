@@ -114,6 +114,8 @@ pub(crate) struct TableHandlerState {
     pub(crate) special_table_state: SpecialTableState,
     // Buffered events during blocking operations: initial copy, alter table, drop table, etc.
     pub(crate) initial_copy_buffered_events: Vec<TableEvent>,
+    // Whether the ongoing initial copy loaded any files (an empty source table loads none).
+    pub(crate) initial_copy_loaded_files: bool,
 
     // ================================================
     // Table maintenance status
@@ -163,6 +165,7 @@ impl TableHandlerState {
             table_maintenance_completion_tx,
             // Initial copy fields.
             initial_copy_buffered_events: Vec::new(),
+            initial_copy_loaded_files: false,
             table_status_tx: None,
         }
     }
@@ -462,13 +465,20 @@ impl TableHandlerState {
     pub(crate) fn start_initial_copy(&mut self) {
         assert_eq!(self.special_table_state, SpecialTableState::Normal);
         self.special_table_state = SpecialTableState::InitialCopy;
+        self.initial_copy_loaded_files = false;
     }
 
     pub(crate) fn finish_initial_copy(&mut self, lsn: u64) {
         assert_eq!(self.special_table_state, SpecialTableState::InitialCopy);
         self.special_table_state = SpecialTableState::Normal;
-        self.latest_commit_lsn = Some(lsn);
-        self.table_consistent_view_lsn = Some(lsn);
+        // The boundary is the table's commit LSN only if the copy produced data at it. After an
+        // empty copy the table has no activity yet; claiming a consistent view at the boundary
+        // would report a persisted table LSN of 0 until the first write (stalling forced snapshots
+        // and the replication slot), since no iceberg snapshot ever exists at that LSN.
+        if self.initial_copy_loaded_files {
+            self.latest_commit_lsn = Some(lsn);
+            self.table_consistent_view_lsn = Some(lsn);
+        }
     }
 
     /// ============================

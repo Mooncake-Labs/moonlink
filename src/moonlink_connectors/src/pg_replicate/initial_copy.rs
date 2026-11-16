@@ -53,6 +53,16 @@ struct CtidShard {
     end_block_exclusive: Option<i64>,
 }
 
+/// Directory the initial copy writes its parquet files to.
+pub fn initial_copy_output_dir(
+    table_base_path: &str,
+    src_table_id: SrcTableId,
+) -> std::path::PathBuf {
+    std::path::PathBuf::from(table_base_path)
+        .join("initial_copy")
+        .join(format!("table_{src_table_id}"))
+}
+
 /// Reads rows using parallel readers and sends them to the provided `event_sender`.
 pub async fn copy_table_stream(
     table_schema: TableSchema,
@@ -61,16 +71,15 @@ pub async fn copy_table_stream(
     config: InitialCopyConfig,
 ) -> Result<CopyProgress> {
     // Convert PostgreSQL schema to Arrow schema
-    let (arrow_schema, _identity_prop) = postgres_schema_to_moonlink_schema(&table_schema);
+    let (arrow_schema, _identity_prop) =
+        postgres_schema_to_moonlink_schema(&table_schema).map_err(PostgresSourceError::from)?;
     let arrow_schema = Arc::new(arrow_schema);
 
     // Prepare writer config
     let writer_cfg = config.writer.clone();
 
     // Create output directory for initial copy files
-    let output_dir = std::path::PathBuf::from(table_base_path)
-        .join("initial_copy")
-        .join(format!("table_{}", table_schema.src_table_id));
+    let output_dir = initial_copy_output_dir(table_base_path, table_schema.src_table_id);
 
     // Create batch channel for RecordBatches
     let (batch_tx, batch_rx) = create_batch_channel(writer_cfg.batch_channel_capacity);
@@ -197,19 +206,24 @@ pub async fn copy_table_stream(
         files_written.len()
     );
 
-    // Send LoadFiles event to batch ingest the Parquet files
-    if let Err(e) = event_sender
-        .send(TableEvent::LoadFiles {
-            files: files_written,
-            storage_config: StorageConfig::FileSystem {
-                root_directory: output_dir.to_str().unwrap().to_string(),
-                atomic_write_dir: None,
-            },
-            lsn: u64::from(snapshot_start_lsn),
-        })
-        .await
-    {
-        tracing::warn!(error = ?e, "failed to send LoadFiles event");
+    // An empty table writes no files. Batch-ingesting an empty file list is invalid (it breaks
+    // the persistence buffer's data file / file index invariant); the copy boundary is still sent by
+    // the caller.
+    if !files_written.is_empty() {
+        // Send LoadFiles event to batch ingest the Parquet files
+        if let Err(e) = event_sender
+            .send(TableEvent::LoadFiles {
+                files: files_written,
+                storage_config: StorageConfig::FileSystem {
+                    root_directory: output_dir.to_str().unwrap().to_string(),
+                    atomic_write_dir: None,
+                },
+                lsn: u64::from(snapshot_start_lsn),
+            })
+            .await
+        {
+            tracing::warn!(error = ?e, "failed to send LoadFiles event");
+        }
     }
 
     Ok(CopyProgress {

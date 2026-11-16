@@ -1,5 +1,5 @@
 use core::str;
-use std::{collections::HashMap, str::Utf8Error};
+use std::collections::HashMap;
 
 use postgres_replication::protocol::{
     BeginBody, CommitBody, DeleteBody, InsertBody, LogicalReplicationMessage, PrimaryKeepAliveBody,
@@ -9,12 +9,9 @@ use postgres_replication::protocol::{
 use thiserror::Error;
 
 use crate::pg_replicate::table::{ColumnSchema, SrcTableId, TableSchema};
+use crate::pg_replicate::util::normalize_numeric_cell;
 
-use super::{
-    table_row::TableRow,
-    text::{FromTextError, TextFormatConverter},
-    Cell,
-};
+use super::{table_row::TableRow, text::TextFormatConverter, Cell};
 
 #[derive(Debug, Error)]
 pub enum CdcEventConversionError {
@@ -30,35 +27,115 @@ pub enum CdcEventConversionError {
     #[error("unsupported type: {0}")]
     UnsupportedType(String),
 
-    #[error("missing tuple in delete body")]
-    MissingTupleInDeleteBody,
+    /// Mirrors identify rows by all their columns, so updates and deletes need the complete old
+    /// row, which postgres only sends under REPLICA IDENTITY FULL (set per partition).
+    #[error("{operation} on the source table did not include the complete old row; the table (and each of its partitions) must have REPLICA IDENTITY FULL")]
+    MissingOldRow {
+        src_table_id: SrcTableId,
+        operation: &'static str,
+    },
+
+    /// An unchanged out-of-line (TOAST) value with no old row to take it from.
+    #[error("column {column}: unchanged TOAST value without the old row")]
+    UnresolvedToast {
+        src_table_id: SrcTableId,
+        column: String,
+    },
 
     #[error("schema missing for table id {0}")]
     MissingSchema(SrcTableId),
 
-    #[error("from bytes error: {0}")]
-    FromBytes(#[from] FromTextError),
+    #[error("table id {src_table_id} sent {received} columns, its schema has {expected}")]
+    TupleShapeMismatch {
+        src_table_id: SrcTableId,
+        expected: usize,
+        received: usize,
+    },
 
-    #[error("invalid string value")]
-    InvalidStr(#[from] Utf8Error),
+    /// A value Postgres sent that moonlink cannot represent faithfully.
+    #[error("column {column} ({type_name}): cannot convert {value}: {reason}")]
+    InvalidValue {
+        src_table_id: SrcTableId,
+        column: String,
+        type_name: String,
+        value: String,
+        reason: String,
+    },
+}
+
+impl CdcEventConversionError {
+    /// The table a conversion error belongs to, if it is specific to one table. Such errors fail
+    /// that table only; the rest of the stream is unaffected.
+    pub fn src_table_id(&self) -> Option<SrcTableId> {
+        match self {
+            Self::TupleShapeMismatch { src_table_id, .. }
+            | Self::InvalidValue { src_table_id, .. }
+            | Self::MissingOldRow { src_table_id, .. }
+            | Self::UnresolvedToast { src_table_id, .. } => Some(*src_table_id),
+            _ => None,
+        }
+    }
+}
+
+/// Values are quoted in errors to help users find the offending row; keep the message bounded.
+fn excerpt(value: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    if value.chars().count() <= MAX_CHARS {
+        format!("'{value}'")
+    } else {
+        let head: String = value.chars().take(MAX_CHARS).collect();
+        format!("'{head}...'")
+    }
 }
 
 pub struct CdcEventConverter;
 
 impl CdcEventConverter {
+    /// Decode a tuple. `unchanged_from` supplies the values of columns postgres reports as
+    /// unchanged TOAST ('u'), which it only does for the new row of an UPDATE.
     fn try_from_tuple_data_slice(
+        src_table_id: SrcTableId,
         column_schemas: &[ColumnSchema],
         tuple_data: &[TupleData],
+        unchanged_from: Option<&TableRow>,
     ) -> Result<TableRow, CdcEventConversionError> {
+        if tuple_data.len() != column_schemas.len() {
+            return Err(CdcEventConversionError::TupleShapeMismatch {
+                src_table_id,
+                expected: column_schemas.len(),
+                received: tuple_data.len(),
+            });
+        }
         let mut values = Vec::with_capacity(column_schemas.len());
 
         for (i, column_schema) in column_schemas.iter().enumerate() {
             let cell = match &tuple_data[i] {
                 TupleData::Null => Cell::Null,
-                TupleData::UnchangedToast => TextFormatConverter::default_value(&column_schema.typ),
+                TupleData::UnchangedToast => match unchanged_from {
+                    Some(old_row) => old_row.values[i].clone(),
+                    None => {
+                        return Err(CdcEventConversionError::UnresolvedToast {
+                            src_table_id,
+                            column: column_schema.name.clone(),
+                        })
+                    }
+                },
                 TupleData::Text(bytes) => {
-                    let str = str::from_utf8(&bytes[..])?;
-                    TextFormatConverter::try_from_str(&column_schema.typ, str)?
+                    let invalid =
+                        |value: String, reason: String| CdcEventConversionError::InvalidValue {
+                            src_table_id,
+                            column: column_schema.name.clone(),
+                            type_name: column_schema.typ.name().to_string(),
+                            value,
+                            reason,
+                        };
+                    let text = str::from_utf8(&bytes[..]).map_err(|e| {
+                        invalid(excerpt(&String::from_utf8_lossy(&bytes[..])), e.to_string())
+                    })?;
+                    let cell = TextFormatConverter::try_from_str(&column_schema.typ, text)
+                        .map_err(|e| invalid(excerpt(text), e.to_string()))?;
+                    normalize_numeric_cell(&column_schema.typ, column_schema.modifier, cell)
+                        .map_err(|reason| invalid(excerpt(text), reason))?
                 }
             };
             values.push(cell);
@@ -72,8 +149,12 @@ impl CdcEventConverter {
         column_schemas: &[ColumnSchema],
         insert_body: InsertBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
-        let row =
-            Self::try_from_tuple_data_slice(column_schemas, insert_body.tuple().tuple_data())?;
+        let row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            insert_body.tuple().tuple_data(),
+            None,
+        )?;
 
         Ok(CdcEvent::Insert((src_table_id, row, insert_body.xid())))
     }
@@ -84,12 +165,26 @@ impl CdcEventConverter {
         column_schemas: &[ColumnSchema],
         update_body: UpdateBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
-        let old_row = update_body
+        // Under REPLICA IDENTITY FULL the old row is complete (detoasted), so it can fill the new
+        // row's unchanged TOAST columns. A key-only old row ('K') is not enough to find the row.
+        let old_tuple = update_body
             .old_tuple()
-            .map(|tuple| Self::try_from_tuple_data_slice(column_schemas, tuple.tuple_data()))
-            .transpose()?;
-        let new_row =
-            Self::try_from_tuple_data_slice(column_schemas, update_body.new_tuple().tuple_data())?;
+            .ok_or(CdcEventConversionError::MissingOldRow {
+                src_table_id,
+                operation: "UPDATE",
+            })?;
+        let old_row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            old_tuple.tuple_data(),
+            None,
+        )?;
+        let new_row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            update_body.new_tuple().tuple_data(),
+            Some(&old_row),
+        )?;
 
         Ok(CdcEvent::Update((
             src_table_id,
@@ -105,11 +200,18 @@ impl CdcEventConverter {
         delete_body: DeleteBody,
     ) -> Result<CdcEvent, CdcEventConversionError> {
         let tuple = delete_body
-            .key_tuple()
-            .or(delete_body.old_tuple())
-            .ok_or(CdcEventConversionError::MissingTupleInDeleteBody)?;
+            .old_tuple()
+            .ok_or(CdcEventConversionError::MissingOldRow {
+                src_table_id,
+                operation: "DELETE",
+            })?;
 
-        let row = Self::try_from_tuple_data_slice(column_schemas, tuple.tuple_data())?;
+        let row = Self::try_from_tuple_data_slice(
+            src_table_id,
+            column_schemas,
+            tuple.tuple_data(),
+            None,
+        )?;
 
         Ok(CdcEvent::Delete((src_table_id, row, delete_body.xid())))
     }
@@ -165,9 +267,10 @@ impl CdcEventConverter {
                         delete_body,
                     )?)
                 }
-                LogicalReplicationMessage::Truncate(_) => {
-                    Err(CdcEventConversionError::MessageNotSupported)
-                }
+                LogicalReplicationMessage::Truncate(truncate_body) => Ok(CdcEvent::Truncate {
+                    src_table_ids: truncate_body.rel_ids().to_vec(),
+                    xact_id: truncate_body.xid(),
+                }),
                 LogicalReplicationMessage::StreamStart(stream_start_body) => {
                     Ok(CdcEvent::StreamStart(stream_start_body))
                 }
@@ -195,7 +298,7 @@ pub enum CdcEvent {
     Begin(BeginBody),
     Commit(CommitBody),
     Insert((SrcTableId, TableRow, Option<u32>)),
-    Update((SrcTableId, Option<TableRow>, TableRow, Option<u32>)),
+    Update((SrcTableId, TableRow, TableRow, Option<u32>)),
     Delete((SrcTableId, TableRow, Option<u32>)),
     Relation(RelationBody),
     Type(TypeBody),
@@ -204,4 +307,20 @@ pub enum CdcEvent {
     StreamStop(StreamStopBody),
     StreamCommit(StreamCommitBody),
     StreamAbort(StreamAbortBody),
+    /// Tables truncated on the source; `xact_id` is set inside a streamed transaction.
+    Truncate {
+        src_table_ids: Vec<SrcTableId>,
+        xact_id: Option<u32>,
+    },
+    /// The table can no longer be mirrored (e.g. its schema changed); it enters the errored state.
+    TableUnsupported {
+        src_table_id: SrcTableId,
+        reason: String,
+    },
+    /// A Relation message for a mirrored table that matched its schema. pgoutput sends one after
+    /// any change to the table's definition or partitions, so its source fingerprint is checked
+    /// before the table's next change is applied.
+    RelationSeen {
+        src_table_id: SrcTableId,
+    },
 }

@@ -1,3 +1,4 @@
+use crate::pg_replicate::clients::postgres::ReplicationClientError;
 use crate::pg_replicate::{
     conversions::{numeric::PgNumeric, table_row::TableRow, ArrayCell, Cell},
     table::{LookupKey, TableSchema},
@@ -14,23 +15,119 @@ use std::sync::Arc;
 use tokio_postgres::types::{Kind, Type};
 use tracing::warn;
 
-fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
+/// Declared (precision, scale) of a numeric typmod, untruncated: postgres allows precision up to
+/// 1000 and scale from -1000 to 1000.
+fn numeric_precision_scale(modifier: i32) -> Option<(i32, i32)> {
     const VARHDRSZ: i32 = 4;
     if modifier < VARHDRSZ {
         return None;
     }
     let typmod = modifier - VARHDRSZ;
     // Derived from: [https://github.com/postgres/postgres/blob/4fbb46f61271f4b7f46ecad3de608fc2f4d7d80f/src/backend/utils/adt/numeric.c#L929v]
-    let precision = ((typmod >> 16) & 0xffff) as u8;
+    let precision = (typmod >> 16) & 0xffff;
     // Derived from: [https://github.com/postgres/postgres/blob/4fbb46f61271f4b7f46ecad3de608fc2f4d7d80f/src/backend/utils/adt/numeric.c#L944]
     let raw_scale = (typmod & 0x7ff);
-    let scale = ((raw_scale ^ 1024) - 1024) as i8;
+    let scale = (raw_scale ^ 1024) - 1024;
     Some((precision, scale))
+}
+
+/// The decimal (precision, scale) a numeric column is stored with: its declared ones, or
+/// Decimal128's maximum precision with arrow's default scale for unconstrained `numeric`.
+fn numeric_storage_precision_scale(modifier: i32) -> (i32, i32) {
+    numeric_precision_scale(modifier).unwrap_or((
+        DECIMAL128_MAX_PRECISION as i32,
+        DECIMAL_DEFAULT_SCALE as i32,
+    ))
+}
+
+/// Bring a decoded numeric value to the exact decimal it is stored as, or explain why it cannot be
+/// stored faithfully: more fractional digits than the column scale, more digits than the
+/// precision allows, or NaN / Infinity. Values are never rounded or replaced.
+fn normalize_numeric(value: PgNumeric, modifier: i32) -> Result<PgNumeric, String> {
+    let (precision, scale) = numeric_storage_precision_scale(modifier);
+    let value = match value {
+        PgNumeric::Value(value) => value,
+        PgNumeric::NaN => return Err("NaN cannot be stored in a decimal column".to_string()),
+        PgNumeric::PositiveInf | PgNumeric::NegativeInf => {
+            return Err("Infinity cannot be stored in a decimal column".to_string())
+        }
+    };
+    let rescaled = value.with_scale(scale as i64);
+    if rescaled != value {
+        return Err(format!(
+            "it has more than {scale} fractional digits (stored as decimal({precision}, {scale}))"
+        ));
+    }
+    let (digits, _) = rescaled.as_bigint_and_exponent();
+    let max_precision = precision.clamp(0, DECIMAL128_MAX_PRECISION as i32) as u32;
+    if digits
+        .to_i128()
+        .is_none_or(|d| d.unsigned_abs() >= 10u128.pow(max_precision))
+    {
+        return Err(format!("it does not fit decimal({max_precision}, {scale})"));
+    }
+    Ok(PgNumeric::Value(rescaled))
+}
+
+/// Normalize the numeric values inside a decoded cell of the given column type (see
+/// [`normalize_numeric`]), including array elements and composite fields.
+pub(crate) fn normalize_numeric_cell(
+    typ: &Type,
+    modifier: i32,
+    cell: Cell,
+) -> Result<Cell, String> {
+    Ok(match cell {
+        Cell::Numeric(value) => Cell::Numeric(normalize_numeric(value, modifier)?),
+        // The list item field is built without the column's typmod (unconstrained), so elements
+        // are scaled to that, not to the declared scale.
+        Cell::Array(ArrayCell::Numeric(values)) => Cell::Array(ArrayCell::Numeric(
+            values
+                .into_iter()
+                .map(|v| v.map(|v| normalize_numeric(v, -1)).transpose())
+                .collect::<Result<_, _>>()?,
+        )),
+        Cell::Composite(values) => Cell::Composite(normalize_composite_fields(typ, values)?),
+        Cell::Array(ArrayCell::Composite(elements)) => {
+            let element_type = match typ.kind() {
+                Kind::Array(inner) => inner,
+                _ => typ,
+            };
+            Cell::Array(ArrayCell::Composite(
+                elements
+                    .into_iter()
+                    .map(|e| {
+                        e.map(|fields| normalize_composite_fields(element_type, fields))
+                            .transpose()
+                    })
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        other => other,
+    })
+}
+
+fn normalize_composite_fields(typ: &Type, values: Vec<Cell>) -> Result<Vec<Cell>, String> {
+    let Kind::Composite(fields) = typ.kind() else {
+        return Ok(values);
+    };
+    values
+        .into_iter()
+        .zip(fields)
+        // Composite fields carry no type modifier.
+        .map(|(value, field)| normalize_numeric_cell(field.type_(), -1, value))
+        .collect()
 }
 
 enum ArrowExtensionType {
     Uuid,
     Json,
+}
+
+/// A column whose type mirrors cannot store; `type_name` describes the offending type.
+struct UnsupportedColumn {
+    column: String,
+    oid: u32,
+    type_name: String,
 }
 
 fn postgres_primitive_to_arrow_type(
@@ -39,7 +136,7 @@ fn postgres_primitive_to_arrow_type(
     name: &str,
     mut nullable: bool,
     field_id: &mut i32,
-) -> Field {
+) -> Result<Field, UnsupportedColumn> {
     let (data_type, extension_name) = match *typ {
         Type::BOOL => (DataType::Boolean, None),
         Type::INT2 => (DataType::Int16, None),
@@ -51,9 +148,22 @@ fn postgres_primitive_to_arrow_type(
             // Numeric type can contain invalid values, we will cast them to NULL
             // so make it nullable.
             nullable = true;
-            let (precision, scale) = numeric_precision_scale(modifier)
-                .unwrap_or((DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE));
-            (DataType::Decimal128(precision, scale), None)
+            let (precision, scale) = numeric_storage_precision_scale(modifier);
+            // Postgres also accepts numeric(p, s) with s > p or s < 0 (PG15+) and p > 38, which
+            // Decimal128 cannot represent.
+            if precision == 0
+                || precision > DECIMAL128_MAX_PRECISION as i32
+                || scale < 0
+                || scale > precision
+            {
+                return Err(UnsupportedColumn {
+                    column: name.to_string(),
+                    oid: typ.oid(),
+                    type_name: format!("numeric({precision},{scale})"),
+                });
+            }
+            // Validated above to fit Decimal128.
+            (DataType::Decimal128(precision as u8, scale as i8), None)
         }
         Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::CHAR | Type::NAME => {
             (DataType::Utf8, None)
@@ -104,7 +214,7 @@ fn postgres_primitive_to_arrow_type(
         }
     }
 
-    field
+    Ok(field)
 }
 
 fn postgres_type_to_arrow_type(
@@ -113,14 +223,14 @@ fn postgres_type_to_arrow_type(
     name: &str,
     nullable: bool,
     field_id: &mut i32,
-) -> Field {
-    match typ.kind() {
-        Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id),
+) -> Result<Field, UnsupportedColumn> {
+    Ok(match typ.kind() {
+        Kind::Simple => postgres_primitive_to_arrow_type(typ, modifier, name, nullable, field_id)?,
         Kind::Array(inner) => {
             let item_type = postgres_type_to_arrow_type(
                 inner, /*modifier=*/ -1, /*name=*/ "item", /*nullable=*/ true,
                 field_id,
-            );
+            )?;
             let field = Field::new_list(name, Arc::new(item_type), nullable);
             let mut metadata = HashMap::new();
             metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
@@ -139,7 +249,7 @@ fn postgres_type_to_arrow_type(
                         field_id,
                     )
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             let mut field = Field::new_struct(name, fields, nullable);
             let mut metadata = HashMap::new();
             metadata.insert("PARQUET:field_id".to_string(), field_id.to_string());
@@ -147,14 +257,21 @@ fn postgres_type_to_arrow_type(
             field.with_metadata(metadata)
         }
         Kind::Enum(_) => Field::new(name, DataType::Utf8, nullable),
+        // Rejected when the mirror is created; never panic on one that slips through.
         _ => {
-            todo!("Unsupported type: {:?}", typ);
+            return Err(UnsupportedColumn {
+                column: name.to_string(),
+                oid: typ.oid(),
+                type_name: typ.name().to_string(),
+            })
         }
-    }
+    })
 }
 
 /// Convert a PostgreSQL TableSchema to an Arrow Schema
-pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema, IdentityProp) {
+pub fn postgres_schema_to_moonlink_schema(
+    table_schema: &TableSchema,
+) -> Result<(Schema, IdentityProp), ReplicationClientError> {
     let mut field_id = 0; // Used to indicate different columns, including internal fields within complex type.
     let fields: Vec<Field> = table_schema
         .column_schemas
@@ -168,7 +285,14 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
                 &mut field_id,
             )
         })
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(|unsupported| {
+            ReplicationClientError::UnsupportedType(
+                format!("{} ({})", unsupported.column, unsupported.type_name),
+                unsupported.oid,
+                table_schema.table_name.to_string(),
+            )
+        })?;
 
     let identity = match &table_schema.lookup_key {
         LookupKey::Key { name: _, columns } => {
@@ -179,14 +303,19 @@ pub fn postgres_schema_to_moonlink_schema(table_schema: &TableSchema) -> (Schema
                         .column_schemas
                         .iter()
                         .position(|cs| cs.name == *c)
-                        .unwrap()
+                        .ok_or_else(|| {
+                            ReplicationClientError::MissingColumn(
+                                c.clone(),
+                                table_schema.table_name.to_string(),
+                            )
+                        })
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             IdentityProp::new_key(columns, &fields)
         }
         LookupKey::FullRow => IdentityProp::FullRow,
     };
-    (Schema::new(fields), identity)
+    Ok((Schema::new(fields), identity))
 }
 
 pub(crate) struct PostgresTableRow(pub TableRow);
@@ -241,9 +370,13 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
             .into_iter()
             .map(|v| {
                 v.map(|n| match n {
+                    // Normalized when decoded, so the digits fit.
                     PgNumeric::Value(bigdecimal) => {
                         let (int_val, _) = bigdecimal.into_bigint_and_exponent();
-                        RowValue::Decimal(int_val.to_i128().unwrap())
+                        int_val
+                            .to_i128()
+                            .map(RowValue::Decimal)
+                            .unwrap_or(RowValue::Null)
                     }
                     _ => RowValue::Null,
                 })
@@ -293,7 +426,7 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
         ArrayCell::Json(values) => values
             .into_iter()
             .map(|v| {
-                v.map(|j| RowValue::ByteArray(j.to_string().as_bytes().to_vec()))
+                v.map(|j| RowValue::ByteArray(j.into_bytes()))
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
@@ -340,7 +473,7 @@ impl From<Cell> for RowValue {
             Cell::TimeStamp(value) => RowValue::Int64(value.and_utc().timestamp_micros()),
             Cell::TimeStampTz(value) => RowValue::Int64(value.timestamp_micros()),
             Cell::Uuid(value) => RowValue::FixedLenByteArray(*value.as_bytes()),
-            Cell::Json(value) => RowValue::ByteArray(value.to_string().as_bytes().to_vec()),
+            Cell::Json(value) => RowValue::ByteArray(value.into_bytes()),
             Cell::Bytes(value) => RowValue::ByteArray(value),
             Cell::Array(value) => RowValue::Array(convert_array_cell(value)),
             Cell::Composite(value) => {
@@ -350,9 +483,13 @@ impl From<Cell> for RowValue {
             }
             Cell::Numeric(value) => {
                 match value {
+                    // Normalized when decoded, so the digits fit.
                     PgNumeric::Value(bigdecimal) => {
                         let (int_val, _) = bigdecimal.into_bigint_and_exponent();
-                        RowValue::Decimal(int_val.to_i128().unwrap())
+                        int_val
+                            .to_i128()
+                            .map(RowValue::Decimal)
+                            .unwrap_or(RowValue::Null)
                     }
                     _ => {
                         // DevNote:
@@ -384,6 +521,113 @@ mod tests {
     use moonlink::row::RowValue;
     use std::str::FromStr;
 
+    #[test]
+    fn numeric_values_are_stored_exactly_or_rejected() {
+        let typmod = |precision: i32, scale: i32| ((precision << 16) | scale) + 4;
+        let decimal = |text: &str, modifier: i32| -> Result<i128, String> {
+            let cell = Cell::Numeric(text.parse::<PgNumeric>().unwrap());
+            match normalize_numeric_cell(&Type::NUMERIC, modifier, cell)? {
+                Cell::Numeric(PgNumeric::Value(v)) => {
+                    Ok(v.into_bigint_and_exponent().0.to_i128().unwrap())
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        // Unconstrained numeric is stored as decimal(38, 10).
+        assert_eq!(decimal("1.5", -1), Ok(15_000_000_000));
+        assert_eq!(decimal("-0.0000000001", -1), Ok(-1));
+        assert_eq!(
+            decimal("123456789012345678.5", -1),
+            Ok(1_234_567_890_123_456_785_000_000_000)
+        );
+        assert!(decimal("1.23456789012", -1)
+            .unwrap_err()
+            .contains("fractional digits"));
+        assert!(decimal("1e39", -1).unwrap_err().contains("does not fit"));
+        assert!(decimal("1e28", -1).unwrap_err().contains("does not fit"));
+        assert!(decimal("NaN", -1).unwrap_err().contains("NaN"));
+        assert!(decimal("Infinity", -1).unwrap_err().contains("Infinity"));
+        // Declared precision and scale.
+        assert_eq!(decimal("12.5", typmod(20, 5)), Ok(1_250_000));
+        assert!(decimal("1.000001", typmod(20, 5)).is_err());
+        // Array elements are scaled to the list item field, decimal(38, 10), whatever the
+        // column's typmod.
+        let array = Cell::Array(ArrayCell::Numeric(vec![
+            Some("2.50".parse().unwrap()),
+            None,
+        ]));
+        match normalize_numeric_cell(&Type::NUMERIC_ARRAY, typmod(10, 2), array).unwrap() {
+            Cell::Array(ArrayCell::Numeric(values)) => match &values[..] {
+                [Some(PgNumeric::Value(v)), None] => {
+                    assert_eq!(v.as_bigint_and_exponent(), (25_000_000_000i64.into(), 10))
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+        let item =
+            postgres_type_to_arrow_type(&Type::NUMERIC_ARRAY, typmod(10, 2), "a", true, &mut 0)
+                .ok()
+                .unwrap();
+        match item.data_type() {
+            DataType::List(item) => assert_eq!(item.data_type(), &DataType::Decimal128(38, 10)),
+            other => panic!("unexpected {other:?}"),
+        }
+        let bad = Cell::Array(ArrayCell::Numeric(vec![Some("NaN".parse().unwrap())]));
+        assert!(normalize_numeric_cell(&Type::NUMERIC_ARRAY, -1, bad).is_err());
+    }
+
+    #[test]
+    fn numeric_typmods_decimal128_cannot_store_are_rejected() {
+        let typmod = |precision: i32, scale: i32| ((precision << 16) | (scale & 0x7ff)) + 4;
+        let schema_with = |modifier: i32| TableSchema {
+            table_name: TableName {
+                schema: "public".to_string(),
+                name: "nums".to_string(),
+            },
+            src_table_id: 1,
+            column_schemas: vec![ColumnSchema {
+                name: "v".to_string(),
+                typ: Type::NUMERIC,
+                modifier,
+                nullable: true,
+            }],
+            lookup_key: LookupKey::FullRow,
+        };
+        for (precision, scale) in [(3, 6), (3, -3), (50, 2)] {
+            let err = postgres_schema_to_moonlink_schema(&schema_with(typmod(precision, scale)))
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains(&format!("numeric({precision},{scale})")),
+                "{err}"
+            );
+        }
+        assert!(postgres_schema_to_moonlink_schema(&schema_with(typmod(38, 10))).is_ok());
+        assert!(postgres_schema_to_moonlink_schema(&schema_with(-1)).is_ok());
+    }
+
+    #[test]
+    fn unsupported_column_type_is_an_error_not_a_panic() {
+        let table_schema = TableSchema {
+            table_name: TableName {
+                schema: "public".to_string(),
+                name: "ranges".to_string(),
+            },
+            src_table_id: 1,
+            column_schemas: vec![ColumnSchema {
+                name: "r".to_string(),
+                typ: Type::INT4_RANGE,
+                modifier: -1,
+                nullable: true,
+            }],
+            lookup_key: LookupKey::FullRow,
+        };
+        let err = postgres_schema_to_moonlink_schema(&table_schema).unwrap_err();
+        assert!(
+            matches!(err, crate::pg_replicate::clients::postgres::ReplicationClientError::UnsupportedType(ref column, _, ref relation) if column == "r (int4range)" && relation == "public.ranges"),
+            "{err:?}"
+        );
+    }
     #[test]
     fn test_table_schema_to_arrow_schema() {
         let table_schema = TableSchema {
@@ -607,7 +851,7 @@ mod tests {
             },
         };
 
-        let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema);
+        let (arrow_schema, identity) = postgres_schema_to_moonlink_schema(&table_schema).unwrap();
         assert_eq!(arrow_schema.fields().len(), 26);
 
         assert_eq!(arrow_schema.field(0).name(), "bool_field");
@@ -802,7 +1046,7 @@ mod tests {
                         .with_timezone(&Utc),
                 ),
                 Cell::Uuid(uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap()),
-                Cell::Json(serde_json::from_str(r#"{"name":"Alice"}"#).unwrap()),
+                Cell::Json(r#"{"name":"Alice"}"#.to_string()),
                 Cell::Null,
             ],
         });

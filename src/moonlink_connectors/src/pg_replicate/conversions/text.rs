@@ -62,6 +62,10 @@ pub enum ArrayParseError {
 
     #[error("missing braces")]
     MissingBraces,
+
+    /// Mirrors store one-dimensional arrays with default bounds only.
+    #[error("multi-dimensional arrays and arrays with explicit bounds are not supported")]
+    NotOneDimensional,
 }
 
 #[derive(Debug, Error)]
@@ -124,70 +128,12 @@ impl TextFormatConverter {
                     | Type::OID
                     | Type::OID_ARRAY
             ),
-            Kind::Array(_) => true,
-            Kind::Composite(_) => true,
+            // Arrays (all Kind::Array, so not matched above) are parsed when their element type
+            // is: the types above each have an array arm, composites are parsed element-wise.
+            // Composites need every field to be supported.
+            Kind::Array(inner) => Self::is_supported_type(inner),
+            Kind::Composite(fields) => fields.iter().all(|f| Self::is_supported_type(f.type_())),
             _ => false,
-        }
-    }
-
-    pub fn default_value(typ: &Type) -> Cell {
-        match *typ {
-            Type::BOOL => Cell::Bool(bool::default()),
-            Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::default())),
-            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                Cell::String(String::default())
-            }
-            Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY => Cell::Array(ArrayCell::String(Vec::default())),
-            Type::INT2 => Cell::I16(i16::default()),
-            Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::default())),
-            Type::INT4 => Cell::I32(i32::default()),
-            Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::default())),
-            Type::INT8 => Cell::I64(i64::default()),
-            Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(Vec::default())),
-            Type::FLOAT4 => Cell::F32(f32::default()),
-            Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::default())),
-            Type::FLOAT8 => Cell::F64(f64::default()),
-            Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::default())),
-            Type::NUMERIC => Cell::Numeric(PgNumeric::default()),
-            Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::default())),
-            Type::BYTEA => Cell::Bytes(Vec::default()),
-            Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::default())),
-            Type::DATE => Cell::Date(NaiveDate::MIN),
-            Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::default())),
-            Type::TIME => Cell::Time(NaiveTime::MIN),
-            Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::default())),
-            Type::TIMESTAMP => Cell::TimeStamp(NaiveDateTime::MIN),
-            Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::TimeStamp(Vec::default())),
-            Type::TIMESTAMPTZ => {
-                let val = DateTime::<Utc>::from_naive_utc_and_offset(NaiveDateTime::MIN, Utc);
-                Cell::TimeStampTz(val)
-            }
-            Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimeStampTz(Vec::default())),
-            Type::UUID => Cell::Uuid(Uuid::default()),
-            Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::default())),
-            Type::JSON | Type::JSONB => Cell::Json(serde_json::Value::default()),
-            Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::default())),
-            Type::OID => Cell::U32(u32::default()),
-            Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::default())),
-            _ => match typ.kind() {
-                Kind::Composite(_) => Cell::Composite(Vec::default()),
-                Kind::Array(inner_type) => {
-                    // Handle arrays of composite types.
-                    // Note: inner_type here refers to the element type of the array.
-                    // PostgreSQL supports multi-dimensional arrays (e.g., text[][]),
-                    // but we currently only handle arrays of composite types here.
-                    match inner_type.kind() {
-                        Kind::Composite(_) => Cell::Array(ArrayCell::Composite(Vec::default())),
-                        Kind::Array(_) => Cell::Null, // TODO: Multi-dimensional arrays not yet handled
-                        _ => Cell::Null,              // Unknown array type
-                    }
-                }
-                _ => Cell::Null,
-            },
         }
     }
 
@@ -199,14 +145,18 @@ impl TextFormatConverter {
                 |str| Ok(Some(parse_bool(str)?)),
                 ArrayCell::Bool,
             ),
-            Type::CHAR | Type::BPCHAR => Ok(Cell::String(str.trim_end().to_string())),
-            Type::VARCHAR | Type::NAME | Type::TEXT => Ok(Cell::String(str.to_string())),
-            Type::CHAR_ARRAY | Type::BPCHAR_ARRAY => TextFormatConverter::parse_array(
+            // character(n) pads with spaces, which (as in its cast to text) are not part of the
+            // value; any other trailing character is.
+            Type::BPCHAR => Ok(Cell::String(str.trim_end_matches(' ').to_string())),
+            Type::CHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+                Ok(Cell::String(str.to_string()))
+            }
+            Type::BPCHAR_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(str.trim_end().to_string())),
+                |str| Ok(Some(str.trim_end_matches(' ').to_string())),
                 ArrayCell::String,
             ),
-            Type::VARCHAR_ARRAY | Type::NAME_ARRAY | Type::TEXT_ARRAY => {
+            Type::CHAR_ARRAY | Type::VARCHAR_ARRAY | Type::NAME_ARRAY | Type::TEXT_ARRAY => {
                 TextFormatConverter::parse_array(
                     str,
                     |str| Ok(Some(str.to_string())),
@@ -326,13 +276,10 @@ impl TextFormatConverter {
                 |str| Ok(Some(Uuid::parse_str(str)?)),
                 ArrayCell::Uuid,
             ),
-            Type::JSON | Type::JSONB => {
-                let val = serde_json::from_str(str)?;
-                Ok(Cell::Json(val))
-            }
+            Type::JSON | Type::JSONB => Ok(Cell::Json(str.to_string())),
             Type::JSON_ARRAY | Type::JSONB_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(serde_json::from_str(str)?)),
+                |str| Ok(Some(str.to_string())),
                 ArrayCell::Json,
             ),
             Type::OID => {
@@ -374,6 +321,10 @@ impl TextFormatConverter {
             return Err(ArrayParseError::InputTooShort.into());
         }
 
+        // Postgres prefixes arrays with non-default bounds with their dimensions: '[0:1]={1,2}'.
+        if str.starts_with('[') {
+            return Err(ArrayParseError::NotOneDimensional.into());
+        }
         if !str.starts_with('{') || !str.ends_with('}') {
             return Err(ArrayParseError::MissingBraces.into());
         }
@@ -414,6 +365,11 @@ impl TextFormatConverter {
                         '\\' => in_escape = true,
                         ',' if !in_quotes => {
                             break;
+                        }
+                        // Element values containing braces are quoted, so an unquoted brace
+                        // opens or closes a nested dimension ('{{1,2},{3,4}}').
+                        '{' | '}' if !in_quotes => {
+                            return Err(ArrayParseError::NotOneDimensional.into());
                         }
                         c => {
                             val_str.push(c);
@@ -570,6 +526,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn arrays_that_are_not_one_dimensional_are_rejected() {
+        for (typ, text) in [
+            (Type::INT4_ARRAY, "{{1,2},{3,4}}"),
+            (Type::TEXT_ARRAY, "{{a,b},{c,d}}"),
+            (Type::INT4_ARRAY, "[0:1]={1,2}"),
+            (Type::TEXT_ARRAY, "[2:2]={x}"),
+        ] {
+            assert!(
+                matches!(
+                    TextFormatConverter::try_from_str(&typ, text),
+                    Err(FromTextError::InvalidArray(
+                        ArrayParseError::NotOneDimensional
+                    ))
+                ),
+                "{typ} {text}"
+            );
+        }
+        // Braces inside quoted elements are data, not dimensions.
+        match TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, r#"{"{a","b}"}"#).unwrap() {
+            Cell::Array(ArrayCell::String(values)) => {
+                assert_eq!(values, vec![Some("{a".to_string()), Some("b}".to_string())])
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_text_array_quoted_null_as_string() {
         let cell =
             TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, "{\"a\",\"null\"}").unwrap();
@@ -594,16 +577,22 @@ mod tests {
 
     #[test]
     fn parse_char_vs_varchar_trailing_spaces() {
-        // CHAR/BPCHAR should trim trailing spaces
-        let char_cell = TextFormatConverter::try_from_str(&Type::CHAR, "hello   ").unwrap();
+        // Type::CHAR is the one-byte "char" type, which is never padded: a space is its value.
+        let char_cell = TextFormatConverter::try_from_str(&Type::CHAR, " ").unwrap();
         match char_cell {
-            Cell::String(s) => assert_eq!(s, "hello"),
+            Cell::String(s) => assert_eq!(s, " "),
             _ => panic!("expected string cell, got: {char_cell:?}"),
         }
 
+        // character(n) (BPCHAR) drops its space padding, but nothing else.
         let bpchar_cell = TextFormatConverter::try_from_str(&Type::BPCHAR, "world   ").unwrap();
         match bpchar_cell {
             Cell::String(s) => assert_eq!(s, "world"),
+            _ => panic!("expected string cell, got: {bpchar_cell:?}"),
+        }
+        let bpchar_cell = TextFormatConverter::try_from_str(&Type::BPCHAR, "a\t  ").unwrap();
+        match bpchar_cell {
+            Cell::String(s) => assert_eq!(s, "a\t"),
             _ => panic!("expected string cell, got: {bpchar_cell:?}"),
         }
 
@@ -623,9 +612,9 @@ mod tests {
 
     #[test]
     fn parse_char_array_vs_varchar_array_trailing_spaces() {
-        // CHAR_ARRAY/BPCHAR_ARRAY should trim trailing spaces
+        // character(n)[] (BPCHAR_ARRAY) drops the elements' space padding
         let char_array_cell =
-            TextFormatConverter::try_from_str(&Type::CHAR_ARRAY, "{\"hello   \",\"world   \"}")
+            TextFormatConverter::try_from_str(&Type::BPCHAR_ARRAY, "{\"hello   \",\"world   \"}")
                 .unwrap();
         match char_array_cell {
             Cell::Array(ArrayCell::String(v)) => {
@@ -633,6 +622,16 @@ mod tests {
                     v,
                     vec![Some("hello".to_string()), Some("world".to_string())]
                 );
+            }
+            _ => panic!("expected string array cell, got: {char_array_cell:?}"),
+        }
+
+        // \"char\"[] elements are single characters, a space included
+        let char_array_cell =
+            TextFormatConverter::try_from_str(&Type::CHAR_ARRAY, "{\" \",a}").unwrap();
+        match char_array_cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![Some(" ".to_string()), Some("a".to_string())]);
             }
             _ => panic!("expected string array cell, got: {char_array_cell:?}"),
         }
