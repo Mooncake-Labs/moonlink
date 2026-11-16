@@ -36,6 +36,12 @@ impl TableEventManager {
         }
     }
 
+    /// Test-only: make the table's handler task die, like an unexpected crash.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn kill_table_handler_for_testing(&self) {
+        let _ = self.table_event_tx.send(TableEvent::KillForTest).await;
+    }
+
     /// Current table status.
     pub fn table_status(&self) -> TableStatus {
         self.table_status_rx.borrow().clone()

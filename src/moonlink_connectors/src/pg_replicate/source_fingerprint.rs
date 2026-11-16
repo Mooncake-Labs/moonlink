@@ -10,7 +10,9 @@
 //! it is first seen (created ahead of use): it is adopted, and its replica identity set. A
 //! partition that already holds rows, or any partition that leaves the table (detached or
 //! dropped), errors the mirror: whether those rows were ever replicated cannot be told from the
-//! catalog. So does an unlogged or foreign partition, whose changes are never decoded.
+//! catalog. So does an unlogged or foreign partition, whose changes are never decoded, and an
+//! inheritance child of a regular table, a renamed value of an enum its columns use, leaving the
+//! publication, and becoming a partition of a published table (which then carries its changes).
 
 use crate::errored_tables::table_file_path;
 use crate::pg_replicate::table::{LookupKey, SrcTableId, TableSchema};
@@ -49,6 +51,11 @@ pub struct SourceFingerprint {
     /// new one, so a partition detached and attached again between two checks shows here.
     #[serde(default)]
     pub attachments: BTreeMap<u32, String>,
+    /// The labels of every enum value its columns can hold (directly, in arrays, domains or
+    /// composites), by pg_enum oid. Mirrors store the label, so a renamed value would leave every
+    /// existing row with the old one; a new value is harmless.
+    #[serde(default)]
+    pub enum_labels: BTreeMap<u32, String>,
 }
 
 /// How the source compares with a recorded fingerprint.
@@ -137,13 +144,55 @@ pub async fn fetch(
     .iter()
     .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
     .collect();
+    let enum_labels = rows(
+        client
+            .simple_query(&format!(
+                "WITH RECURSIVE used(oid) AS ( \
+                   SELECT atttypid FROM pg_attribute \
+                   WHERE attrelid = {relid} AND attnum > 0 AND NOT attisdropped \
+                   UNION \
+                   SELECT inner_type.oid FROM used JOIN pg_type t ON t.oid = used.oid, \
+                   LATERAL (SELECT t.typelem WHERE t.typelem <> 0 \
+                            UNION ALL SELECT t.typbasetype WHERE t.typbasetype <> 0 \
+                            UNION ALL SELECT a.atttypid FROM pg_attribute a \
+                            WHERE t.typrelid <> 0 AND a.attrelid = t.typrelid \
+                            AND a.attnum > 0 AND NOT a.attisdropped) inner_type(oid)) \
+                 SELECT e.oid, e.enumlabel FROM pg_enum e WHERE e.enumtypid IN \
+                 (SELECT oid FROM used);"
+            ))
+            .await?,
+    )
+    .iter()
+    .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+    .collect();
     Ok(Some(SourceFingerprint {
         value_format_version: VALUE_FORMAT_VERSION,
         relid,
         columns,
         partitions,
         attachments,
+        enum_labels,
     }))
+}
+
+/// Whether a regular table has inheritance children (partitions of a partitioned table are
+/// published through it and do not count; nor do temporary children, whose rows only their own
+/// session sees and whose changes are never decoded).
+async fn has_inheritance_children(
+    client: &Client,
+    relid: SrcTableId,
+) -> Result<bool, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent \
+                 JOIN pg_class child ON child.oid = i.inhrelid \
+                 WHERE i.inhparent = {relid} AND c.relkind = 'r' \
+                 AND child.relpersistence <> 't' LIMIT 1;"
+            ))
+            .await?,
+    );
+    Ok(!found.is_empty())
 }
 
 /// A partition whose changes logical decoding never sees (unlogged, or a foreign table), as a
@@ -173,6 +222,66 @@ pub async fn unreplicated_partition(
         };
         format!("partition {name} is {what}, so postgres never sends its changes")
     }))
+}
+
+/// Whether the table is in moonlink's publication. Only then does postgres send its changes.
+async fn in_publication(client: &Client, relid: SrcTableId) -> Result<bool, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT 1 FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid \
+                 WHERE p.pubname = 'moonlink_pub' AND r.prrelid = {relid}::oid;"
+            ))
+            .await?,
+    );
+    Ok(!found.is_empty())
+}
+
+/// The members of moonlink's publication among the partitioned tables above the table, by oid,
+/// with schema-qualified names. With publish_via_partition_root, postgres publishes a partition's
+/// changes only as those of the topmost partitioned table in the publication, so the
+/// partition's own mirror receives nothing.
+pub async fn published_ancestors(
+    client: &Client,
+    relid: SrcTableId,
+) -> Result<Vec<(SrcTableId, String)>, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT c.oid, format('%I.%I', n.nspname, c.relname) \
+                 FROM pg_partition_ancestors({relid}::oid::regclass) a \
+                 JOIN pg_publication_rel r ON r.prrelid = a.relid \
+                 JOIN pg_publication p ON p.oid = r.prpubid AND p.pubname = 'moonlink_pub' \
+                 JOIN pg_class c ON c.oid = a.relid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE a.relid <> {relid}::oid::regclass ORDER BY 2;"
+            ))
+            .await?,
+    );
+    Ok(found
+        .iter()
+        .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+        .collect())
+}
+
+/// The partitions of the table at any depth, by oid, with schema-qualified names.
+pub async fn partitions(
+    client: &Client,
+    relid: SrcTableId,
+) -> Result<Vec<(SrcTableId, String)>, tokio_postgres::Error> {
+    let found = rows(
+        client
+            .simple_query(&format!(
+                "SELECT c.oid, format('%I.%I', n.nspname, c.relname) \
+                 FROM pg_partition_tree({relid}::oid::regclass) t \
+                 JOIN pg_class c ON c.oid = t.relid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE t.relid <> {relid}::oid::regclass ORDER BY 2;"
+            ))
+            .await?,
+    );
+    Ok(found
+        .iter()
+        .map(|row| (field(row, 0), row.get(1).unwrap_or_default().to_string()))
+        .collect())
 }
 
 /// Name of a relation, and whether it holds no rows; None if it no longer exists.
@@ -219,6 +328,47 @@ pub async fn drift(
         return Ok(Drift::Changed(format!(
             "{}; schema changes are not supported",
             describe_column_change(&expected.columns, &current.columns)
+        )));
+    }
+    // A value's oid survives ALTER TYPE ... RENAME VALUE; values cannot be dropped.
+    for (value, label) in &expected.enum_labels {
+        match current.enum_labels.get(value) {
+            Some(now) if now == label => {}
+            Some(now) => {
+                return Ok(Drift::Changed(format!(
+                    "the enum value '{label}' its columns can hold was renamed to '{now}', and the \
+                     mirror's rows keep the old label"
+                )))
+            }
+            None => {
+                return Ok(Drift::Changed(format!(
+                    "the enum value '{label}' its columns can hold no longer exists"
+                )))
+            }
+        }
+    }
+    if has_inheritance_children(client, expected.relid).await? {
+        return Ok(Drift::Changed(
+            "it gained inheritance children, whose changes are not replicated with it (and \
+             which a query of the table includes)"
+                .to_string(),
+        ));
+    }
+    // Removed by hand, or by a drop of an earlier mirror of the table that finished late.
+    if !in_publication(client, expected.relid).await? {
+        return Ok(Drift::Changed(
+            "it is no longer in publication moonlink_pub, so postgres does not send its changes"
+                .to_string(),
+        ));
+    }
+    if let Some((_, ancestor)) = published_ancestors(client, expected.relid)
+        .await?
+        .into_iter()
+        .next()
+    {
+        return Ok(Drift::Changed(format!(
+            "it became a partition of {ancestor}, which is in publication moonlink_pub, so \
+             postgres now publishes its changes only as {ancestor}'s"
         )));
     }
     if let Some(partition) = unreplicated_partition(client, expected.relid).await? {

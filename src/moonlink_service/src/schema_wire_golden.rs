@@ -186,6 +186,6 @@ const EXPECTED_MAPPING: &str = r#"
     c_uuid FixedSizeBinary(16) nullable=true [ARROW:extension:name=arrow.uuid, PARQUET:field_id=25]
     c_json Utf8 nullable=true [ARROW:extension:metadata=, ARROW:extension:name=arrow.json, PARQUET:field_id=26]
     c_jsonb Utf8 nullable=true [ARROW:extension:metadata=, ARROW:extension:name=arrow.json, PARQUET:field_id=27]
-    c_enum Utf8 nullable=true []
-    c_composite Struct([Field { name: "x", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"PARQUET:field_id": "28"} }, Field { name: "y", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"PARQUET:field_id": "29"} }]) nullable=true [PARQUET:field_id=30]
+    c_enum Utf8 nullable=true [PARQUET:field_id=28]
+    c_composite Struct([Field { name: "x", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"PARQUET:field_id": "29"} }, Field { name: "y", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"PARQUET:field_id": "30"} }]) nullable=true [PARQUET:field_id=31]
 "#;

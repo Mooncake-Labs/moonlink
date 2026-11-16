@@ -243,6 +243,20 @@ impl MoonlinkBackend {
         Ok(())
     }
 
+    /// Test-only: make a mirror's table handler task die, like an unexpected crash.
+    #[cfg(feature = "test-utils")]
+    pub async fn kill_table_handler_for_testing(
+        &self,
+        database: String,
+        table: String,
+    ) -> Result<()> {
+        let mut manager = self.replication_manager.write().await;
+        let mooncake_table_id = MooncakeTableId { database, table };
+        let writer = manager.get_table_event_manager(&mooncake_table_id)?;
+        writer.kill_table_handler_for_testing().await;
+        Ok(())
+    }
+
     /// Create a table in the database.
     ///
     /// # Arguments

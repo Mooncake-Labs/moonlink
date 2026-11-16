@@ -151,6 +151,9 @@ pub enum TableEvent {
     /// Test-only: how long an errored table waits for background tasks before dropping.
     #[cfg(test)]
     SetErroredDropWaitForTest { wait: std::time::Duration },
+    /// Test-only: make the table's handler task die (panic), like an unexpected crash.
+    #[cfg(any(test, feature = "test-utils"))]
+    KillForTest,
     /// Test-only: how long garbage collection keeps superseded files when no read path reports
     /// live readers (harnesses that drive a table handler without a ReadStateManager).
     #[cfg(test)]

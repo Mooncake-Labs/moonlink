@@ -114,6 +114,19 @@ async fn scan_rows(
     col: &str,
     timeout: Duration,
 ) -> Option<BTreeMap<i64, Option<String>>> {
+    scan_rows_as(backend, dst, lsn, col, timeout, None).await
+}
+
+/// [`scan_rows`], with the column cast to `as_type` first (e.g. dates and timestamps as their
+/// stored day or microsecond counts).
+async fn scan_rows_as(
+    backend: &MoonlinkBackend,
+    dst: &str,
+    lsn: u64,
+    col: &str,
+    timeout: Duration,
+    as_type: Option<DataType>,
+) -> Option<BTreeMap<i64, Option<String>>> {
     let state = tokio::time::timeout(
         timeout,
         backend.scan_table(DB.to_string(), dst.to_string(), Some(lsn)),
@@ -143,6 +156,10 @@ async fn scan_rows(
                 .unwrap()
                 .clone();
             let column = batch.column_by_name(col).unwrap();
+            let column = match &as_type {
+                Some(as_type) => &cast(column, as_type).unwrap(),
+                None => column,
+            };
             // Nested values (lists, structs) have no cast to text and bytes may not be utf-8;
             // display them instead (bytes as hex).
             let vals = match column.data_type() {
@@ -462,6 +479,19 @@ async fn snapshot_error(backend: &MoonlinkBackend, dst: &str, lsn: u64) -> Optio
     .expect("create_snapshot timed out")
     .err()
     .map(|e| error_text(&e))
+}
+
+/// Wait (up to 20 s) for the source comparison, which polls every 5 s, to error `dst`. Asks for a
+/// snapshot at `reached`, an LSN the mirror already reached, so a healthy mirror answers at once
+/// instead of waiting for a commit an erroring one never applies.
+async fn wait_until_errored(backend: &MoonlinkBackend, dst: &str, reached: u64) -> String {
+    for _ in 0..20 {
+        if let Some(err) = snapshot_error(backend, dst, reached).await {
+            return err;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    panic!("{dst} was not errored within 20 s");
 }
 
 /// Any change to a mirrored table's definition puts that mirror, and only that mirror, into the
@@ -1220,6 +1250,103 @@ async fn numeric_values_are_exact_or_error_the_mirror() {
     assert!(big.contains("does not fit"), "{big}");
 }
 
+/// Source rows of `table` as id -> `col` as text (Postgres' own rendering of the value).
+async fn source_rows(client: &Client, table: &str, col: &str) -> BTreeMap<i64, Option<String>> {
+    client
+        .query(&format!("SELECT id, {col}::text FROM {table}"), &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, Option<String>>(1)))
+        .collect()
+}
+
+/// numeric(38,s) values at both ends of their range, including unscaled values far beyond 96 bits,
+/// replicate exactly through the initial copy and CDC, persist to iceberg (whose column bounds
+/// must not panic or be wrong) and read back exactly after a restart.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn numeric_38_digit_values_survive_snapshots_and_restart() {
+    const MAX_38_10: &str = "9999999999999999999999999999.9999999999";
+    const MAX_38_0: &str = "99999999999999999999999999999999999999";
+    // 2^96: the first unscaled value rust_decimal cannot hold.
+    const TWO_POW_96: &str = "79228162514264337593543950336";
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_num38;
+         CREATE TABLE rv_num38 (id BIGINT PRIMARY KEY, n NUMERIC(38, 10), w NUMERIC(38, 0));
+         INSERT INTO rv_num38 VALUES
+           (1, {MAX_38_10}, {MAX_38_0}),
+           (2, -{MAX_38_10}, -{MAX_38_0}),
+           (3, 1234567890123456789012345678.1234567890, NULL),
+           (4, 0, 0);"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_num38_mc", "public.rv_num38", &uri).await;
+    client
+        .simple_query(&format!(
+            "INSERT INTO rv_num38 VALUES
+               (5, -1234567890123456789012345678.1234567890, {TWO_POW_96}),
+               (6, 0.0000000001, -{TWO_POW_96}),
+               (7, -0.0000000001, {MAX_38_0});
+             UPDATE rv_num38 SET n = -{MAX_38_10}, w = {MAX_38_0} WHERE id = 4;
+             DELETE FROM rv_num38 WHERE id = 7;"
+        ))
+        .await
+        .unwrap();
+    let source_n = source_rows(&client, "rv_num38", "n").await;
+    let source_w = source_rows(&client, "rv_num38", "w").await;
+    assert_eq!(source_n.len(), 6);
+
+    let timeout = Duration::from_secs(60);
+    let lsn = current_wal_lsn(&client).await;
+    let check = async |backend: &MoonlinkBackend, lsn: u64, when: &str| {
+        let n = scan_rows(backend, "rv_num38_mc", lsn, "n", timeout).await;
+        assert_eq!(n.as_ref(), Some(&source_n), "n {when}");
+        let w = scan_rows(backend, "rv_num38_mc", lsn, "w", timeout).await;
+        assert_eq!(w.as_ref(), Some(&source_w), "w {when}");
+    };
+    check(&backend, lsn, "before the iceberg snapshot").await;
+    assert_eq!(snapshot_error(&backend, "rv_num38_mc", lsn).await, None);
+    check(&backend, lsn, "after the iceberg snapshot").await;
+
+    // Restart: the table is loaded back from iceberg, including its column bounds.
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    check(&backend, lsn, "after a restart").await;
+
+    // A later commit persists another file next to the loaded one.
+    client
+        .simple_query(&format!(
+            "UPDATE rv_num38 SET n = {MAX_38_10} WHERE id = 2;"
+        ))
+        .await
+        .unwrap();
+    let source_n = source_rows(&client, "rv_num38", "n").await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_num38_mc", lsn).await, None);
+    let n = scan_rows(&backend, "rv_num38_mc", lsn, "n", timeout).await;
+    assert_eq!(
+        n.as_ref(),
+        Some(&source_n),
+        "n after a commit following the restart"
+    );
+
+    // Compaction rewrites the files (and their bounds); the result loads after another restart.
+    backend
+        .optimize_table(DB.to_string(), "rv_num38_mc".to_string(), "full")
+        .await
+        .unwrap();
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    let n = scan_rows(&backend, "rv_num38_mc", lsn, "n", timeout).await;
+    assert_eq!(n, Some(source_n), "n after compaction and a restart");
+    let w = scan_rows(&backend, "rv_num38_mc", lsn, "w", timeout).await;
+    assert_eq!(w, Some(source_w), "w after compaction and a restart");
+}
+
 /// Arrays that are not one-dimensional with default bounds cannot be mirrored: a mirror that
 /// receives one is errored (never silently mangled or dropped together with its transaction),
 /// and creating a mirror of a table that holds one fails cleanly.
@@ -1304,7 +1431,7 @@ async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[
         .await
         .unwrap_err();
     assert!(
-        err.contains("not supported") && err.contains("numeric("),
+        err.contains("has a type mirrors cannot store") && err.contains("numeric("),
         "{err}"
     );
     wait_for_no_slots(&client).await;
@@ -1312,7 +1439,7 @@ async fn unrepresentable_numeric_typmod_is_refused(#[case] column_type: &str, #[
 
 /// Inheritance parents cannot be mirrored faithfully (children's changes are not replicated with
 /// the parent): creating such a mirror is refused, and a mirror whose table gained a child is
-/// errored at the next start rather than silently diverging.
+/// errored, at the next start or within seconds while running, rather than silently diverging.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn inheritance_parent_is_refused() {
@@ -1321,7 +1448,9 @@ async fn inheritance_parent_is_refused() {
         "DROP TABLE IF EXISTS rv_parent, rv_later_parent CASCADE;
          CREATE TABLE rv_parent (id BIGINT, v TEXT);
          CREATE TABLE rv_child (extra INT) INHERITS (rv_parent);
-         CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);",
+         CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);
+         DROP TABLE IF EXISTS rv_parent_ok CASCADE;
+         CREATE TABLE rv_parent_ok (id BIGINT PRIMARY KEY);",
     )
     .await;
     let backend = Arc::new(backend);
@@ -1345,12 +1474,84 @@ async fn inheritance_parent_is_refused() {
         .await
         .unwrap();
     let backend = new_backend(&tmp).await.unwrap();
+    mirror(
+        &backend,
+        &tmp,
+        "rv_parent_ok_mc",
+        "public.rv_parent_ok",
+        &uri,
+    )
+    .await;
     let err = scan_error(&backend, "rv_later_parent_mc")
         .await
         .expect("must be errored after a child appeared");
     assert!(err.contains("inheritance children"), "{err}");
+
+    // A temporary child does not count: other sessions never see its rows, and its changes are
+    // never decoded.
+    {
+        let (session, _) = connect_to_postgres(&uri).await;
+        session
+            .simple_query(
+                "CREATE TEMPORARY TABLE rv_temp_child () INHERITS (rv_parent_ok);
+                 INSERT INTO rv_temp_child VALUES (99);",
+            )
+            .await
+            .unwrap();
+        // Past a source comparison, then a change, so the snapshot has a commit to reach.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        client
+            .simple_query("INSERT INTO rv_parent_ok VALUES (1);")
+            .await
+            .unwrap();
+        let lsn = current_wal_lsn(&client).await;
+        assert_eq!(snapshot_error(&backend, "rv_parent_ok_mc", lsn).await, None);
+        assert_eq!(
+            scan_ids(&backend, "rv_parent_ok_mc", lsn).await,
+            Some(vec![1])
+        );
+    }
+
+    // While running: the source is compared again within seconds.
     client
-        .simple_query("DROP TABLE rv_parent, rv_later_parent CASCADE;")
+        .simple_query(
+            "DROP TABLE rv_later_parent CASCADE; CREATE TABLE rv_later_parent (id BIGINT PRIMARY KEY);",
+        )
+        .await
+        .unwrap();
+    backend
+        .drop_table(DB.to_string(), "rv_later_parent_mc".to_string())
+        .await
+        .unwrap();
+    let backend = Arc::new(backend);
+    try_mirror(
+        &backend,
+        &tmp,
+        "rv_later_parent_mc",
+        "public.rv_later_parent",
+        &uri,
+    )
+    .await
+    .unwrap();
+    client
+        .simple_query("INSERT INTO rv_later_parent VALUES (1);")
+        .await
+        .unwrap();
+    let reached = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_later_parent_mc", reached).await,
+        Some(vec![1])
+    );
+    client
+        .simple_query(
+            "CREATE TABLE rv_later_child () INHERITS (rv_later_parent); INSERT INTO rv_later_child VALUES (7);",
+        )
+        .await
+        .unwrap();
+    let err = wait_until_errored(&backend, "rv_later_parent_mc", reached).await;
+    assert!(err.contains("gained inheritance children"), "{err}");
+    client
+        .simple_query("DROP TABLE rv_parent, rv_later_parent, rv_parent_ok CASCADE;")
         .await
         .unwrap();
 }
@@ -1718,8 +1919,8 @@ async fn character_and_bytea_values_are_exact() {
 /// Arrays and composites whose element or field type cannot be converted are refused when the
 /// mirror is created, even for an empty table, instead of erroring it at the first row.
 #[rstest::rstest]
-#[case::enum_array("rv_mood[]")]
 #[case::interval_array("INTERVAL[]")]
+#[case::domain_over_interval("rv_dspan")]
 #[case::composite_with_interval("rv_span")]
 #[case::array_of_composite_with_interval("rv_span[]")]
 #[tokio::test(flavor = "multi_thread")]
@@ -1728,9 +1929,11 @@ async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(&format!(
         "DROP TABLE IF EXISTS rv_nested;
-         DROP TYPE IF EXISTS rv_mood, rv_span;
+         DROP TYPE IF EXISTS rv_mood, rv_span CASCADE;
+         DROP DOMAIN IF EXISTS rv_dspan;
          CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
          CREATE TYPE rv_span AS (n INT, d INTERVAL);
+         CREATE DOMAIN rv_dspan AS INTERVAL;
          CREATE TABLE rv_nested (id BIGINT PRIMARY KEY, v {column_type});"
     ))
     .await;
@@ -1738,7 +1941,11 @@ async fn nested_unsupported_types_are_refused(#[case] column_type: &str) {
     let err = try_mirror(&backend, &tmp, "rv_nested_mc", "public.rv_nested", &uri)
         .await
         .unwrap_err();
-    assert!(err.contains("is not supported"), "{err}");
+    assert!(
+        err.contains("cannot be mirrored: column v (")
+            && err.contains(") has a type mirrors cannot store"),
+        "{err}"
+    );
     wait_for_no_slots(&client).await;
 
     // Arrays of supported types (and of supported composites) are still accepted.
@@ -3744,22 +3951,18 @@ async fn unlogged_partition_errors_the_mirror(#[case] ddl: &str) {
     )
     .await;
     mirror(&backend, &tmp, "rv_part_mc", "public.rv_part", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_part VALUES (2, 'b');")
+        .await
+        .unwrap();
+    let reached = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_ids(&backend, "rv_part_mc", reached).await,
+        Some(vec![1, 2])
+    );
     client.simple_query(ddl).await.unwrap();
-    // Nothing of an unlogged partition reaches the stream; the source is polled every 5 s.
-    let mut err = None;
-    for _ in 0..20 {
-        client
-            .simple_query("INSERT INTO rv_part VALUES (2, 'b') ON CONFLICT (id) DO UPDATE SET v = rv_part.v || 'x';")
-            .await
-            .unwrap();
-        let lsn = current_wal_lsn(&client).await;
-        err = snapshot_error(&backend, "rv_part_mc", lsn).await;
-        if err.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let err = err.expect("a mirror with an unlogged partition must be errored");
+    // Nothing of an unlogged partition reaches the stream; the source is compared every 5 s.
+    let err = wait_until_errored(&backend, "rv_part_mc", reached).await;
     assert!(
         err.contains("is unlogged, so postgres never sends its changes"),
         "{err}"
@@ -3834,6 +4037,977 @@ async fn unlogged_partitioned_member_with_logged_leaves_replicates() {
     );
     client
         .simple_query("DROP TABLE IF EXISTS rv_part;")
+        .await
+        .unwrap();
+}
+
+/// Dates and timestamps before year 1 (BC) or after 9999 replicate exactly, in the initial copy
+/// and through CDC; infinite ones cannot be stored in a mirror, so they refuse the copy and error
+/// the mirror instead of being dropped.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dates_beyond_years_1_to_9999_replicate_and_infinity_errors() {
+    let values = [
+        ("2040-04-10 BC", "2040-04-10 12:34:56.5 BC"),
+        ("0001-01-01 BC", "0001-01-01 00:00:00 BC"),
+        ("0001-01-01", "0001-01-01 23:59:59.999999"),
+        ("1900-02-28", "1900-02-28 01:02:03"),
+        ("10000-01-01", "10000-01-01 23:59:59.999999"),
+        ("12345-06-07", "12345-06-07 12:00:00"),
+    ];
+    let row = |id: usize, (date, ts): &(&str, &str)| format!("({id}, '{date}', '{ts}', '{ts}')");
+    let copied: Vec<String> = values.iter().enumerate().map(|(i, v)| row(i, v)).collect();
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_dates, rv_inf;
+         CREATE TABLE rv_dates (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ);
+         INSERT INTO rv_dates VALUES {};
+         CREATE TABLE rv_inf (id BIGINT PRIMARY KEY, d DATE);
+         INSERT INTO rv_inf VALUES (1, 'infinity');",
+        copied.join(", ")
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_dates_mc", "public.rv_dates", &uri).await;
+    let streamed: Vec<String> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| row(i + 100, v))
+        .collect();
+    client
+        .simple_query(&format!(
+            "INSERT INTO rv_dates VALUES {}; UPDATE rv_dates SET ts = ts - interval '1 day' WHERE id = 3;",
+            streamed.join(", ")
+        ))
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    for (column, epoch) in [
+        ("d", "(d - DATE '1970-01-01')::bigint"),
+        ("ts", "(extract(epoch FROM ts) * 1000000)::bigint"),
+        ("tz", "(extract(epoch FROM tz) * 1000000)::bigint"),
+    ] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {epoch}::text FROM rv_dates"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(source.len(), 12);
+        let mirror = scan_rows_as(
+            &backend,
+            "rv_dates_mc",
+            lsn,
+            column,
+            Duration::from_secs(30),
+            Some(DataType::Int64),
+        )
+        .await;
+        assert_eq!(mirror, Some(source), "column {column}");
+    }
+
+    let backend = Arc::new(backend);
+    let err = try_mirror(&backend, &tmp, "rv_inf_mc", "public.rv_inf", &uri)
+        .await
+        .unwrap_err();
+    assert!(err.contains("infinite date or timestamp"), "{err}");
+    client
+        .simple_query("INSERT INTO rv_dates VALUES (200, 'infinity', '2020-01-01', '2020-01-01');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = snapshot_error(&backend, "rv_dates_mc", lsn)
+        .await
+        .expect("an infinite date must error the mirror");
+    assert!(err.contains("infinite date or timestamp"), "{err}");
+}
+
+/// The mirror of rv_dom matches the source in every column (Postgres text, with arrays printed
+/// like the mirror's lists).
+async fn check_rv_dom(backend: &MoonlinkBackend, client: &Client, lsn: u64, step: &str) {
+    assert_eq!(
+        snapshot_error(backend, "rv_dom_mc", lsn).await,
+        None,
+        "{step}"
+    );
+    for column in ["d", "t", "n", "dd", "e", "ea", "da", "ad"] {
+        let expected = if ["ea", "da", "ad"].contains(&column) {
+            format!("'[' || array_to_string({column}, ', ', '') || ']'")
+        } else {
+            format!("{column}::text")
+        };
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {expected} FROM rv_dom"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            scan_rows(backend, "rv_dom_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "{step}: column {column}"
+        );
+    }
+}
+
+/// Domains are mirrored as their base type (with the domain's modifier, e.g. numeric(10,2)), also
+/// a domain over a domain or over an array, and arrays of domains; enums (and arrays of them) as
+/// their labels. Values replicate exactly in the copy, through CDC and after a restart.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn domains_and_enums_replicate() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_dom;
+         DROP DOMAIN IF EXISTS rv_dposint, rv_dposint2, rv_dtext, rv_dnum, rv_dints CASCADE;
+         DROP TYPE IF EXISTS rv_rainbow CASCADE;
+         CREATE DOMAIN rv_dposint AS INT CHECK (VALUE > 0);
+         CREATE DOMAIN rv_dposint2 AS rv_dposint;
+         CREATE DOMAIN rv_dtext AS VARCHAR(10);
+         CREATE DOMAIN rv_dnum AS NUMERIC(10, 2);
+         CREATE DOMAIN rv_dints AS INT[];
+         CREATE TYPE rv_rainbow AS ENUM ('red', 'green', 'blue');
+         CREATE TABLE rv_dom (id BIGINT PRIMARY KEY, d rv_dposint, t rv_dtext, n rv_dnum,
+             dd rv_dposint2, e rv_rainbow, ea rv_rainbow[], da rv_dposint[], ad rv_dints);
+         INSERT INTO rv_dom VALUES
+             (1, 5, 'abc', 1.25, 7, 'green', '{red,blue}', '{1,2}', '{3,NULL}'),
+             (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_dom_mc", "public.rv_dom", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_dom VALUES (3, 9, 'xyz', 12345678.9, 1, 'blue', '{}', '{4}', '{5,6}');
+             UPDATE rv_dom SET n = 0.5, e = 'red', ea = '{green}' WHERE id = 1;
+             DELETE FROM rv_dom WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    check_rv_dom(&backend, &client, lsn, "copy and CDC").await;
+
+    let backend = restart_with(
+        backend,
+        &tmp,
+        &client,
+        &uri,
+        "INSERT INTO rv_dom VALUES (4, 2, 'q', 3.5, 2, 'green', '{blue}', '{7}', '{8}');",
+    )
+    .await;
+    client
+        .simple_query("UPDATE rv_dom SET t = 'after' WHERE id = 3;")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    check_rv_dom(&backend, &client, lsn, "after a restart").await;
+}
+
+/// Multi-level partitions whose physical column order differs from the root's (created
+/// standalone and attached), including a sub-partitioned member attached empty after the mirror
+/// was created, replicate exactly through the root: no panic on their relation messages.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn multi_level_partitions_with_another_column_order_replicate() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ml CASCADE;
+         CREATE TABLE rv_ml (id BIGINT, b INT, c TEXT, d INT, PRIMARY KEY (id, b, c))
+             PARTITION BY RANGE (b);
+         CREATE TABLE rv_ml1 (b INT NOT NULL, id BIGINT NOT NULL, c TEXT NOT NULL, d INT)
+             PARTITION BY RANGE (c);
+         CREATE TABLE rv_ml11 (c TEXT NOT NULL, d INT, b INT NOT NULL, id BIGINT NOT NULL);
+         ALTER TABLE rv_ml1 ATTACH PARTITION rv_ml11 FOR VALUES FROM ('a') TO ('m');
+         ALTER TABLE rv_ml ATTACH PARTITION rv_ml1 FOR VALUES FROM (2) TO (10);
+         INSERT INTO rv_ml VALUES (1, 2, 'a', 1), (2, 3, 'b', 2);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_ml_mc", "public.rv_ml", &uri).await;
+    client
+        .simple_query(
+            "CREATE TABLE rv_ml5 (c TEXT NOT NULL, id BIGINT NOT NULL, b INT NOT NULL, d INT)
+                 PARTITION BY LIST (c);
+             CREATE TABLE rv_ml5_a (d INT, c TEXT NOT NULL, b INT NOT NULL, id BIGINT NOT NULL);
+             ALTER TABLE rv_ml5 ATTACH PARTITION rv_ml5_a FOR VALUES IN ('a');
+             ALTER TABLE rv_ml ATTACH PARTITION rv_ml5 FOR VALUES FROM (40) TO (50);",
+        )
+        .await
+        .unwrap();
+    // Let the source comparison adopt the new (empty) partitions first.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_ml VALUES (3, 45, 'a', 7), (4, 4, 'c', 8);
+             UPDATE rv_ml SET d = d + 100;
+             DELETE FROM rv_ml WHERE id = 1;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_ml_mc", lsn).await, None);
+    for column in ["b", "c", "d"] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {column}::text FROM rv_ml"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(source.len(), 3);
+        assert_eq!(
+            scan_rows(&backend, "rv_ml_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "column {column}"
+        );
+    }
+    client
+        .simple_query("DROP TABLE IF EXISTS rv_ml CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// Relation messages and changes for a published table that has no mirror (added to the
+/// publication by hand, or whose mirror was just dropped) are ignored: replication of the other
+/// mirrors goes on.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn changes_of_a_published_table_without_a_mirror_are_ignored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_known, rv_unknown;
+         CREATE TABLE rv_known (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_unknown (id BIGINT PRIMARY KEY, v TEXT);",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_known_mc", "public.rv_known", &uri).await;
+    client
+        .simple_query(
+            "ALTER PUBLICATION moonlink_pub ADD TABLE rv_unknown;
+             INSERT INTO rv_unknown VALUES (1, 'a');
+             ALTER TABLE rv_unknown ADD COLUMN w INT;
+             INSERT INTO rv_unknown VALUES (2, 'b', 2);
+             INSERT INTO rv_known VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_known_mc", lsn).await, Some(vec![1]));
+    client
+        .simple_query("INSERT INTO rv_known VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_known_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_known_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+}
+
+/// Dates and timestamps (and arrays of them, with BC and five-digit years) replicate exactly
+/// whatever TimeZone and DateStyle the mirror's role or database defaults to: a local zone prints
+/// old timestamptz values with second-precision (LMT) offsets, and a non-ISO DateStyle prints
+/// dates as DD/MM/YYYY.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dates_replicate_whatever_the_session_time_zone_and_date_style() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_tz;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_tz_role') THEN
+             EXECUTE 'DROP OWNED BY rv_tz_role'; DROP ROLE rv_tz_role;
+           END IF;
+         END $$;
+         CREATE ROLE rv_tz_role LOGIN SUPERUSER PASSWORD 'pwtz';
+         ALTER ROLE rv_tz_role SET TimeZone = 'America/Los_Angeles';
+         ALTER ROLE rv_tz_role SET DateStyle = 'SQL, DMY';
+         CREATE TABLE rv_tz (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP, tz TIMESTAMPTZ,
+             da DATE[], tza TIMESTAMPTZ[]);
+         INSERT INTO rv_tz VALUES
+             (1, '0044-03-15 BC', '0044-03-15 12:00:00 BC', '0044-03-15 12:00:00+00 BC',
+              '{\"0044-03-15 BC\",12345-06-07,NULL}',
+              '{\"0044-03-15 12:00:00+00 BC\",\"12345-06-07 00:00:00+00\"}'),
+             (2, '1800-01-01', '1800-01-01 00:00:00', '1800-01-01 00:00:00+00', '{}', NULL),
+             (3, '2020-06-30', '2020-06-30 23:59:59.5', '2020-06-30 23:59:59.5+00',
+              '{2020-06-30}', '{\"1850-01-01 00:00:00+00\"}');",
+    )
+    .await;
+    let role_uri = uri_for_user(&uri, "rv_tz_role", "pwtz");
+    mirror(&backend, &tmp, "rv_tz_mc", "public.rv_tz", &role_uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_tz VALUES
+                 (4, '1883-11-18', '1883-11-18 12:00:00', '1883-11-18 12:00:00+00',
+                  '{\"0001-01-01 BC\",10000-01-01}', '{\"1909-06-01 00:00:00+00\",NULL}'),
+                 (5, '0001-01-01 BC', '0001-01-01 00:00:00 BC', '1909-06-01 00:00:00+00',
+                  NULL, '{\"0001-12-31 23:59:59+00 BC\"}');
+             UPDATE rv_tz SET tz = tz + interval '1 second' WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_tz_mc", lsn).await, None);
+    for (column, epoch) in [
+        ("d", "(d - DATE '1970-01-01')::bigint"),
+        ("ts", "(extract(epoch FROM ts) * 1000000)::bigint"),
+        ("tz", "(extract(epoch FROM tz) * 1000000)::bigint"),
+        (
+            "da",
+            "CASE WHEN da IS NOT NULL THEN '[' || array_to_string(ARRAY(SELECT (x - DATE '1970-01-01')::text FROM unnest(da) x), ', ', '') || ']' END",
+        ),
+        (
+            "tza",
+            "CASE WHEN tza IS NOT NULL THEN '[' || array_to_string(ARRAY(SELECT (extract(epoch FROM x) * 1000000)::bigint::text FROM unnest(tza) x), ', ', '') || ']' END",
+        ),
+    ] {
+        let as_type = if column.ends_with('a') && column.len() > 1 {
+            DataType::List(Arc::new(arrow::datatypes::Field::new(
+                "item",
+                DataType::Int64,
+                true,
+            )))
+        } else {
+            DataType::Int64
+        };
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {epoch}::text FROM rv_tz"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            scan_rows_as(
+                &backend,
+                "rv_tz_mc",
+                lsn,
+                column,
+                Duration::from_secs(30),
+                Some(as_type)
+            )
+            .await,
+            Some(source),
+            "column {column}"
+        );
+    }
+}
+
+/// Mirrors store enum labels, so renaming a value (ALTER TYPE ... RENAME VALUE) would leave every
+/// existing row with the old label: whether the column holds the enum directly, in an array,
+/// through a domain or in a composite, the mirror is errored within seconds (and at recovery, if
+/// renamed while moonlink was stopped). Adding a value changes no existing row and is followed.
+#[rstest::rstest]
+#[case::direct("rv_mood", "'sad'")]
+#[case::array("rv_mood[]", "'{sad}'")]
+#[case::domain("rv_dmood", "'sad'")]
+#[case::composite("rv_feeling", "ROW('sad', 1)")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn renamed_enum_value_errors_the_mirror(#[case] column_type: &str, #[case] value: &str) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_en, rv_en_bystander;
+         DROP DOMAIN IF EXISTS rv_dmood CASCADE;
+         DROP TYPE IF EXISTS rv_feeling, rv_mood CASCADE;
+         CREATE TYPE rv_mood AS ENUM ('sad', 'happy');
+         CREATE DOMAIN rv_dmood AS rv_mood;
+         CREATE TYPE rv_feeling AS (m rv_mood, n INT);
+         CREATE TABLE rv_en (id BIGINT PRIMARY KEY, v {column_type});
+         CREATE TABLE rv_en_bystander (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_en VALUES (1, {value});"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_en_mc", "public.rv_en", &uri).await;
+    mirror(
+        &backend,
+        &tmp,
+        "rv_en_by_mc",
+        "public.rv_en_bystander",
+        &uri,
+    )
+    .await;
+
+    // A new value: followed, and rows using it replicate.
+    client
+        .simple_query("ALTER TYPE rv_mood ADD VALUE 'calm';")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    client
+        .simple_query("INSERT INTO rv_en (id) VALUES (2);")
+        .await
+        .unwrap();
+    let reached = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_en_mc", reached).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_en_mc", reached).await,
+        Some(vec![1, 2])
+    );
+
+    client
+        .simple_query("ALTER TYPE rv_mood RENAME VALUE 'sad' TO 'unhappy';")
+        .await
+        .unwrap();
+    let err = wait_until_errored(&backend, "rv_en_mc", reached).await;
+    assert!(
+        err.contains("enum value 'sad' its columns can hold was renamed to 'unhappy'"),
+        "{err}"
+    );
+    // The other mirror of the database is unaffected.
+    assert_eq!(scan_error(&backend, "rv_en_by_mc").await, None);
+
+    // Renamed while moonlink is stopped: errored at recovery.
+    let backend = Arc::new(backend);
+    backend
+        .drop_table(DB.to_string(), "rv_en_mc".to_string())
+        .await
+        .unwrap();
+    try_mirror(&backend, &tmp, "rv_en_mc", "public.rv_en", &uri)
+        .await
+        .unwrap();
+    let backend = Arc::into_inner(backend).unwrap();
+    let backend = restart_with(
+        backend,
+        &tmp,
+        &client,
+        &uri,
+        "ALTER TYPE rv_mood RENAME VALUE 'happy' TO 'glad';",
+    )
+    .await;
+    let err = scan_error(&backend, "rv_en_mc")
+        .await
+        .expect("renamed while stopped: errored at recovery");
+    assert!(err.contains("was renamed to 'glad'"), "{err}");
+    client
+        .simple_query("DROP TABLE rv_en; DROP DOMAIN rv_dmood; DROP TYPE rv_feeling, rv_mood;")
+        .await
+        .unwrap();
+}
+
+/// Make a mirror's table handler task die (needs the test-utils feature).
+#[cfg(feature = "test-utils")]
+async fn kill_table_handler(backend: &MoonlinkBackend, dst: &str) {
+    backend
+        .kill_table_handler_for_testing(DB.to_string(), dst.to_string())
+        .await
+        .unwrap();
+}
+
+#[cfg(not(feature = "test-utils"))]
+async fn kill_table_handler(_backend: &MoonlinkBackend, _dst: &str) {
+    panic!("killing a table handler needs --features test-utils");
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The source table's rows as id -> v.
+async fn source_rows_of(client: &Client, table: &str) -> BTreeMap<i64, Option<String>> {
+    client
+        .query(&format!("SELECT id, v FROM {table}"), &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// Drop + re-create (the remedy for every errored mirror) starts from the source alone: a mirror
+/// re-created under the same name never sees the dropped one's Iceberg snapshot or data files,
+/// whether the dropped mirror was healthy or its table task had died; also after a restart.
+#[rstest::rstest]
+#[case::healthy(false, false)]
+#[case::dead_table_task(true, false)]
+#[case::iceberg_table_left_by_an_interrupted_drop(false, true)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn recreated_mirror_starts_from_the_source_alone(
+    #[case] kill: bool,
+    #[case] leave_iceberg_table: bool,
+) {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_rc;
+         CREATE TABLE rv_rc (id BIGINT PRIMARY KEY, v TEXT);
+         INSERT INTO rv_rc SELECT i, 'old' FROM generate_series(1, 5) i;",
+    )
+    .await;
+    mirror(&backend, &tmp, "rv_rc_mc", "public.rv_rc", &uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_rc VALUES (6, 'old'); UPDATE rv_rc SET v = 'old2' WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    // Persisted to Iceberg (data files, deletion vectors, snapshot).
+    assert_eq!(snapshot_error(&backend, "rv_rc_mc", lsn).await, None);
+    if kill {
+        kill_table_handler(&backend, "rv_rc_mc").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // The mirror's iceberg table: <root>/<database>/<mirror>.
+    let iceberg_table = tmp.path().join(DB).join("rv_rc_mc");
+    let saved = tmp.path().join("saved_iceberg_table");
+    if leave_iceberg_table {
+        copy_dir(&iceberg_table, &saved);
+    }
+    backend
+        .drop_table(DB.to_string(), "rv_rc_mc".to_string())
+        .await
+        .unwrap();
+    // Nothing of the dropped mirror is left (its iceberg table and local files).
+    let mut leftovers = Vec::new();
+    let mut dirs = vec![tmp.path().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.to_string_lossy().contains("rv_rc_mc") {
+                leftovers.push(path.clone());
+            }
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    if leave_iceberg_table {
+        // As if the drop had been interrupted before deleting it.
+        copy_dir(&saved, &iceberg_table);
+    }
+
+    client
+        .simple_query(
+            "DELETE FROM rv_rc WHERE id IN (1, 3); UPDATE rv_rc SET v = 'new' WHERE id = 4;
+             INSERT INTO rv_rc VALUES (7, 'new');",
+        )
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_rc_mc", "public.rv_rc", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_rc VALUES (8, 'new');")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_rows(&backend, "rv_rc_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source_rows_of(&client, "rv_rc").await),
+        "after re-create"
+    );
+    // Persist the re-created mirror, then restart: recovery must load its own snapshot only.
+    assert_eq!(snapshot_error(&backend, "rv_rc_mc", lsn).await, None);
+    let backend = restart_with(
+        backend,
+        &tmp,
+        &client,
+        &uri,
+        "INSERT INTO rv_rc VALUES (9, 'new');",
+    )
+    .await;
+    client
+        .simple_query("UPDATE rv_rc SET v = 'newer' WHERE id = 5;")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(
+        scan_rows(&backend, "rv_rc_mc", lsn, "v", Duration::from_secs(30)).await,
+        Some(source_rows_of(&client, "rv_rc").await),
+        "after a restart"
+    );
+}
+
+/// Floats and bytea replicate exactly whatever extra_float_digits and bytea_output the mirror's
+/// role or database defaults to (extra_float_digits <= 0 would print rounded floats, escape
+/// output would print bytea in another format).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn floats_and_bytea_replicate_whatever_the_session_output_settings() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_out;
+         DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rv_out_role') THEN
+             EXECUTE 'DROP OWNED BY rv_out_role'; DROP ROLE rv_out_role;
+           END IF;
+         END $$;
+         CREATE ROLE rv_out_role LOGIN SUPERUSER PASSWORD 'pwout';
+         ALTER ROLE rv_out_role SET extra_float_digits = 0;
+         ALTER ROLE rv_out_role SET bytea_output = 'escape';
+         ALTER ROLE rv_out_role SET IntervalStyle = 'sql_standard';
+         CREATE TABLE rv_out (id BIGINT PRIMARY KEY, f8 DOUBLE PRECISION, f4 REAL,
+             fa DOUBLE PRECISION[], b BYTEA);
+         INSERT INTO rv_out VALUES
+             (1, 3.141592653589793, 3.1415927, '{1.0000000000000002,0.30000000000000004}',
+              '\\xdeadbeef00ff'),
+             (2, 123456.78901234567, 0.1, '{}', '\\x');",
+    )
+    .await;
+    let role_uri = uri_for_user(&uri, "rv_out_role", "pwout");
+    mirror(&backend, &tmp, "rv_out_mc", "public.rv_out", &role_uri).await;
+    client
+        .simple_query(
+            "INSERT INTO rv_out VALUES (3, 2.718281828459045, 2.7182817,
+                 '{12345678.123456789,NULL}', '\\x5c6e2700');
+             UPDATE rv_out SET f8 = 1.0000000000000002, b = '\\x01' WHERE id = 2;",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_out_mc", lsn).await, None);
+    for (column, expected) in [
+        ("f8", "f8::text"),
+        ("f4", "f4::text"),
+        (
+            "fa",
+            "'[' || array_to_string(ARRAY(SELECT x::text FROM unnest(fa) x), ', ', '') || ']'",
+        ),
+        ("b", "encode(b, 'hex')"),
+    ] {
+        let source: BTreeMap<i64, Option<String>> = client
+            .query(&format!("SELECT id, {expected} FROM rv_out"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            scan_rows(&backend, "rv_out_mc", lsn, column, Duration::from_secs(30)).await,
+            Some(source),
+            "column {column}"
+        );
+    }
+}
+
+/// How many times `table` appears in moonlink's publication.
+async fn published_count(client: &Client, table: &str) -> i64 {
+    client
+        .query_one(
+            "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'moonlink_pub' AND tablename = $1",
+            &[&table],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Dropping a mirror takes only its own table out of the publication. Dropping an inheritance
+/// parent's mirror (as its error asks, once the parent gained a child) must not take the child
+/// along: the child's own mirror would silently stop receiving changes.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn dropping_a_parents_mirror_keeps_its_childs_mirror_replicating() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_ih CASCADE;
+         CREATE TABLE rv_ih (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_ih_mc", "public.rv_ih", &uri).await;
+    client
+        .simple_query("CREATE TABLE rv_ih1 () INHERITS (rv_ih);")
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_ih1_mc", "public.rv_ih1", &uri).await;
+    client
+        .simple_query("INSERT INTO rv_ih1 VALUES (1);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(scan_ids(&backend, "rv_ih1_mc", lsn).await, Some(vec![1]));
+    let err = wait_until_errored(&backend, "rv_ih_mc", lsn).await;
+    assert!(err.contains("gained inheritance children"), "{err}");
+
+    backend
+        .drop_table(DB.to_string(), "rv_ih_mc".to_string())
+        .await
+        .unwrap();
+    assert_eq!(published_count(&client, "rv_ih").await, 0);
+    assert_eq!(published_count(&client, "rv_ih1").await, 1);
+    client
+        .simple_query("INSERT INTO rv_ih1 VALUES (2), (3);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_ih1_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_ih1_mc", lsn).await,
+        Some(vec![1, 2, 3])
+    );
+    client
+        .simple_query("DROP TABLE rv_ih CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// A temporary inheritance child does not stop its parent from being mirrored (or resumed): its
+/// rows are its session's alone and its changes are never decoded, so only the parent itself
+/// joins the publication (postgres refuses to publish a temporary table).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_table_with_a_temporary_child_can_be_mirrored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_tparent CASCADE;
+         CREATE TABLE rv_tparent (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_tparent VALUES (1);",
+    )
+    .await;
+    let (session, _) = connect_to_postgres(&uri).await;
+    session
+        .simple_query(
+            "CREATE TEMPORARY TABLE rv_tchild () INHERITS (rv_tparent);
+             INSERT INTO rv_tchild VALUES (99);",
+        )
+        .await
+        .unwrap();
+    let backend = Arc::new(backend);
+    try_mirror(&backend, &tmp, "rv_tparent_mc", "public.rv_tparent", &uri)
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO rv_tparent VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_tparent_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_tparent_mc", lsn).await,
+        Some(vec![1, 2])
+    );
+    drop(session);
+    client
+        .simple_query("DROP TABLE rv_tparent CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// postgres publishes a partition's changes only through the topmost partitioned table in the
+/// publication, so a partitioned table and one of its partitions cannot both be mirrored: the
+/// second is refused (in either order), and a mirrored table attached as a partition of a
+/// mirrored table is errored, rather than silently receiving nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_partitioned_table_and_its_partition_are_not_both_mirrored() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_proot, rv_pstandalone CASCADE;
+         CREATE TABLE rv_proot (id BIGINT PRIMARY KEY) PARTITION BY RANGE (id);
+         CREATE TABLE rv_pmid PARTITION OF rv_proot FOR VALUES FROM (0) TO (200) PARTITION BY RANGE (id);
+         CREATE TABLE rv_pleaf1 PARTITION OF rv_pmid FOR VALUES FROM (0) TO (100);
+         CREATE TABLE rv_pleaf2 PARTITION OF rv_pmid FOR VALUES FROM (100) TO (200);
+         CREATE TABLE rv_pstandalone (id BIGINT PRIMARY KEY);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    mirror(
+        &backend,
+        &tmp,
+        "rv_pstandalone_mc",
+        "public.rv_pstandalone",
+        &uri,
+    )
+    .await;
+
+    // A published partitioned table without a mirror would take the partition's changes too.
+    client
+        .simple_query("ALTER PUBLICATION moonlink_pub ADD TABLE ONLY rv_pmid;")
+        .await
+        .unwrap();
+    let err = try_mirror(&backend, &tmp, "rv_pleaf1_mc", "public.rv_pleaf1", &uri)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("in publication moonlink_pub without a running mirror")
+            && err.contains("ALTER PUBLICATION moonlink_pub DROP TABLE ONLY public.rv_pmid"),
+        "{err}"
+    );
+    client
+        .simple_query("ALTER PUBLICATION moonlink_pub DROP TABLE ONLY rv_pmid;")
+        .await
+        .unwrap();
+
+    // A partition first: its partitioned tables are refused, and it keeps replicating.
+    mirror(&backend, &tmp, "rv_pleaf1_mc", "public.rv_pleaf1", &uri).await;
+    for ancestor in ["rv_proot", "rv_pmid"] {
+        let err = try_mirror(
+            &backend,
+            &tmp,
+            &format!("{ancestor}_mc"),
+            &format!("public.{ancestor}"),
+            &uri,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("cannot both be mirrored") && err.contains("rv_pleaf1"),
+            "{err}"
+        );
+    }
+    client
+        .simple_query("INSERT INTO rv_proot VALUES (1), (101);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_pleaf1_mc", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_pleaf1_mc", lsn).await, Some(vec![1]));
+
+    // A partitioned table first: its partitions, at any depth, are refused. A published
+    // partition without a mirror does not stand in the way.
+    backend
+        .drop_table(DB.to_string(), "rv_pleaf1_mc".to_string())
+        .await
+        .unwrap();
+    client
+        .simple_query("ALTER PUBLICATION moonlink_pub ADD TABLE ONLY rv_pleaf2;")
+        .await
+        .unwrap();
+    mirror(&backend, &tmp, "rv_proot_mc", "public.rv_proot", &uri).await;
+    for partition in ["rv_pmid", "rv_pleaf2"] {
+        let err = try_mirror(
+            &backend,
+            &tmp,
+            &format!("{partition}_mc"),
+            &format!("public.{partition}"),
+            &uri,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("cannot both be mirrored") && err.contains("rv_proot"),
+            "{err}"
+        );
+    }
+
+    // A mirrored table that becomes a partition of a mirrored table no longer gets its changes.
+    client
+        .simple_query(
+            "ALTER TABLE rv_proot ATTACH PARTITION rv_pstandalone FOR VALUES FROM (200) TO (300);
+             INSERT INTO rv_proot VALUES (2);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = wait_until_errored(&backend, "rv_pstandalone_mc", lsn).await;
+    assert!(
+        err.contains("became a partition of public.rv_proot") && err.contains("drop and re-create"),
+        "{err}"
+    );
+    // Rows only after the partitioned table's mirror adopted the (empty) new partition.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    client
+        .simple_query("INSERT INTO rv_proot VALUES (201);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_proot_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_proot_mc", lsn).await,
+        Some(vec![1, 2, 101, 201])
+    );
+    client
+        .simple_query("DROP TABLE rv_proot CASCADE;")
+        .await
+        .unwrap();
+}
+
+/// Set lock_timeout for every new connection to the test database (None resets it).
+async fn set_database_lock_timeout(client: &Client, timeout: Option<&str>) {
+    let action = match timeout {
+        Some(timeout) => format!("SET lock_timeout = ''{timeout}''"),
+        None => "RESET lock_timeout".to_string(),
+    };
+    client
+        .simple_query(&format!(
+            "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I {action}', current_database()); END $$;"
+        ))
+        .await
+        .unwrap();
+}
+
+/// A mirror is replicated only while its table is in the publication. A drop whose removal from
+/// the publication is retried in the background (the table was locked) must finish before the
+/// table's mirror is re-created, or it would take the new mirror's table out; and a table taken
+/// out of the publication by other means errors its mirror rather than leaving it silently stale.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_mirror_re_created_while_its_drop_is_retried_replicates() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_rd, rv_rd_keep;
+         CREATE TABLE rv_rd (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_rd_keep (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_rd VALUES (1);",
+    )
+    .await;
+    set_database_lock_timeout(&client, None).await;
+    let backend = Arc::new(backend);
+    // Keeps the source's replication connection (and its pending retries) alive across the drop.
+    mirror(&backend, &tmp, "rv_rd_keep_mc", "public.rv_rd_keep", &uri).await;
+    mirror(&backend, &tmp, "rv_rd_mc", "public.rv_rd", &uri).await;
+
+    // Each attempt to take the locked table out of the publication times out, so the drop
+    // returns with the removal retried in the background, about once a second.
+    set_database_lock_timeout(&client, Some("50ms")).await;
+    let (locker, _) = connect_to_postgres(&uri).await;
+    locker
+        .simple_query("BEGIN; LOCK TABLE rv_rd IN SHARE UPDATE EXCLUSIVE MODE;")
+        .await
+        .unwrap();
+    backend
+        .drop_table(DB.to_string(), "rv_rd_mc".to_string())
+        .await
+        .unwrap();
+    assert_eq!(published_count(&client, "rv_rd").await, 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    locker.simple_query("COMMIT;").await.unwrap();
+    try_mirror(&backend, &tmp, "rv_rd_mc", "public.rv_rd", &uri)
+        .await
+        .unwrap();
+    set_database_lock_timeout(&client, None).await;
+    // Past every retry.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    client
+        .simple_query("INSERT INTO rv_rd VALUES (2);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(published_count(&client, "rv_rd").await, 1);
+    assert_eq!(snapshot_error(&backend, "rv_rd_mc", lsn).await, None);
+    assert_eq!(scan_ids(&backend, "rv_rd_mc", lsn).await, Some(vec![1, 2]));
+
+    // Taken out of the publication by hand: errored, the other mirror unaffected.
+    client
+        .simple_query(
+            "ALTER PUBLICATION moonlink_pub DROP TABLE ONLY rv_rd;
+             INSERT INTO rv_rd VALUES (3); INSERT INTO rv_rd_keep VALUES (1);",
+        )
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    let err = wait_until_errored(&backend, "rv_rd_mc", lsn).await;
+    assert!(
+        err.contains("no longer in publication moonlink_pub") && err.contains("drop and re-create"),
+        "{err}"
+    );
+    assert_eq!(snapshot_error(&backend, "rv_rd_keep_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_rd_keep_mc", lsn).await,
+        Some(vec![1])
+    );
+    client
+        .simple_query("DROP TABLE rv_rd, rv_rd_keep;")
         .await
         .unwrap();
 }

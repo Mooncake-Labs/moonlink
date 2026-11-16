@@ -23,6 +23,8 @@ struct TableState {
     status_reader: TableStatusReader,
     /// Persists the errored state when the table enters it.
     errored_marker_writer: JoinHandle<()>,
+    /// To delete the table's files when its handler cannot (it died).
+    iceberg_table_config: moonlink::IcebergTableConfig,
 }
 
 /// Id which uniquely identifies a table, including source information (src uri, src table id) and destination information (mooncake table id).
@@ -263,6 +265,7 @@ impl ReplicationConnection {
             event_manager: table_resources.table_event_manager,
             status_reader: table_resources.table_status_reader,
             errored_marker_writer,
+            iceberg_table_config: moonlink_table_config.iceberg_table_config.clone(),
         };
 
         // TODO(hjiang): Add assertion or error propagation.
@@ -324,6 +327,17 @@ impl ReplicationConnection {
         // the mirror could never be dropped (or re-created) again.
         if let Err(e) = event_manager.drop_table().await {
             warn!(error = ?e, src_table_id, "table handler could not complete the drop");
+            // Delete what the handler would have: a mirror re-created with this name must not
+            // load this one's iceberg snapshot.
+            let _ =
+                errored_tables::drop_iceberg_table_files(&table_state.iceberg_table_config).await;
+            let local_files =
+                std::path::Path::new(&self.table_base_path).join(mooncake_table_id.to_string());
+            if let Err(e) = tokio::fs::remove_dir_all(&local_files).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(error = ?e, ?local_files, "failed to delete the dropped mirror's local files");
+                }
+            }
         }
 
         // Drop from the appropriate source

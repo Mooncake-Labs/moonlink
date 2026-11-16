@@ -21,7 +21,7 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 futures = { workspace = true }
-moonlink = { workspace = true, features = ["test-utils"] }
+moonlink = { workspace = true }
 moonlink_connectors = { workspace = true }
 moonlink_error = { workspace = true }
 moonlink_metadata_store = { workspace = true }
@@ -41,6 +41,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 iceberg = { workspace = true }
+# Test helpers (e.g. decode_read_state_for_testing) for this crate's tests only; never in a
+# normal build.
+moonlink = { workspace = true, features = ["test-utils"] }
 roaring = { workspace = true }
 rstest = { workspace = true }
 serial_test = { workspace = true }
