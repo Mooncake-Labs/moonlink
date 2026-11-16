@@ -59,7 +59,6 @@ use crate::storage::table::common::table_manager::{PersistenceFileParams, TableM
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::table::iceberg::puffin_utils::PuffinBlobRef;
-use crate::storage::wal::{WalManager, WalPersistenceUpdateResult};
 use crate::table_notify::TableEvent;
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -486,9 +485,6 @@ pub struct MooncakeTable {
     /// Table notifier, which is used to sent multiple types of event completion information.
     table_notify: Option<Sender<TableEvent>>,
 
-    /// WAL manager, used to persist WAL events.
-    wal_manager: WalManager,
-
     /// LSN of ongoing flushes.
     /// Maps from LSN to its count.
     pub ongoing_flush_lsns: BTreeMap<u64, u32>,
@@ -506,11 +502,23 @@ pub struct MooncakeTable {
     event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
 }
 
+/// Postgres can re-send transactions that were already applied (e.g. after a restart, the slot
+/// may trail what was applied); the commit LSN must never move backwards, and must not panic.
+pub(crate) fn clamp_commit_lsn(lsn: u64, commit_lsn_baseline: u64) -> u64 {
+    if lsn < commit_lsn_baseline {
+        tracing::warn!(
+            lsn,
+            commit_lsn_baseline,
+            "commit LSN is behind the table, committing at the current LSN"
+        );
+        return commit_lsn_baseline;
+    }
+    lsn
+}
+
 impl MooncakeTable {
     /// foreground functions
     ///
-    /// Note that wal manager is constructed outside of the constructor as
-    /// it may be recovered from persistent wal metadata.
     /// TODO(hjiang): Provide a struct to hold all parameters.
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -520,7 +528,6 @@ impl MooncakeTable {
         base_path: PathBuf,
         iceberg_table_config: IcebergTableConfig,
         table_config: MooncakeTableConfig,
-        wal_manager: WalManager,
         object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
@@ -546,7 +553,6 @@ impl MooncakeTable {
             iceberg_table_manager,
             object_storage_cache,
             table_filesystem_accessor,
-            wal_manager,
         )
         .await
     }
@@ -556,15 +562,12 @@ impl MooncakeTable {
         mut table_manager: Box<dyn TableManager>,
         object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
-        wal_manager: WalManager,
     ) -> Result<Self> {
         table_metadata.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
         let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
         let last_persistence_snapshot_lsn = current_snapshot.flush_lsn;
         if let Some(last_persistence_snapshot_lsn) = last_persistence_snapshot_lsn {
-            // We should NOT send the wal_highest_completion_lsn, because those events are not applied at this point yet.
-            // They will replayed through the event stream, and re-applied to the table.
             table_snapshot_watch_sender
                 .send(last_persistence_snapshot_lsn)
                 .unwrap();
@@ -605,7 +608,6 @@ impl MooncakeTable {
             last_flush_lsn: None,
             last_persistence_snapshot_lsn,
             table_notify: None,
-            wal_manager,
             ongoing_flush_lsns: BTreeMap::new(),
             completed_unrecorded_flush_lsns: BTreeSet::new(),
             event_replay_tx: None,
@@ -1129,67 +1131,6 @@ impl MooncakeTable {
         Ok(())
     }
 
-    /// Uses the latest wal metadata and iceberg LSN from the latest iceberg snapshot
-    /// to determine the files to truncate.
-    ///
-    /// # Arguments
-    ///
-    /// * uuid: WAL persistence event unique id.
-    #[must_use]
-    pub(crate) fn do_wal_persistence_update(&mut self, uuid: uuid::Uuid) -> bool {
-        let latest_persistence_snapshot_lsn = self.get_persistence_snapshot_lsn();
-
-        let wal_persistence_update_result = self
-            .wal_manager
-            .prepare_persistent_update(latest_persistence_snapshot_lsn);
-
-        if wal_persistence_update_result.should_do_persistence() {
-            let event_sender_clone = self.table_notify.as_ref().unwrap().clone();
-            let file_system_accessor = self.wal_manager.get_file_system_accessor();
-            tokio::spawn(async move {
-                WalManager::wal_persist_truncate_async(
-                    uuid,
-                    wal_persistence_update_result,
-                    file_system_accessor,
-                    event_sender_clone,
-                )
-                .await;
-            });
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Handles the result of a persist and truncate operation.
-    /// Returns the highest LSN that has been persisted into WAL.
-    pub(crate) fn handle_completed_wal_persistence_update(
-        &mut self,
-        result: &WalPersistenceUpdateResult,
-    ) -> Option<u64> {
-        self.wal_manager
-            .handle_complete_wal_persistence_update(result)
-    }
-
-    /// Drop the WAL files. Note that at the moment this drops WAL files in the mooncake table's local filesystem
-    /// and so behaves the same as MooncakeTable.drop_table(),
-    /// but in the future this is needed to support object storage
-    pub(crate) async fn drop_wal(&mut self) -> Result<()> {
-        self.wal_manager.drop_wal().await
-    }
-
-    pub fn push_wal_event(&mut self, event: &TableEvent) {
-        self.wal_manager.push(event);
-    }
-
-    pub fn get_wal_highest_completion_lsn(&self) -> u64 {
-        self.wal_manager.get_highest_completion_lsn()
-    }
-
-    pub fn get_wal_curr_file_number(&self) -> u64 {
-        self.wal_manager.get_curr_file_number()
-    }
-
     /// Shutdown the current table, which unpins all referenced data files in the global data file.
     pub async fn shutdown(&mut self) -> Result<()> {
         let evicted_files_to_delete = {
@@ -1288,6 +1229,7 @@ impl MooncakeTable {
     }
 
     pub fn commit(&mut self, lsn: u64) {
+        let lsn = clamp_commit_lsn(lsn, self.next_snapshot_task.commit_lsn_baseline);
         // Record events for commit.
         if let Some(event_replay_tx) = &self.event_replay_tx {
             let table_event =
@@ -1298,7 +1240,6 @@ impl MooncakeTable {
         }
 
         // Perform commit operation.
-        ma::assert_ge!(lsn, self.next_snapshot_task.commit_lsn_baseline);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(

@@ -1,11 +1,9 @@
-use std::path::Path;
-
 use crate::{Error, Result};
 use moonlink::row::IdentityProp;
 use moonlink::MooncakeTableId;
 use moonlink::{
     AccessorConfig, DataCompactionConfig, FileIndexMergeConfig, IcebergTableConfig,
-    MooncakeTableConfig, MoonlinkTableConfig, StorageConfig, WalConfig,
+    MooncakeTableConfig, MoonlinkTableConfig, StorageConfig,
 };
 /// Configuration on table creation.
 use serde::{Deserialize, Serialize};
@@ -88,11 +86,6 @@ pub struct TableConfig {
     #[serde(rename = "iceberg")]
     #[serde(default)]
     pub iceberg_config: Option<AccessorConfig>,
-
-    /// WAL storage config.
-    #[serde(rename = "wal")]
-    #[serde(default)]
-    pub wal_config: Option<AccessorConfig>,
 }
 
 impl TableConfig {
@@ -114,11 +107,6 @@ impl TableConfig {
                 atomic_write_dir: None,
             };
             config.iceberg_config = Some(AccessorConfig::new_with_storage_config(storage_config));
-        }
-        if config.wal_config.is_none() {
-            let storage_config =
-                WalConfig::default_storage_config_local(Path::new(default_table_directory));
-            config.wal_config = Some(AccessorConfig::new_with_storage_config(storage_config));
         }
 
         Ok(config)
@@ -149,10 +137,6 @@ impl TableConfig {
                     accessor_config: self.iceberg_config.clone().unwrap(),
                 },
             },
-            wal_table_config: WalConfig::new(
-                self.wal_config.unwrap(),
-                &mooncake_table_id.to_string(),
-            ),
         };
         Ok(config)
     }
@@ -175,12 +159,6 @@ mod tests {
                 row_identity: None,
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
-                moonlink::StorageConfig::FileSystem {
-                    root_directory: "/tmp/path".to_string(),
-                    atomic_write_dir: None,
-                },
-            )),
-            wal_config: Some(AccessorConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
                     root_directory: "/tmp/path".to_string(),
                     atomic_write_dir: None,
@@ -230,12 +208,6 @@ mod tests {
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
                     root_directory: "/tmp".to_string(),
-                    atomic_write_dir: None,
-                },
-            )),
-            wal_config: Some(AccessorConfig::new_with_storage_config(
-                moonlink::StorageConfig::FileSystem {
-                    root_directory: "/tmp/wal".to_string(),
                     atomic_write_dir: None,
                 },
             )),
@@ -301,18 +273,6 @@ mod tests {
                     write_option: None,
                 },
             )),
-            wal_config: Some(AccessorConfig::new_with_storage_config(
-                moonlink::StorageConfig::Gcs {
-                    project: "gcs-proj".to_string(),
-                    region: "us-west1".to_string(),
-                    bucket: "moonlink-wal".to_string(),
-                    access_key_id: "access-key-wal".to_string(),
-                    secret_access_key: "secret-wal".to_string(),
-                    endpoint: None,
-                    disable_auth: false,
-                    write_option: None,
-                },
-            )),
         };
         assert_eq!(expected_table_config, actual_table_config);
     }
@@ -370,15 +330,6 @@ mod tests {
                     endpoint: None,
                 },
             )),
-            wal_config: Some(AccessorConfig::new_with_storage_config(
-                moonlink::StorageConfig::S3 {
-                    region: "us-west1".to_string(),
-                    bucket: "moonlink-wal".to_string(),
-                    access_key_id: "access-key-wal".to_string(),
-                    secret_access_key: "secret-wal".to_string(),
-                    endpoint: None,
-                },
-            )),
         };
         assert_eq!(expected_table_config, actual_table_config);
     }
@@ -410,12 +361,6 @@ mod tests {
                 row_identity: Some(IdentityProp::None),
             },
             iceberg_config: Some(AccessorConfig::new_with_storage_config(
-                moonlink::StorageConfig::FileSystem {
-                    root_directory: "/tmp/path".to_string(),
-                    atomic_write_dir: None,
-                },
-            )),
-            wal_config: Some(AccessorConfig::new_with_storage_config(
                 moonlink::StorageConfig::FileSystem {
                     root_directory: "/tmp/path".to_string(),
                     atomic_write_dir: None,

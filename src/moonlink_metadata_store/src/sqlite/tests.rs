@@ -2,7 +2,6 @@ use crate::base_metadata_store::MetadataStoreTrait;
 use crate::sqlite::sqlite_metadata_store::SqliteMetadataStore;
 use moonlink::{
     AccessorConfig, IcebergCatalogConfig, IcebergTableConfig, MoonlinkTableConfig, StorageConfig,
-    WalConfig,
 };
 
 use tempfile::{tempdir, TempDir};
@@ -71,10 +70,6 @@ fn get_accessor_config() -> AccessorConfig {
 
 /// Create a moonlink table config for test.
 pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
-    let wal_accessor = AccessorConfig::new_with_storage_config(StorageConfig::FileSystem {
-        root_directory: "/tmp/test_wal_uri".to_string(),
-        atomic_write_dir: None,
-    });
     MoonlinkTableConfig {
         iceberg_table_config: IcebergTableConfig {
             namespace: vec!["namespace".to_string()],
@@ -84,7 +79,6 @@ pub(crate) fn get_moonlink_table_config() -> MoonlinkTableConfig {
                 accessor_config: get_accessor_config(),
             },
         },
-        wal_table_config: WalConfig::new(wal_accessor, &format!("{DATABASE}.{TABLE}")),
         ..Default::default()
     }
 }
@@ -177,7 +171,7 @@ async fn test_table_metadata_store_and_load_s3() {
     let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
 
     let metadata_store = SqliteMetadataStore::new(sqlite_path.clone()).await.unwrap();
-    let moonlink_table_config = get_s3_moonlink_table_config(DATABASE, TABLE);
+    let moonlink_table_config = get_s3_moonlink_table_config();
 
     metadata_store
         .store_table_metadata(
@@ -206,7 +200,7 @@ async fn test_table_metadata_store_and_load_gcs() {
     let sqlite_path = get_sqlite_database_filepath(&tmp_dir);
 
     let metadata_store = SqliteMetadataStore::new(sqlite_path.clone()).await.unwrap();
-    let moonlink_table_config = get_gcs_moonlink_table_config(DATABASE, TABLE);
+    let moonlink_table_config = get_gcs_moonlink_table_config();
 
     metadata_store
         .store_table_metadata(

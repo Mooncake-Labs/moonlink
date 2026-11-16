@@ -650,7 +650,6 @@ impl ChaosState {
                     row,
                     xact_id: self.get_cur_xact_id(),
                     lsn: self.get_and_update_cur_lsn(),
-                    is_recovery: false,
                 }])
             }
             EventKind::BeginNonStreamingTxn => {
@@ -660,21 +659,18 @@ impl ChaosState {
                     row,
                     xact_id: self.get_cur_xact_id(),
                     lsn: self.get_and_update_cur_lsn(),
-                    is_recovery: false,
                 }])
             }
             EventKind::Append => ChaosEvent::create_table_events(vec![TableEvent::Append {
                 row: self.get_next_row_to_append(),
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
-                is_recovery: false,
             }]),
             EventKind::Delete => ChaosEvent::create_table_events(vec![TableEvent::Delete {
                 row: self.get_random_row_to_delete(),
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
                 delete_if_exists: self.is_upsert_table,
-                is_recovery: false,
             }]),
             EventKind::Update => {
                 let row = self.get_random_row_to_update();
@@ -684,50 +680,35 @@ impl ChaosState {
                         xact_id: self.get_cur_xact_id(),
                         lsn: self.get_and_update_cur_lsn(),
                         delete_if_exists: self.is_upsert_table,
-                        is_recovery: false,
                     },
                     TableEvent::Append {
                         row: row.clone(),
                         xact_id: self.get_cur_xact_id(),
                         lsn: self.get_and_update_cur_lsn(),
-                        is_recovery: false,
                     },
                 ])
             }
             EventKind::StreamFlush => {
                 ChaosEvent::create_table_events(vec![TableEvent::StreamFlush {
                     xact_id: self.get_cur_xact_id().unwrap(),
-                    is_recovery: false,
                 }])
             }
             EventKind::StreamAbort => {
                 let xact_id = self.get_cur_xact_id().unwrap();
                 self.stream_abort_transaction();
-                ChaosEvent::create_table_events(vec![TableEvent::StreamAbort {
-                    xact_id,
-                    is_recovery: false,
-                    closes_incomplete_wal_transaction: false,
-                }])
+                ChaosEvent::create_table_events(vec![TableEvent::StreamAbort { xact_id }])
             }
             EventKind::EndWithFlush => {
                 let lsn = self.get_and_update_cur_lsn();
                 let xact_id = self.get_cur_xact_id();
                 self.commit_transaction(lsn);
-                ChaosEvent::create_table_events(vec![TableEvent::CommitFlush {
-                    lsn,
-                    xact_id,
-                    is_recovery: false,
-                }])
+                ChaosEvent::create_table_events(vec![TableEvent::CommitFlush { lsn, xact_id }])
             }
             EventKind::EndNoFlush => {
                 let lsn = self.get_and_update_cur_lsn();
                 let xact_id = self.get_cur_xact_id();
                 self.commit_transaction(lsn);
-                ChaosEvent::create_table_events(vec![TableEvent::Commit {
-                    lsn,
-                    xact_id,
-                    is_recovery: false,
-                }])
+                ChaosEvent::create_table_events(vec![TableEvent::Commit { lsn, xact_id }])
             }
         }
     }
@@ -786,7 +767,6 @@ struct TestEnvironment {
     table_handler: TableHandler,
     event_sender: mpsc::Sender<TableEvent>,
     handler_event_replay_rx: mpsc::UnboundedReceiver<TableEvent>,
-    wal_flush_lsn_rx: watch::Receiver<u64>,
     last_commit_lsn_tx: watch::Sender<u64>,
     replication_lsn_tx: watch::Sender<u64>,
     mooncake_table_metadata: Arc<TableMetadata>,
@@ -878,7 +858,6 @@ impl TestEnvironment {
             Some(table_event_replay_tx),
         )
         .await;
-        let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
         let table_event_manager =
             TableEventManager::new(table_handler.get_event_sender(), table_event_sync_receiver);
         let event_sender = table_handler.get_event_sender();
@@ -920,7 +899,6 @@ impl TestEnvironment {
             table_handler,
             event_sender,
             handler_event_replay_rx,
-            wal_flush_lsn_rx,
             replication_lsn_tx,
             last_commit_lsn_tx,
             mooncake_table_metadata,

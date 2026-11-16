@@ -89,6 +89,25 @@ impl Sink {
     pub fn reset_keepalive_floor(&mut self) {
         self.max_keepalive_lsn_seen = 0;
     }
+
+    /// Postgres re-sends transactions that were still streaming when replication reconnects, so
+    /// their partially received rows are dropped.
+    pub async fn abort_in_progress_streams(&mut self) {
+        for (xact_id, state) in std::mem::take(&mut self.streaming_transactions_state) {
+            for table_id in state.touched_tables {
+                if let Some(event_sender) = self.event_senders.get(&table_id) {
+                    if let Err(e) =
+                        Self::send_table_event(event_sender, TableEvent::StreamAbort { xact_id })
+                            .await
+                    {
+                        warn!(error = ?e, xact_id, "failed to abort in-progress stream");
+                    }
+                }
+            }
+        }
+        self.transaction_state = TransactionState::default();
+        self.streaming_last_key = None;
+    }
 }
 
 pub struct SchemaChangeRequest(pub SrcTableId);
@@ -224,7 +243,6 @@ impl Sink {
                             TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
-                                is_recovery: false,
                             },
                         )
                         .await
@@ -259,7 +277,6 @@ impl Sink {
                                 TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
-                                    is_recovery: false,
                                 },
                             )
                             .await
@@ -283,7 +300,6 @@ impl Sink {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -302,7 +318,6 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                             delete_if_exists: false,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -315,7 +330,6 @@ impl Sink {
                             row: PostgresTableRow(new_table_row).into(),
                             lsn: final_lsn,
                             xact_id,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -334,7 +348,6 @@ impl Sink {
                             lsn: final_lsn,
                             xact_id,
                             delete_if_exists: false,
-                            is_recovery: false,
                         },
                     )
                     .await
@@ -385,11 +398,7 @@ impl Sink {
                         if let Some(event_sender) = self.event_senders.get(table_id) {
                             if let Err(e) = Self::send_table_event(
                                 event_sender,
-                                TableEvent::StreamAbort {
-                                    xact_id,
-                                    is_recovery: false,
-                                    closes_incomplete_wal_transaction: false,
-                                },
+                                TableEvent::StreamAbort { xact_id },
                             )
                             .await
                             {

@@ -63,16 +63,10 @@ impl TableHandler {
         let table_handler_event_sender = event_sender.clone();
         let event_sender_for_periodical_snapshot = event_sender.clone();
         let event_sender_for_periodical_force_snapshot = event_sender.clone();
-        let event_sender_for_periodical_wal = event_sender.clone();
         let periodic_event_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     // Sending to channel fails only happens when eventloop exits, directly exit timer events.
-                    _ = table_handler_timer.wal_snapshot_timer.tick() => {
-                        if event_sender_for_periodical_wal.send(TableEvent::PeriodicalPersistenceUpdateWal(uuid::Uuid::new_v4())).await.is_err() {
-                            return;
-                        }
-                    }
                     _ = table_handler_timer.mooncake_snapshot_timer.tick() => {
                         if event_sender_for_periodical_snapshot.send(TableEvent::PeriodicalMooncakeTableSnapshot(uuid::Uuid::new_v4())).await.is_err() {
                            return;
@@ -129,28 +123,13 @@ impl TableHandler {
         handler_event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
         mut table: MooncakeTable,
     ) {
+        // Postgres replays everything after the slot's confirmed LSN, which never exceeds the
+        // iceberg snapshot LSN, so replayed events up to that LSN are already persisted.
         let persistence_snapshot_lsn = table.get_persistence_snapshot_lsn();
-        // Here we indicate that highest completion lsn of 0 indicates that we have not seen any completed WAL events yet.
-        let wal_highest_completion_lsn = table.get_wal_highest_completion_lsn();
-        let wal_curr_file_number = table.get_wal_curr_file_number();
-
-        let initial_persistence_lsn = if wal_curr_file_number > 0 {
-            if let Some(persistence_snapshot_lsn) = persistence_snapshot_lsn {
-                Some(std::cmp::max(
-                    persistence_snapshot_lsn,
-                    wal_highest_completion_lsn,
-                ))
-            } else {
-                Some(wal_highest_completion_lsn)
-            }
-        } else {
-            persistence_snapshot_lsn
-        };
-
         let mut table_handler_state = TableHandlerState::new(
             event_sync_sender.table_maintenance_completion_tx.clone(),
             event_sync_sender.force_snapshot_completion_tx.clone(),
-            initial_persistence_lsn,
+            /*initial_persistence_lsn=*/ persistence_snapshot_lsn,
             persistence_snapshot_lsn,
         );
 
@@ -168,19 +147,13 @@ impl TableHandler {
                 return;
             }
 
-            // Step-3: delete the WAL files.
-            if let Err(e) = table.drop_wal().await {
-                let _ = event_sync_sender.drop_table_completion_tx.send(Err(e));
-                return;
-            }
-
-            // Step-4: delete the mooncake table.
+            // Step-3: delete the mooncake table.
             if let Err(e) = table.drop_mooncake_table().await {
                 let _ = event_sync_sender.drop_table_completion_tx.send(Err(e));
                 return;
             }
 
-            // Step-5: send back completion notification.
+            // Step-4: send back completion notification.
             let _ = event_sync_sender.drop_table_completion_tx.send(Ok(()));
         };
 
@@ -735,49 +708,6 @@ impl TableHandler {
                     TableEvent::EvictedFilesToDelete { evicted_files } => {
                         start_task_to_delete_evicted(evicted_files.files);
                     }
-                    TableEvent::PeriodicalPersistenceUpdateWal(uuid) => {
-                        if !table_handler_state.wal_persist_ongoing {
-                            table_handler_state.wal_persist_ongoing = true;
-                            let ongoing_persist_truncate = table.do_wal_persistence_update(uuid);
-                            table_handler_state.wal_persist_ongoing = ongoing_persist_truncate;
-                        }
-                    }
-                    TableEvent::PeriodicalWalPersistenceUpdateResult { result } => {
-                        match result {
-                            Ok(result) => {
-                                if let Some(highest_lsn) =
-                                    table.handle_completed_wal_persistence_update(&result)
-                                {
-                                    event_sync_sender
-                                        .wal_flush_lsn_tx
-                                        .send(highest_lsn)
-                                        .unwrap();
-                                }
-                                table_handler_state.wal_persist_ongoing = false;
-
-                                // Check whether need to drop table.
-                                if table_handler_state.special_table_state
-                                    == SpecialTableState::DropTable
-                                    && table_handler_state
-                                        .can_drop_table_now(table.has_ongoing_flush())
-                                {
-                                    drop_table(&mut table, event_sync_sender).await;
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                error!(error = %e, "failed to persist wal");
-                            }
-                        }
-                    }
-                    TableEvent::FinishRecovery {
-                        highest_completion_lsn,
-                    } => {
-                        event_sync_sender
-                            .wal_flush_lsn_tx
-                            .send(highest_completion_lsn)
-                            .unwrap();
-                    }
                     TableEvent::FlushResult {
                         event_id,
                         xact_id,
@@ -840,16 +770,26 @@ impl TableHandler {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
+        if table_handler_state.is_replayed_applied_event(&event) {
+            // Streamed rows of a replayed transaction were collected again; drop them.
+            if let TableEvent::Commit {
+                xact_id: Some(xact_id),
+                ..
+            } = event
+            {
+                if table.has_transaction_stream(xact_id) {
+                    table.abort_in_stream_batch(xact_id);
+                }
+            }
+            return;
+        }
+
         // Don't update the lsn if the event is not processed yet.
         table_handler_state.update_table_lsns(&event);
 
         // Discard events that we have already processed.
-        if table_handler_state.should_discard_event(&event) && !event.is_recovery() {
+        if table_handler_state.should_discard_event(&event) {
             return;
-        }
-
-        if !event.is_recovery() {
-            table.push_wal_event(&event);
         }
 
         match event {
@@ -905,15 +845,8 @@ impl TableHandler {
                 )
                 .await;
             }
-            TableEvent::StreamAbort {
-                xact_id,
-                closes_incomplete_wal_transaction,
-                ..
-            } => {
-                // If we are closing a transaction that is part of the WAL recovery process, then we do not need to process it, but just push it in to the WAL.
-                if !closes_incomplete_wal_transaction {
-                    table.abort_in_stream_batch(xact_id);
-                }
+            TableEvent::StreamAbort { xact_id } => {
+                table.abort_in_stream_batch(xact_id);
             }
             TableEvent::CommitFlush { lsn, xact_id, .. } => {
                 Self::commit_and_attempt_flush(

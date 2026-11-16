@@ -118,6 +118,12 @@ cargo test -p moonlink_backend --test '*'
 cargo test -p moonlink_service --lib --features postgres-integration
 ```
 
+## Durability and Recovery
+
+Moonlink acknowledges the Postgres replication slot only up to what is persisted in Iceberg, and replays the rest from the slot after a restart. Expect Postgres to retain more `pg_wal`: changes stay in it until they reach Iceberg (at most about 5 minutes for idle tables, which get a forced snapshot every 300 s).
+
+After upgrading, or after a crash, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again). Old `_wal` directories from earlier versions are unused and can be deleted.
+
 ## Contributing
 
 We’re grateful for our contributors. If you'd like to help improve Moonlink, join our [community](https://join.slack.com/t/mooncake-devs/shared_invite/zt-2sepjh5hv-rb9jUtfYZ9bvbxTCUrsEEA).

@@ -3,7 +3,6 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::watch;
-use tracing::warn;
 
 /// Tracks replication progress and notifies listeners when the replicated
 /// LSN advances.
@@ -35,10 +34,9 @@ impl LsnState {
     pub fn mark(&self, lsn: u64) {
         if lsn > self.current.load(Ordering::SeqCst) {
             self.current.store(lsn, Ordering::SeqCst);
-            // Ignore send error if there are no subscribers (e.g., during shutdown)
-            if let Err(e) = self.tx.send(lsn) {
-                warn!(error = ?e, "failed to send replication state for lsn {}", lsn);
-            }
+            // `send` drops the value when nobody is subscribed yet, and later subscribers would
+            // then start from a stale LSN.
+            self.tx.send_replace(lsn);
         }
     }
 
@@ -78,5 +76,14 @@ mod tests {
         // This will panic without the fix because there are no receivers.
         state.mark(100);
         assert_eq!(state.now(), 100);
+    }
+
+    #[test]
+    fn subscriber_created_after_mark_sees_latest_lsn() {
+        let state = LsnState::new();
+        state.mark(42);
+        // Not newer than the current value, so nothing is sent.
+        state.mark(42);
+        assert_eq!(*state.subscribe().borrow(), 42);
     }
 }

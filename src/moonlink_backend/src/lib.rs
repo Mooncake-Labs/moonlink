@@ -355,29 +355,6 @@ impl MoonlinkBackend {
         Ok(read_state.clone())
     }
 
-    /// Wait for the WAL flush LSN to reach the requested LSN. Note that WAL flush LSN will update
-    /// up till the latest commit that has been persisted in to the WAL.
-    pub async fn wait_for_wal_flush(
-        &self,
-        database: String,
-        table: String,
-        lsn: u64,
-    ) -> Result<()> {
-        validate_not_empty(&database, "database")?;
-        validate_not_empty(&table, "table")?;
-
-        let mut manager = self.replication_manager.write().await;
-        let mooncake_table_id = MooncakeTableId { database, table };
-        let writer = manager.get_table_event_manager(&mooncake_table_id)?;
-
-        // Wait for WAL flush LSN to reach the requested LSN
-        let mut rx = writer.subscribe_wal_flush_lsn();
-        while *rx.borrow() < lsn {
-            rx.changed().await.unwrap();
-        }
-        Ok(())
-    }
-
     /// Gracefully shutdown a replication connection identified by its URI.
     /// If postgres drop all is false, then we will not drop the PostgreSQL publication and replication slot,
     /// which allows for recovery from the PostgreSQL replication slot.

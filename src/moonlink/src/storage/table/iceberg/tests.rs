@@ -46,15 +46,12 @@ use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::table::iceberg::schema_utils::*;
 use crate::storage::table::iceberg::test_utils::*;
-use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::MooncakeTable;
 use crate::DataCompactionConfig;
 use crate::FileSystemAccessor;
 use crate::ObjectStorageCache;
 use crate::ObjectStorageCacheConfig;
 use crate::TableEvent;
-use crate::WalConfig;
-use crate::WalManager;
 use futures::{stream, StreamExt};
 
 use std::collections::HashMap;
@@ -278,8 +275,6 @@ async fn test_skip_iceberg_snapshot() {
     let warehouse_uri = path.clone().to_str().unwrap().to_string();
 
     let iceberg_table_config = create_iceberg_table_config(warehouse_uri);
-    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
-    let wal_manager = WalManager::new(&wal_config);
     let schema = create_test_arrow_schema();
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -288,7 +283,6 @@ async fn test_skip_iceberg_snapshot() {
         path,
         iceberg_table_config.clone(),
         MooncakeTableConfig::default(),
-        wal_manager,
         create_test_object_storage_cache(&temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
@@ -2221,8 +2215,6 @@ async fn test_small_batch_size_and_large_parquet_size() {
         create_test_table_metadata(temp_dir.path().to_str().unwrap().to_string());
 
     let iceberg_table_config = create_iceberg_table_config(warehouse_uri.clone());
-    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
-    let wal_manager = WalManager::new(&wal_config);
     let schema = create_test_arrow_schema();
     let mooncake_table_config = MooncakeTableConfig {
         append_only: false,
@@ -2245,7 +2237,6 @@ async fn test_small_batch_size_and_large_parquet_size() {
         path,
         iceberg_table_config.clone(),
         mooncake_table_config,
-        wal_manager,
         object_storage_cache.clone(),
         create_test_filesystem_accessor(&iceberg_table_config),
     )
@@ -2310,8 +2301,6 @@ async fn test_multiple_table_ids_for_deletion_vector() {
     let path = temp_dir.path().to_path_buf();
 
     let iceberg_table_config = get_iceberg_table_config(&temp_dir);
-    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &path);
-    let wal_manager = WalManager::new(&wal_config);
     let schema = create_test_arrow_schema();
     let mut table = MooncakeTable::new(
         schema.as_ref().clone(),
@@ -2320,7 +2309,6 @@ async fn test_multiple_table_ids_for_deletion_vector() {
         path,
         iceberg_table_config.clone(),
         MooncakeTableConfig::default(),
-        wal_manager,
         create_test_object_storage_cache(&temp_dir),
         create_test_filesystem_accessor(&iceberg_table_config),
     )

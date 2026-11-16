@@ -9,7 +9,7 @@ use crate::table_handler_timer::create_table_handler_timers;
 use crate::union_read::ReadStateManager;
 use crate::{
     BaseFileSystemAccess, CacheTrait, DataCompactionConfig, DiskSliceWriterConfig,
-    FileIndexMergeConfig, FileSystemAccessor, IcebergPersistenceConfig, WalConfig, WalManager,
+    FileIndexMergeConfig, FileSystemAccessor, IcebergPersistenceConfig,
 };
 use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
@@ -26,8 +26,6 @@ use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-/// WAL ID used for testing.
-const WAL_TEST_TABLE_ID: &str = "1";
 /// Iceberg test namespace and table name.
 const ICEBERG_TEST_NAMESPACE: &str = "namespace";
 const ICEBERG_TEST_TABLE: &str = "test_table";
@@ -243,30 +241,23 @@ impl ProfileState {
                     row,
                     xact_id: None,
                     lsn: self.get_and_update_cur_lsn(),
-                    is_recovery: false,
                 }])
             }
             EventKind::Append => ProfileEvent::create_table_events(vec![TableEvent::Append {
                 row: self.get_next_row_to_append(),
                 xact_id: None,
                 lsn: self.get_and_update_cur_lsn(),
-                is_recovery: false,
             }]),
             EventKind::Delete => ProfileEvent::create_table_events(vec![TableEvent::Delete {
                 row: self.get_random_row_to_delete(),
                 xact_id: None,
                 lsn: self.get_and_update_cur_lsn(),
                 delete_if_exists: self.is_upsert_table,
-                is_recovery: false,
             }]),
             EventKind::EndNoFlush => {
                 let lsn = self.get_and_update_cur_lsn();
                 self.commit_transaction(lsn);
-                ProfileEvent::create_table_events(vec![TableEvent::Commit {
-                    lsn,
-                    xact_id: None,
-                    is_recovery: false,
-                }])
+                ProfileEvent::create_table_events(vec![TableEvent::Commit { lsn, xact_id: None }])
             }
         }
     }
@@ -307,7 +298,6 @@ struct TestEnvironment {
     table_event_manager: TableEventManager,
     table_handler: TableHandler,
     event_sender: mpsc::Sender<TableEvent>,
-    wal_flush_lsn_rx: watch::Receiver<u64>,
     last_commit_lsn_tx: watch::Sender<u64>,
     replication_lsn_tx: watch::Sender<u64>,
     mooncake_table_metadata: Arc<MooncakeTableMetadata>,
@@ -373,7 +363,6 @@ impl TestEnvironment {
             /*table_event_replay_tx=*/ None,
         )
         .await;
-        let wal_flush_lsn_rx = table_event_sync_receiver.wal_flush_lsn_rx.clone();
         let table_event_manager =
             TableEventManager::new(table_handler.get_event_sender(), table_event_sync_receiver);
         let event_sender = table_handler.get_event_sender();
@@ -388,7 +377,6 @@ impl TestEnvironment {
             read_state_manager,
             table_handler,
             event_sender,
-            wal_flush_lsn_rx,
             replication_lsn_tx,
             last_commit_lsn_tx,
             mooncake_table_metadata,
@@ -431,9 +419,6 @@ async fn create_mooncake_table(
     iceberg_table_config: IcebergTableConfig,
     object_storage_cache: Arc<dyn CacheTrait>,
 ) -> MooncakeTable {
-    let wal_config =
-        WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &mooncake_table_metadata.path);
-    let wal_manager = WalManager::new(&wal_config);
     let table = MooncakeTable::new(
         create_test_arrow_schema().as_ref().clone(),
         ICEBERG_TEST_TABLE.to_string(),
@@ -441,7 +426,6 @@ async fn create_mooncake_table(
         mooncake_table_metadata.path.clone(),
         iceberg_table_config.clone(),
         mooncake_table_metadata.config.clone(),
-        wal_manager,
         object_storage_cache,
         create_test_filesystem_accessor(&iceberg_table_config),
     )

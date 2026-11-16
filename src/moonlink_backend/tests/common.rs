@@ -85,12 +85,6 @@ impl TestGuard {
                     atomic_write_dir: None,
                 },
             )),
-            wal_config: Some(AccessorConfig::new_with_storage_config(
-                StorageConfig::FileSystem {
-                    root_directory,
-                    atomic_write_dir: None,
-                },
-            )),
         };
         serde_json::to_string(&table_config).unwrap()
     }
@@ -135,6 +129,20 @@ impl Drop for TestGuard {
             });
         });
     }
+}
+
+/// Return the `confirmed_flush_lsn` of moonlink's replication slot.
+#[allow(dead_code)]
+pub async fn confirmed_flush_lsn(client: &Client) -> u64 {
+    let row = client
+        .query_one(
+            "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let lsn: PgLsn = row.get(0);
+    lsn.into()
 }
 
 /// Return the current WAL LSN as a simple `u64`.
@@ -452,12 +460,6 @@ pub fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
         iceberg_config: Some(AccessorConfig::new_with_storage_config(
             StorageConfig::FileSystem {
                 root_directory: root_directory.clone(),
-                atomic_write_dir: None,
-            },
-        )),
-        wal_config: Some(AccessorConfig::new_with_storage_config(
-            StorageConfig::FileSystem {
-                root_directory,
                 atomic_write_dir: None,
             },
         )),

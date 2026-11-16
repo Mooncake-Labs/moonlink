@@ -30,9 +30,8 @@ pub use storage::{
     FsThrottleConfig, FsTimeoutConfig, IcebergCatalogConfig, IcebergFileCatalogConfig,
     IcebergPersistenceConfig, IcebergSnapshotFetcher, IcebergTableConfig, IcebergTableManager,
     MooncakeTable, MooncakeTableConfig, MoonlinkSecretType, MoonlinkTableConfig,
-    MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig, PersistentWalMetadata,
-    SnapshotReadOutput, StorageConfig, TableEventManager, TableManager, TableSnapshotStatus,
-    TableStatusReader, WalConfig, WalManager, WalTransactionState,
+    MoonlinkTableSecret, ObjectStorageCache, ObjectStorageCacheConfig, SnapshotReadOutput,
+    StorageConfig, TableEventManager, TableManager, TableSnapshotStatus, TableStatusReader,
 };
 pub use table_handler::TableHandler;
 pub use table_handler_timer::TableHandlerTimer;

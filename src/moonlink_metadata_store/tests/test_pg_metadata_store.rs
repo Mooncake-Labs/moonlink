@@ -85,7 +85,7 @@ mod tests {
         let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
 
         let moonlink_table_config =
-            moonlink_metadata_store::test_utils::get_s3_moonlink_table_config(DATABASE, TABLE);
+            moonlink_metadata_store::test_utils::get_s3_moonlink_table_config();
 
         metadata_store
             .store_table_metadata(
@@ -115,7 +115,7 @@ mod tests {
         let metadata_store = PgMetadataStore::new(table_uri.clone()).unwrap();
 
         let moonlink_table_config =
-            moonlink_metadata_store::test_utils::get_gcs_moonlink_table_config(DATABASE, TABLE);
+            moonlink_metadata_store::test_utils::get_gcs_moonlink_table_config();
 
         metadata_store
             .store_table_metadata(

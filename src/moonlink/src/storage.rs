@@ -12,7 +12,6 @@ pub(crate) mod snapshot_options;
 pub(crate) mod storage_utils;
 pub(crate) mod table;
 pub(super) mod timer;
-pub(crate) mod wal;
 
 pub use crate::event_sync::EventSyncReceiver;
 pub use cache::object_storage::base_cache::CacheTrait;
@@ -51,7 +50,6 @@ pub use table::iceberg::iceberg_table_config::GlueCatalogConfig as IcebergGlueCa
 pub use table::iceberg::iceberg_table_config::RestCatalogConfig as IcebergRestCatalogConfig;
 pub use table::iceberg::iceberg_table_config::{IcebergCatalogConfig, IcebergTableConfig};
 pub use table::iceberg::iceberg_table_manager::IcebergTableManager;
-pub use wal::{PersistentWalMetadata, WalConfig, WalManager, WalTransactionState};
 
 pub use filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
 

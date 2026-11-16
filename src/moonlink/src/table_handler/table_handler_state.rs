@@ -123,12 +123,6 @@ pub(crate) struct TableHandlerState {
     pub(crate) table_maintenance_process_status: MaintenanceProcessStatus,
     /// Notify when data compaction completes.
     pub(crate) table_maintenance_completion_tx: broadcast::Sender<Result<()>>,
-
-    // ================================================
-    // Write-ahead log (WAL)
-    // ================================================
-    //
-    pub(crate) wal_persist_ongoing: bool,
 }
 
 impl TableHandlerState {
@@ -157,7 +151,6 @@ impl TableHandlerState {
             table_maintenance_completion_tx,
             // Initial copy fields.
             initial_copy_buffered_events: Vec::new(),
-            wal_persist_ongoing: false,
         }
     }
 
@@ -232,12 +225,36 @@ impl TableHandlerState {
         if event.is_streaming_update() {
             return false;
         }
-        // For non-streaming events, discard if LSN is less than flush LSN.
         let initial_persistence_lsn = self.initial_persistence_lsn.unwrap();
-        if let Some(lsn) = event.get_lsn_for_ingest_event() {
-            lsn <= initial_persistence_lsn
-        } else {
-            false
+        match event {
+            // Commits carry the commit's end LSN, which is what persistence LSNs are made of.
+            TableEvent::Commit { lsn, .. } | TableEvent::CommitFlush { lsn, .. } => {
+                *lsn <= initial_persistence_lsn
+            }
+            // Row events carry the start LSN of their commit record, and the next transaction's
+            // commit record can start exactly at the persisted commit's end LSN.
+            _ => event
+                .get_lsn_for_ingest_event()
+                .is_some_and(|lsn| lsn < initial_persistence_lsn),
+        }
+    }
+
+    /// Whether the event belongs to a transaction this table has already applied. When replication
+    /// reconnects, postgres re-sends every transaction after the slot's confirmed LSN, which trails
+    /// what is applied in memory. LSN boundaries follow [`Self::should_discard_event`].
+    pub(crate) fn is_replayed_applied_event(&self, event: &TableEvent) -> bool {
+        let Some(latest_commit_lsn) = self.latest_commit_lsn else {
+            return false;
+        };
+        match event {
+            TableEvent::Commit { lsn, .. } => *lsn <= latest_commit_lsn,
+            TableEvent::Append {
+                lsn, xact_id: None, ..
+            }
+            | TableEvent::Delete {
+                lsn, xact_id: None, ..
+            } => *lsn < latest_commit_lsn,
+            _ => false,
         }
     }
 
@@ -322,9 +339,6 @@ impl TableHandlerState {
             return false;
         }
         if self.persistence_snapshot_ongoing {
-            return false;
-        }
-        if self.wal_persist_ongoing {
             return false;
         }
         if self.table_maintenance_process_status != MaintenanceProcessStatus::Unrequested {
