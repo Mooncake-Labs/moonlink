@@ -62,7 +62,7 @@ pub(super) const NAMESPACE_INDICATOR_OBJECT_NAME: &str = "indicator.text";
 /// Metadata directory, which stores all metadata files, including manifest files, metadata files, version hint files, etc.
 pub(super) const METADATA_DIRECTORY: &str = "metadata";
 /// Version hint file which indicates the latest version for the table, the file exists for all valid iceberg tables.
-pub(super) const VERSION_HINT_FILENAME: &str = "version-hint.text";
+pub(crate) const VERSION_HINT_FILENAME: &str = "version-hint.text";
 
 #[derive(Debug)]
 pub struct FileCatalog {
@@ -210,6 +210,39 @@ impl FileCatalog {
         Ok(version)
     }
 
+    /// Load the highest-numbered `vN.metadata.json` under `metadata_directory` that parses.
+    async fn load_latest_parseable_metadata(
+        &self,
+        metadata_directory: &str,
+    ) -> IcebergResult<(String, TableMetadata)> {
+        let files = self
+            .filesystem_accessor
+            .list_direct_files(metadata_directory)
+            .await
+            .map_err(|e| {
+                IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Failed to list metadata directory {metadata_directory}"),
+                )
+                .with_source(e)
+            })?;
+        let mut versions: Vec<u32> = files
+            .iter()
+            .filter_map(|f| metadata_file_version(f))
+            .collect();
+        versions.sort_unstable_by(|a, b| b.cmp(a));
+        for version in versions {
+            let metadata_filepath = format!("{metadata_directory}/v{version}.metadata.json");
+            if let Ok(metadata) = self.load_table_metadata(&metadata_filepath).await {
+                return Ok((metadata_filepath, metadata));
+            }
+        }
+        Err(IcebergError::new(
+            iceberg::ErrorKind::DataInvalid,
+            format!("no readable metadata file under {metadata_directory}"),
+        ))
+    }
+
     /// Load iceberg table metadata.
     async fn load_table_metadata(&self, metadata_filepath: &str) -> IcebergResult<TableMetadata> {
         let metadata_bytes = self
@@ -298,6 +331,12 @@ impl Catalog for FileCatalog {
                 .with_retryable(true)
                 .with_source(e)
             })?;
+
+        // Hidden entries (e.g. the atomic-write temp directory) are never namespaces.
+        let subdirectories: Vec<String> = subdirectories
+            .into_iter()
+            .filter(|d| !d.starts_with('.'))
+            .collect();
 
         // Start multiple async functions in parallel to check whether namespace.
         let mut futures = Vec::with_capacity(subdirectories.len());
@@ -448,7 +487,7 @@ impl Catalog for FileCatalog {
             })?;
 
         let mut table_idents: Vec<TableIdent> = Vec::with_capacity(subdirectories.len());
-        for cur_subdir in subdirectories.iter() {
+        for cur_subdir in subdirectories.iter().filter(|d| !d.starts_with('.')) {
             let cur_table_ident = TableIdent::new(namespace_ident.clone(), cur_subdir.clone());
             let exists = self.table_exists(&cur_table_ident).await?;
             if exists {
@@ -474,28 +513,9 @@ impl Catalog for FileCatalog {
     ) -> IcebergResult<Table> {
         let directory = namespace_ident.to_url_string();
         let table_ident = TableIdent::new(namespace_ident.clone(), creation.name.clone());
+        let table_name = creation.name.clone();
 
-        // Create version hint file.
-        let version_hint_filepath = format!(
-            "{}/{}/{}/version-hint.text",
-            directory, creation.name, METADATA_DIRECTORY,
-        );
-        self.filesystem_accessor
-            .write_object(
-                &version_hint_filepath,
-                /*content=*/ "0".as_bytes().to_vec(),
-            )
-            .await
-            .map_err(|e| {
-                IcebergError::new(
-                    iceberg::ErrorKind::Unexpected,
-                    format!("Failed to write version hint file at table {} creation under namespace {:?} ", creation.name, namespace_ident),
-                )
-                .with_retryable(true)
-                .with_source(e)
-            })?;
-
-        // Create metadata file.
+        // Create metadata file before the version hint: the hint makes the table exist.
         let metadata_filepath = format!(
             "{}/{}/metadata/v0.metadata.json",
             directory,
@@ -512,6 +532,26 @@ impl Catalog for FileCatalog {
                 IcebergError::new(
                     iceberg::ErrorKind::Unexpected,
                     format!("Failed to write metadata file {metadata_filepath} at table creation"),
+                )
+                .with_retryable(true)
+                .with_source(e)
+            })?;
+
+        // Create version hint file.
+        let version_hint_filepath = format!(
+            "{}/{}/{}/version-hint.text",
+            directory, table_name, METADATA_DIRECTORY,
+        );
+        self.filesystem_accessor
+            .write_object(
+                &version_hint_filepath,
+                /*content=*/ "0".as_bytes().to_vec(),
+            )
+            .await
+            .map_err(|e| {
+                IcebergError::new(
+                    iceberg::ErrorKind::Unexpected,
+                    format!("Failed to write version hint file at table {table_name} creation under namespace {namespace_ident:?} "),
                 )
                 .with_retryable(true)
                 .with_source(e)
@@ -578,7 +618,24 @@ impl Catalog for FileCatalog {
                 .with_retryable(true)
                 .with_source(e)
             })?;
-        Ok(exists)
+        if exists {
+            return Ok(true);
+        }
+        // A lost or never-written hint must not make an existing table look absent (it would be
+        // re-created empty over the old one).
+        let metadata_directory = format!(
+            "{}/{}/{}",
+            table.namespace.to_url_string(),
+            table.name(),
+            METADATA_DIRECTORY
+        );
+        let has_metadata = self
+            .filesystem_accessor
+            .list_direct_files(&metadata_directory)
+            .await
+            .map(|files| files.iter().any(|f| metadata_file_version(f).is_some()))
+            .unwrap_or(false);
+        Ok(has_metadata)
     }
 
     /// Rename a table in the catalog.
@@ -589,7 +646,16 @@ impl Catalog for FileCatalog {
     /// Update a table to the catalog, which writes metadata file and version hint file.
     async fn update_table(&self, mut commit: TableCommit) -> IcebergResult<Table> {
         let (metadata_filepath, metadata) = self.load_metadata(commit.identifier()).await?;
-        let version = metadata.next_sequence_number();
+        // Next version after the current metadata file. (Not next_sequence_number(): schema-only
+        // updates don't bump it, which would overwrite the current metadata file in place.)
+        let version = metadata_file_version(&metadata_filepath)
+            .map(|v| v + 1)
+            .ok_or_else(|| {
+                IcebergError::new(
+                    iceberg::ErrorKind::DataInvalid,
+                    format!("unexpected metadata file name {metadata_filepath}"),
+                )
+            })?;
         let builder = TableMetadataBuilder::new_from_metadata(
             metadata.clone(),
             /*current_file_location=*/ Some(metadata_filepath.clone()),
@@ -601,7 +667,7 @@ impl Catalog for FileCatalog {
         // Construct new metadata with updates.
         let updates = commit.take_updates();
         let builder = reflect_table_updates(builder, updates)?;
-        let metadata = builder.build()?.metadata;
+        let metadata = expire_snapshots_and_metadata_log(builder.build()?.metadata)?;
 
         // Write metadata file.
         let metadata_directory = format!(
@@ -725,22 +791,86 @@ impl CatalogAccess for FileCatalog {
             VERSION_HINT_FILENAME,
         );
 
-        // Load and assign etag.
-        self.load_version_hint_etag(&version_hint_filepath).await?;
-
-        // Read version hint file.
-        let version = self.load_current_version(&version_hint_filepath).await?;
-
-        // Read and parse table metadata.
-        let metadata_filepath = format!(
-            "{}/{}/{}/v{}.metadata.json",
+        let metadata_directory = format!(
+            "{}/{}/{}",
             table_ident.namespace().to_url_string(),
             table_ident.name(),
             METADATA_DIRECTORY,
-            version,
         );
-        let metadata = self.load_table_metadata(&metadata_filepath).await?;
 
-        Ok((metadata_filepath, metadata))
+        // Load and assign etag; a missing or unreadable hint is handled by the fallback below.
+        let _ = self.load_version_hint_etag(&version_hint_filepath).await;
+
+        // Read version hint file, then the metadata it points to. Only a missing or unreadable
+        // hint falls back to the newest readable metadata file: if the hint names a metadata file
+        // that cannot be loaded, an older version may lack changes whose source WAL is already
+        // released, so loading it would silently lose them.
+        let hint_err = match self.load_current_version(&version_hint_filepath).await {
+            Ok(version) => {
+                let metadata_filepath = format!("{metadata_directory}/v{version}.metadata.json");
+                return match self.load_table_metadata(&metadata_filepath).await {
+                    Ok(metadata) => Ok((metadata_filepath, metadata)),
+                    Err(e) => Err(IcebergError::new(
+                        iceberg::ErrorKind::DataInvalid,
+                        format!(
+                            "iceberg metadata file {metadata_filepath} named by the version hint cannot be loaded ({e}); not falling back to an older version, which could miss committed changes"
+                        ),
+                    )),
+                };
+            }
+            Err(e) => e,
+        };
+        // An interrupted write can leave the hint missing or unreadable.
+        let loaded = self
+            .load_latest_parseable_metadata(&metadata_directory)
+            .await
+            .map_err(|_| IcebergError::new(hint_err.kind(), hint_err.message().to_string()))?;
+        tracing::warn!(
+            table = %table_ident,
+            error = %hint_err,
+            metadata = loaded.0,
+            "iceberg version hint unusable, loaded the newest readable metadata file instead"
+        );
+        Ok(loaded)
     }
+}
+
+/// Version `N` of a `.../vN.metadata.json` path, if it is one.
+fn metadata_file_version(path: &str) -> Option<u32> {
+    let name = path.rsplit('/').next()?;
+    name.strip_prefix('v')?
+        .strip_suffix(".metadata.json")?
+        .parse()
+        .ok()
+}
+
+/// Moonlink only ever reads the current snapshot, so every commit drops all older snapshots and
+/// keeps a single previous entry in the metadata log. Without this, each metadata file embeds the
+/// full history and grows with every commit.
+fn expire_snapshots_and_metadata_log(metadata: TableMetadata) -> IcebergResult<TableMetadata> {
+    const PREVIOUS_VERSIONS_MAX: &str = "write.metadata.previous-versions-max";
+    let current = metadata.current_snapshot_id();
+    let expired: Vec<i64> = metadata
+        .snapshots()
+        .map(|snapshot| snapshot.snapshot_id())
+        .filter(|id| Some(*id) != current)
+        .collect();
+    let needs_property = metadata
+        .properties()
+        .get(PREVIOUS_VERSIONS_MAX)
+        .map(String::as_str)
+        != Some("1");
+    if expired.is_empty() && !needs_property {
+        return Ok(metadata);
+    }
+    let mut builder =
+        TableMetadataBuilder::new_from_metadata(metadata, /*current_file_location=*/ None)
+            .remove_snapshots(&expired);
+    if needs_property {
+        builder = builder.set_properties(std::collections::HashMap::from([(
+            PREVIOUS_VERSIONS_MAX.to_string(),
+            "1".to_string(),
+        )]))?;
+    }
+    Ok(builder.build()?.metadata)
 }

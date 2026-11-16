@@ -34,10 +34,6 @@ pub(crate) struct SnapshotTableState {
     /// Iceberg warehouse location.
     pub(super) iceberg_warehouse_location: String,
 
-    /// Distinguishes this table's temporary read files from those of another table with the same
-    /// id (see [`Snapshot::get_name_for_inmemory_file`]).
-    pub(super) table_instance_id: uuid::Uuid,
-
     /// Mooncake table metadata.
     pub(super) mooncake_table_metadata: Arc<MooncakeTableMetadata>,
 
@@ -92,6 +88,16 @@ pub(crate) struct SnapshotTableState {
 
     /// Batch ID counter for non-streaming operations
     pub(super) non_streaming_batch_id_counter: Arc<BatchIdCounter>,
+
+    /// Mooncake snapshot sequence, incremented at the end of every snapshot update; shared with
+    /// the owning table (and its garbage collection) through an `Arc`.
+    pub(crate) snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Whether data compaction already logged groups it can never compact.
+    pub(super) logged_uncompactable_groups: std::sync::atomic::AtomicBool,
+
+    /// Garbage collection of the owning table's iceberg files, if enabled.
+    pub(crate) gc_context: Option<Arc<crate::storage::table::iceberg::gc::IcebergGcContext>>,
 }
 
 /// A committed deletion that found no row to delete.
@@ -182,8 +188,10 @@ impl SnapshotTableState {
 
         let table_config = metadata.config.clone();
         Ok(Self {
+            snapshot_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            logged_uncompactable_groups: std::sync::atomic::AtomicBool::new(false),
+            gc_context: None,
             iceberg_warehouse_location,
-            table_instance_id: uuid::Uuid::new_v4(),
             mooncake_table_metadata: metadata.clone(),
             current_snapshot,
             batches,
@@ -667,6 +675,15 @@ impl SnapshotTableState {
             self.assert_current_snapshot_consistent().await;
         }
 
+        // Published after every state change of this update (readers hold the read lock).
+        let seq = self
+            .snapshot_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if let (Some(gc_context), Some(commit)) = (&self.gc_context, task.applied_iceberg_commit) {
+            gc_context.mark_applied(commit, seq);
+        }
+
         MooncakeSnapshotOutput {
             uuid: opt.uuid,
             commit_lsn: self.current_snapshot.snapshot_version,
@@ -976,6 +993,7 @@ impl SnapshotTableState {
                 let batch = self.batches.get(batch_id).expect("missing batch");
                 let data = batch.data.as_ref().expect("batch missing data");
                 MoonlinkRow::from_record_batch(&data.slice(*row_id, 1))
+                    .expect("a batch moonlink wrote converts back to rows")
                     .pop()
                     .unwrap()
             }

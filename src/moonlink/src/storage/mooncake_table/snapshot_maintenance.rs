@@ -1,12 +1,15 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// This file contains maintenance related features for mooncake snapshot.
 use crate::storage::compaction::table_compaction::SingleFileToCompact;
+use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
 use crate::storage::mooncake_table::{
     DataCompactionPayload, FileIndiceMergePayload, MaintenanceOption, SnapshotTask,
 };
-use crate::storage::storage_utils::{ProcessedDeletionRecord, TableId, TableUniqueFileId};
+use crate::storage::storage_utils::{
+    FileId, MooncakeDataFileRef, ProcessedDeletionRecord, TableId, TableUniqueFileId,
+};
 use crate::table_notify::{DataCompactionMaintenanceStatus, IndexMergeMaintenanceStatus};
 
 /// Remap single record location after compaction.
@@ -81,104 +84,89 @@ impl SnapshotTableState {
             return DataCompactionMaintenanceStatus::Nothing;
         }
 
-        // To simplify state management, only compact data files which have been persisted into iceberg table.
+        // Compaction rewrites whole file indices, so data files sharing an index are selected
+        // together or not at all; otherwise the rows of the unselected files would lose their
+        // index entries.
         let unpersisted_data_files = self.unpersisted_records.get_unpersisted_data_files_set();
-        let mut tentative_data_files_to_compact = HashSet::new();
-
-        // Number of data files rejected to merge due to unpersistence.
+        let unpersisted_file_indices = self.unpersisted_records.get_unpersisted_file_indices_set();
         let mut reject_by_unpersistence = 0;
-
-        // TODO(hjiang): We should be able to early exit, if left items are not enough to reach the compaction threshold.
-        for (cur_data_file, disk_file_entry) in all_disk_files.iter() {
-            // Doesn't compact those unpersisted files.
-            if unpersisted_data_files.contains(cur_data_file) {
-                reject_by_unpersistence += 1;
+        let mut never_compacted_files = 0;
+        let mut eligible_groups = Vec::new();
+        for group in self.build_compaction_groups() {
+            // To simplify state management, only compact data files which have been persisted into iceberg table.
+            let unpersisted = group
+                .files
+                .iter()
+                .any(|f| unpersisted_data_files.contains(&f.data_file))
+                || group
+                    .file_indices
+                    .iter()
+                    .any(|i| unpersisted_file_indices.contains(i));
+            if unpersisted {
+                reject_by_unpersistence += group.files.len();
                 continue;
             }
-
-            // Skip compaction if the file size exceeds threshold, AND deleted rows are below config thresholds.
-            if disk_file_entry.file_size >= data_compaction_file_size_threshold {
-                // Compaction by deletion is skipped.
-                if data_file_deletion_percentage_threshold == 0 {
-                    continue;
+            // Every file must be small enough, or deleted enough, to be worth rewriting.
+            let all_files_eligible = group.files.iter().all(|f| {
+                f.file_size < data_compaction_file_size_threshold
+                    || (data_file_deletion_percentage_threshold != 0
+                        && f.deletion_percentage >= data_file_deletion_percentage_threshold)
+            });
+            if all_files_eligible {
+                if group.files.len() > max_data_compaction_file_num_threshold {
+                    never_compacted_files += group.files.len();
                 }
-                let deletion_percentage = disk_file_entry
-                    .committed_deletion_vector
-                    .get_num_rows_deleted()
-                    * 100
-                    / disk_file_entry.num_rows;
-                if deletion_percentage < data_file_deletion_percentage_threshold {
-                    continue;
-                }
+                eligible_groups.push(group);
+            } else if group.files.len() > 1 {
+                // Small files sharing an index with a large one are only compacted together.
+                never_compacted_files += group.files.len();
             }
-
-            // Break early if tentative data files to compact already reaches upper limit.
-            if tentative_data_files_to_compact.len() >= max_data_compaction_file_num_threshold {
-                break;
-            }
-
-            // Tentatively decide data file to compact.
-            let single_file_to_compact = SingleFileToCompact {
-                file_id: TableUniqueFileId {
-                    table_id: TableId(self.mooncake_table_metadata.table_id),
-                    file_id: cur_data_file.file_id(),
-                },
-                data_file_cache_handle: disk_file_entry.cache_handle.clone(),
-                filepath: cur_data_file.file_path().to_string(),
-                deletion_vector: disk_file_entry.puffin_deletion_blob.clone(),
-            };
-            assert!(tentative_data_files_to_compact.insert(single_file_to_compact));
+        }
+        if never_compacted_files > 0
+            && !self
+                .logged_uncompactable_groups
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::info!(
+                table = self.mooncake_table_metadata.mooncake_table_id,
+                files = never_compacted_files,
+                "some data files share a file index with files too large to rewrite together, so data compaction skips them"
+            );
         }
 
-        if tentative_data_files_to_compact.len() < min_data_compaction_file_num_threshold {
+        let chosen_groups = choose_compaction_groups(
+            eligible_groups,
+            min_data_compaction_file_num_threshold,
+            max_data_compaction_file_num_threshold,
+        );
+        let chosen_file_count: usize = chosen_groups.iter().map(|g| g.files.len()).sum();
+        if chosen_file_count < min_data_compaction_file_num_threshold {
             // There're two possibilities here:
             // 1. If due to unpersistence, data compaction should wait until persistence completion.
-            if tentative_data_files_to_compact.len() + reject_by_unpersistence
-                >= min_data_compaction_file_num_threshold
+            if chosen_file_count + reject_by_unpersistence >= min_data_compaction_file_num_threshold
             {
                 return DataCompactionMaintenanceStatus::Unknown;
             }
             // 2. There're not enough number of small data files to merge.
-            else {
-                return DataCompactionMaintenanceStatus::Nothing;
-            }
+            return DataCompactionMaintenanceStatus::Nothing;
         }
 
-        // Calculate related file indices to compact.
+        let mut tentative_data_files_to_compact = HashSet::new();
         let mut file_indices_to_compact = HashSet::new();
-        let file_ids_to_compact = tentative_data_files_to_compact
-            .iter()
-            .map(|single_file_to_compact| single_file_to_compact.file_id.file_id)
-            .collect::<HashSet<_>>();
-        for cur_file_index in self.current_snapshot.indices.file_indices.iter() {
-            for cur_file in cur_file_index.files.iter() {
-                if file_ids_to_compact.contains(&cur_file.file_id()) {
-                    assert!(file_indices_to_compact.insert(cur_file_index.clone()));
-                    break;
-                }
+        for group in chosen_groups {
+            for f in group.files {
+                let disk_file_entry = &all_disk_files[&f.data_file];
+                assert!(tentative_data_files_to_compact.insert(SingleFileToCompact {
+                    file_id: TableUniqueFileId {
+                        table_id: TableId(self.mooncake_table_metadata.table_id),
+                        file_id: f.data_file.file_id(),
+                    },
+                    data_file_cache_handle: disk_file_entry.cache_handle.clone(),
+                    filepath: f.data_file.file_path().to_string(),
+                    deletion_vector: disk_file_entry.puffin_deletion_blob.clone(),
+                }));
             }
-        }
-
-        // Skip data files to compact if their corresponding file indices haven't been persisted.
-        let mut file_indices_to_remove = vec![];
-        let unpersisted_file_indices = self.unpersisted_records.get_unpersisted_file_indices_set();
-        for cur_file_index in file_indices_to_compact.iter() {
-            if unpersisted_file_indices.contains(cur_file_index) {
-                file_indices_to_remove.push(cur_file_index.clone());
-            }
-        }
-        for cur_file_index in file_indices_to_remove.iter() {
-            for cur_data_file in cur_file_index.files.iter() {
-                let table_unique_file_id = self.get_table_unique_file_id(cur_data_file.file_id());
-                assert!(tentative_data_files_to_compact.remove(&table_unique_file_id));
-                reject_by_unpersistence += 1;
-            }
-            assert!(file_indices_to_compact.remove(cur_file_index));
-        }
-
-        // Check again whether need to compact.
-        if tentative_data_files_to_compact.len() < min_data_compaction_file_num_threshold {
-            return DataCompactionMaintenanceStatus::Unknown;
+            file_indices_to_compact.extend(group.file_indices);
         }
 
         let payload = DataCompactionPayload {
@@ -191,18 +179,81 @@ impl SnapshotTableState {
             file_indices: file_indices_to_compact.into_iter().collect::<Vec<_>>(),
         };
 
-        #[cfg(any(test, debug_assertions))]
-        {
-            self.validate_compaction_payload(&payload);
+        if !self.compaction_payload_is_consistent(&payload) {
+            tracing::error!(
+                table = self.mooncake_table_metadata.mooncake_table_id,
+                "skipping data compaction: selected data files do not match their file indices"
+            );
+            return DataCompactionMaintenanceStatus::Nothing;
         }
         DataCompactionMaintenanceStatus::Payload(payload)
     }
 
-    /// Util function to validate the consistency of data files and file indices for data compaction payload.
-    #[cfg(any(test, debug_assertions))]
-    fn validate_compaction_payload(&self, payload: &DataCompactionPayload) {
+    /// Partition data files into groups connected by shared file indices.
+    fn build_compaction_groups(&self) -> Vec<CompactionGroup> {
+        let disk_files = &self.current_snapshot.disk_files;
+        let files: Vec<&MooncakeDataFileRef> = disk_files.keys().collect();
+        let position: HashMap<FileId, usize> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.file_id(), i))
+            .collect();
+        let mut parent: Vec<usize> = (0..files.len()).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let file_indices = &self.current_snapshot.indices.file_indices;
+        for index in file_indices.iter() {
+            let members: Vec<usize> = index
+                .files
+                .iter()
+                .filter_map(|f| position.get(&f.file_id()).copied())
+                .collect();
+            for pair in members.windows(2) {
+                let (a, b) = (find(&mut parent, pair[0]), find(&mut parent, pair[1]));
+                parent[a] = b;
+            }
+        }
+        let mut groups: HashMap<usize, CompactionGroup> = HashMap::new();
+        for (i, f) in files.iter().enumerate() {
+            let entry = &disk_files[*f];
+            let deletion_percentage = if entry.num_rows == 0 {
+                0
+            } else {
+                entry.committed_deletion_vector.get_num_rows_deleted() * 100 / entry.num_rows
+            };
+            groups
+                .entry(find(&mut parent, i))
+                .or_default()
+                .files
+                .push(CompactionGroupFile {
+                    data_file: (*f).clone(),
+                    file_size: entry.file_size,
+                    deletion_percentage,
+                });
+        }
+        for index in file_indices.iter() {
+            if let Some(first) = index
+                .files
+                .iter()
+                .find_map(|f| position.get(&f.file_id()).copied())
+            {
+                if let Some(group) = groups.get_mut(&find(&mut parent, first)) {
+                    group.file_indices.push(index.clone());
+                }
+            }
+        }
+        groups.into_values().collect()
+    }
+
+    /// Whether the payload's data files are exactly the files covered by its file indices.
+    fn compaction_payload_is_consistent(&self, payload: &DataCompactionPayload) -> bool {
         if self.mooncake_table_metadata.config.append_only {
-            return;
+            return true;
         }
 
         // Data files to compact.
@@ -218,7 +269,7 @@ impl SnapshotTableState {
             data_files_by_file_indices.extend(cur_file_index.files.iter().map(|f| f.file_id()));
         }
 
-        assert_eq!(data_files, data_files_by_file_indices);
+        data_files == data_files_by_file_indices
     }
 
     /// Util function to decide whether and what to merge index.
@@ -270,8 +321,28 @@ impl SnapshotTableState {
 
         // Number of index blocks rejected to merge due to unpersistence.
         let mut reject_by_unpersistence = 0;
+        // Merging the index of a large data file with those of small files would tie the small
+        // files to it: compaction only takes data files sharing an index together, so they could
+        // no longer be compacted.
+        let large_data_file_size = self
+            .mooncake_table_metadata
+            .config
+            .data_compaction_config
+            .data_file_final_size;
+        let skip_large_files = !matches!(index_merge_option, MaintenanceOption::ForceFull(_));
         for cur_file_index in all_file_indices.iter() {
             if cur_file_index.get_index_blocks_size() >= index_merge_file_size_threshold {
+                continue;
+            }
+            if skip_large_files
+                && cur_file_index.files.iter().any(|f| {
+                    self.current_snapshot
+                        .disk_files
+                        .get(f)
+                        .map(|e| e.file_size as u64 >= large_data_file_size)
+                        .unwrap_or(false)
+                })
+            {
                 continue;
             }
 
@@ -425,4 +496,43 @@ impl SnapshotTableState {
             }
         }
     }
+}
+
+/// One data file of a [`CompactionGroup`].
+#[derive(Clone, Debug)]
+pub(crate) struct CompactionGroupFile {
+    pub(crate) data_file: MooncakeDataFileRef,
+    pub(crate) file_size: usize,
+    /// Percentage (0..=100) of the file's rows that are deleted.
+    pub(crate) deletion_percentage: usize,
+}
+
+/// Data files connected through shared file indices; compaction takes a group as a whole.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CompactionGroup {
+    pub(crate) files: Vec<CompactionGroupFile>,
+    pub(crate) file_indices: Vec<FileIndex>,
+}
+
+/// Pick whole groups to compact, up to `max_files` data files in total. Returns an empty list if
+/// fewer than `min_files` files can be chosen.
+pub(crate) fn choose_compaction_groups(
+    eligible: Vec<CompactionGroup>,
+    min_files: usize,
+    max_files: usize,
+) -> Vec<CompactionGroup> {
+    let mut chosen = Vec::new();
+    let mut total = 0;
+    for group in eligible {
+        let size = group.files.len();
+        if total + size > max_files {
+            continue;
+        }
+        total += size;
+        chosen.push(group);
+    }
+    if total < min_files {
+        return Vec::new();
+    }
+    chosen
 }

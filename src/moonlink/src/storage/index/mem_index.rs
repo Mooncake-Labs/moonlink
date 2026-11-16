@@ -148,8 +148,10 @@ impl MemIndex {
     ) -> Vec<(u64, usize, usize)> {
         let remap = |key: u64, location: &RecordLocation| match location {
             RecordLocation::MemoryBatch(batch_id, row_idx) => {
-                let old_location = (batch_id_to_idx[batch_id], row_idx);
-                let new_location = row_offset_mapping[old_location.0][*old_location.1];
+                // Batches whose rows were all deleted are not written, so they have no mapping;
+                // their (deleted) rows get no index entry, like deleted rows of written batches.
+                let batch_idx = *batch_id_to_idx.get(batch_id)?;
+                let new_location = row_offset_mapping[batch_idx][*row_idx];
                 new_location.map(|new_location| (key, new_location.0, new_location.1))
             }
             RecordLocation::DiskFile(_, _) => panic!("No disk file in mem index"),

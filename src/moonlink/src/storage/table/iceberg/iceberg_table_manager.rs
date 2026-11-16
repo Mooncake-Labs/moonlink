@@ -13,10 +13,11 @@ use crate::storage::table::common::table_manager::{
     PersistenceFileParams, PersistenceResult, TableManager,
 };
 use crate::storage::table::iceberg::catalog_utils;
+use crate::storage::table::iceberg::gc::GcTrigger;
 use crate::storage::table::iceberg::moonlink_catalog::MoonlinkCatalog;
 use crate::storage::table::iceberg::utils;
 use crate::IcebergTableConfig;
-use crate::Result;
+use crate::{Error, Result};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,11 +72,26 @@ pub struct IcebergTableManager {
     /// Maps from mooncake file index to remote puffin filepath.
     pub(crate) persisted_file_indices: HashMap<MooncakeFileIndex, String>,
 
+    /// Remote index block files of each persisted index puffin (keyed by puffin path); the
+    /// in-memory file indices refer to cache copies instead.
+    pub(crate) persisted_index_block_files: HashMap<String, Vec<String>>,
+
     /// Maps from remote data file path to its file id.
     pub(crate) remote_data_file_to_file_id: HashMap<String, FileId>,
 
     /// Iceberg persistence stats.
     pub(crate) persistence_stats: Arc<IcebergPersistenceStats>,
+
+    /// Set for tables owned by a mooncake table; enables garbage collection.
+    pub(crate) gc_context: Option<Arc<crate::storage::table::iceberg::gc::IcebergGcContext>>,
+    /// Data-directory files no longer referenced, with when / after which commit (see
+    /// `IcebergGcContext::committed`) they were first seen unreferenced.
+    pub(crate) gc_unreferenced_since: HashMap<String, (std::time::Instant, u64)>,
+    /// Files the current version referenced at the last garbage collection, i.e. what its
+    /// successor's predecessor references.
+    pub(crate) gc_previous_referenced: Option<std::collections::HashSet<String>>,
+    /// Paths a dry run of garbage collection already reported (nothing is deleted then).
+    pub(crate) gc_dry_run_reported: std::collections::HashSet<String>,
 }
 
 impl IcebergTableManager {
@@ -99,8 +115,13 @@ impl IcebergTableManager {
             filesystem_accessor,
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
+            persisted_index_block_files: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
             persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
+            gc_context: None,
+            gc_unreferenced_since: HashMap::new(),
+            gc_previous_referenced: None,
+            gc_dry_run_reported: std::collections::HashSet::new(),
         })
     }
 
@@ -128,8 +149,13 @@ impl IcebergTableManager {
             filesystem_accessor,
             persisted_data_files: HashMap::new(),
             persisted_file_indices: HashMap::new(),
+            persisted_index_block_files: HashMap::new(),
             remote_data_file_to_file_id: HashMap::new(),
             persistence_stats: Arc::new(IcebergPersistenceStats::new(mooncake_table_id)),
+            gc_context: None,
+            gc_unreferenced_since: HashMap::new(),
+            gc_previous_referenced: None,
+            gc_dry_run_reported: std::collections::HashSet::new(),
         })
     }
 
@@ -193,20 +219,38 @@ impl TableManager for IcebergTableManager {
 
     async fn sync_snapshot(
         &mut self,
-        mut snapshot_payload: PersistenceSnapshotPayload,
+        snapshot_payload: PersistenceSnapshotPayload,
         file_params: PersistenceFileParams,
     ) -> Result<PersistenceResult> {
-        // Persist data files, deletion vectors, and file indices.
-        let new_table_schema = std::mem::take(&mut snapshot_payload.new_table_schema);
-        let persistence_result = self
-            .sync_snapshot_impl(snapshot_payload, file_params)
-            .await?;
-
-        // Perform schema evolution if necessary.
-        if let Some(new_table_schema) = new_table_schema {
-            self.alter_table_schema_impl(new_table_schema).await?;
+        let backup = self.backup_sync_state();
+        match self
+            .sync_snapshot_and_evolve_schema(snapshot_payload, file_params)
+            .await
+        {
+            Ok(result) => {
+                if let Some(gc_context) = &self.gc_context {
+                    gc_context
+                        .committed
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                // Best effort: a failed cleanup only leaves files behind for the next run.
+                if let Err(e) = Box::pin(self.collect_garbage(GcTrigger::Commit)).await {
+                    tracing::warn!(error = ?e, "iceberg garbage collection failed");
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                let err = self.recover_after_failed_sync(backup, err).await;
+                // Free what the failed commit wrote (e.g. on a full disk), unless it may have
+                // committed after all.
+                if !matches!(err, Error::IcebergCommitOutcomeUnknown(_)) {
+                    if let Err(e) = Box::pin(self.collect_garbage(GcTrigger::FailedCommit)).await {
+                        tracing::warn!(error = ?e, "iceberg garbage collection after a failed commit failed");
+                    }
+                }
+                Err(err)
+            }
         }
-        Ok(persistence_result)
     }
 
     async fn load_snapshot_from_table(&mut self) -> Result<(u32, MooncakeSnapshot)> {
@@ -214,7 +258,11 @@ impl TableManager for IcebergTableManager {
         let recovery_stats =
             IcebergTableRecoveryStats::new(self.mooncake_table_metadata.mooncake_table_id.clone());
         let _guard = recovery_stats.start();
-        let snapshot = self.load_snapshot_from_table_impl().await?;
+        let snapshot = Box::pin(self.load_snapshot_from_table_impl()).await?;
+        // No reader exists yet: remove everything left over by earlier runs.
+        if let Err(e) = Box::pin(self.collect_garbage(GcTrigger::Load)).await {
+            tracing::warn!(error = ?e, "iceberg garbage collection at load failed");
+        }
         Ok(snapshot)
     }
 
@@ -229,8 +277,86 @@ impl TableManager for IcebergTableManager {
         self.snapshot_loaded = false;
         self.persisted_data_files.clear();
         self.persisted_file_indices.clear();
+        self.persisted_index_block_files.clear();
         self.remote_data_file_to_file_id.clear();
 
         Ok(())
+    }
+}
+
+/// In-memory state mutated by a sync, restored if the sync fails.
+struct SyncStateBackup {
+    persisted_data_files: HashMap<FileId, DataFileEntry>,
+    persisted_file_indices: HashMap<MooncakeFileIndex, String>,
+    persisted_index_block_files: HashMap<String, Vec<String>>,
+    remote_data_file_to_file_id: HashMap<String, FileId>,
+    current_snapshot_id: Option<i64>,
+}
+
+impl IcebergTableManager {
+    fn backup_sync_state(&self) -> SyncStateBackup {
+        SyncStateBackup {
+            persisted_data_files: self.persisted_data_files.clone(),
+            persisted_file_indices: self.persisted_file_indices.clone(),
+            persisted_index_block_files: self.persisted_index_block_files.clone(),
+            remote_data_file_to_file_id: self.remote_data_file_to_file_id.clone(),
+            current_snapshot_id: self
+                .iceberg_table
+                .as_ref()
+                .and_then(|t| t.metadata().current_snapshot_id()),
+        }
+    }
+
+    /// Restore in-memory state after a failed sync and check the committed table is unchanged,
+    /// so the next sync can simply retry. If the failed attempt did change (or we cannot read)
+    /// the committed table, return an [`Error::IcebergCommitOutcomeUnknown`].
+    async fn recover_after_failed_sync(&mut self, backup: SyncStateBackup, err: Error) -> Error {
+        self.persisted_data_files = backup.persisted_data_files;
+        self.persisted_file_indices = backup.persisted_file_indices;
+        self.persisted_index_block_files = backup.persisted_index_block_files;
+        self.remote_data_file_to_file_id = backup.remote_data_file_to_file_id;
+        self.catalog.clear_puffin_metadata();
+        match utils::get_table_if_exists(
+            &*self.catalog,
+            &self.config.namespace,
+            &self.config.table_name,
+        )
+        .await
+        {
+            Ok(table) => {
+                let committed_snapshot_id = table
+                    .as_ref()
+                    .and_then(|t| t.metadata().current_snapshot_id());
+                if committed_snapshot_id == backup.current_snapshot_id {
+                    self.iceberg_table = table;
+                    err
+                } else {
+                    Error::iceberg_commit_outcome_unknown(format!(
+                        "iceberg commit failed after the table changed (snapshot {:?} -> {:?}): {err}",
+                        backup.current_snapshot_id, committed_snapshot_id
+                    ))
+                }
+            }
+            Err(load_err) => Error::iceberg_commit_outcome_unknown(format!(
+                "iceberg commit failed ({err}) and the table could not be re-read ({load_err})"
+            )),
+        }
+    }
+
+    async fn sync_snapshot_and_evolve_schema(
+        &mut self,
+        mut snapshot_payload: PersistenceSnapshotPayload,
+        file_params: PersistenceFileParams,
+    ) -> Result<PersistenceResult> {
+        let new_table_schema = std::mem::take(&mut snapshot_payload.new_table_schema);
+        let persistence_result = self
+            .sync_snapshot_impl(snapshot_payload, file_params)
+            .await?;
+
+        // Perform schema evolution if necessary.
+        if let Some(new_table_schema) = new_table_schema {
+            self.alter_table_schema_impl(new_table_schema).await?;
+        }
+        Ok(persistence_result)
     }
 }

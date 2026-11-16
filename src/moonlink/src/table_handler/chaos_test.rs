@@ -1,10 +1,3 @@
-/// This file implements chaos test for table handler.
-///
-/// System invariants:
-/// - Begin events happen only after end events
-/// - End events happen only after begin events
-/// - Rows to delete comes from committed appended ones
-/// - LSN always increases
 use crate::event_sync::create_table_event_syncer;
 use crate::row::{MoonlinkRow, RowValue};
 #[cfg(feature = "storage-gcs")]
@@ -23,6 +16,14 @@ use crate::table_handler::chaos_table_metadata::ReplayTableMetadata;
 use crate::table_handler::test_utils::*;
 use crate::table_handler::{TableEvent, TableHandler};
 use crate::table_handler_timer::create_table_handler_timers;
+/// This file implements chaos test for table handler.
+///
+/// System invariants:
+/// - Begin events happen only after end events
+/// - End events happen only after begin events
+/// - Rows to delete comes from committed appended ones
+/// - LSN always increases
+use crate::union_read::always_healthy_table_status;
 use crate::union_read::ReadStateManager;
 use crate::{IcebergTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig};
 
@@ -53,6 +54,7 @@ struct ChaosTestArgs {
 /// Combine argument parsing logic into one function using pico-args.
 /// Since cargo test filters unknown flags, we use a different approach:
 /// - Try to parse from command line args first (for direct binary execution)
+/// - Then the `MOONLINK_CHAOS_SEED` environment variable (works through `cargo test`)
 /// - Fall back to timestamp-based seed
 /// - For print events, we'll use a simple flag that might work
 fn parse_chaos_test_args() -> ChaosTestArgs {
@@ -62,6 +64,14 @@ fn parse_chaos_test_args() -> ChaosTestArgs {
     let seed: Option<u64> = pargs.opt_value_from_str("--seed").unwrap_or(None);
     let print_events_on_success = pargs.contains("--print-events-on-success");
 
+    let seed = seed.or_else(|| {
+        std::env::var("MOONLINK_CHAOS_SEED").ok().map(|value| {
+            value
+                .trim()
+                .parse()
+                .expect("MOONLINK_CHAOS_SEED must be a u64")
+        })
+    });
     // Default seed if not provided
     let seed = seed.unwrap_or_else(|| {
         SystemTime::now()
@@ -840,13 +850,14 @@ impl TestEnvironment {
         let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
         let read_state_filepath_remap =
             std::sync::Arc::new(|local_filepath: String| local_filepath);
+        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let read_state_manager = ReadStateManager::new(
             &table,
             replication_lsn_rx.clone(),
             last_commit_lsn_rx,
+            table_event_sync_receiver.table_status_rx.clone(),
             read_state_filepath_remap,
         );
-        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let (handler_event_replay_tx, handler_event_replay_rx) = mpsc::unbounded_channel();
         let (table_event_replay_tx, table_event_replay_rx) = mpsc::unbounded_channel();
         let table_handler = TableHandler::new(
@@ -973,7 +984,7 @@ async fn validate_persisted_iceberg_table(
     let cache_temp_dir = tempdir().unwrap();
     let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
-    let mut table = create_mooncake_table(
+    let mut table = create_mooncake_table_for_validation(
         mooncake_table_metadata.clone(),
         iceberg_table_config.clone(),
         object_storage_cache,
@@ -986,6 +997,7 @@ async fn validate_persisted_iceberg_table(
         &table,
         replication_lsn_rx.clone(),
         last_commit_lsn_rx,
+        always_healthy_table_status(),
         read_state_filepath_remap,
     );
     check_read_snapshot(
@@ -1016,10 +1028,17 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
             test_env_config.special_table_option == SpecialTableOption::AppendOnly,
             test_env_config.special_table_option == SpecialTableOption::UpsertDeleteIfExists,
         );
-        println!(
-            "Test {} is with random seed {}",
-            test_env_config.test_name, state.random_seed
-        );
+        // Written to the stderr handle, which the test harness does not capture, so the seed is
+        // visible even if the test hangs (rerun with MOONLINK_CHAOS_SEED=<seed>).
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "Test {} is with random seed {}",
+                test_env_config.test_name,
+                state.random_seed
+            );
+        }
 
         // Attempt read on empty table.
         check_read_snapshot(
@@ -1035,14 +1054,21 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
             // Perform table maintenance operations.
             if let Some(TableEvent::ForceRegularIndexMerge) = &chaos_events.table_maintenance_event
             {
-                let mut rx = table_event_manager.initiate_index_merge().await;
-                rx.recv().await.unwrap().unwrap();
+                let rx = table_event_manager.initiate_index_merge().await.unwrap();
+                TableEventManager::synchronize_maintenance_request(rx)
+                    .await
+                    .unwrap();
             }
             if let Some(TableEvent::ForceRegularDataCompaction) =
                 &chaos_events.table_maintenance_event
             {
-                let mut rx = table_event_manager.initiate_data_compaction().await;
-                rx.recv().await.unwrap().unwrap();
+                let rx = table_event_manager
+                    .initiate_data_compaction()
+                    .await
+                    .unwrap();
+                TableEventManager::synchronize_maintenance_request(rx)
+                    .await
+                    .unwrap();
             }
 
             // Perform table update operations.

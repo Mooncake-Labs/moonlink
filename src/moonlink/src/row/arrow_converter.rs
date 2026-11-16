@@ -1,13 +1,15 @@
 use super::moonlink_type::RowValue;
 use crate::row::MoonlinkRow;
-use arrow::array::Array;
+use crate::Result;
+use arrow::array::{Array, AsArray};
+use arrow::error::ArrowError;
 use arrow_array::{
     BinaryArray, BooleanArray, Date32Array, FixedSizeBinaryArray, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray, StructArray,
+    Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,
 };
 
 /// Convert arrow record batch to moonlink rows.
-pub(super) fn record_batch_to_moonlink_row(batch: &RecordBatch) -> Vec<MoonlinkRow> {
+pub(super) fn record_batch_to_moonlink_row(batch: &RecordBatch) -> Result<Vec<MoonlinkRow>> {
     let num_rows = batch.num_rows();
     let num_cols = batch.num_columns();
     let mut rows = Vec::with_capacity(num_rows);
@@ -16,22 +18,29 @@ pub(super) fn record_batch_to_moonlink_row(batch: &RecordBatch) -> Vec<MoonlinkR
         let mut values = Vec::with_capacity(num_cols);
         for col_idx in 0..num_cols {
             let arr = batch.column(col_idx).as_ref();
-            let v = arrow_value_to_rowvalue(arr, row_idx);
-            values.push(v);
+            values.push(arrow_value_to_rowvalue(arr, row_idx)?);
         }
         rows.push(MoonlinkRow::new(values));
     }
-    rows
+    Ok(rows)
 }
 
-/// From arrow value to moonlink row value. Must produce the same value the CDC path builds for
-/// the row, since full-row identities are hashed and compared on these values.
-fn arrow_value_to_rowvalue(arr: &dyn Array, row_idx: usize) -> RowValue {
+/// Every element of a list-like array slice.
+fn array_elements(values: &dyn Array) -> Result<RowValue> {
+    let items = (0..values.len())
+        .map(|i| arrow_value_to_rowvalue(values, i))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(RowValue::Array(items))
+}
+
+/// From arrow value to moonlink row value; the inverse of `ColumnArrayBuilder::append_value`, so
+/// a row read back from parquet equals (and hashes like) the row CDC produced.
+fn arrow_value_to_rowvalue(arr: &dyn Array, row_idx: usize) -> Result<RowValue> {
     if arr.is_null(row_idx) {
-        return RowValue::Null;
+        return Ok(RowValue::Null);
     }
 
-    match arr.data_type() {
+    let value = match arr.data_type() {
         arrow_schema::DataType::Int16 => {
             let a = arr.as_any().downcast_ref::<Int16Array>().unwrap();
             RowValue::Int32(a.value(row_idx) as i32)
@@ -104,27 +113,35 @@ fn arrow_value_to_rowvalue(arr: &dyn Array, row_idx: usize) -> RowValue {
             }
         }
         arrow_schema::DataType::List(_) => {
-            let a = arr.as_any().downcast_ref::<ListArray>().unwrap();
-            let values = a.value(row_idx);
-            RowValue::Array(
-                (0..values.len())
-                    .map(|i| arrow_value_to_rowvalue(values.as_ref(), i))
-                    .collect(),
-            )
+            return array_elements(arr.as_list::<i32>().value(row_idx).as_ref());
+        }
+        arrow_schema::DataType::LargeList(_) => {
+            return array_elements(arr.as_list::<i64>().value(row_idx).as_ref());
+        }
+        arrow_schema::DataType::FixedSizeList(_, _) => {
+            return array_elements(arr.as_fixed_size_list().value(row_idx).as_ref());
+        }
+        // Written from a RowValue::Array of key/value structs.
+        arrow_schema::DataType::Map(_, _) => {
+            return array_elements(&arr.as_map().value(row_idx));
         }
         arrow_schema::DataType::Struct(_) => {
-            let a = arr.as_any().downcast_ref::<StructArray>().unwrap();
-            RowValue::Struct(
-                a.columns()
-                    .iter()
-                    .map(|child| arrow_value_to_rowvalue(child.as_ref(), row_idx))
-                    .collect(),
-            )
+            let fields = arr
+                .as_struct()
+                .columns()
+                .iter()
+                .map(|column| arrow_value_to_rowvalue(column.as_ref(), row_idx))
+                .collect::<Result<Vec<_>>>()?;
+            RowValue::Struct(fields)
         }
-        _ => {
-            panic!("Unimplemented type {:?}", arr.data_type());
+        other => {
+            return Err(ArrowError::NotYetImplemented(format!(
+                "reading column type {other:?} back into rows"
+            ))
+            .into());
         }
-    }
+    };
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -235,7 +252,7 @@ mod tests {
 
         let batch = RecordBatch::try_new(Arc::new(schema), arrays).unwrap();
 
-        let rows = MoonlinkRow::from_record_batch(&batch);
+        let rows = MoonlinkRow::from_record_batch(&batch).unwrap();
         assert_eq!(rows.len(), 2);
 
         assert_eq!(
@@ -307,7 +324,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = MoonlinkRow::from_record_batch(&batch);
+        let rows = MoonlinkRow::from_record_batch(&batch).unwrap();
         let read_back: Vec<Vec<RowValue>> = rows.into_iter().map(|r| r.values).collect();
         let expected: Vec<Vec<RowValue>> = lists
             .into_iter()
@@ -315,5 +332,121 @@ mod tests {
             .map(|(l, s)| vec![l, s])
             .collect();
         assert_eq!(read_back, expected);
+    }
+
+    /// Rows shaped like the ones CDC produces (pg_replicate `From<Cell> for RowValue`: an
+    /// ArrayCell::Null becomes an empty array, NULL elements stay NULL, composites become
+    /// structs) survive the trip through the disk-slice writer and parquet unchanged, so a file
+    /// index rebuilt from parquet finds the rows CDC deletes.
+    #[test]
+    fn test_cdc_shaped_rows_round_trip_through_parquet() {
+        use crate::row::column_array_builder::ColumnArrayBuilder;
+        use crate::row::moonlink_row::stable_lookup_key;
+        use arrow_schema::Fields;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use parquet::arrow::ArrowWriter;
+
+        let item = |dt: DataType| Arc::new(Field::new("item", dt, true));
+        let struct_fields = Fields::from(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::List(item(DataType::Utf8)), true),
+        ]);
+        let map_entries = Arc::new(Field::new(
+            "entries",
+            DataType::Struct(Fields::from(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Utf8, true),
+            ])),
+            false,
+        ));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("ints", DataType::List(item(DataType::Int32)), true),
+            Field::new("texts", DataType::List(item(DataType::Utf8)), true),
+            Field::new("dates", DataType::List(item(DataType::Date32)), true),
+            Field::new(
+                "decimals",
+                DataType::List(item(DataType::Decimal128(10, 2))),
+                true,
+            ),
+            Field::new("composite", DataType::Struct(struct_fields.clone()), true),
+            Field::new(
+                "composites",
+                DataType::List(item(DataType::Struct(struct_fields))),
+                true,
+            ),
+            Field::new("map", DataType::Map(map_entries, false), true),
+        ]));
+        let text = |s: &str| RowValue::ByteArray(s.as_bytes().to_vec());
+        let rows = vec![
+            MoonlinkRow::new(vec![
+                RowValue::Int32(1),
+                RowValue::Array(vec![RowValue::Int32(1), RowValue::Null, RowValue::Int32(3)]),
+                RowValue::Array(vec![text("a"), RowValue::Null]),
+                RowValue::Array(vec![RowValue::Int32(19000)]),
+                RowValue::Array(vec![RowValue::Decimal(12345), RowValue::Null]),
+                RowValue::Struct(vec![RowValue::Int32(7), RowValue::Array(vec![text("x")])]),
+                RowValue::Array(vec![
+                    RowValue::Struct(vec![RowValue::Null, RowValue::Array(vec![])]),
+                    RowValue::Null,
+                ]),
+                RowValue::Array(vec![RowValue::Struct(vec![text("k"), text("v")])]),
+            ]),
+            // Empty arrays (CDC's ArrayCell::Null) and NULL values everywhere else.
+            MoonlinkRow::new(vec![
+                RowValue::Int32(2),
+                RowValue::Array(vec![]),
+                RowValue::Null,
+                RowValue::Array(vec![]),
+                RowValue::Null,
+                RowValue::Null,
+                RowValue::Array(vec![]),
+                RowValue::Null,
+            ]),
+        ];
+
+        let columns: Vec<ArrayRef> = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(col, field)| {
+                let mut builder = ColumnArrayBuilder::new(field.data_type(), rows.len());
+                for row in &rows {
+                    builder.append_value(&row.values[col]).unwrap();
+                }
+                builder.finish(field.data_type())
+            })
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+
+        let mut parquet_bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut parquet_bytes, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(parquet_bytes))
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut read_back = Vec::new();
+        for batch in reader {
+            read_back.extend(MoonlinkRow::from_record_batch(&batch.unwrap()).unwrap());
+        }
+
+        assert_eq!(read_back.len(), rows.len());
+        for (written, read) in rows.iter().zip(read_back.iter()) {
+            assert_eq!(written.values, read.values);
+            assert_eq!(
+                stable_lookup_key(written.values.iter()),
+                stable_lookup_key(read.values.iter())
+            );
+        }
+    }
+
+    #[test]
+    fn test_unsupported_column_type_is_an_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new("u", DataType::UInt8, false)]));
+        let column: ArrayRef = Arc::new(arrow_array::UInt8Array::from(vec![1u8]));
+        let batch = RecordBatch::try_new(schema, vec![column]).unwrap();
+        assert!(MoonlinkRow::from_record_batch(&batch).is_err());
     }
 }

@@ -22,6 +22,15 @@ pub(crate) struct DataFileManifestManager<'a> {
     /// Number of manifest entries for the active manifest writer.
     cur_manifest_entries_num: usize,
     finalized_manifest_files: Vec<ManifestFile>,
+    /// Entries per manifest file before rolling over.
+    max_entries_per_manifest: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets tests exercise manifest rollover without tens of thousands of data files.
+    pub(crate) static MAX_MANIFEST_ENTRY_COUNT_FOR_TEST: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(DEFAULT_MAX_MANIFEST_ENTRY_COUNT) };
 }
 
 impl<'a> DataFileManifestManager<'a> {
@@ -37,6 +46,10 @@ impl<'a> DataFileManifestManager<'a> {
             writer: None,
             cur_manifest_entries_num: 0,
             finalized_manifest_files: Vec::new(),
+            #[cfg(not(test))]
+            max_entries_per_manifest: DEFAULT_MAX_MANIFEST_ENTRY_COUNT,
+            #[cfg(test)]
+            max_entries_per_manifest: MAX_MANIFEST_ENTRY_COUNT_FOR_TEST.with(|c| c.get()),
         }
     }
 
@@ -77,7 +90,7 @@ impl<'a> DataFileManifestManager<'a> {
             self.cur_manifest_entries_num += 1;
 
             // Check whether we need to rollover to a new manifest file.
-            if self.cur_manifest_entries_num >= DEFAULT_MAX_MANIFEST_ENTRY_COUNT {
+            if self.cur_manifest_entries_num >= self.max_entries_per_manifest {
                 if let Some(writer) = self.writer.take() {
                     let manifest_file = writer.write_manifest_file().await?;
                     self.finalized_manifest_files.push(manifest_file);
@@ -89,12 +102,13 @@ impl<'a> DataFileManifestManager<'a> {
         Ok(())
     }
 
-    /// Finalize the current manifest file and return.
-    pub(crate) async fn finalize(self) -> IcebergResult<Option<ManifestFile>> {
-        if let Some(writer) = self.writer {
+    /// Finalize the current manifest file and return every manifest written, including the ones
+    /// already rolled over.
+    pub(crate) async fn finalize(mut self) -> IcebergResult<Vec<ManifestFile>> {
+        if let Some(writer) = self.writer.take() {
             let manifest_file = writer.write_manifest_file().await?;
-            return Ok(Some(manifest_file));
+            self.finalized_manifest_files.push(manifest_file);
         }
-        Ok(None)
+        Ok(self.finalized_manifest_files)
     }
 }

@@ -1,9 +1,13 @@
 use crate::error::Result;
+use crate::event_sync::TableStatus;
+use crate::storage::table::iceberg::gc::LiveReadSeqProvider;
 use crate::storage::MooncakeTable;
 use crate::storage::SnapshotTableState;
+use crate::union_read::live_reads::LiveReadSeqs;
 use crate::ReadState;
 use crate::ReadStateFilepathRemap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::sync::{watch, RwLock};
 
 /// Snapshot LSN, which indicates there's no snapshot LSN update.
@@ -18,15 +22,35 @@ struct CachedRead {
     /// Requests up to this LSN are answered by `state`: no commit of this table in
     /// `(snapshot, valid_upto]` existed when it was materialized.
     valid_upto: u64,
+    /// Snapshot sequence the state was built from. Maintenance-only snapshots (compaction, index
+    /// merge, iceberg import) bump it without moving the snapshot LSN.
+    snapshot_seq: u64,
     state: Arc<ReadState>,
 }
 
 impl CachedRead {
+    fn empty(read_state_filepath_remap: ReadStateFilepathRemap) -> Self {
+        Self {
+            snapshot_key: None,
+            valid_upto: 0,
+            snapshot_seq: 0,
+            state: Arc::new(ReadState::new(
+                /*data_files=*/ Vec::new(),
+                /*puffin_cache_handles=*/ Vec::new(),
+                /*deletion_vectors_at_read=*/ Vec::new(),
+                /*position_deletes=*/ Vec::new(),
+                /*associated_files=*/ Vec::new(),
+                /*cache_handles=*/ Vec::new(),
+                read_state_filepath_remap,
+            )),
+        }
+    }
+
     /// Rows up to the snapshot are always covered. Beyond it, also require the CURRENT view to be
     /// clean: a commit at or below `valid_upto` that was marked late (e.g. buffered during initial
     /// copy) makes the view dirty and forces a wait for its snapshot.
-    fn reusable(&self, view: &LsnView, requested_lsn: Option<u64>) -> bool {
-        if self.snapshot_key != Some(view.snapshot) {
+    fn reusable(&self, view: &LsnView, snapshot_seq: u64, requested_lsn: Option<u64>) -> bool {
+        if self.snapshot_key != Some(view.snapshot) || self.snapshot_seq != snapshot_seq {
             return false;
         }
         match requested_lsn {
@@ -37,6 +61,11 @@ impl CachedRead {
             }
         }
     }
+}
+
+/// Orders snapshot watch values; [`NO_SNAPSHOT_LSN`] is older than any published snapshot.
+fn snapshot_lsn_is_newer(lsn: u64, than: u64) -> bool {
+    lsn != NO_SNAPSHOT_LSN && (than == NO_SNAPSHOT_LSN || lsn > than)
 }
 
 /// One consistent observation of the table's LSN watches.
@@ -107,14 +136,34 @@ impl LsnView {
     }
 }
 
+/// Status watch of a table without a table handler (test validation readers): healthy for as long
+/// as the process runs.
+#[cfg(test)]
+pub(crate) fn always_healthy_table_status() -> watch::Receiver<TableStatus> {
+    let (sender, receiver) = watch::channel(TableStatus::Healthy);
+    // A dropped sender means a dropped table to readers; keep it alive.
+    Box::leak(Box::new(sender));
+    receiver
+}
+
+/// How long a read whose watch closed waits for the table status to say why.
+#[cfg(not(test))]
+const PRODUCER_ENDED_STATUS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const PRODUCER_ENDED_STATUS_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub struct ReadStateManager {
-    cache: RwLock<CachedRead>,
+    cache: Arc<RwLock<CachedRead>>,
+    snapshot_seq: Arc<AtomicU64>,
+    live_reads: Arc<LiveReadSeqs>,
     table_snapshot: Arc<RwLock<SnapshotTableState>>,
     table_snapshot_watch_receiver: watch::Receiver<u64>,
     replication_lsn_rx: watch::Receiver<u64>,
     last_commit_lsn_rx: watch::Receiver<u64>,
     /// Functor which maps local filepath to remote URI if possible, should be applied on all files within [`ReadState`].
     read_state_filepath_remap: ReadStateFilepathRemap,
+    /// Table health; reads of an errored table fail instead of waiting or serving stale data.
+    table_status_rx: watch::Receiver<TableStatus>,
 }
 
 impl ReadStateManager {
@@ -122,29 +171,146 @@ impl ReadStateManager {
         table: &MooncakeTable,
         replication_lsn_rx: watch::Receiver<u64>,
         last_commit_lsn_rx: watch::Receiver<u64>,
+        table_status_rx: watch::Receiver<TableStatus>,
         read_state_filepath_remap: ReadStateFilepathRemap,
     ) -> Self {
         let (table_snapshot, table_snapshot_watch_receiver) = table.get_state_for_reader();
+        let cache = Arc::new(RwLock::new(CachedRead::empty(
+            read_state_filepath_remap.clone(),
+        )));
+        let snapshot_seq = table.snapshot_seq_handle();
+        let live_reads = Arc::new(LiveReadSeqs::default());
+        table.set_live_read_seq_provider(Self::live_read_seq_provider(
+            Arc::downgrade(&cache),
+            snapshot_seq.clone(),
+            live_reads.clone(),
+            read_state_filepath_remap.clone(),
+        ));
         ReadStateManager {
-            cache: RwLock::new(CachedRead {
-                snapshot_key: None,
-                valid_upto: 0,
-                state: Arc::new(ReadState::new(
-                    /*data_files=*/ Vec::new(),
-                    /*puffin_cache_handles=*/ Vec::new(),
-                    /*deletion_vectors_at_read=*/ Vec::new(),
-                    /*position_deletes=*/ Vec::new(),
-                    /*associated_files=*/ Vec::new(),
-                    /*cache_handles=*/ Vec::new(),
-                    read_state_filepath_remap.clone(), // Unused
-                )),
-            }),
+            cache,
+            snapshot_seq,
+            live_reads,
             table_snapshot,
             table_snapshot_watch_receiver,
             replication_lsn_rx,
             last_commit_lsn_rx,
             read_state_filepath_remap,
+            table_status_rx,
         }
+    }
+
+    /// Oldest snapshot sequence any live read state was built from, for garbage collection.
+    /// On an idle table the cached read state would pin superseded files forever, so a cached
+    /// state that is outdated and not held by any scan is released first.
+    fn live_read_seq_provider(
+        cache: Weak<RwLock<CachedRead>>,
+        snapshot_seq: Arc<AtomicU64>,
+        live_reads: Arc<LiveReadSeqs>,
+        read_state_filepath_remap: ReadStateFilepathRemap,
+    ) -> LiveReadSeqProvider {
+        Arc::new(move || {
+            if let Some(cache) = cache.upgrade() {
+                if let Ok(mut cached) = cache.try_write() {
+                    if cached.snapshot_key.is_some()
+                        && cached.snapshot_seq != snapshot_seq.load(Ordering::SeqCst)
+                        && Arc::strong_count(&cached.state) == 1
+                    {
+                        *cached = CachedRead::empty(read_state_filepath_remap.clone());
+                    }
+                }
+            }
+            live_reads.min()
+        })
+    }
+
+    /// Wait until replication reached `lsn`, then return the LSN a snapshot must cover so that it
+    /// contains every commit of this table at or below `lsn`: `min(lsn, table commit LSN)`.
+    ///
+    /// Callers pass the end of the session's last transaction, which may be WAL without a commit
+    /// for this table (an xid-less transaction that pruned pages, a logical message, a commit to
+    /// another table); waiting for a table commit at that LSN would never end. Once replication is
+    /// at `lsn`, the producer order (commit LSN marked before replication LSN, table events sent in
+    /// between) guarantees every such commit was already handed to the table handler.
+    pub async fn wait_for_lsn_coverage(&self, lsn: u64) -> Result<u64> {
+        let mut replication_lsn_rx = self.replication_lsn_rx.clone();
+        let mut table_status_rx = self.table_status_rx.clone();
+        loop {
+            Self::check_healthy(&mut table_status_rx)?;
+            let replication = *replication_lsn_rx.borrow_and_update();
+            let commit = *self.last_commit_lsn_rx.borrow();
+            if commit >= lsn {
+                return Ok(lsn);
+            }
+            if replication >= lsn {
+                return Ok(commit);
+            }
+            tokio::select! {
+                res = replication_lsn_rx.changed() => {
+                    if let Err(closed) = res {
+                        return Err(Self::producer_ended(&mut table_status_rx, closed.into()).await);
+                    }
+                }
+                res = Self::table_status_changed(&mut table_status_rx) => res?,
+            }
+        }
+    }
+
+    /// Whether the table's LSNs already allow a read at `lsn`, i.e. a read that has not finished
+    /// is waiting for its read state build rather than for replication. For diagnostics.
+    pub fn lsn_reached(&self, lsn: Option<u64>) -> bool {
+        // Same order as `LsnView::observe`.
+        let replication = *self.replication_lsn_rx.borrow();
+        let commit = *self.last_commit_lsn_rx.borrow();
+        let snapshot = *self.table_snapshot_watch_receiver.borrow();
+        LsnView::normalize(replication, commit, snapshot).can_satisfy(lsn)
+    }
+
+    /// Current (snapshot, commit, replication) LSNs, for diagnostics.
+    pub fn lsn_status(&self) -> (u64, u64, u64) {
+        (
+            *self.table_snapshot_watch_receiver.borrow(),
+            *self.last_commit_lsn_rx.borrow(),
+            *self.replication_lsn_rx.borrow(),
+        )
+    }
+
+    fn check_healthy(status_rx: &mut watch::Receiver<TableStatus>) -> Result<()> {
+        if let TableStatus::Errored(message) = &*status_rx.borrow_and_update() {
+            return Err(crate::Error::table_errored(message));
+        }
+        Ok(())
+    }
+
+    async fn table_status_changed(status_rx: &mut watch::Receiver<TableStatus>) -> Result<()> {
+        if status_rx.changed().await.is_err() {
+            return Err(crate::Error::table_errored(
+                "table dropped while a read was waiting for it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The error for a read whose LSN or snapshot watch closed (its producer stopped). When CDC
+    /// fails a table, the sink drops the table's replication watch before the table handler has
+    /// marked the table errored, so wait briefly for the status: its errored reason (or "dropped")
+    /// tells users what to do, the closed channel does not.
+    async fn producer_ended(
+        status_rx: &mut watch::Receiver<TableStatus>,
+        closed: crate::Error,
+    ) -> crate::Error {
+        let status = async {
+            loop {
+                if let Err(e) = Self::check_healthy(status_rx) {
+                    return e;
+                }
+                if let Err(e) = Self::table_status_changed(status_rx).await {
+                    return e;
+                }
+            }
+        };
+        tokio::time::timeout(PRODUCER_ENDED_STATUS_WAIT, status)
+            .await
+            .unwrap_or(closed)
     }
 
     #[inline]
@@ -164,8 +330,10 @@ impl ReadStateManager {
         let mut table_snapshot_rx = self.table_snapshot_watch_receiver.clone();
         let mut replication_lsn_rx = self.replication_lsn_rx.clone();
         let last_commit_lsn = self.last_commit_lsn_rx.clone();
+        let mut table_status_rx = self.table_status_rx.clone();
 
         loop {
+            Self::check_healthy(&mut table_status_rx)?;
             let view = LsnView::observe(
                 &mut replication_lsn_rx,
                 &last_commit_lsn,
@@ -173,44 +341,175 @@ impl ReadStateManager {
             );
             {
                 let cache = self.cache.read().await;
-                if cache.reusable(&view, requested_lsn) {
+                let snapshot_seq = self.snapshot_seq.load(Ordering::SeqCst);
+                if cache.reusable(&view, snapshot_seq, requested_lsn) {
                     return Ok(cache.state.clone());
                 }
             }
             if view.can_satisfy(requested_lsn) {
                 return self.read_from_snapshot_and_update_cache(view).await;
             }
-            // `observe` marked both receivers as seen, so these wait for the next update.
-            if requested_lsn.unwrap() > view.replication {
-                replication_lsn_rx.changed().await?;
-            } else {
-                table_snapshot_rx.changed().await?;
+            // `observe` and `check_healthy` marked the receivers as seen, so these wait for the
+            // next update.
+            let wait_replication = requested_lsn.unwrap() > view.replication;
+            let closed = tokio::select! {
+                res = replication_lsn_rx.changed(), if wait_replication => res.err(),
+                res = table_snapshot_rx.changed(), if !wait_replication => res.err(),
+                res = Self::table_status_changed(&mut table_status_rx) => {
+                    res?;
+                    None
+                }
+            };
+            if let Some(closed) = closed {
+                return Err(Self::producer_ended(&mut table_status_rx, closed.into()).await);
             }
         }
     }
 
-    #[tracing::instrument(name = "update_read_state", skip_all)]
     async fn read_from_snapshot_and_update_cache(&self, view: LsnView) -> Result<Arc<ReadState>> {
-        let mut cache = self.cache.write().await;
-        if cache.snapshot_key == Some(view.snapshot) {
-            // Same snapshot already materialized; only the label can grow.
-            cache.valid_upto = cache.valid_upto.max(view.valid_upto());
-            return Ok(cache.state.clone());
+        // Between prepare_read and the finished ReadState, cache pins and the temp parquet are
+        // owned by values only a complete ReadState releases. Build in a task of its own, so a
+        // cancelled caller (client disconnect, LSN-wait timeout) cannot interrupt that window;
+        // an abandoned build still publishes its state to the cache, which releases it normally.
+        // The build's cleanup (error, panic) never waits for the table handler. A stuck build
+        // holds the cache lock, so later reads of the table queue behind it; callers bound their
+        // wait (scan_table's LSN-wait timeout), and a queued build that finally runs re-checks
+        // the cache first.
+        let build = Self::build_read_state(
+            self.cache.clone(),
+            self.snapshot_seq.clone(),
+            self.live_reads.clone(),
+            self.table_snapshot.clone(),
+            self.read_state_filepath_remap.clone(),
+            view,
+        );
+        match tokio::spawn(build).await {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => Err(e.into()),
         }
-        let snapshot_read_output = {
-            let mut table_state_snapshot = self.table_snapshot.write().await;
-            table_state_snapshot.request_read().await?
+    }
+
+    #[tracing::instrument(name = "update_read_state", skip_all)]
+    async fn build_read_state(
+        cache: Arc<RwLock<CachedRead>>,
+        current_snapshot_seq: Arc<AtomicU64>,
+        live_reads: Arc<LiveReadSeqs>,
+        table_snapshot: Arc<RwLock<SnapshotTableState>>,
+        read_state_filepath_remap: ReadStateFilepathRemap,
+        view: LsnView,
+    ) -> Result<Arc<ReadState>> {
+        let mut cache = cache.write().await;
+        // A reader whose view went stale while it waited for the lock: the cached state is newer
+        // than its view, so it covers every LSN the view could satisfy.
+        let cache_is_newer = cache
+            .snapshot_key
+            .is_some_and(|key| snapshot_lsn_is_newer(key, view.snapshot));
+        if cache.snapshot_seq == current_snapshot_seq.load(Ordering::SeqCst) {
+            if cache.snapshot_key == Some(view.snapshot) {
+                // Same snapshot already materialized; only the label can grow.
+                cache.valid_upto = cache.valid_upto.max(view.valid_upto());
+                return Ok(cache.state.clone());
+            }
+            if cache_is_newer {
+                return Ok(cache.state.clone());
+            }
+        }
+        // Only collection happens under the snapshot lock; the temp parquet is written after it is
+        // released. The cache write guard still serializes materialization per table.
+        let (pending_read, live_read_guard) = {
+            let mut table_state_snapshot = table_snapshot.write().await;
+            let pending_read = table_state_snapshot.prepare_read().await?;
+            // Register under the snapshot lock: from here on GC keeps this snapshot's files.
+            let guard = live_reads.register(pending_read.snapshot_seq());
+            (pending_read, guard)
         };
+        let snapshot_seq = pending_read.snapshot_seq();
+        #[cfg(test)]
+        test_hooks::before_materialize(&table_snapshot).await;
+        let snapshot_read_output = pending_read.materialize().await?;
         let state = snapshot_read_output
-            .take_as_read_state(self.read_state_filepath_remap.clone())
+            .take_as_read_state(read_state_filepath_remap)
             .await?;
+        state.attach_live_read_guard(live_read_guard);
+        // The current snapshot is at least as new as both keys; keep the newer key and its label.
+        let (snapshot_key, valid_upto) = if cache_is_newer {
+            (cache.snapshot_key, cache.valid_upto)
+        } else {
+            (Some(view.snapshot), view.valid_upto())
+        };
         // Publish only after the read state was built, so a failure keeps the previous key.
         *cache = CachedRead {
-            snapshot_key: Some(view.snapshot),
-            valid_upto: view.valid_upto(),
+            snapshot_key,
+            valid_upto,
+            snapshot_seq,
             state: state.clone(),
         };
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use super::{ReadStateManager, RwLock, SnapshotTableState};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    enum Hook {
+        Block(oneshot::Sender<()>, oneshot::Receiver<()>),
+        Panic,
+    }
+
+    /// Armed hooks, keyed by the table snapshot they apply to, so that reads of other tables
+    /// (tests run in parallel in one process) never take them.
+    static BLOCK_MATERIALIZE: Mutex<Option<HashMap<usize, Hook>>> = Mutex::new(None);
+
+    fn key(table_snapshot: &Arc<RwLock<SnapshotTableState>>) -> usize {
+        Arc::as_ptr(table_snapshot) as usize
+    }
+
+    /// Make the next materialization of `manager`'s table report on the returned receiver and
+    /// wait until the returned sender fires (or is dropped).
+    pub(crate) fn block_next_materialize(
+        manager: &ReadStateManager,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        BLOCK_MATERIALIZE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(
+                key(&manager.table_snapshot),
+                Hook::Block(reached_tx, release_rx),
+            );
+        (reached_rx, release_tx)
+    }
+
+    /// Make the next materialization of `manager`'s table panic.
+    pub(crate) fn panic_next_materialize(manager: &ReadStateManager) {
+        BLOCK_MATERIALIZE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(key(&manager.table_snapshot), Hook::Panic);
+    }
+
+    pub(crate) async fn before_materialize(table_snapshot: &Arc<RwLock<SnapshotTableState>>) {
+        let hook = BLOCK_MATERIALIZE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|hooks| hooks.remove(&key(table_snapshot)));
+        match hook {
+            Some(Hook::Block(reached, release)) => {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+            Some(Hook::Panic) => panic!("injected panic while building a read state"),
+            None => {}
+        }
     }
 }
 
@@ -346,6 +645,7 @@ mod tests {
         let mk = |key: Option<u64>, valid_upto: u64| CachedRead {
             snapshot_key: key,
             valid_upto,
+            snapshot_seq: 7,
             state: Arc::new(ReadState::new(
                 vec![],
                 vec![],
@@ -359,18 +659,56 @@ mod tests {
         let clean_at_100 = LsnView::normalize(150, 100, 100);
         let dirty_at_100 = LsnView::normalize(150, 120, 100);
         // Same snapshot, within label.
-        assert!(mk(Some(100), 150).reusable(&clean_at_100, Some(150)));
+        assert!(mk(Some(100), 150).reusable(&clean_at_100, 7, Some(150)));
         // Same snapshot, beyond label.
-        assert!(!mk(Some(100), 150).reusable(&clean_at_100, Some(151)));
+        assert!(!mk(Some(100), 150).reusable(&clean_at_100, 7, Some(151)));
         // A later-marked commit at/below the label makes the view dirty: only the snapshot range is served.
-        assert!(!mk(Some(100), 150).reusable(&dirty_at_100, Some(120)));
-        assert!(mk(Some(100), 150).reusable(&dirty_at_100, Some(100)));
+        assert!(!mk(Some(100), 150).reusable(&dirty_at_100, 7, Some(120)));
+        assert!(mk(Some(100), 150).reusable(&dirty_at_100, 7, Some(100)));
         // A newer snapshot was published: never reuse, even if the label is higher.
-        assert!(!mk(Some(100), 200).reusable(&LsnView::normalize(200, 200, 200), Some(200)));
+        assert!(!mk(Some(100), 200).reusable(&LsnView::normalize(200, 200, 200), 7, Some(200)));
         // Empty cache.
-        assert!(!mk(None, u64::MAX).reusable(&clean_at_100, Some(1)));
+        assert!(!mk(None, u64::MAX).reusable(&clean_at_100, 7, Some(1)));
         // Latest read reuses only a clean current snapshot.
-        assert!(mk(Some(100), 100).reusable(&clean_at_100, None));
-        assert!(!mk(Some(100), 100).reusable(&dirty_at_100, None));
+        assert!(mk(Some(100), 100).reusable(&clean_at_100, 7, None));
+        assert!(!mk(Some(100), 100).reusable(&dirty_at_100, 7, None));
+        // A maintenance-only snapshot (same LSN, new sequence) also forces a refresh.
+        assert!(!mk(Some(100), 150).reusable(&clean_at_100, 8, Some(100)));
+    }
+
+    #[test]
+    fn snapshot_lsn_order_treats_no_snapshot_as_oldest() {
+        assert!(snapshot_lsn_is_newer(100, 50));
+        assert!(!snapshot_lsn_is_newer(50, 100));
+        assert!(!snapshot_lsn_is_newer(100, 100));
+        assert!(snapshot_lsn_is_newer(0, NO_SNAPSHOT_LSN));
+        assert!(!snapshot_lsn_is_newer(NO_SNAPSHOT_LSN, 100));
+        assert!(!snapshot_lsn_is_newer(NO_SNAPSHOT_LSN, NO_SNAPSHOT_LSN));
+    }
+
+    #[tokio::test]
+    async fn stale_view_reuses_newer_cached_read_state() {
+        use crate::union_read::read_state_manager_tests::{assert_rows, Env};
+
+        let mut env = Env::new("stale_view_reuses_newer_cached_read_state").await;
+        env.commit_and_snapshot(&[1], 50, /*flush=*/ false).await;
+        env.publish(50, 50, 50);
+        // Reader A observes snapshot 50, then is delayed before taking the cache lock.
+        let stale_view = LsnView::normalize(50, 50, 50);
+        env.commit_and_snapshot(&[2], 100, /*flush=*/ false).await;
+        env.publish(100, 100, 100);
+        // Reader B materializes snapshot 100.
+        let b = env.rsm.try_read(Some(100)).await.unwrap();
+        assert_rows(&b, &[1, 2]).await;
+
+        let a = env
+            .rsm
+            .read_from_snapshot_and_update_cache(stale_view)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "stale reader re-materialized");
+        assert_eq!(env.rsm.cache.read().await.snapshot_key, Some(100));
+        let next = env.rsm.try_read(Some(100)).await.unwrap();
+        assert!(Arc::ptr_eq(&next, &b), "newer cache key was downgraded");
     }
 }

@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::UnixListener;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 fn is_disconnect(io: &std::io::Error) -> bool {
     matches!(io.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
@@ -69,10 +69,130 @@ pub async fn start_unix_server(
         tokio::spawn(async move {
             match handle_stream(backend, stream).await {
                 Err(e) if is_closed_connection(&e) => {}
-                Err(e) => panic!("Unexpected Unix RPC server error: {e}"),
+                // One misbehaving client must never take the service down; just drop it.
+                Err(e) => warn!("closing RPC connection after error: {e}"),
                 Ok(()) => {}
             }
         });
+    }
+}
+
+/// Bound on concurrently open scans of one table per connection.
+const MAX_OPEN_SCANS_PER_TABLE: usize = 64;
+
+/// Open scans of one connection.
+///
+/// The protocol has no scan id: a ScanTableEnd cannot say which of several open scans of a table
+/// it ends, and releasing the wrong one deletes files a query is still reading. So every read
+/// state of a table stays alive until as many Ends as Begins arrived for it (or the connection
+/// closes). The bound refuses further Begins instead of releasing an open scan.
+#[derive(Default)]
+struct OpenScans {
+    tables: HashMap<(String, String), TableScans>,
+}
+
+struct TableScans {
+    /// Begins without a matching End.
+    open: usize,
+    /// Distinct read states handed out since the table had no open scan.
+    states: Vec<Arc<moonlink::ReadState>>,
+}
+
+impl OpenScans {
+    /// Register a scan whose payload is about to be sent. Fails, keeping every open scan, if the
+    /// table already has [`MAX_OPEN_SCANS_PER_TABLE`] open scans on this connection.
+    fn begin(&mut self, key: (String, String), state: Arc<moonlink::ReadState>) -> bool {
+        let scans = self.tables.entry(key).or_insert_with(|| TableScans {
+            open: 0,
+            states: Vec::new(),
+        });
+        if scans.open >= MAX_OPEN_SCANS_PER_TABLE {
+            return false;
+        }
+        scans.open += 1;
+        if !scans.states.iter().any(|s| Arc::ptr_eq(s, &state)) {
+            scans.states.push(state);
+        }
+        true
+    }
+
+    /// End one scan of the table; returns false if it had none open.
+    fn end(&mut self, key: &(String, String)) -> bool {
+        let Some(scans) = self.tables.get_mut(key) else {
+            return false;
+        };
+        scans.open -= 1;
+        if scans.open == 0 {
+            self.tables.remove(key);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn held(&self, key: &(String, String)) -> (usize, usize) {
+        self.tables
+            .get(key)
+            .map_or((0, 0), |scans| (scans.open, scans.states.len()))
+    }
+}
+
+/// Largest request frame accepted. Real requests are a few hundred bytes; the cap stops a
+/// garbage length prefix from allocating up to 4 GiB.
+const MAX_REQUEST_FRAME_BYTES: usize = 64 << 20;
+
+enum Incoming {
+    Request(Request),
+    /// A complete frame that does not decode (unknown variant, client/server version skew).
+    /// Framing is still in sync, so the server can answer with an error and continue.
+    Malformed(moonlink_rpc::Error),
+}
+
+/// Read one length-prefixed request frame, then decode it with `moonlink_rpc::read` so the wire
+/// format stays defined in one place.
+async fn read_request<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Incoming> {
+    let mut len_bytes = [0u8; 4];
+    reader.read_exact(&mut len_bytes).await?;
+    let len = u32::from_ne_bytes(len_bytes) as usize;
+    if len > MAX_REQUEST_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("request frame of {len} bytes exceeds {MAX_REQUEST_FRAME_BYTES}"),
+        )
+        .into());
+    }
+    let mut frame = Vec::with_capacity(4 + len);
+    frame.extend_from_slice(&len_bytes);
+    frame.resize(4 + len, 0);
+    reader.read_exact(&mut frame[4..]).await?;
+    match read::<_, Request>(&mut frame.as_slice()).await {
+        Ok(request) => Ok(Incoming::Request(request)),
+        Err(e) => Ok(Incoming::Malformed(e)),
+    }
+}
+
+/// Run a request that may wait on replication progress, but give up as soon as the client goes
+/// away. Requests are strictly request/response, so nothing may arrive while one is pending: EOF
+/// means the client is gone, and any byte breaks framing. Returns `None` if the connection should
+/// be closed.
+async fn unless_client_disconnects<R, F>(
+    reader: &mut R,
+    what: &str,
+    request: F,
+) -> Option<F::Output>
+where
+    R: AsyncRead + Unpin,
+    F: std::future::Future,
+{
+    let mut probe = [0u8; 1];
+    tokio::select! {
+        res = request => Some(res),
+        peer = reader.read(&mut probe) => {
+            match peer {
+                Ok(0) | Err(_) => debug!("client disconnected during {what}"),
+                Ok(_) => warn!("unexpected bytes while {what} is pending; closing connection"),
+            }
+            None
+        }
     }
 }
 
@@ -98,26 +218,55 @@ fn into_error_struct<E: Into<anyhow::Error>>(e: E) -> ErrorStruct {
     {
         return ErrorStruct::new(errored.message.clone(), errored.status).with_source(e);
     }
+    // So is an LSN-wait timeout's (it names the LSNs and likely causes), and it is retryable.
+    if let Some(moonlink_backend::Error::LsnWaitTimeout(timeout)) =
+        e.downcast_ref::<moonlink_backend::Error>()
+    {
+        return ErrorStruct::new(timeout.message.clone(), timeout.status).with_source(e);
+    }
     ErrorStruct::new("backend error".to_string(), ErrorStatus::Permanent).with_source(e)
 }
 
-async fn handle_stream<S>(backend: Arc<MoonlinkBackend>, mut stream: S) -> Result<()>
+async fn handle_stream<S>(backend: Arc<MoonlinkBackend>, stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut map = HashMap::new();
+    // Split so a pending ScanTableBegin can notice the peer closing while it waits for an LSN.
+    let (mut reader, mut stream) = tokio::io::split(stream);
+    let mut open_scans = OpenScans::default();
     loop {
-        let request = read(&mut stream).await?;
+        let request = match read_request(&mut reader).await? {
+            Incoming::Request(request) => request,
+            Incoming::Malformed(e) => {
+                warn!("malformed RPC request: {e}");
+                // `Err` encodes identically for every response type, so any client can decode it.
+                let res: RpcResult<()> = Err(ErrorStruct::new(
+                    "malformed or unsupported request (client/server version mismatch?)"
+                        .to_string(),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(e));
+                write(&mut stream, &res).await?;
+                continue;
+            }
+        };
         match request {
             Request::CreateSnapshot {
                 database,
                 table,
                 lsn,
             } => {
-                let res: RpcResult<CreateSnapshotResponse> = backend
-                    .create_snapshot(database, table, lsn)
-                    .await
-                    .map_err(into_error_struct);
+                let what = format!("CreateSnapshot for {database}.{table}");
+                let Some(res) = unless_client_disconnects(
+                    &mut reader,
+                    &what,
+                    backend.create_snapshot(database, table, lsn),
+                )
+                .await
+                else {
+                    return Ok(());
+                };
+                let res: RpcResult<CreateSnapshotResponse> = res.map_err(into_error_struct);
                 write(&mut stream, &res).await?;
             }
             Request::CreateTable {
@@ -199,15 +348,34 @@ where
                 table,
                 lsn,
             } => {
-                match backend
-                    .scan_table(database.to_string(), table.to_string(), Some(lsn))
-                    .await
-                    .map_err(into_error_struct)
-                {
+                let what = format!("ScanTableBegin for {database}.{table}");
+                let Some(scan_result) = unless_client_disconnects(
+                    &mut reader,
+                    &what,
+                    backend.scan_table(database.to_string(), table.to_string(), Some(lsn)),
+                )
+                .await
+                else {
+                    return Ok(());
+                };
+                match scan_result.map_err(into_error_struct) {
                     Ok(state) => {
-                        let res: RpcResult<ScanTableBeginResponse> = Ok(state.data.clone());
+                        let payload = state.data.clone();
+                        // Register before replying so the files stay pinned while the client reads them.
+                        let res: RpcResult<ScanTableBeginResponse> = if open_scans
+                            .begin((database.clone(), table.clone()), state)
+                        {
+                            Ok(payload)
+                        } else {
+                            warn!("{MAX_OPEN_SCANS_PER_TABLE} scans of {database}.{table} are open on one connection; refusing another");
+                            Err(ErrorStruct::new(
+                                    format!(
+                                        "too many open scans of {database}.{table} on this connection (at most {MAX_OPEN_SCANS_PER_TABLE}); end some first"
+                                    ),
+                                    ErrorStatus::Permanent,
+                                ))
+                        };
                         write(&mut stream, &res).await?;
-                        assert!(map.insert((database, table), state).is_none());
                     }
                     Err(err) => {
                         let res: RpcResult<ScanTableBeginResponse> = Err(err);
@@ -216,7 +384,10 @@ where
                 }
             }
             Request::ScanTableEnd { database, table } => {
-                assert!(map.remove(&(database, table)).is_some());
+                // Idempotent: duckdb_mooncake ignores ScanTableEnd errors anyway.
+                if !open_scans.end(&(database.clone(), table.clone())) {
+                    debug!("ScanTableEnd for {database}.{table} without a matching ScanTableBegin");
+                }
                 write(&mut stream, &RpcResult::<ScanTableEndResponse>::Ok(())).await?;
             }
             // Kept for wire compatibility (pg_mooncake mooncake.load_files); loading files is not implemented.
@@ -295,6 +466,315 @@ mod tests {
         server_handle.abort();
         let _ = server_handle.await;
         std::panic::set_hook(prev_hook);
+    }
+
+    /// A client that disconnects while its ScanTableBegin or CreateSnapshot waits for an LSN must
+    /// not leave the connection task waiting until the LSN wait times out.
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn pending_request_is_cancelled_when_client_disconnects() {
+        use crate::test_utils::pg;
+        use std::time::Duration;
+
+        let table = "rpc_disconnect_test";
+        let pg_client = pg::connect().await;
+        pg::create_source_table(&pg_client, table, 1).await;
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(
+            MoonlinkBackend::new(base_path, None, Box::new(sqlite_store))
+                .await
+                .unwrap(),
+        );
+        backend
+            .create_table(
+                "postgres".to_string(),
+                table.to_string(),
+                format!("public.{table}"),
+                pg::database_uri(),
+                "{}".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        let far_lsn = pg::current_wal_lsn(&pg_client).await + (1u64 << 40);
+
+        let requests = [
+            moonlink_rpc::Request::ScanTableBegin {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+            moonlink_rpc::Request::CreateSnapshot {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+        ];
+        for request in requests {
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            let connection = tokio::spawn(super::handle_stream(backend.clone(), server));
+            moonlink_rpc::write(&mut client, &request).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(client);
+
+            let res = tokio::time::timeout(Duration::from_secs(5), connection)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "connection task kept waiting after the client disconnected: {request:?}"
+                    )
+                });
+            assert!(res.unwrap().is_ok());
+        }
+
+        backend
+            .drop_table("postgres".to_string(), table.to_string())
+            .await
+            .unwrap();
+        pg::drop_source_table(&pg_client, table).await;
+    }
+    /// An LSN-wait timeout reaches the client with its message at top level and its Temporary
+    /// status, and the connection stays usable.
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn lsn_wait_timeout_reaches_the_client_as_a_temporary_error() {
+        use crate::test_utils::pg;
+        use moonlink_error::ErrorStatus;
+        use std::time::Duration;
+
+        let table = "rpc_lsn_timeout_test";
+        let pg_client = pg::connect().await;
+        pg::create_source_table(&pg_client, table, 1).await;
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(
+            MoonlinkBackend::new(base_path, None, Box::new(sqlite_store))
+                .await
+                .unwrap(),
+        );
+        backend.set_lsn_wait_timeout(Duration::from_millis(300));
+        backend
+            .create_table(
+                "postgres".to_string(),
+                table.to_string(),
+                format!("public.{table}"),
+                pg::database_uri(),
+                "{}".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        let far_lsn = pg::current_wal_lsn(&pg_client).await + (1u64 << 40);
+
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        let connection = tokio::spawn(super::handle_stream(backend.clone(), server));
+        let requests = [
+            moonlink_rpc::Request::ScanTableBegin {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+            moonlink_rpc::Request::CreateSnapshot {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                lsn: far_lsn,
+            },
+        ];
+        for request in requests {
+            moonlink_rpc::write(&mut client, &request).await.unwrap();
+            // Both responses encode `Err` identically.
+            let res: moonlink_rpc::RpcResult<()> =
+                tokio::time::timeout(Duration::from_secs(10), moonlink_rpc::read(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let err = res.expect_err("waiting for an LSN replication never reaches must time out");
+            assert_eq!(err.status, ErrorStatus::Temporary, "{request:?}: {err:?}");
+            assert!(
+                err.message.contains(&far_lsn.to_string()) && err.message != "backend error",
+                "{request:?}: the timeout message must be the top-level message: {err:?}"
+            );
+        }
+        moonlink_rpc::write(&mut client, &moonlink_rpc::Request::ListTables {})
+            .await
+            .unwrap();
+        let tables: moonlink_rpc::RpcResult<Vec<moonlink_rpc::Table>> =
+            moonlink_rpc::read(&mut client).await.unwrap();
+        assert_eq!(tables.unwrap().len(), 1);
+        drop(client);
+        let _ = connection.await;
+
+        backend
+            .drop_table("postgres".to_string(), table.to_string())
+            .await
+            .unwrap();
+        pg::drop_source_table(&pg_client, table).await;
+    }
+    /// optimize on an errored mirror answers with the mirror's "out of sync" message instead of
+    /// panicking the connection task, and the connection keeps serving requests.
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn optimize_of_an_errored_mirror_returns_its_message() {
+        use crate::test_utils::pg;
+        use std::time::Duration;
+
+        let table = "rpc_optimize_errored_test";
+        let pg_client = pg::connect().await;
+        pg::create_source_table(&pg_client, table, 3).await;
+        let tempdir = TempDir::new().unwrap();
+        let base_path = tempdir.path().to_str().unwrap().to_string();
+        let sqlite_store = SqliteMetadataStore::new_with_directory(&base_path)
+            .await
+            .unwrap();
+        let backend = std::sync::Arc::new(
+            MoonlinkBackend::new(base_path, None, Box::new(sqlite_store))
+                .await
+                .unwrap(),
+        );
+        backend
+            .create_table(
+                "postgres".to_string(),
+                table.to_string(),
+                format!("public.{table}"),
+                pg::database_uri(),
+                "{}".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend
+            .enter_errored_for_testing(
+                "postgres".to_string(),
+                table.to_string(),
+                "source schema changed".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        let connection = tokio::spawn(super::handle_stream(backend.clone(), server));
+        for mode in ["data", "index", "full"] {
+            let request = moonlink_rpc::Request::OptimizeTable {
+                database: "postgres".to_string(),
+                table: table.to_string(),
+                mode: mode.to_string(),
+            };
+            moonlink_rpc::write(&mut client, &request).await.unwrap();
+            let res: moonlink_rpc::RpcResult<()> =
+                tokio::time::timeout(Duration::from_secs(10), moonlink_rpc::read(&mut client))
+                    .await
+                    .unwrap_or_else(|_| panic!("optimize {mode} did not answer"))
+                    .unwrap_or_else(|e| panic!("optimize {mode}: connection broke: {e:?}"));
+            let err = res.expect_err("optimize of an errored mirror must fail");
+            assert!(
+                err.message.contains("out of sync")
+                    && err.message.contains("source schema changed"),
+                "optimize {mode}: {err:?}"
+            );
+        }
+        moonlink_rpc::write(&mut client, &moonlink_rpc::Request::ListTables {})
+            .await
+            .unwrap();
+        let tables: moonlink_rpc::RpcResult<Vec<moonlink_rpc::Table>> =
+            moonlink_rpc::read(&mut client).await.unwrap();
+        assert_eq!(tables.unwrap().len(), 1);
+        drop(client);
+        assert!(connection.await.is_ok(), "connection task panicked");
+
+        backend
+            .drop_table("postgres".to_string(), table.to_string())
+            .await
+            .unwrap();
+        pg::drop_source_table(&pg_client, table).await;
+    }
+}
+
+#[cfg(test)]
+mod open_scans_tests {
+    use super::{OpenScans, MAX_OPEN_SCANS_PER_TABLE};
+    use std::sync::Arc;
+
+    fn read_state() -> Arc<moonlink::ReadState> {
+        Arc::new(moonlink::ReadState::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            Arc::new(|path| path),
+        ))
+    }
+
+    fn key() -> (String, String) {
+        ("db".to_string(), "t".to_string())
+    }
+
+    /// Ending one of two overlapping scans keeps both read states; the last End releases them.
+    #[tokio::test]
+    async fn read_states_live_until_the_last_end() {
+        let mut scans = OpenScans::default();
+        let (first, second) = (read_state(), read_state());
+        assert!(scans.begin(key(), first.clone()));
+        assert!(scans.begin(key(), second.clone()));
+        assert!(scans.end(&key()));
+        assert_eq!(scans.held(&key()), (1, 2), "one End released an open scan");
+        assert_eq!(Arc::strong_count(&first), 2);
+        assert_eq!(Arc::strong_count(&second), 2);
+        assert!(scans.end(&key()));
+        assert_eq!(scans.held(&key()), (0, 0));
+        assert_eq!(
+            Arc::strong_count(&first),
+            1,
+            "the last End must release every scan"
+        );
+        assert_eq!(Arc::strong_count(&second), 1);
+        assert!(!scans.end(&key()), "End without Begin");
+    }
+
+    /// Begins that got the same cached read state store it once.
+    #[tokio::test]
+    async fn a_shared_read_state_is_held_once() {
+        let mut scans = OpenScans::default();
+        let state = read_state();
+        assert!(scans.begin(key(), state.clone()));
+        assert!(scans.begin(key(), state.clone()));
+        assert_eq!(scans.held(&key()), (2, 1));
+        assert!(scans.end(&key()));
+        assert_eq!(scans.held(&key()), (1, 1));
+    }
+
+    /// At the bound, a further Begin is refused and no open scan is released.
+    #[tokio::test]
+    async fn the_bound_refuses_begins_instead_of_releasing_scans() {
+        let mut scans = OpenScans::default();
+        let states: Vec<_> = (0..MAX_OPEN_SCANS_PER_TABLE)
+            .map(|_| read_state())
+            .collect();
+        for state in &states {
+            assert!(scans.begin(key(), state.clone()));
+        }
+        assert!(!scans.begin(key(), read_state()));
+        assert_eq!(
+            scans.held(&key()),
+            (MAX_OPEN_SCANS_PER_TABLE, MAX_OPEN_SCANS_PER_TABLE)
+        );
+        assert!(states.iter().all(|s| Arc::strong_count(s) == 2));
+        assert!(scans.end(&key()));
+        assert!(
+            scans.begin(key(), read_state()),
+            "a slot frees up after an End"
+        );
     }
 }
 

@@ -11,12 +11,16 @@
 use crate::event_sync::EventSyncSender;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::AlterTableRequest;
+use crate::storage::mooncake_table::TableDropper;
 use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
+use crate::storage::task_supervisor::panic_message;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_handler_timer::TableHandlerTimer;
 use crate::table_notify::TableEvent;
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -25,6 +29,7 @@ use tracing::{debug, error, info_span, warn};
 pub(crate) mod table_handler_state;
 use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
+    MAX_CONSECUTIVE_PERSISTENCE_FAILURES,
 };
 
 const MAX_BUFFERED_TABLE_EVENTS: usize = 32_768;
@@ -111,18 +116,38 @@ impl TableHandler {
             }
         });
 
+        // If the event loop itself panics, a minimal loop keeps serving the table's channel: it
+        // marks the table errored, fails waiters and still performs DROP.
+        let fallback = EventLoopPanicFallback {
+            dropper: table.dropper(),
+            table_name: table.mooncake_table_id().to_string(),
+            drop_completion_tx: event_sync_sender.drop_table_completion_tx.clone(),
+            force_snapshot_completion_tx: event_sync_sender.force_snapshot_completion_tx.clone(),
+            table_maintenance_completion_tx: event_sync_sender
+                .table_maintenance_completion_tx
+                .clone(),
+            table_status_tx: event_sync_sender.table_status_tx.clone(),
+        };
+
         // Spawn the task with the oneshot receiver
         let event_handle = Some(tokio::spawn(
             async move {
-                Self::event_loop(
+                let mut event_receiver = event_receiver;
+                let result = AssertUnwindSafe(Self::event_loop(
                     table_handler_event_sender,
                     event_sync_sender,
-                    event_receiver,
+                    &mut event_receiver,
                     replication_lsn_rx,
                     handler_event_replay_tx,
                     table,
-                )
+                ))
+                .catch_unwind()
                 .await;
+                if let Err(payload) = result {
+                    fallback
+                        .run(&mut event_receiver, panic_message(payload.as_ref()))
+                        .await;
+                }
             }
             .instrument(info_span!("table_event_loop")),
         ));
@@ -145,7 +170,7 @@ impl TableHandler {
     async fn event_loop(
         table_handler_event_sender: Sender<TableEvent>,
         event_sync_sender: EventSyncSender,
-        mut event_receiver: Receiver<TableEvent>,
+        event_receiver: &mut Receiver<TableEvent>,
         replication_lsn_rx: watch::Receiver<u64>,
         handler_event_replay_tx: Option<mpsc::UnboundedSender<TableEvent>>,
         mut table: MooncakeTable,
@@ -225,6 +250,11 @@ impl TableHandler {
                     errored_drop.background_task_wait = wait;
                     continue;
                 }
+                #[cfg(test)]
+                if let TableEvent::SetGcGraceForTest { grace } = event {
+                    table.set_gc_grace_for_test(grace);
+                    continue;
+                }
 
                 // ==============================
                 // Errored state
@@ -246,7 +276,10 @@ impl TableHandler {
                     }
                 }
                 if table_handler_state.is_errored()
-                    || matches!(event, TableEvent::EnterErrored { .. })
+                    || matches!(
+                        event,
+                        TableEvent::EnterErrored { .. } | TableEvent::BackgroundTaskFailed { .. }
+                    )
                 {
                     let drop_now = Self::process_errored_table_event(
                         event,
@@ -396,6 +429,8 @@ impl TableHandler {
                     // Branch to drop the iceberg table and clear pinned data files from the global object storage cache, only used when the whole table requested to drop.
                     // So we block wait for asynchronous request completion.
                     TableEvent::DropTable => {
+                        // A flush waiting for disk space would hold up the drop for its whole wait.
+                        table.cancel_flushes_waiting_for_disk_space();
                         // Fast-path: no other concurrent events, directly clean up states and ack back.
                         if table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                             drop_table(&mut table, event_sync_sender).await;
@@ -570,7 +605,8 @@ impl TableHandler {
                             min_pending_flush_lsn,
                             table_handler_state.persistence_snapshot_result_consumed,
                             table_handler_state.persistence_snapshot_ongoing,
-                        ) {
+                        ) && table_handler_state.persistence_backoff_elapsed()
+                        {
                             if let Some(persistence_snapshot_payload) =
                                 mooncake_snapshot_result.persistence_snapshot_payload
                             {
@@ -697,6 +733,8 @@ impl TableHandler {
                                         .send(Ok(()));
                                 }
 
+                                table_handler_state.record_persistence_success();
+
                                 // Buffer iceberg persistence result, which later will be reflected to mooncake snapshot.
                                 let iceberg_flush_lsn = snapshot_res.flush_lsn;
                                 advance_flush_lsn(
@@ -714,6 +752,32 @@ impl TableHandler {
                                 );
                             }
                             Err(e) => {
+                                // Take the table manager back; an unknown commit outcome or a
+                                // lost manager cannot be retried safely.
+                                let manager_recovered = table.on_persistence_failed();
+                                let outcome_unknown = !manager_recovered
+                                    || matches!(e, crate::Error::IcebergCommitOutcomeUnknown(_));
+                                let failures = if e.is_storage_full() {
+                                    table_handler_state.record_persistence_failure_on_full_disk()
+                                } else {
+                                    table_handler_state.record_persistence_failure()
+                                };
+                                error!(
+                                    error = ?e,
+                                    table = table.mooncake_table_id(),
+                                    failures,
+                                    "iceberg persistence failed"
+                                );
+                                let errored_reason = if outcome_unknown {
+                                    Some(format!("iceberg persistence failed and its outcome is unknown: {e}"))
+                                } else if failures >= MAX_CONSECUTIVE_PERSISTENCE_FAILURES {
+                                    Some(format!(
+                                        "iceberg persistence failed {failures} times in a row, last error: {e}"
+                                    ))
+                                } else {
+                                    None
+                                };
+
                                 if table_handler_state.has_pending_force_snapshot_request() {
                                     if let Err(send_err) = table_handler_state
                                         .force_snapshot_completion_tx
@@ -737,6 +801,23 @@ impl TableHandler {
 
                                 // If iceberg snapshot fails, send error back to all broadcast subscribers and unset force snapshot requests.
                                 table_handler_state.largest_force_snapshot_lsn = None;
+
+                                if let Some(reason) = errored_reason {
+                                    if Self::process_errored_table_event(
+                                        TableEvent::EnterErrored { reason },
+                                        &mut table,
+                                        &mut table_handler_state,
+                                        &mut errored_drop,
+                                        &table_handler_event_sender,
+                                    )
+                                    .await
+                                    {
+                                        Self::drop_errored_table(&mut table, event_sync_sender)
+                                            .await;
+                                        return;
+                                    }
+                                    continue;
+                                }
                             }
                         }
 
@@ -749,7 +830,9 @@ impl TableHandler {
                         }
                     }
                     TableEvent::IndexMergeResult { index_merge_result } => {
-                        table_handler_state.mark_index_merge_completed().await;
+                        table_handler_state
+                            .mark_index_merge_completed(&index_merge_result)
+                            .await;
                         match index_merge_result {
                             Ok(index_merge_result) => {
                                 table.record_index_merge_completion(&index_merge_result);
@@ -766,6 +849,11 @@ impl TableHandler {
                             }
                             Err(err) => {
                                 error!(error = ?err, "failed to perform index merge");
+                                Self::log_if_background_maintenance_stopped(
+                                    &table_handler_state,
+                                    &table,
+                                );
+                                table.on_index_merge_failed();
                             }
                         }
                     }
@@ -783,6 +871,11 @@ impl TableHandler {
                             Err(err) => {
                                 // TODO(hjiang): Need to record failed compaction result back to snapshot, so committed deletion logs could be pruned.
                                 error!(error = ?err, "failed to perform compaction");
+                                Self::log_if_background_maintenance_stopped(
+                                    &table_handler_state,
+                                    &table,
+                                );
+                                table.on_data_compaction_failed();
                             }
                         }
                         // Check whether need to drop table.
@@ -819,8 +912,22 @@ impl TableHandler {
                             }
                         }
                         Some(Err(e)) => {
-                            error!(error = ?e, "failed to flush disk slice");
-                            panic!("Fatal flush error: {e:?}");
+                            // The flush task already retried; the rows cannot be made durable.
+                            error!(error = ?e, table = table.mooncake_table_id(), "failed to flush disk slice");
+                            if Self::process_errored_table_event(
+                                TableEvent::EnterErrored {
+                                    reason: format!("writing table data to disk failed: {e}"),
+                                },
+                                &mut table,
+                                &mut table_handler_state,
+                                &mut errored_drop,
+                                &table_handler_event_sender,
+                            )
+                            .await
+                            {
+                                Self::drop_errored_table(&mut table, event_sync_sender).await;
+                                return;
+                            }
                         }
                         None => {
                             debug!("flush result is none");
@@ -830,6 +937,10 @@ impl TableHandler {
                     // Replication events
                     // ==============================
                     //
+                    #[cfg(test)]
+                    TableEvent::PanicForTest => {
+                        panic!("event loop panic injected by test");
+                    }
                     _ => {
                         unreachable!("unexpected event: {:?}", event);
                     }
@@ -855,6 +966,7 @@ impl TableHandler {
             reason = %reason,
             "mirror table entered the errored state; it must be dropped and re-created"
         );
+        table.cancel_flushes_waiting_for_disk_space();
         table_handler_state.enter_errored(table.mooncake_table_id(), reason)
     }
 
@@ -880,6 +992,13 @@ impl TableHandler {
     ) -> bool {
         match event {
             TableEvent::EnterErrored { reason } => {
+                if Self::enter_errored(table_handler_state, table, reason) == Some(true) {
+                    Self::request_errored_drop(errored_drop, table_handler_event_sender);
+                }
+            }
+            // The failed task stopped counting as in flight when it panicked.
+            TableEvent::BackgroundTaskFailed { task, message } => {
+                let reason = format!("internal error in {task}: {message}");
                 if Self::enter_errored(table_handler_state, table, reason) == Some(true) {
                     Self::request_errored_drop(errored_drop, table_handler_event_sender);
                 }
@@ -942,11 +1061,18 @@ impl TableHandler {
                 persistence_snapshot_result,
             } => {
                 table_handler_state.persistence_snapshot_ongoing = false;
-                if let Ok(mut res) = persistence_snapshot_result {
-                    if let Some(manager) = res.table_manager.take() {
-                        table.restore_table_manager(manager);
+                match persistence_snapshot_result {
+                    Ok(mut res) => {
+                        if let Some(manager) = res.table_manager.take() {
+                            table.restore_table_manager(manager);
+                        }
+                        Self::delete_evicted_files(std::mem::take(
+                            &mut res.evicted_files_to_delete,
+                        ));
                     }
-                    Self::delete_evicted_files(std::mem::take(&mut res.evicted_files_to_delete));
+                    Err(_) => {
+                        table.on_persistence_failed();
+                    }
                 }
             }
             TableEvent::EvictedFilesToDelete { evicted_files } => {
@@ -976,6 +1102,21 @@ impl TableHandler {
             tokio::time::sleep(wait).await;
             let _ = sender.send(TableEvent::ErroredDropTimeout).await;
         });
+    }
+
+    fn log_if_background_maintenance_stopped(
+        table_handler_state: &TableHandlerState,
+        table: &MooncakeTable,
+    ) {
+        if table_handler_state.consecutive_maintenance_failures
+            == table_handler_state::MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES
+        {
+            error!(
+                table = table.mooncake_table_id(),
+                failures = table_handler_state.consecutive_maintenance_failures,
+                "background compaction and index merge stopped after repeated failures; explicit optimize requests still run them"
+            );
+        }
     }
 
     /// Best-effort deletion of evicted cache files in a detached task.
@@ -1273,3 +1414,70 @@ mod errored_state_tests;
 
 #[cfg(test)]
 mod errored_drop_tests;
+
+#[cfg(test)]
+mod maintenance_failure_tests;
+
+#[cfg(test)]
+mod persistence_failure_tests;
+
+/// Serves a table whose event loop panicked: the table is errored, requests fail, DROP works.
+struct EventLoopPanicFallback {
+    dropper: TableDropper,
+    table_name: String,
+    drop_completion_tx: crate::event_sync::DropCompletionSender,
+    force_snapshot_completion_tx: watch::Sender<Option<crate::Result<u64>>>,
+    table_maintenance_completion_tx: tokio::sync::broadcast::Sender<crate::Result<()>>,
+    table_status_tx: watch::Sender<crate::event_sync::TableStatus>,
+}
+
+impl EventLoopPanicFallback {
+    async fn run(self, event_receiver: &mut Receiver<TableEvent>, panic_message: String) {
+        let reason = format!("internal error in table event loop: {panic_message}");
+        error!(
+            table = self.table_name,
+            reason, "mirror table entered the errored state; it must be dropped and re-created"
+        );
+        let message = crate::Error::errored_table_message(&self.table_name, &reason);
+        let _ = self
+            .table_status_tx
+            .send(crate::event_sync::TableStatus::Errored(message.clone()));
+        let _ = self
+            .force_snapshot_completion_tx
+            .send(Some(Err(crate::Error::table_errored(&message))));
+        let _ = self
+            .table_maintenance_completion_tx
+            .send(Err(crate::Error::table_errored(&message)));
+        while let Some(event) = event_receiver.recv().await {
+            match event {
+                TableEvent::DropTable => {
+                    let result = self
+                        .dropper
+                        .drop_all(ERRORED_DROP_BACKGROUND_TASK_WAIT)
+                        .await;
+                    if let Err(e) = &result {
+                        error!(error = ?e, table = self.table_name, "failed to drop errored table");
+                    }
+                    let _ = self.drop_completion_tx.send(result);
+                    return;
+                }
+                TableEvent::ForceSnapshot { .. } => {
+                    let _ = self
+                        .force_snapshot_completion_tx
+                        .send(Some(Err(crate::Error::table_errored(&message))));
+                }
+                TableEvent::ForceRegularIndexMerge
+                | TableEvent::ForceRegularDataCompaction
+                | TableEvent::ForceFullMaintenance => {
+                    let _ = self
+                        .table_maintenance_completion_tx
+                        .send(Err(crate::Error::table_errored(&message)));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests;

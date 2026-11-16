@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::cache::object_storage::base_cache::{CacheEntry, CacheTrait, FileMetadata};
 use crate::storage::index::cache_utils as index_cache_utils;
-use crate::storage::mooncake_table::data_batches::InMemoryBatch;
+use crate::storage::mooncake_table::data_batches::{DeleteAtPosOutcome, InMemoryBatch};
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::storage_utils::{ProcessedDeletionRecord, TableUniqueFileId};
 use fastbloom::BloomFilter;
@@ -23,6 +23,9 @@ pub(crate) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
     pending_deletions_in_main_table: Vec<RawDeletionRecord>,
+    /// Main mem-slice positions of `pending_deletions_in_main_table`; identical rows (tables
+    /// without a key) must each claim a different position.
+    claimed_main_mem_slice_positions: HashSet<(u64, usize)>,
     index_bloom_filter: BloomFilter,
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
@@ -126,6 +129,7 @@ impl TransactionStreamState {
             mem_slice: MemSlice::new(schema, batch_size, identity, streaming_counter),
             local_deletions: Vec::new(),
             pending_deletions_in_main_table: Vec::new(),
+            claimed_main_mem_slice_positions: HashSet::new(),
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             stream_indices: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
@@ -317,15 +321,22 @@ impl MooncakeTable {
             }
         }
 
-        // Scope the main table deletion lookup
-        record.pos = {
+        // Scope the main table deletion lookup. Rows are only marked deleted at commit, so skip
+        // positions this transaction already claimed (identical rows of a table without a key).
+        let no_claims = HashSet::new();
+        let claimed = self
+            .transaction_stream_states
+            .get(&xact_id)
+            .map_or(&no_claims, |state| &state.claimed_main_mem_slice_positions);
+        record.pos =
             self.mem_slice
-                .find_non_deleted_position(&record, &row_identity)
-                .await
-        };
+                .find_non_deleted_position_excluding(&record, &row_identity, claimed);
 
         record.compact_full_row_identity(&row_identity);
         let stream_state = self.get_or_create_stream_state(xact_id);
+        if let Some(pos) = record.pos {
+            stream_state.claimed_main_mem_slice_positions.insert(pos);
+        }
         stream_state.pending_deletions_in_main_table.push(record);
     }
 
@@ -684,11 +695,28 @@ impl MooncakeTable {
 
         // We update our delete records with the last lsn of the transaction
         // Note that in the stream case we dont have this until commit time
+        let row_identity = self.metadata.config.row_identity.clone();
         for deletion in stream_state.pending_deletions_in_main_table.iter_mut() {
-            // If the row is no longer in memslice, it must be flushed, let snapshot task find it.
             if let Some(pos) = deletion.pos {
-                if !self.mem_slice.try_delete_at_pos(pos) {
-                    deletion.pos = None;
+                match self.mem_slice.try_delete_at_pos(pos) {
+                    DeleteAtPosOutcome::Deleted => {}
+                    // Another delete took this identical row first: take the next live one.
+                    DeleteAtPosOutcome::AlreadyDeleted => {
+                        deletion.pos = self
+                            .mem_slice
+                            .find_non_deleted_position_excluding(
+                                deletion,
+                                &row_identity,
+                                &HashSet::new(),
+                            )
+                            .filter(|p| {
+                                self.mem_slice.try_delete_at_pos(*p) == DeleteAtPosOutcome::Deleted
+                            });
+                    }
+                    // No longer in the mem slice: it was flushed, let the snapshot task find it.
+                    DeleteAtPosOutcome::NotInMemSlice => {
+                        deletion.pos = None;
+                    }
                 }
             }
             deletion.lsn = lsn - 1;

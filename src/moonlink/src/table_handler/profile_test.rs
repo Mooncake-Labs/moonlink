@@ -347,13 +347,14 @@ impl TestEnvironment {
         let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
         let read_state_filepath_remap =
             std::sync::Arc::new(|local_filepath: String| local_filepath);
+        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let read_state_manager = ReadStateManager::new(
             &table,
             replication_lsn_rx.clone(),
             last_commit_lsn_rx,
+            table_event_sync_receiver.table_status_rx.clone(),
             read_state_filepath_remap,
         );
-        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let table_handler = TableHandler::new(
             table,
             table_event_sync_sender,

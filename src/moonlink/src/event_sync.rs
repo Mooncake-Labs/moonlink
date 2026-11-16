@@ -1,4 +1,5 @@
 /// This module contains sender and receiver for table events synchronization.
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, oneshot, watch};
 
 use crate::Result;
@@ -26,10 +27,28 @@ pub struct EventSyncReceiver {
     pub table_status_rx: watch::Receiver<TableStatus>,
 }
 
+/// One-shot drop completion that can be shared between the table event loop and its panic
+/// fallback; only the first send is delivered.
+#[derive(Clone, Debug)]
+pub struct DropCompletionSender(Arc<Mutex<Option<oneshot::Sender<Result<()>>>>>);
+
+impl DropCompletionSender {
+    pub fn new(tx: oneshot::Sender<Result<()>>) -> Self {
+        Self(Arc::new(Mutex::new(Some(tx))))
+    }
+
+    pub fn send(&self, result: Result<()>) -> std::result::Result<(), Result<()>> {
+        match self.0.lock().unwrap().take() {
+            Some(tx) => tx.send(result),
+            None => Err(result),
+        }
+    }
+}
+
 /// Contains a few senders, which notifies after certain iceberg events completion.
 pub struct EventSyncSender {
     /// Notifies when drop table completes.
-    pub drop_table_completion_tx: oneshot::Sender<Result<()>>,
+    pub drop_table_completion_tx: DropCompletionSender,
     /// Notifies when iceberg flush LSN advances.
     pub flush_lsn_tx: watch::Sender<u64>,
     /// Notifies when force snapshot completes.
@@ -52,7 +71,7 @@ pub fn create_table_event_syncer() -> (EventSyncSender, EventSyncReceiver) {
     let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
     let (table_status_tx, table_status_rx) = watch::channel(TableStatus::Healthy);
     let event_sync_sender = EventSyncSender {
-        drop_table_completion_tx,
+        drop_table_completion_tx: DropCompletionSender::new(drop_table_completion_tx),
         flush_lsn_tx,
         force_snapshot_completion_tx: force_snapshot_completion_tx.clone(),
         table_maintenance_completion_tx: table_maintenance_completion_tx.clone(),

@@ -87,13 +87,14 @@ impl TestEnvironment {
         let (replication_tx, replication_rx) = watch::channel(0u64);
         let (last_commit_tx, last_commit_rx) = watch::channel(0u64);
         let snapshot_lsn_tx = table.get_snapshot_watch_sender().clone();
+        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let read_state_manager = Some(Arc::new(ReadStateManager::new(
             &table,
             replication_rx.clone(),
             last_commit_rx,
+            table_event_sync_receiver.table_status_rx.clone(),
             get_read_state_filepath_remap(),
         )));
-        let (table_event_sync_sender, table_event_sync_receiver) = create_table_event_syncer();
         let force_snapshot_completion_rx = table_event_sync_receiver
             .force_snapshot_completion_rx
             .clone();
@@ -127,12 +128,21 @@ impl TestEnvironment {
 
     /// Creates a new test environment with default settings.
     pub async fn new(temp_dir: TempDir, mooncake_table_config: MooncakeTableConfig) -> Self {
+        Self::new_with_table_setup(temp_dir, mooncake_table_config, |_| {}).await
+    }
+
+    /// Like [`Self::new`], with `setup` applied to the table before the handler takes it.
+    pub(crate) async fn new_with_table_setup(
+        temp_dir: TempDir,
+        mooncake_table_config: MooncakeTableConfig,
+        setup: impl FnOnce(&mut MooncakeTable),
+    ) -> Self {
         let path = temp_dir.path().to_path_buf();
         let table_name = "table_name";
         let iceberg_table_config =
             get_iceberg_manager_config(table_name.to_string(), path.to_str().unwrap().to_string());
 
-        let mooncake_table = MooncakeTable::new(
+        let mut mooncake_table = MooncakeTable::new(
             (*create_test_arrow_schema()).clone(),
             table_name.to_string(),
             1,
@@ -144,6 +154,7 @@ impl TestEnvironment {
         )
         .await
         .unwrap();
+        setup(&mut mooncake_table);
 
         Self::new_with_mooncake_table(temp_dir, mooncake_table).await
     }
@@ -253,20 +264,20 @@ impl TestEnvironment {
 
     /// Force an index merge operation, and block wait its completion.
     pub async fn force_index_merge_and_sync(&mut self) -> Result<()> {
-        let mut rx = self.table_event_manager.initiate_index_merge().await;
-        rx.recv().await.unwrap()
+        let rx = self.table_event_manager.initiate_index_merge().await?;
+        TableEventManager::synchronize_maintenance_request(rx).await
     }
 
     /// Force a data compaction operation, and block wait its completion.
     pub async fn force_data_compaction_and_sync(&mut self) -> Result<()> {
-        let mut rx = self.table_event_manager.initiate_data_compaction().await;
-        rx.recv().await.unwrap()
+        let rx = self.table_event_manager.initiate_data_compaction().await?;
+        TableEventManager::synchronize_maintenance_request(rx).await
     }
 
     /// Force a full table maintenance task operation, and block wait its completion.
     pub async fn force_full_maintenance_and_sync(&mut self) -> Result<()> {
-        let mut rx = self.table_event_manager.initiate_full_compaction().await;
-        rx.recv().await.unwrap()
+        let rx = self.table_event_manager.initiate_full_compaction().await?;
+        TableEventManager::synchronize_maintenance_request(rx).await
     }
 
     /// Commit the transaction, flush and create mooncake/iceberg snapshot.

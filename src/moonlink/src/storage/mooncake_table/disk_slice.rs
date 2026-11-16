@@ -54,6 +54,37 @@ pub struct DiskSliceWriter {
 
     /// Records already flushed data files.
     files: Vec<(MooncakeDataFileRef, DiskFileAttrs)>,
+
+    /// Every parquet file this write created, complete or not.
+    created_files: Vec<PathBuf>,
+
+    #[cfg(test)]
+    pub(super) failure_injector: Option<Arc<FlushFailureInjector>>,
+}
+
+/// Test-only: makes the next flush writes fail with a full disk after they created a data file.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct FlushFailureInjector {
+    remaining_full_disk_failures: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl FlushFailureInjector {
+    pub(crate) fn fail_next_writes(&self, writes: usize) {
+        self.remaining_full_disk_failures
+            .store(writes, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn take_failure(&self) -> bool {
+        self.remaining_full_disk_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+    }
 }
 
 impl std::fmt::Debug for DiskSliceWriter {
@@ -89,6 +120,9 @@ impl DiskSliceWriter {
             dir_path,
             batches,
             files: vec![],
+            created_files: vec![],
+            #[cfg(test)]
+            failure_injector: None,
             batch_id_to_idx: HashMap::new(),
             writer_lsn,
             table_auto_incr_id,
@@ -134,6 +168,26 @@ impl DiskSliceWriter {
 
     pub fn lsn(&self) -> Option<u64> {
         self.writer_lsn
+    }
+
+    /// Delete the files a failed [`Self::write`] created; a retry writes new ones.
+    pub(super) async fn remove_partial_outputs(&mut self) {
+        for path in self.created_files.drain(..) {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(error = ?e, path = ?path, "failed to delete partial flush output");
+                }
+            }
+        }
+    }
+
+    /// Memory held by the batches to write.
+    pub(super) fn in_memory_bytes(&self) -> u64 {
+        self.batches
+            .iter()
+            .filter_map(|entry| entry.batch.data.as_ref())
+            .map(|batch| batch.get_array_memory_size() as u64)
+            .sum()
     }
 
     pub(super) fn input_batches(&self) -> &Vec<BatchEntry> {
@@ -201,10 +255,11 @@ impl DiskSliceWriter {
                 );
                 let file_path = get_random_file_name_in_dir(dir_path);
                 data_file = Some(create_data_file(file_id, file_path));
-                let file =
-                    tokio::fs::File::create(dir_path.join(data_file.as_ref().unwrap().file_path()))
-                        .await
-                        .map_err(Into::<Error>::into)?;
+                let created_path = dir_path.join(data_file.as_ref().unwrap().file_path());
+                let file = tokio::fs::File::create(&created_path)
+                    .await
+                    .map_err(Into::<Error>::into)?;
+                self.created_files.push(created_path);
                 let properties = parquet_utils::get_default_parquet_properties();
                 writer = Some(AsyncArrowWriter::try_new(
                     file,
@@ -219,6 +274,14 @@ impl DiskSliceWriter {
             }
             // Write the batch
             writer.as_mut().unwrap().write(batch).await?;
+            #[cfg(test)]
+            if self
+                .failure_injector
+                .as_ref()
+                .is_some_and(|injector| injector.take_failure())
+            {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
+            }
             let estimated_total_size = {
                 let cur_writer = writer.as_ref().unwrap();
                 cur_writer.memory_size()

@@ -58,9 +58,11 @@ use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::table::common::table_manager::{PersistenceFileParams, TableManager};
+use crate::storage::table::iceberg::gc::{IcebergGcContext, LiveReadSeqProvider};
 use crate::storage::table::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::table::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::table::iceberg::puffin_utils::PuffinBlobRef;
+use crate::storage::task_supervisor::spawn_supervised;
 use crate::table_notify::TableEvent;
 use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
@@ -182,6 +184,9 @@ pub struct Snapshot {
     pub(crate) largest_flush_lsn: Option<u64>,
     /// indices
     pub(crate) indices: MooncakeIndex,
+    /// Lookup-key hash version of the file indices loaded from persistence (see
+    /// [`crate::row::LOOKUP_KEY_VERSION`]); older indices are rebuilt on load.
+    pub(crate) lookup_key_version: u32,
 }
 
 impl Snapshot {
@@ -193,6 +198,7 @@ impl Snapshot {
             flush_lsn: None,
             largest_flush_lsn: None,
             indices: MooncakeIndex::new(),
+            lookup_key_version: crate::row::LOOKUP_KEY_VERSION,
         }
     }
 
@@ -204,17 +210,15 @@ impl Snapshot {
             .sum()
     }
 
-    /// File holding this snapshot's committed in-memory rows for reads; reused while it exists.
-    /// `table_instance_id` tells apart tables with the same id in one temporary directory, whose
-    /// snapshots can have the same version (a table recovered at its persisted LSN).
-    pub fn get_name_for_inmemory_file(&self, table_instance_id: uuid::Uuid) -> PathBuf {
+    /// Unique per call: each [`crate::ReadState`] owns (and deletes) its own temporary file.
+    pub fn get_name_for_inmemory_file(&self) -> PathBuf {
         let mut directory = PathBuf::from(&self.metadata.config.temp_files_directory);
         directory.push(format!(
             "inmemory_{}_{}_{}_{}.parquet",
             self.metadata.mooncake_table_id,
             self.metadata.table_id,
-            table_instance_id,
-            self.snapshot_version
+            self.snapshot_version,
+            uuid::Uuid::now_v7()
         ));
         directory
     }
@@ -228,6 +232,136 @@ impl std::fmt::Debug for Snapshot {
             .field("flush_lsn", &self.flush_lsn)
             .field("snapshot_version", &self.snapshot_version)
             .finish()
+    }
+}
+
+/// Attempts for writing a flushed disk slice before the table is errored.
+const FLUSH_WRITE_ATTEMPTS: u32 = 5;
+#[cfg(not(test))]
+const FLUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const FLUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+const FLUSH_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a flush waits for disk space before the table is errored.
+#[cfg(not(test))]
+const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+#[cfg(test)]
+const FLUSH_FULL_DISK_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// While flushes wait for disk space, the changes they hold stay in memory and replication keeps
+/// adding to them. Past this many bytes, summed over all tables of the process (they share one
+/// backend), the mirrors holding the most of them give up their flushes (which errors those
+/// mirrors) rather than growing the Postgres backend until it is killed for memory.
+const FULL_DISK_MAX_WAITING_FLUSH_BYTES: u64 = 512 << 20;
+
+/// The accounting all tables of the process share. (Tests that make flushes wait for disk
+/// space or change the limit give their tables their own, so parallel tests do not interfere.)
+fn process_wide_full_disk_flush_wait() -> Arc<FullDiskFlushWait> {
+    static PROCESS_WIDE: std::sync::OnceLock<Arc<FullDiskFlushWait>> = std::sync::OnceLock::new();
+    PROCESS_WIDE.get_or_init(Arc::default).clone()
+}
+
+/// Distinguishes tables in a shared [`FullDiskFlushWait`].
+fn next_full_disk_flush_wait_table_key() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Debug, Default)]
+struct TableFlushWait {
+    bytes: u64,
+    /// One of the table's flushes gave up (so the table is errored): all of its waiting flushes
+    /// give up and release their memory.
+    gave_up: bool,
+}
+
+#[derive(Debug, Default)]
+struct WaitingFlushes {
+    total_bytes: u64,
+    tables: HashMap<u64, TableFlushWait>,
+}
+
+/// In-memory bytes of the flushes that are waiting for disk space, per table.
+#[derive(Debug)]
+pub(crate) struct FullDiskFlushWait {
+    waiting: std::sync::Mutex<WaitingFlushes>,
+    limit: std::sync::atomic::AtomicU64,
+}
+
+impl Default for FullDiskFlushWait {
+    fn default() -> Self {
+        Self {
+            waiting: std::sync::Mutex::new(WaitingFlushes::default()),
+            limit: std::sync::atomic::AtomicU64::new(FULL_DISK_MAX_WAITING_FLUSH_BYTES),
+        }
+    }
+}
+
+impl FullDiskFlushWait {
+    fn start_waiting(self: &Arc<Self>, table: u64, bytes: u64) -> FullDiskFlushWaitGuard {
+        let mut waiting = self.waiting.lock().unwrap();
+        waiting.total_bytes += bytes;
+        waiting.tables.entry(table).or_default().bytes += bytes;
+        FullDiskFlushWaitGuard {
+            wait: self.clone(),
+            table,
+            bytes,
+        }
+    }
+
+    /// Whether a waiting flush of `table` gives up: while the total is over the limit, only the
+    /// tables holding the most waiting bytes do, so a mirror with little waiting is not errored
+    /// for another one's load.
+    fn should_give_up(&self, table: u64) -> bool {
+        let limit = self.limit.load(std::sync::atomic::Ordering::SeqCst);
+        let mut waiting = self.waiting.lock().unwrap();
+        let over_limit = waiting.total_bytes > limit;
+        let largest = waiting.tables.values().map(|t| t.bytes).max().unwrap_or(0);
+        let Some(entry) = waiting.tables.get_mut(&table) else {
+            return false;
+        };
+        if over_limit && entry.bytes == largest {
+            entry.gave_up = true;
+        }
+        entry.gave_up
+    }
+
+    fn limit_mib(&self) -> u64 {
+        self.limit.load(std::sync::atomic::Ordering::SeqCst) >> 20
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiting_bytes(&self) -> u64 {
+        self.waiting.lock().unwrap().total_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_limit_for_test(&self, bytes: u64) {
+        self.limit.store(bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct FullDiskFlushWaitGuard {
+    wait: Arc<FullDiskFlushWait>,
+    table: u64,
+    bytes: u64,
+}
+
+impl FullDiskFlushWaitGuard {
+    fn should_give_up(&self) -> bool {
+        self.wait.should_give_up(self.table)
+    }
+}
+
+impl Drop for FullDiskFlushWaitGuard {
+    fn drop(&mut self) {
+        let mut waiting = self.wait.waiting.lock().unwrap();
+        waiting.total_bytes -= self.bytes;
+        if let Some(entry) = waiting.tables.get_mut(&self.table) {
+            entry.bytes -= self.bytes;
+            if entry.bytes == 0 {
+                waiting.tables.remove(&self.table);
+            }
+        }
     }
 }
 
@@ -274,6 +408,11 @@ pub struct SnapshotTask {
     /// Schema change, or force snapshot.
     force_empty_persistence_payload: bool,
 
+    /// Iceberg commit (see `IcebergGcContext::committed`) whose persisted records this task
+    /// applies; lets garbage collection know when the mooncake snapshot stopped referencing the
+    /// files that commit removed.
+    applied_iceberg_commit: Option<u64>,
+
     /// Committed deletion records, which have been persisted into iceberg, and should be pruned from mooncake snapshot.
     committed_deletion_logs: HashSet<(FileId, usize /*row idx*/)>,
 
@@ -313,6 +452,7 @@ impl SnapshotTask {
             new_commit_point: None,
             new_streaming_xact: Vec::new(),
             force_empty_persistence_payload: false,
+            applied_iceberg_commit: None,
             // Committed deletion logs which have been persisted, and should be pruned from mooncake snapshot.
             committed_deletion_logs: HashSet::new(),
             // Index merge related fields.
@@ -525,6 +665,63 @@ pub struct MooncakeTable {
 
     /// Background tasks (flush, snapshot, maintenance, persistence) that have not reported back.
     in_flight_tasks: InFlightTasks,
+
+    /// A failed persistence task leaves the table manager here (the success path returns it in
+    /// the result), so the table can retry instead of losing it.
+    failed_persistence_table_manager: Arc<std::sync::Mutex<Option<Box<dyn TableManager>>>>,
+
+    /// Mooncake snapshot sequence (shared with the snapshot state), bumped by every snapshot.
+    snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Shared with the iceberg table manager for garbage collection.
+    gc_context: Option<Arc<IcebergGcContext>>,
+
+    /// Memory held by flushes waiting for disk space.
+    pub(crate) full_disk_flush_wait: Arc<FullDiskFlushWait>,
+    /// This table's key in `full_disk_flush_wait`.
+    full_disk_flush_wait_table: u64,
+    /// Set (or closed, when the table is dropped) once the table no longer wants the results of
+    /// flushes that are waiting for disk space: they give up and release their memory.
+    flush_wait_cancel: tokio::sync::watch::Sender<bool>,
+
+    #[cfg(test)]
+    pub(crate) flush_failure_injector: Arc<disk_slice::FlushFailureInjector>,
+    /// Test-only: compactions and index merges wait for a permit before they read their inputs.
+    #[cfg(test)]
+    pub(crate) maintenance_start_gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+/// Deletes a table's iceberg table and local files without the `MooncakeTable` itself; used when
+/// the table event loop died and only DROP must still work.
+pub(crate) struct TableDropper {
+    factory: Option<IcebergTableManagerFactory>,
+    metadata: Arc<TableMetadata>,
+    in_flight_tasks: InFlightTasks,
+}
+
+impl TableDropper {
+    pub(crate) async fn drop_all(self, max_wait_for_tasks: std::time::Duration) -> Result<()> {
+        // An in-flight persistence could write into the warehouse after it was dropped, which a
+        // re-created mirror would then load; other tasks could fail on files deleted under them.
+        let deadline = std::time::Instant::now() + max_wait_for_tasks;
+        while self.in_flight_tasks.count() > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if let Some(factory) = self.factory {
+            let mut manager = IcebergTableManager::new(
+                self.metadata.clone(),
+                factory.object_storage_cache,
+                factory.filesystem_accessor,
+                factory.iceberg_table_config,
+            )
+            .await?;
+            manager.drop_table().await?;
+        }
+        match tokio::fs::remove_dir_all(&self.metadata.path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -569,6 +766,60 @@ impl MooncakeTable {
         object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
     ) -> Result<Self> {
+        Self::new_impl(
+            schema,
+            mooncake_table_id,
+            table_id,
+            base_path,
+            iceberg_table_config,
+            table_config,
+            object_storage_cache,
+            table_filesystem_accessor,
+            /*garbage_collect=*/ true,
+        )
+        .await
+    }
+
+    /// Open a second, read-only view of a table another `MooncakeTable` owns (test validators):
+    /// without garbage collection, which would delete files the owner is still writing.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_without_gc(
+        schema: Schema,
+        mooncake_table_id: String,
+        table_id: u32,
+        base_path: PathBuf,
+        iceberg_table_config: IcebergTableConfig,
+        table_config: MooncakeTableConfig,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    ) -> Result<Self> {
+        Self::new_impl(
+            schema,
+            mooncake_table_id,
+            table_id,
+            base_path,
+            iceberg_table_config,
+            table_config,
+            object_storage_cache,
+            table_filesystem_accessor,
+            /*garbage_collect=*/ false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_impl(
+        schema: Schema,
+        mooncake_table_id: String,
+        table_id: u32,
+        base_path: PathBuf,
+        iceberg_table_config: IcebergTableConfig,
+        table_config: MooncakeTableConfig,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        garbage_collect: bool,
+    ) -> Result<Self> {
         let metadata = Arc::new(TableMetadata {
             mooncake_table_id,
             table_id,
@@ -577,41 +828,86 @@ impl MooncakeTable {
             path: base_path,
         });
         let iceberg_table_config_for_factory = iceberg_table_config.clone();
-        let iceberg_table_manager = Box::new(
-            IcebergTableManager::new(
-                metadata.clone(),
-                object_storage_cache.clone(),
-                table_filesystem_accessor.clone(),
-                iceberg_table_config,
-            )
-            .await?,
-        );
+        let gc_context = Arc::new(IcebergGcContext::default());
+        let mut iceberg_table_manager = IcebergTableManager::new(
+            metadata.clone(),
+            object_storage_cache.clone(),
+            table_filesystem_accessor.clone(),
+            iceberg_table_config,
+        )
+        .await?;
+        if garbage_collect {
+            iceberg_table_manager.gc_context = Some(gc_context.clone());
+        }
+        let iceberg_table_manager = Box::new(iceberg_table_manager);
 
         let factory = IcebergTableManagerFactory {
             iceberg_table_config: iceberg_table_config_for_factory,
             object_storage_cache: object_storage_cache.clone(),
             filesystem_accessor: table_filesystem_accessor.clone(),
         };
-        let mut table = Self::new_with_table_manager(
+        let mut table = Self::new_with_table_manager_and_snapshot_seq(
             metadata,
             iceberg_table_manager,
             object_storage_cache,
             table_filesystem_accessor,
+            // The table, its snapshot state and the table manager's GC share one counter.
+            gc_context.snapshot_seq.clone(),
         )
         .await?;
         table.table_manager_factory = Some(factory);
+        if garbage_collect {
+            table.snapshot.try_write().unwrap().gc_context = Some(gc_context.clone());
+            table.gc_context = Some(gc_context);
+        }
         Ok(table)
     }
 
+    /// Delete superseded files without waiting for reader information (garbage collection tests).
+    #[cfg(test)]
+    pub(crate) fn set_gc_grace_for_test(&self, grace: std::time::Duration) {
+        if let Some(gc_context) = &self.gc_context {
+            gc_context.set_grace_without_reader_info(grace);
+        }
+    }
+
+    /// Build a table around an injected table manager (tests use mocks).
+    #[cfg(test)]
     pub(crate) async fn new_with_table_manager(
+        table_metadata: Arc<TableMetadata>,
+        table_manager: Box<dyn TableManager>,
+        object_storage_cache: Arc<dyn CacheTrait>,
+        table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    ) -> Result<Self> {
+        Self::new_with_table_manager_and_snapshot_seq(
+            table_metadata,
+            table_manager,
+            object_storage_cache,
+            table_filesystem_accessor,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        )
+        .await
+    }
+
+    async fn new_with_table_manager_and_snapshot_seq(
         table_metadata: Arc<TableMetadata>,
         mut table_manager: Box<dyn TableManager>,
         object_storage_cache: Arc<dyn CacheTrait>,
         table_filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+        snapshot_seq: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Self> {
         table_metadata.validate();
         let (table_snapshot_watch_sender, table_snapshot_watch_receiver) = watch::channel(u64::MAX);
-        let (next_file_id, current_snapshot) = table_manager.load_snapshot_from_table().await?;
+        // Loading (with its garbage collection) and the index rebuild are large futures; boxed so
+        // every caller up the recovery chain does not carry them on its stack.
+        let (mut next_file_id, current_snapshot) =
+            Box::pin(table_manager.load_snapshot_from_table()).await?;
+        let rebuilt_file_indices = Box::pin(Self::rebuild_legacy_file_indices(
+            &table_metadata,
+            &current_snapshot,
+            &mut next_file_id,
+        ))
+        .await?;
         let last_persistence_snapshot_lsn = current_snapshot.flush_lsn;
         if let Some(last_persistence_snapshot_lsn) = last_persistence_snapshot_lsn {
             table_snapshot_watch_sender
@@ -623,7 +919,7 @@ impl MooncakeTable {
         let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
         let mooncake_table_id = table_metadata.mooncake_table_id.clone();
 
-        Ok(Self {
+        let mut table = Self {
             mem_slice: MemSlice::new(
                 table_metadata.schema.clone(),
                 table_metadata.config.batch_size,
@@ -663,8 +959,102 @@ impl MooncakeTable {
             event_replay_tx: None,
             table_manager_factory: None,
             in_flight_tasks: InFlightTasks::default(),
+            failed_persistence_table_manager: Arc::new(std::sync::Mutex::new(None)),
+            snapshot_seq,
+            gc_context: None,
             snapshot_stats: Arc::new(SnapshotCreationStats::new(mooncake_table_id)),
-        })
+            full_disk_flush_wait: process_wide_full_disk_flush_wait(),
+            full_disk_flush_wait_table: next_full_disk_flush_wait_table_key(),
+            flush_wait_cancel: tokio::sync::watch::channel(false).0,
+            #[cfg(test)]
+            flush_failure_injector: Arc::default(),
+            #[cfg(test)]
+            maintenance_start_gate: None,
+        };
+        table.snapshot.try_write().unwrap().snapshot_seq = table.snapshot_seq.clone();
+        if let Some(index_swap) = rebuilt_file_indices {
+            // Applied by the first mooncake snapshot (before any deletion is resolved) and
+            // persisted by the first iceberg commit, which also stamps the new key version.
+            table.next_snapshot_task.index_merge_result = index_swap;
+            table.next_snapshot_task.force_empty_persistence_payload = true;
+        }
+        Ok(table)
+    }
+
+    /// File indices persisted with an older lookup-key hash (per-process random seeds before
+    /// version 2) cannot find any row after a restart. Rebuild them from the data files, one index
+    /// per data file, and return the swap to apply as an index-merge result.
+    async fn rebuild_legacy_file_indices(
+        table_metadata: &Arc<TableMetadata>,
+        snapshot: &Snapshot,
+        next_file_id: &mut u32,
+    ) -> Result<Option<FileIndiceMergeResult>> {
+        let identity = &table_metadata.config.row_identity;
+        let hashed_identity = matches!(identity, IdentityProp::FullRow | IdentityProp::Keys(_));
+        if snapshot.lookup_key_version >= crate::row::LOOKUP_KEY_VERSION
+            || !hashed_identity
+            || snapshot.indices.file_indices.is_empty()
+        {
+            return Ok(None);
+        }
+        tracing::warn!(
+            table = table_metadata.mooncake_table_id,
+            data_files = snapshot.disk_files.len(),
+            "table was written by an older moonlink whose file indices are not restart-safe; rebuilding them from the data files"
+        );
+        let mut new_file_indices = Vec::with_capacity(snapshot.disk_files.len());
+        let started = std::time::Instant::now();
+        let mut last_progress = started;
+        let total_files = snapshot.disk_files.len();
+        for (done, data_file) in snapshot.disk_files.keys().enumerate() {
+            if last_progress.elapsed() >= std::time::Duration::from_secs(10) {
+                last_progress = std::time::Instant::now();
+                tracing::info!(
+                    table = table_metadata.mooncake_table_id,
+                    done,
+                    total_files,
+                    "rebuilding file indices"
+                );
+            }
+            let index_file_id = *next_file_id as u64;
+            *next_file_id += 1;
+            // A panic here would abort the whole service start, not just this table.
+            let index = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                Self::build_index_for_files(
+                    vec![data_file.clone()],
+                    identity.clone(),
+                    table_metadata.path.clone(),
+                    index_file_id,
+                ),
+            ))
+            .await
+            .unwrap_or_else(|payload| {
+                Err(crate::Error::from(std::io::Error::other(format!(
+                    "panic: {}",
+                    crate::storage::task_supervisor::panic_message(payload.as_ref())
+                ))))
+            })
+            .map_err(|e| {
+                crate::Error::table_errored(&crate::Error::errored_table_message(
+                    &table_metadata.mooncake_table_id,
+                    &format!(
+                        "file indices written by an older moonlink could not be rebuilt ({e})"
+                    ),
+                ))
+            })?;
+            new_file_indices.push(index);
+        }
+        tracing::info!(
+            table = table_metadata.mooncake_table_id,
+            files = total_files,
+            elapsed = ?started.elapsed(),
+            "rebuilt file indices written by an older moonlink"
+        );
+        Ok(Some(FileIndiceMergeResult {
+            uuid: uuid::Uuid::new_v4(),
+            old_file_indices: snapshot.indices.file_indices.iter().cloned().collect(),
+            new_file_indices,
+        }))
     }
 
     pub(crate) fn alter_table(
@@ -769,6 +1159,14 @@ impl MooncakeTable {
 
         assert!(self.iceberg_table_manager.is_none());
         self.iceberg_table_manager = Some(persistence_snapshot_res.table_manager.unwrap());
+        // At most one persistence is in flight, so this is the commit that produced the result.
+        if let Some(gc_context) = &self.gc_context {
+            self.next_snapshot_task.applied_iceberg_commit = Some(
+                gc_context
+                    .committed
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            );
+        }
 
         // ---- Buffer iceberg persisted content to next snapshot task ---
         assert!(self.next_snapshot_task.committed_deletion_logs.is_empty());
@@ -833,6 +1231,27 @@ impl MooncakeTable {
 
         assert!(self.next_snapshot_task.data_compaction_result.is_empty());
         self.next_snapshot_task.data_compaction_result = data_compaction_res;
+    }
+
+    /// A background index merge failed: nothing to apply, allow the next one.
+    pub(crate) fn on_index_merge_failed(&mut self) {
+        assert!(
+            self.background_task_status_for_validation
+                .index_merge_ongoing
+        );
+        self.background_task_status_for_validation
+            .index_merge_ongoing = false;
+    }
+
+    /// A background data compaction failed: nothing to apply, allow the next one.
+    pub(crate) fn on_data_compaction_failed(&mut self) {
+        assert!(
+            self.background_task_status_for_validation
+                .data_compaction_ongoing
+        );
+        self.background_task_status_for_validation
+            .data_compaction_ongoing = false;
+        self.next_snapshot_task.compacting_data_files.clear();
     }
 
     /// Record index merge completion event.
@@ -980,12 +1399,81 @@ impl MooncakeTable {
             );
         }
 
-        let mut disk_slice_clone = disk_slice.clone();
+        #[cfg(test)]
+        {
+            disk_slice.failure_injector = Some(self.flush_failure_injector.clone());
+        }
+        let pristine_disk_slice = disk_slice.clone();
+        let supervisor_notify = table_notify_tx.clone();
         let notifier = self.in_flight_tasks.notifier(table_notify_tx);
-        tokio::task::spawn(async move {
-            let flush_result = disk_slice_clone.write().await;
+        let full_disk_flush_wait = self.full_disk_flush_wait.clone();
+        let full_disk_flush_wait_table = self.full_disk_flush_wait_table;
+        let mut flush_wait_cancel = self.flush_wait_cancel.subscribe();
+        spawn_supervised("flush", supervisor_notify, async move {
+            // Transient IO errors are retried from the unwritten slice, under new file names (the
+            // failed attempt's files are deleted first). A full disk is waited out for longer and
+            // does not count as a failed attempt: it is fixed by freeing space.
+            let mut attempt = 1;
+            let mut full_disk_retries = 0;
+            let full_disk_deadline = std::time::Instant::now() + FLUSH_FULL_DISK_RETRY_LIMIT;
+            let mut disk_space_wait = None;
+            let flush_result = loop {
+                let mut candidate = pristine_disk_slice.clone();
+                match candidate.write().await {
+                    Ok(()) => break Ok(candidate),
+                    Err(e) => {
+                        candidate.remove_partial_outputs().await;
+                        if e.is_storage_full() {
+                            let waiting = disk_space_wait.get_or_insert_with(|| {
+                                full_disk_flush_wait.start_waiting(
+                                    full_disk_flush_wait_table,
+                                    pristine_disk_slice.in_memory_bytes(),
+                                )
+                            });
+                            let cancelled = *flush_wait_cancel.borrow()
+                                || flush_wait_cancel.has_changed().is_err();
+                            if cancelled || waiting.should_give_up() {
+                                let message = if cancelled {
+                                    "the disk is full and the mirror is errored or being dropped"
+                                        .to_string()
+                                } else {
+                                    format!(
+                                        "the disk is full and more than {} MiB of changes (of all mirrors) are waiting in memory for disk space, most of them from this mirror",
+                                        full_disk_flush_wait.limit_mib()
+                                    )
+                                };
+                                tracing::error!(error = ?e, "{message}; giving up the flush");
+                                break Err(crate::Error::Io(
+                                    moonlink_error::ErrorStruct::new(
+                                        message,
+                                        moonlink_error::ErrorStatus::Permanent,
+                                    )
+                                    .with_source(e),
+                                ));
+                            }
+                        }
+                        if e.is_storage_full() && std::time::Instant::now() < full_disk_deadline {
+                            full_disk_retries += 1;
+                            tracing::warn!(error = ?e, full_disk_retries, "disk full while flushing table data, retrying");
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::cmp::min(
+                                    FLUSH_RETRY_BACKOFF * full_disk_retries,
+                                    FLUSH_RETRY_MAX_BACKOFF,
+                                )) => {}
+                                _ = flush_wait_cancel.changed() => {}
+                            }
+                        } else if attempt < FLUSH_WRITE_ATTEMPTS {
+                            tracing::warn!(error = ?e, attempt, "disk slice write failed, retrying");
+                            tokio::time::sleep(FLUSH_RETRY_BACKOFF * attempt).await;
+                            attempt += 1;
+                        } else {
+                            break Err(e);
+                        }
+                    }
+                }
+            };
             match flush_result {
-                Ok(()) => {
+                Ok(disk_slice_clone) => {
                     notifier
                         .send(TableEvent::FlushResult {
                             event_id,
@@ -1145,7 +1633,8 @@ impl MooncakeTable {
             .notifier(self.table_notify.as_ref().unwrap().clone());
         let snapshot_stats = self.snapshot_stats.clone();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(async move {
+        let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
+        spawn_supervised("mooncake snapshot", supervisor_notify, async move {
             let _latency_guard = snapshot_stats.start();
             Self::create_snapshot_async(cur_snapshot, next_snapshot_task, opt, table_notify)
                 .instrument(info_span!("create_snapshot_async"))
@@ -1164,6 +1653,11 @@ impl MooncakeTable {
     }
 
     /// Mark next iceberg snapshot as force, even if the payload is empty.
+    /// Make flushes that are waiting for disk space give up (the table is errored or dropped).
+    pub(crate) fn cancel_flushes_waiting_for_disk_space(&self) {
+        self.flush_wait_cancel.send_replace(true);
+    }
+
     pub(crate) fn force_empty_persistence_payload(&mut self) {
         self.next_snapshot_task.force_empty_persistence_payload = true;
     }
@@ -1222,6 +1716,30 @@ impl MooncakeTable {
     /// Number of background tasks that may still read or write table files.
     pub(crate) fn in_flight_background_tasks(&self) -> usize {
         self.in_flight_tasks.count()
+    }
+
+    /// Mooncake snapshot sequence: incremented after every mooncake snapshot (including ones that
+    /// only apply compaction or index merge results). Read without locking; a read state should
+    /// record the value it was built from while holding the snapshot read lock.
+    pub fn snapshot_seq_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.snapshot_seq.clone()
+    }
+
+    /// Let garbage collection know which snapshot sequences live readers still use. Without a
+    /// provider, superseded data files are kept for a grace period before deletion.
+    pub(crate) fn set_live_read_seq_provider(&self, provider: LiveReadSeqProvider) {
+        if let Some(gc_context) = &self.gc_context {
+            *gc_context.live_read_seq_provider.lock().unwrap() = Some(provider);
+        }
+    }
+
+    /// Everything needed to drop this table later without the table itself.
+    pub(crate) fn dropper(&self) -> TableDropper {
+        TableDropper {
+            factory: self.table_manager_factory.clone(),
+            metadata: self.metadata.clone(),
+            in_flight_tasks: self.in_flight_tasks.clone(),
+        }
     }
 
     /// Give back a table manager returned by a background task.
@@ -1443,8 +1961,22 @@ impl MooncakeTable {
             .in_flight_tasks
             .notifier(self.table_notify.as_ref().unwrap().clone());
 
+        // The merge reads index blocks of the current snapshot.
+        let maintenance_reader = self
+            .gc_context
+            .as_ref()
+            .map(|gc_context| gc_context.register_maintenance_reader());
+
+        #[cfg(test)]
+        let start_gate = self.maintenance_start_gate.clone();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(async move {
+        let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
+        spawn_supervised("index merge", supervisor_notify, async move {
+            let _maintenance_reader = maintenance_reader;
+            #[cfg(test)]
+            if let Some(gate) = start_gate {
+                drop(gate.acquire().await);
+            }
             let result: Result<()> = async move {
                 let mut builder = GlobalIndexBuilder::new();
                 builder.set_directory(table_directory);
@@ -1527,13 +2059,29 @@ impl MooncakeTable {
             .in_flight_tasks
             .notifier(self.table_notify.as_ref().unwrap().clone());
 
+        // The compaction reads data and deletion-vector files of the current snapshot.
+        let maintenance_reader = self
+            .gc_context
+            .as_ref()
+            .map(|gc_context| gc_context.register_maintenance_reader());
+
         // Record data files being compacted.
         assert!(self.next_snapshot_task.compacting_data_files.is_empty());
         self.next_snapshot_task.compacting_data_files = compaction_payload.get_data_files();
 
+        #[cfg(test)]
+        let start_gate = self.maintenance_start_gate.clone();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(
+        let supervisor_notify = self.table_notify.as_ref().unwrap().clone();
+        spawn_supervised(
+            "data compaction",
+            supervisor_notify,
             async move {
+                let _maintenance_reader = maintenance_reader;
+                #[cfg(test)]
+                if let Some(gate) = start_gate {
+                    drop(gate.acquire().await);
+                }
                 let builder = CompactionBuilder::new(compaction_payload, schema_ref, file_params);
                 let data_compaction_result = builder.build().await;
                 table_notify_tx_copy
@@ -1577,6 +2125,17 @@ impl MooncakeTable {
             .await;
     }
 
+    /// Called after a failed iceberg persistence: take the table manager back and allow the next
+    /// persistence. Returns false if the manager could not be recovered.
+    pub(crate) fn on_persistence_failed(&mut self) -> bool {
+        self.background_task_status_for_validation
+            .persistence_snapshot_ongoing = false;
+        if let Some(manager) = self.failed_persistence_table_manager.lock().unwrap().take() {
+            self.iceberg_table_manager = Some(manager);
+        }
+        self.iceberg_table_manager.is_some()
+    }
+
     /// Persist an iceberg snapshot.
     async fn persist_iceberg_snapshot_impl(
         mut iceberg_table_manager: Box<dyn TableManager>,
@@ -1584,6 +2143,7 @@ impl MooncakeTable {
         table_notify: TaskNotifier,
         table_auto_incr_ids: std::ops::Range<u32>,
         table_event_id: uuid::Uuid,
+        failed_table_manager_slot: Arc<std::sync::Mutex<Option<Box<dyn TableManager>>>>,
     ) {
         // Perform iceberg snapshot operation.
         let flush_lsn = snapshot_payload.flush_lsn;
@@ -1631,8 +2191,9 @@ impl MooncakeTable {
             .sync_snapshot(snapshot_payload, persistence_file_params)
             .await;
 
-        // Notify on event error.
+        // Notify on event error; hand the table manager back first so the table can retry.
         if let Err(err) = iceberg_persistence_res {
+            *failed_table_manager_slot.lock().unwrap() = Some(iceberg_table_manager);
             table_notify
                 .send(TableEvent::PersistenceSnapshotResult {
                     persistence_snapshot_result: Err(err),
@@ -1741,7 +2302,9 @@ impl MooncakeTable {
                 .unwrap();
         }
 
-        tokio::task::spawn(
+        spawn_supervised(
+            "iceberg persistence",
+            self.table_notify.as_ref().unwrap().clone(),
             Self::persist_iceberg_snapshot_impl(
                 iceberg_table_manager,
                 snapshot_payload,
@@ -1749,6 +2312,7 @@ impl MooncakeTable {
                     .notifier(self.table_notify.as_ref().unwrap().clone()),
                 table_auto_incr_ids,
                 table_event_id,
+                self.failed_persistence_table_manager.clone(),
             )
             .instrument(info_span!("persist_iceberg_snapshot")),
         );
@@ -1874,3 +2438,30 @@ pub(crate) mod test_utils_commons;
 
 #[cfg(test)]
 pub(crate) mod cache_test_utils;
+
+#[cfg(test)]
+mod deleted_batch_flush_tests;
+
+#[cfg(test)]
+mod stream_delete_tests;
+
+#[cfg(test)]
+mod commit_failure_tests;
+
+#[cfg(test)]
+mod lookup_key_tests;
+
+#[cfg(test)]
+mod compaction_group_tests;
+
+#[cfg(test)]
+mod catalog_robustness_tests;
+
+#[cfg(test)]
+mod gc_tests;
+
+#[cfg(test)]
+mod full_disk_flush_tests;
+
+#[cfg(test)]
+mod open_future_size_tests;

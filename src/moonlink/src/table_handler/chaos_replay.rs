@@ -16,6 +16,7 @@ use crate::storage::mooncake_table_config::DiskSliceWriterConfig;
 use crate::table_handler::chaos_table_metadata::ReplayTableMetadata;
 use crate::table_handler::test_utils::check_read_snapshot;
 use crate::table_notify::{TableEvent, TableMaintenanceStatus};
+use crate::union_read::always_healthy_table_status;
 use crate::IcebergTableConfig;
 use crate::MooncakeTableConfig;
 use crate::ReadStateManager;
@@ -164,7 +165,7 @@ async fn validate_persisted_iceberg_table(
     let cache_temp_dir = tempdir().unwrap();
     let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
-    let mut table = create_mooncake_table(
+    let mut table = create_mooncake_table_for_validation(
         mooncake_table_metadata.clone(),
         iceberg_table_config.clone(),
         object_storage_cache,
@@ -177,6 +178,7 @@ async fn validate_persisted_iceberg_table(
         &table,
         replication_lsn_rx.clone(),
         last_commit_lsn_rx,
+        always_healthy_table_status(),
         read_state_filepath_remap,
     );
     check_read_snapshot(
@@ -274,6 +276,7 @@ pub(crate) async fn replay(replay_filepath: &str) {
         &table,
         replication_lsn_rx,
         commit_lsn_rx,
+        always_healthy_table_status(),
         read_state_filepath_remap,
     );
 

@@ -118,6 +118,10 @@ cargo test -p moonlink_backend --test '*'
 cargo test -p moonlink_service --lib --features postgres-integration
 ```
 
+## Waiting for replication
+
+A query at an LSN (and `mooncake.create_snapshot`) first waits until replication reaches that LSN. The Postgres backend cannot be cancelled while it waits, so the wait is bounded: after 30 seconds the query fails with a retryable error that names the requested and replicated LSNs. If your replication is often slower than that, raise the bound by setting `MOONLINK_LSN_WAIT_TIMEOUT_SECS` (whole seconds, at most one day) in the environment Postgres is started with.
+
 ## Durability and Recovery
 
 > **Before upgrading from pg_mooncake 0.2 (Moonlink with its own WAL), snapshot every mirror, or re-create every mirror after the upgrade.** That version acknowledged changes to Postgres once they were in its `_wal` directory. The new version does not read that directory, and Postgres does not send those changes again, so a mirror silently misses every change that had not reached Iceberg yet. Before upgrading:
@@ -143,6 +147,14 @@ FROM pg_replication_slots WHERE slot_name LIKE 'moonlink_slot%';
 To cap it, set `max_slot_wal_keep_size` on the source. If Moonlink then falls that far behind, Postgres invalidates the slot and every mirror has to be re-created.
 
 **After a crash**, if a mirror looks wrong, drop it and re-create it (`CALL mooncake.create_table(...)` again).
+
+Data files are made durable before the Iceberg commit that references them, but deletion vector and index puffin files are not fsynced into their directory, so a power loss right after a commit can leave a mirror that fails to load and must be re-created.
+
+On the first start after upgrading, every existing mirror rebuilds its lookup indices from its data files (earlier versions hashed rows with a seed that changed on every restart, so updates and deletes of already-flushed rows could fail after a restart). This is a one-time read of each table's key columns, logged as a warning per table. If a table's indices cannot be rebuilt, that mirror is marked out of sync and must be dropped and re-created; other mirrors are not affected.
+
+This version also deletes Iceberg files that neither the current version nor the one before it references (old snapshots, metadata files, manifests, deletion vectors, files replaced by compaction), which earlier versions kept forever. A replaced data or deletion-vector file is kept until no running scan can still read it. On the first start after upgrading, each table's leftover files are removed when the table loads. Set `MOONLINK_ICEBERG_GC=dry-run` to only log what would be deleted (each file once, as a count and size per commit; paths at debug level), or `MOONLINK_ICEBERG_GC=off` to keep every file. Dry-run is meant for a short look: it keeps listing and remembering every superseded file, so its cost grows the longer it runs; use `off` to keep files for good.
+
+If the disk fills up, mirrors stop advancing instead of failing: flushes and Iceberg commits are retried (at most every minute) until space is available, and files of failed attempts are removed. Changes that wait for disk space are held in memory, so a mirror is marked out of sync once a flush cannot be written for 30 minutes, or sooner, once more than 512 MiB of changes are waiting, counted over all mirrors together (busy mirrors on a full disk would otherwise grow the Postgres background worker until it is killed for memory); then the mirror holding the most of them is marked out of sync, and the others keep waiting. A mirror that is marked out of sync or dropped releases its waiting changes at once. Postgres keeps the unconfirmed changes in `pg_wal` meanwhile.
 
 ## What mirrors do not follow
 

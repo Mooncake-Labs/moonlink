@@ -12,6 +12,42 @@ use opendal::layers::TimeoutLayer;
 use opendal::services;
 use opendal::Operator;
 
+/// Temp-file directory for atomic writes, created under the filesystem root. Hidden (dot) entries
+/// are never treated as namespaces or tables.
+pub(crate) const DEFAULT_ATOMIC_WRITE_SUBDIR: &str = ".moonlink_atomic_tmp";
+
+/// Delete temp files a crash or a failed write left in an atomic-write directory. Runs once per
+/// directory and process, before the first operator of this process writes through it.
+#[cfg(feature = "storage-fs")]
+fn remove_leftover_atomic_write_files(dir: &str) {
+    static SWEPT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    if !SWEPT.lock().unwrap().insert(dir.to_string()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let (mut files, mut bytes) = (0usize, 0u64);
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+            files += 1;
+            bytes += metadata.len();
+        }
+    }
+    if files > 0 {
+        tracing::info!(
+            dir,
+            files,
+            bytes,
+            "removed temp files left by interrupted writes"
+        );
+    }
+}
+
 fn create_opendal_operator_impl(storage_config: &StorageConfig) -> Result<Operator> {
     match storage_config {
         #[cfg(feature = "storage-fs")]
@@ -19,10 +55,19 @@ fn create_opendal_operator_impl(storage_config: &StorageConfig) -> Result<Operat
             root_directory,
             atomic_write_dir,
         } => {
-            let mut builder = services::Fs::default().root(root_directory);
-            if let Some(atomic_write_dir) = atomic_write_dir {
-                builder = builder.atomic_write_dir(atomic_write_dir);
-            }
+            // Always write through a temp file + rename, so a crash or a full disk never leaves a
+            // truncated metadata file or version hint behind. The default temp directory lives
+            // under the root, i.e. on the same filesystem, which keeps the rename atomic.
+            let atomic_write_dir = atomic_write_dir.clone().unwrap_or_else(|| {
+                std::path::Path::new(root_directory)
+                    .join(DEFAULT_ATOMIC_WRITE_SUBDIR)
+                    .to_string_lossy()
+                    .to_string()
+            });
+            remove_leftover_atomic_write_files(&atomic_write_dir);
+            let builder = services::Fs::default()
+                .root(root_directory)
+                .atomic_write_dir(&atomic_write_dir);
             Ok(Operator::new(builder)?.finish())
         }
         #[cfg(feature = "storage-gcs")]

@@ -93,6 +93,7 @@ impl DeltalakeTableManager {
                 in_memory_index: HashSet::new(),
                 file_indices: Vec::new(),
             },
+            lookup_key_version: crate::row::LOOKUP_KEY_VERSION,
         };
         Ok((next_file_id as u32, mooncake_snapshot))
     }

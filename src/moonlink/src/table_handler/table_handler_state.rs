@@ -11,6 +11,15 @@ use more_asserts as ma;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info};
 
+/// Consecutive failed iceberg persistence attempts after which the table is errored.
+pub(crate) const MAX_CONSECUTIVE_PERSISTENCE_FAILURES: u32 = 10;
+pub(crate) const MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES: u32 = 5;
+#[cfg(not(test))]
+const PERSISTENCE_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const PERSISTENCE_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+const PERSISTENCE_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SpecialTableState {
     Normal,
@@ -142,6 +151,22 @@ pub(crate) struct TableHandlerState {
     // ================================================
     //
     pub(crate) table_status_tx: Option<watch::Sender<TableStatus>>,
+
+    // ================================================
+    // Persistence retry
+    // ================================================
+    //
+    /// Consecutive failed iceberg persistence attempts.
+    pub(crate) consecutive_persistence_failures: u32,
+    /// Consecutive failed compactions / index merges; background maintenance stops at
+    /// [`MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES`] (explicit optimize requests still run).
+    pub(crate) consecutive_maintenance_failures: u32,
+    /// Consecutive persistence failures caused by a full disk (not counted above).
+    pub(crate) consecutive_full_disk_persistence_failures: u32,
+    /// Do not start another iceberg persistence before this instant.
+    pub(crate) persistence_retry_after: Option<std::time::Instant>,
+    /// A persistence failed and must be retried even without new writes.
+    pub(crate) persistence_retry_pending: bool,
 }
 
 impl TableHandlerState {
@@ -181,12 +206,59 @@ impl TableHandlerState {
             initial_copy_buffered_events: Vec::new(),
             initial_copy_loaded_files: false,
             table_status_tx: None,
+            consecutive_persistence_failures: 0,
+            consecutive_maintenance_failures: 0,
+            consecutive_full_disk_persistence_failures: 0,
+            persistence_retry_after: None,
+            persistence_retry_pending: false,
         }
     }
 
     pub(crate) fn with_table_status_tx(mut self, tx: watch::Sender<TableStatus>) -> Self {
         self.table_status_tx = Some(tx);
         self
+    }
+
+    /// Record a failed iceberg persistence and back off exponentially; returns the number of
+    /// consecutive failures.
+    pub(crate) fn record_persistence_failure(&mut self) -> u32 {
+        self.consecutive_persistence_failures += 1;
+        let exponent = std::cmp::min(self.consecutive_persistence_failures - 1, 16);
+        let backoff = std::cmp::min(
+            PERSISTENCE_RETRY_BASE_BACKOFF.saturating_mul(1 << exponent),
+            PERSISTENCE_RETRY_MAX_BACKOFF,
+        );
+        self.persistence_retry_after = Some(std::time::Instant::now() + backoff);
+        self.persistence_retry_pending = true;
+        self.consecutive_persistence_failures
+    }
+
+    /// Record a persistence that failed because the disk is full: retried with a capped backoff
+    /// but not counted towards erroring the table, since freeing space fixes it. Returns the
+    /// number of consecutive (counted) failures.
+    pub(crate) fn record_persistence_failure_on_full_disk(&mut self) -> u32 {
+        self.consecutive_full_disk_persistence_failures += 1;
+        let exponent = std::cmp::min(self.consecutive_full_disk_persistence_failures - 1, 6);
+        let backoff = std::cmp::min(
+            PERSISTENCE_RETRY_BASE_BACKOFF.saturating_mul(1 << exponent),
+            PERSISTENCE_RETRY_MAX_BACKOFF,
+        );
+        self.persistence_retry_after = Some(std::time::Instant::now() + backoff);
+        self.persistence_retry_pending = true;
+        self.consecutive_persistence_failures
+    }
+
+    pub(crate) fn record_persistence_success(&mut self) {
+        self.consecutive_full_disk_persistence_failures = 0;
+        self.consecutive_persistence_failures = 0;
+        self.persistence_retry_after = None;
+        self.persistence_retry_pending = false;
+    }
+
+    pub(crate) fn persistence_backoff_elapsed(&self) -> bool {
+        self.persistence_retry_after
+            .map(|t| std::time::Instant::now() >= t)
+            .unwrap_or(true)
     }
 
     pub(crate) fn is_errored(&self) -> bool {
@@ -274,6 +346,13 @@ impl TableHandlerState {
         uuid: uuid::Uuid,
     ) -> SnapshotOption {
         let mut force_create = request_force;
+        // Retry a failed persistence once its backoff has elapsed, even if nothing new arrived.
+        if self.persistence_retry_pending
+            && self.persistence_backoff_elapsed()
+            && !self.persistence_snapshot_ongoing
+        {
+            force_create = true;
+        }
         if self.table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
             force_create = true;
         }
@@ -612,6 +691,14 @@ impl TableHandlerState {
             return MaintenanceOption::Skip;
         }
         match request_status {
+            // A maintenance that keeps failing (e.g. on an unreadable file) would otherwise be
+            // retried, rewriting and deleting its partial output, on every snapshot.
+            MaintenanceRequestStatus::Unrequested
+                if self.consecutive_maintenance_failures
+                    >= MAX_CONSECUTIVE_BACKGROUND_MAINTENANCE_FAILURES =>
+            {
+                MaintenanceOption::Skip
+            }
             MaintenanceRequestStatus::Unrequested => {
                 MaintenanceOption::BestEffort(uuid::Uuid::new_v4())
             }
@@ -637,14 +724,29 @@ impl TableHandlerState {
         self.get_maintenance_task_option(&self.data_compaction_request_status)
     }
 
-    /// Mark index merge completion.
-    pub(crate) async fn mark_index_merge_completed(&mut self) {
+    /// Mark index merge completion. A failed merge leaves nothing to persist, so maintenance
+    /// goes back to idle and any optimize waiter gets the error.
+    pub(crate) async fn mark_index_merge_completed(
+        &mut self,
+        index_merge_result: &Result<crate::storage::mooncake_table::FileIndiceMergeResult>,
+    ) {
         assert_eq!(
             self.table_maintenance_process_status,
             MaintenanceProcessStatus::InProcess
         );
         self.index_merge_request_status = MaintenanceRequestStatus::Unrequested;
-        self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+        match index_merge_result {
+            Ok(_) => {
+                self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+                self.consecutive_maintenance_failures = 0;
+            }
+            Err(err) => {
+                self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
+                self.consecutive_maintenance_failures += 1;
+                // Background maintenance has no waiter; ignore the missing receiver.
+                let _ = self.table_maintenance_completion_tx.send(Err(err.clone()));
+            }
+        }
     }
 
     /// Mark data compaction completion.
@@ -656,12 +758,13 @@ impl TableHandlerState {
         match &data_compaction_result {
             Ok(_) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::ReadyToPersist;
+                self.consecutive_maintenance_failures = 0;
             }
             Err(err) => {
                 self.table_maintenance_process_status = MaintenanceProcessStatus::Unrequested;
-                self.table_maintenance_completion_tx
-                    .send(Err(err.clone()))
-                    .unwrap();
+                self.consecutive_maintenance_failures += 1;
+                // Background maintenance has no waiter; ignore the missing receiver.
+                let _ = self.table_maintenance_completion_tx.send(Err(err.clone()));
             }
         }
     }

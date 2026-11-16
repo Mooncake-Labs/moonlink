@@ -52,6 +52,11 @@ impl IcebergTableManager {
         let file_index_blob =
             FileIndexBlob::load_from_index_blob(file_io.clone(), entry.data_file()).await?;
         let mut cur_iceberg_file_index = file_index_blob.file_index;
+        let index_block_paths: Vec<String> = cur_iceberg_file_index
+            .index_block_files
+            .iter()
+            .map(|b| b.filepath.clone())
+            .collect();
         let table_id = TableId(self.mooncake_table_metadata.table_id);
         let mooncake_file_index = cur_iceberg_file_index
             .as_mooncake_file_index(
@@ -67,6 +72,8 @@ impl IcebergTableManager {
             mooncake_file_index.clone(),
             entry.data_file().file_path().to_string(),
         );
+        self.persisted_index_block_files
+            .insert(entry.data_file().file_path().to_string(), index_block_paths);
 
         Ok(Some(mooncake_file_index))
     }
@@ -327,11 +334,13 @@ impl IcebergTableManager {
             }
         }
 
-        let mooncake_snapshot = self.transform_to_mooncake_snapshot(
+        let mut mooncake_snapshot = self.transform_to_mooncake_snapshot(
             loaded_deletion_vector,
             loaded_file_indices,
             snapshot_property.flush_lsn,
         );
+        // Tables persisted before the property existed used a per-process random hash.
+        mooncake_snapshot.lookup_key_version = snapshot_property.lookup_key_version.unwrap_or(1);
         Ok((next_file_id as u32, mooncake_snapshot))
     }
 }

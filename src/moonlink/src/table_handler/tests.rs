@@ -1670,6 +1670,11 @@ async fn test_discard_duplicate_writes() {
                 Ok((/*next_file_id=*/ 0, mock_mooncake_snapshot_copy))
             })
         });
+    // The periodic mooncake snapshot can start an iceberg persistence when the test runs slowly;
+    // keep it in flight instead of failing the table on an unexpected mock call.
+    mock_table_manager
+        .expect_sync_snapshot()
+        .returning(|_, _| Box::pin(std::future::pending()));
 
     let mut mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,

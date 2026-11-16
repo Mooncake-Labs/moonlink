@@ -70,11 +70,16 @@ impl TableEventManager {
 
     /// Initiate an iceberg snapshot event, return the channel for synchronization.
     pub async fn initiate_snapshot(&mut self, lsn: u64) -> watch::Receiver<Option<Result<u64>>> {
-        self.table_event_tx
+        // Only results published after this request count; an error from an earlier, failed
+        // attempt must not fail this one.
+        let mut rx = self.force_snapshot_completion_rx.clone();
+        rx.mark_unchanged();
+        // If the handler is gone, the receiver reports it on the first wait.
+        let _ = self
+            .table_event_tx
             .send(TableEvent::ForceSnapshot { lsn: Some(lsn) })
-            .await
-            .unwrap();
-        self.force_snapshot_completion_rx.clone()
+            .await;
+        rx
     }
 
     /// Util function to decide whether the current LSN satisfies the requested LSN.
@@ -94,9 +99,12 @@ impl TableEventManager {
         mut rx: watch::Receiver<Option<Result<u64>>>,
         requested_lsn: u64,
     ) -> Result<()> {
-        // Fast-path: check whether existing persisted table LSN has already satisfied the requested LSN.
-        if Self::is_iceberg_snapshot_ready(&rx.borrow(), requested_lsn)? {
-            return Ok(());
+        // Fast-path: the persisted table LSN already satisfies the request. A stale error from an
+        // earlier attempt is ignored here; only errors published after the request fail it.
+        if let Some(Ok(current_lsn)) = &*rx.borrow() {
+            if *current_lsn >= requested_lsn {
+                return Ok(());
+            }
         }
 
         // Otherwise falls back to loop until requested LSN is met.
@@ -104,7 +112,7 @@ impl TableEventManager {
             if rx.changed().await.is_err() {
                 return Err(self_stopped_error());
             }
-            if Self::is_iceberg_snapshot_ready(&rx.borrow(), requested_lsn)? {
+            if Self::is_iceberg_snapshot_ready(&rx.borrow_and_update(), requested_lsn)? {
                 break;
             }
         }
@@ -113,33 +121,51 @@ impl TableEventManager {
     }
 
     /// Initiate an index merge event, return the channel for synchronization.
-    pub async fn initiate_index_merge(&mut self) -> broadcast::Receiver<Result<()>> {
-        let subscriber = self.table_maintenance_completion_tx.subscribe();
-        self.table_event_tx
-            .send(TableEvent::ForceRegularIndexMerge)
+    /// Fails at once if the table handler is gone; an errored table answers with its error.
+    pub async fn initiate_index_merge(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
+        self.initiate_maintenance(TableEvent::ForceRegularIndexMerge)
             .await
-            .unwrap();
-        subscriber
     }
 
-    /// Initialte a data compaction event, return the channel for synchronization.
-    pub async fn initiate_data_compaction(&mut self) -> broadcast::Receiver<Result<()>> {
-        let subscriber = self.table_maintenance_completion_tx.subscribe();
-        self.table_event_tx
-            .send(TableEvent::ForceRegularDataCompaction)
+    /// Initiate a data compaction event, return the channel for synchronization.
+    /// Fails at once if the table handler is gone; an errored table answers with its error.
+    pub async fn initiate_data_compaction(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
+        self.initiate_maintenance(TableEvent::ForceRegularDataCompaction)
             .await
-            .unwrap();
-        subscriber
     }
 
-    /// Initialte full table maintenance event, return the channel for synchronization.
-    pub async fn initiate_full_compaction(&mut self) -> broadcast::Receiver<Result<()>> {
+    /// Initiate full table maintenance event, return the channel for synchronization.
+    /// Fails at once if the table handler is gone; an errored table answers with its error.
+    pub async fn initiate_full_compaction(&mut self) -> Result<broadcast::Receiver<Result<()>>> {
+        self.initiate_maintenance(TableEvent::ForceFullMaintenance)
+            .await
+    }
+
+    async fn initiate_maintenance(
+        &mut self,
+        event: TableEvent,
+    ) -> Result<broadcast::Receiver<Result<()>>> {
         let subscriber = self.table_maintenance_completion_tx.subscribe();
         self.table_event_tx
-            .send(TableEvent::ForceFullMaintenance)
+            .send(event)
             .await
-            .unwrap();
-        subscriber
+            .map_err(|_| self_stopped_error())?;
+        Ok(subscriber)
+    }
+
+    /// Wait for the result of a maintenance request started with an `initiate_*` method.
+    pub async fn synchronize_maintenance_request(
+        mut rx: broadcast::Receiver<Result<()>>,
+    ) -> Result<()> {
+        loop {
+            match rx.recv().await {
+                Ok(result) => return result,
+                // The handler answers maintenance requests in order, so a later result still
+                // means this request has finished.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Err(self_stopped_error()),
+            }
+        }
     }
 
     /// Drop a mooncake table.
@@ -170,4 +196,62 @@ fn self_stopped_error() -> crate::Error {
     crate::Error::table_handler_stopped(
         "table handler stopped unexpectedly; drop and re-create the mirror",
     )
+}
+
+#[cfg(test)]
+mod maintenance_request_tests {
+    use super::*;
+    use crate::event_sync::create_table_event_syncer;
+
+    fn manager_without_handler() -> TableEventManager {
+        let (table_event_tx, table_event_rx) = mpsc::channel(1);
+        drop(table_event_rx);
+        let (_sender, receiver) = create_table_event_syncer();
+        TableEventManager::new(table_event_tx, receiver)
+    }
+
+    /// A maintenance request to a table whose handler is gone fails instead of panicking.
+    #[tokio::test]
+    async fn initiate_without_handler_fails() {
+        let mut manager = manager_without_handler();
+        assert!(matches!(
+            manager.initiate_index_merge().await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+        assert!(matches!(
+            manager.initiate_data_compaction().await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+        assert!(matches!(
+            manager.initiate_full_compaction().await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+    }
+
+    /// Waiting for a maintenance result returns the handler's error, and an error (not a panic)
+    /// once the result channel is closed; a lagged receiver keeps waiting for a result.
+    #[tokio::test]
+    async fn synchronize_maintenance_request_results() {
+        let (tx, rx) = broadcast::channel::<Result<()>>(1);
+        tx.send(Err(crate::Error::table_errored("mirror t is out of sync")))
+            .unwrap();
+        assert!(matches!(
+            TableEventManager::synchronize_maintenance_request(rx).await,
+            Err(crate::Error::TableErrored(_))
+        ));
+
+        let rx = tx.subscribe();
+        drop(tx);
+        assert!(matches!(
+            TableEventManager::synchronize_maintenance_request(rx).await,
+            Err(crate::Error::TableHandlerStopped(_))
+        ));
+
+        let (tx, rx) = broadcast::channel::<Result<()>>(1);
+        tx.send(Err(crate::Error::table_errored("lost"))).unwrap();
+        tx.send(Ok(())).unwrap();
+        assert!(TableEventManager::synchronize_maintenance_request(rx)
+            .await
+            .is_ok());
+    }
 }

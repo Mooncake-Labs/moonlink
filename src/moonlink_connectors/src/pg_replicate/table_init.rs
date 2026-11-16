@@ -139,17 +139,18 @@ pub async fn build_table_components(
     }
     let handler_replication_lsn_rx = table_replication_state.subscribe();
 
+    let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
     let read_state_manager = ReadStateManager::new(
         &table,
         replication_lsn_rx,
         commit_lsn_rx,
+        event_sync_receiver.table_status_rx.clone(),
         table_components.read_state_filepath_remap,
     );
     let table_status_reader = TableStatusReader::new(
         &table_components.moonlink_table_config.iceberg_table_config,
         &table,
     );
-    let (event_sync_sender, event_sync_receiver) = create_table_event_syncer();
     let table_handler_timers = create_table_handler_timers();
     let table_handler = TableHandler::new(
         table,
@@ -176,4 +177,106 @@ pub async fn build_table_components(
         slot_status_tx: None,
     };
     Ok(table_resource)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_schema::{DataType, Field};
+    use moonlink::row::IdentityProp;
+    use moonlink::{
+        AccessorConfig, IcebergCatalogConfig, IcebergTableConfig, MooncakeTableConfig,
+        MoonlinkTableConfig, ObjectStorageCache, ObjectStorageCacheConfig, StorageConfig,
+    };
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    async fn table_resources(dir: &tempfile::TempDir) -> (TableResources, Arc<ReplicationState>) {
+        let base = dir.path().to_str().unwrap().to_string();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: base.clone(),
+            atomic_write_dir: None,
+        };
+        let accessor_config = AccessorConfig::new_with_storage_config(storage_config);
+        let mut mooncake_table_config = MooncakeTableConfig::new(format!("{base}/temp"));
+        mooncake_table_config.append_only = false;
+        mooncake_table_config.row_identity = IdentityProp::FullRow;
+        let moonlink_table_config = MoonlinkTableConfig {
+            mooncake_table_config,
+            iceberg_table_config: IcebergTableConfig {
+                namespace: vec!["db".to_string()],
+                table_name: "t".to_string(),
+                data_accessor_config: accessor_config.clone(),
+                metadata_accessor_config: IcebergCatalogConfig::File { accessor_config },
+            },
+        };
+        let schema = ArrowSchema::new(vec![Field::new("id", DataType::Int64, false)
+            .with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "0".to_string(),
+            )]))]);
+        let replication_state = ReplicationState::new();
+        let resources = build_table_components(
+            "db.t".to_string(),
+            schema,
+            "public.t".to_string(),
+            1,
+            &base,
+            &replication_state,
+            TableComponents {
+                read_state_filepath_remap: Arc::new(|path| path),
+                object_storage_cache: ObjectStorageCache::new(ObjectStorageCacheConfig::new(
+                    1 << 30,
+                    format!("{base}/cache"),
+                    true,
+                )),
+                moonlink_table_config,
+            },
+        )
+        .await
+        .unwrap();
+        (resources, replication_state)
+    }
+
+    /// Reads of a mirror that becomes errored while it runs fail with the errored message:
+    /// reads that start afterwards and reads that were already waiting for an LSN.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_of_a_table_errored_at_runtime_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (resources, _replication_state) = table_resources(&dir).await;
+        let reader = Arc::new(resources.read_state_manager);
+        reader.try_read(None).await.unwrap();
+
+        let waiting = tokio::spawn({
+            let reader = reader.clone();
+            async move { reader.try_read(Some(1u64 << 40)).await.map(|_| ()) }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished());
+
+        resources
+            .table_event_manager
+            .enter_errored("source schema changed".to_string())
+            .await
+            .unwrap();
+
+        let err = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("a read waiting for an LSN did not observe the errored state")
+            .unwrap()
+            .expect_err("waiting read must fail");
+        assert!(err.to_string().contains("source schema changed"), "{err}");
+        for lsn in [None, Some(0)] {
+            let err = reader
+                .try_read(lsn)
+                .await
+                .expect_err("read of an errored table must fail");
+            assert!(err.to_string().contains("out of sync"), "{err}");
+        }
+        let err = reader
+            .wait_for_lsn_coverage(0)
+            .await
+            .expect_err("snapshot LSN resolution of an errored table must fail");
+        assert!(err.to_string().contains("out of sync"), "{err}");
+    }
 }

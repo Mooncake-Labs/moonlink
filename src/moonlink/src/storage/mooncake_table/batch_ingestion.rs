@@ -163,7 +163,7 @@ impl MooncakeTable {
     }
 
     /// Build a single GlobalIndex spanning `files` by scanning Parquet with identity projection.
-    async fn build_index_for_files(
+    pub(crate) async fn build_index_for_files(
         files: Vec<MooncakeDataFileRef>,
         identity: IdentityProp,
         table_dir: PathBuf,
@@ -171,6 +171,19 @@ impl MooncakeTable {
     ) -> Result<FileIndex> {
         // Accumulate (hash, seg_idx, row_idx)
         let mut entries: Vec<(u64, usize, usize)> = Vec::new();
+        // The projection yields identity columns in schema order; keys hash in key order.
+        let key_order: Option<Vec<usize>> = match &identity {
+            IdentityProp::Keys(keys) => {
+                let mut sorted = keys.clone();
+                sorted.sort_unstable();
+                Some(
+                    keys.iter()
+                        .map(|k| sorted.binary_search(k).unwrap())
+                        .collect(),
+                )
+            }
+            _ => None,
+        };
 
         for (seg_idx, data_file) in files.iter().enumerate() {
             let file = tokio::fs::File::open(data_file.file_path()).await?;
@@ -186,8 +199,13 @@ impl MooncakeTable {
             while let Some(row_group_reader) = reader.next_row_group().await? {
                 let mut batch_stream = row_group_reader;
                 while let Some(batch) = batch_stream.next().transpose()? {
-                    let rows = MoonlinkRow::from_record_batch(&batch);
-                    for row in rows {
+                    let rows = MoonlinkRow::from_record_batch(&batch)?;
+                    for mut row in rows {
+                        if let Some(order) = &key_order {
+                            row = MoonlinkRow::new(
+                                order.iter().map(|&i| row.values[i].clone()).collect(),
+                            );
+                        }
                         let hash = identity.get_lookup_key_from_identity_row(&row);
                         entries.push((hash, seg_idx, row_idx_within_file));
                         row_idx_within_file += 1;
@@ -240,6 +258,109 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// Data files with array columns (FullRow identity hashes them too) can be indexed, e.g. by
+    /// the rebuild of file indices written by an older moonlink.
+    #[tokio::test]
+    async fn test_build_index_for_files_with_array_column() {
+        use arrow_array::{ArrayRef, Int32Array, ListArray};
+        use arrow_schema::{DataType, Field, Schema};
+        let temp_dir = tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "tags",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                true,
+            ),
+        ]));
+        let tags = ListArray::from_iter_primitive::<arrow_array::types::Int32Type, _, _>(vec![
+            Some(vec![Some(1), None]),
+            None,
+            Some(vec![]),
+        ]);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+                Arc::new(tags) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let path = temp_dir.path().join("with_array.parquet");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        let mut writer = AsyncArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
+
+        let data_file = crate::storage::storage_utils::create_data_file(
+            /*file_id=*/ 0,
+            path.to_str().unwrap().to_string(),
+        );
+        let index = MooncakeTable::build_index_for_files(
+            vec![data_file.clone()],
+            IdentityProp::FullRow,
+            temp_dir.path().to_path_buf(),
+            /*index_file_id=*/ 1,
+        )
+        .await
+        .unwrap();
+
+        let rows = MoonlinkRow::from_record_batch(&batch).unwrap();
+        let keys: Vec<u64> = rows
+            .iter()
+            .map(|row| IdentityProp::FullRow.get_lookup_key(row))
+            .collect();
+        let lookups =
+            crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
+                keys.clone().into_iter(),
+            );
+        let results = index.search_values(&lookups).await;
+        for (row_idx, key) in keys.iter().enumerate() {
+            assert!(
+                results.contains(&(*key, RecordLocation::DiskFile(data_file.file_id(), row_idx))),
+                "row {row_idx} not found"
+            );
+        }
+    }
+
+    /// Identity keys not in schema order hash like CDC rows do (in key order).
+    #[tokio::test]
+    async fn test_build_index_for_files_with_unordered_keys() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("unordered_keys.parquet");
+        let batch = batch_with_rows(&[1, 2, 3]);
+        write_parquet_file(&path, std::slice::from_ref(&batch)).await;
+        let data_file = crate::storage::storage_utils::create_data_file(
+            /*file_id=*/ 0,
+            path.to_str().unwrap().to_string(),
+        );
+        let identity = IdentityProp::Keys(vec![2, 0]);
+        let index = MooncakeTable::build_index_for_files(
+            vec![data_file.clone()],
+            identity.clone(),
+            temp_dir.path().to_path_buf(),
+            /*index_file_id=*/ 1,
+        )
+        .await
+        .unwrap();
+        let rows = MoonlinkRow::from_record_batch(&batch).unwrap();
+        let keys: Vec<u64> = rows
+            .iter()
+            .map(|row| identity.get_lookup_key(row))
+            .collect();
+        let lookups =
+            crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
+                keys.clone().into_iter(),
+            );
+        let results = index.search_values(&lookups).await;
+        for (row_idx, key) in keys.iter().enumerate() {
+            assert!(
+                results.contains(&(*key, RecordLocation::DiskFile(data_file.file_id(), row_idx))),
+                "row {row_idx} not found"
+            );
+        }
     }
 
     #[tokio::test]
@@ -337,8 +458,8 @@ mod tests {
 
         // Validate index can look up a couple of keys across files
         let index = indices.remove(0);
-        let rows_file1 = MoonlinkRow::from_record_batch(&b1);
-        let rows_file2 = MoonlinkRow::from_record_batch(&b2);
+        let rows_file1 = MoonlinkRow::from_record_batch(&b1).unwrap();
+        let rows_file2 = MoonlinkRow::from_record_batch(&b2).unwrap();
         let key1 = IdentityProp::SinglePrimitiveKey(0).get_lookup_key(&rows_file1[0]);
         let key2 = IdentityProp::SinglePrimitiveKey(0).get_lookup_key(&rows_file2[2]);
         let lookups = crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
@@ -393,8 +514,8 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(indices.len(), 1);
         let index = indices.remove(0);
-        let r1 = MoonlinkRow::from_record_batch(&b1);
-        let r2 = MoonlinkRow::from_record_batch(&b2);
+        let r1 = MoonlinkRow::from_record_batch(&b1).unwrap();
+        let r2 = MoonlinkRow::from_record_batch(&b2).unwrap();
         let k1 = IdentityProp::Keys(vec![0]).get_lookup_key(&r1[0]);
         let k2 = IdentityProp::Keys(vec![0]).get_lookup_key(&r2[1]);
         let lookups = crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
@@ -445,7 +566,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(indices.len(), 1);
         let index = indices.remove(0);
-        let rows = MoonlinkRow::from_record_batch(&b1);
+        let rows = MoonlinkRow::from_record_batch(&b1).unwrap();
         let k = IdentityProp::FullRow.get_lookup_key(&rows[2]);
         let lookups = crate::storage::index::persisted_bucket_hash_map::GlobalIndex::prepare_hashes_for_lookup(
             vec![k].into_iter(),

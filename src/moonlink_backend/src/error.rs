@@ -55,6 +55,9 @@ pub enum Error {
 
     #[error("{0}")]
     RecoveryPanicked(ErrorStruct),
+
+    #[error("{0}")]
+    LsnWaitTimeout(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -85,6 +88,10 @@ impl Error {
     }
 
     #[track_caller]
+    pub fn lsn_wait_timeout(message: String) -> Self {
+        Self::LsnWaitTimeout(ErrorStruct::new(message, ErrorStatus::Temporary))
+    }
+
     pub fn recovery_panicked(reason: &str) -> Self {
         Self::RecoveryPanicked(ErrorStruct::new(
             format!("recovery panicked: {reason}"),
@@ -107,7 +114,8 @@ impl Error {
             | Error::MpscChannelSendError(es)
             | Error::InvalidConfig(es)
             | Error::InsufficientDiskSpace(es)
-            | Error::RecoveryPanicked(es) => es,
+            | Error::RecoveryPanicked(es)
+            | Error::LsnWaitTimeout(es) => es,
         }
     }
 
@@ -127,6 +135,7 @@ impl Error {
             Error::InvalidConfig(es) => es.status,
             Error::InsufficientDiskSpace(es) => es.status,
             Error::RecoveryPanicked(es) => es.status,
+            Error::LsnWaitTimeout(es) => es.status,
         }
     }
 

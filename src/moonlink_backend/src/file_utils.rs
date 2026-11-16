@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use moonlink::{ObjectStorageCache, ObjectStorageCacheConfig};
 
 use std::io::ErrorKind;
@@ -27,13 +27,42 @@ pub(super) fn get_cache_directory_under_base(base_path: &str) -> std::path::Path
     get_directory_under_base(base_path, DEFAULT_MOONLINK_OBJECT_STORAGE_CACHE_PATH)
 }
 
-/// Util function to get filesystem size for cache directory
-fn get_cache_filesystem_size(path: &str) -> u64 {
-    let vfs_stat = nix::sys::statvfs::statvfs(path).unwrap();
-    let block_size = vfs_stat.block_size();
-    let avai_blocks = vfs_stat.files_available();
+/// Smallest read-cache budget used when the filesystem is (nearly) full.
+const MIN_CACHE_BYTES: u64 = 64 << 20; // 64MiB
 
-    (block_size as u64).checked_mul(avai_blocks as u64).unwrap()
+/// Bytes available to unprivileged users on the filesystem holding `path`, or None if unknown.
+// statvfs field widths differ across platforms, so the casts are not always no-ops.
+#[allow(clippy::unnecessary_cast)]
+fn get_available_bytes(path: &str) -> Option<u64> {
+    match nix::sys::statvfs::statvfs(path) {
+        Ok(vfs_stat) => Some(
+            (vfs_stat.fragment_size() as u64).saturating_mul(vfs_stat.blocks_available() as u64),
+        ),
+        Err(e) => {
+            tracing::warn!(path, error = %e, "statvfs failed for read cache directory");
+            None
+        }
+    }
+}
+
+/// Read-cache budget for the given available bytes. Never fails: a full disk only shrinks the
+/// cache, it must not stop the service from starting.
+/// Monotonic in the available space.
+pub(super) fn cache_bytes_for_available(available_bytes: Option<u64>) -> u64 {
+    match available_bytes {
+        Some(available) if available >= MIN_DISK_SPACE_FOR_CACHE + MIN_CACHE_BYTES => {
+            available - MIN_DISK_SPACE_FOR_CACHE
+        }
+        Some(available) => {
+            tracing::warn!(
+                available,
+                budget = MIN_CACHE_BYTES,
+                "low disk space for the read cache, using a small cache"
+            );
+            MIN_CACHE_BYTES
+        }
+        None => MIN_CACHE_BYTES,
+    }
 }
 
 /// Create default object storage cache.
@@ -42,16 +71,9 @@ pub(super) fn create_default_object_storage_cache(
     cache_directory_pathbuf: std::path::PathBuf,
 ) -> Result<ObjectStorageCache> {
     let cache_directory = cache_directory_pathbuf.to_str().unwrap().to_string();
-    let filesystem_size = get_cache_filesystem_size(&cache_directory);
-    if filesystem_size < MIN_DISK_SPACE_FOR_CACHE {
-        return Err(Error::insufficient_disk_space(
-            /*requires=*/ MIN_DISK_SPACE_FOR_CACHE,
-            /*actual=*/ filesystem_size,
-        ));
-    }
-
+    let max_bytes = cache_bytes_for_available(get_available_bytes(&cache_directory));
     let cache_config = ObjectStorageCacheConfig {
-        max_bytes: filesystem_size - MIN_DISK_SPACE_FOR_CACHE,
+        max_bytes,
         cache_directory,
         optimize_local_filesystem: true,
     };
@@ -110,5 +132,54 @@ mod tests {
         let base = "/tmp";
         let newdir = get_directory_under_base(base, SUBDIR);
         assert_eq!(newdir.to_str().unwrap(), format!("/tmp/{SUBDIR}"));
+    }
+}
+
+#[cfg(test)]
+mod cache_size_tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_bytes_ignore_inode_counts_and_never_fail() {
+        // Plenty of space: everything but the reserve.
+        assert_eq!(
+            cache_bytes_for_available(Some(10 << 30)),
+            (10 << 30) - MIN_DISK_SPACE_FOR_CACHE
+        );
+        // Low space (or a filesystem reporting nothing useful): small cache, no error.
+        assert_eq!(cache_bytes_for_available(Some(0)), MIN_CACHE_BYTES);
+        assert_eq!(cache_bytes_for_available(Some(512 << 20)), MIN_CACHE_BYTES);
+        assert_eq!(cache_bytes_for_available(None), MIN_CACHE_BYTES);
+
+        // More free space never means a smaller cache, also around the reserve boundary.
+        let boundary = MIN_DISK_SPACE_FOR_CACHE + MIN_CACHE_BYTES;
+        let mut previous = 0;
+        for available in (0..=(boundary + (256 << 20))).step_by(16 << 20) {
+            let budget = cache_bytes_for_available(Some(available));
+            assert!(budget >= previous, "budget shrank at {available}");
+            previous = budget;
+        }
+        assert_eq!(
+            cache_bytes_for_available(Some(boundary - 1)),
+            MIN_CACHE_BYTES
+        );
+        assert_eq!(cache_bytes_for_available(Some(boundary)), MIN_CACHE_BYTES);
+        assert_eq!(
+            cache_bytes_for_available(Some(boundary + 1)),
+            MIN_CACHE_BYTES + 1
+        );
+    }
+
+    #[test]
+    fn test_available_bytes_uses_blocks_not_inodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let vfs = nix::sys::statvfs::statvfs(path).unwrap();
+        #[allow(clippy::unnecessary_cast)]
+        let expected = vfs.fragment_size() as u64 * vfs.blocks_available() as u64;
+        let got = get_available_bytes(path).unwrap();
+        // Free space can move a little between the two calls.
+        let diff = got.abs_diff(expected);
+        assert!(diff < (64 << 20), "got {got}, expected about {expected}");
     }
 }

@@ -16,7 +16,9 @@ use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
 #[cfg(feature = "test-utils")]
 pub use recovery_utils::set_recovery_delay_between_tables_for_test;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::recovery_utils::BackendAttributes;
@@ -24,6 +26,47 @@ use crate::table_status::TableStatus;
 
 /// Type alias for filepath remap function, which remaps http URI to local filepath if possible.
 type HttpFilepathRemap = std::sync::Arc<dyn Fn(String) -> String + Send + Sync>;
+
+/// Upper bound for a scan or snapshot request waiting until replication reaches the requested
+/// LSN. The pg_mooncake backend issuing the request blocks uninterruptibly (no statement_timeout /
+/// cancel) for this long.
+const DEFAULT_LSN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Environment variable overriding [`DEFAULT_LSN_WAIT_TIMEOUT`], in whole seconds.
+pub const LSN_WAIT_TIMEOUT_ENV: &str = "MOONLINK_LSN_WAIT_TIMEOUT_SECS";
+
+/// Larger LSN wait timeouts are clamped to this; it also keeps the value far from wrapping.
+const MAX_LSN_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn clamp_lsn_wait_timeout(timeout: Duration) -> Duration {
+    if timeout > MAX_LSN_WAIT_TIMEOUT {
+        tracing::warn!(
+            ?timeout,
+            "LSN wait timeout clamped to {}s",
+            MAX_LSN_WAIT_TIMEOUT.as_secs()
+        );
+        return MAX_LSN_WAIT_TIMEOUT;
+    }
+    timeout
+}
+
+/// The LSN wait timeout for a value of [`LSN_WAIT_TIMEOUT_ENV`]; unset or invalid gives the default.
+fn parse_lsn_wait_timeout(value: Option<&str>) -> Duration {
+    let Some(value) = value else {
+        return DEFAULT_LSN_WAIT_TIMEOUT;
+    };
+    match value.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => clamp_lsn_wait_timeout(Duration::from_secs(secs)),
+        _ => {
+            tracing::warn!(
+                value,
+                "invalid {LSN_WAIT_TIMEOUT_ENV} (expected a positive number of seconds), using {}s",
+                DEFAULT_LSN_WAIT_TIMEOUT.as_secs()
+            );
+            DEFAULT_LSN_WAIT_TIMEOUT
+        }
+    }
+}
 
 /// Max concurrency to fetch parquet metadata in parallel.
 const DEFAULT_PARQUET_METADATA_FETCH_PARALLELISM: usize = 128;
@@ -41,6 +84,9 @@ pub struct MoonlinkBackend {
     metadata_store_accessor: Box<dyn MetadataStoreTrait>,
 
     replication_manager: Arc<RwLock<ReplicationManager>>,
+
+    /// See [`DEFAULT_LSN_WAIT_TIMEOUT`].
+    lsn_wait_timeout_ms: AtomicU64,
 }
 
 impl MoonlinkBackend {
@@ -136,22 +182,64 @@ impl MoonlinkBackend {
             temp_files_dir: temp_files_dir.to_str().unwrap().to_string(),
             replication_manager,
             metadata_store_accessor,
+            lsn_wait_timeout_ms: AtomicU64::new(
+                parse_lsn_wait_timeout(std::env::var(LSN_WAIT_TIMEOUT_ENV).ok().as_deref())
+                    .as_millis() as u64,
+            ),
         })
+    }
+
+    /// Override how long [`Self::scan_table`] and [`Self::create_snapshot`] wait for replication
+    /// to reach the requested LSN.
+    pub fn set_lsn_wait_timeout(&self, timeout: Duration) {
+        self.lsn_wait_timeout_ms.store(
+            clamp_lsn_wait_timeout(timeout).as_millis() as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn lsn_wait_timeout(&self) -> Duration {
+        Duration::from_millis(self.lsn_wait_timeout_ms.load(Ordering::Relaxed))
     }
 
     /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
     /// If the requested database or table doesn't exist, return [`TableNotFound`] error.
+    /// Only the wait for replication to reach `lsn` is bounded ([`LSN_WAIT_TIMEOUT_ENV`]).
     pub async fn create_snapshot(&self, database: String, table: String, lsn: u64) -> Result<()> {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
 
+        let mooncake_table_id = MooncakeTableId { database, table };
+        let table_reader = {
+            let manager = self.replication_manager.read().await;
+            manager.get_table_reader(&mooncake_table_id)?
+        };
+        // Resolve the LSN first, without any manager lock: `lsn` is the end of the caller's last
+        // transaction, which need not be a commit of this table.
+        let timeout = self.lsn_wait_timeout();
+        let target_lsn =
+            match tokio::time::timeout(timeout, table_reader.wait_for_lsn_coverage(lsn)).await {
+                Ok(target_lsn) => target_lsn?,
+                Err(_) => {
+                    let (_, commit_lsn, replication_lsn) = table_reader.lsn_status();
+                    return Err(Error::lsn_wait_timeout(format!(
+                        "mirror {mooncake_table_id}: replication did not reach LSN {lsn} within \
+                         {timeout:?} (replicated up to {replication_lsn}, committed {commit_lsn}); \
+                         replication may be stalled or catching up, or src_uri points at a \
+                         different server whose LSNs are not comparable. Retry, or check \
+                         mooncake.list_tables()."
+                    )));
+                }
+            };
         let rx = {
             let mut manager = self.replication_manager.write().await;
-            let mooncake_table_id = MooncakeTableId { database, table };
             let writer = manager.get_table_event_manager(&mooncake_table_id)?;
-            writer.initiate_snapshot(lsn).await
+            writer.initiate_snapshot(target_lsn).await
         };
-        TableEventManager::synchronize_force_snapshot_request(rx, lsn).await?;
+        // Not bounded: persisting a large backlog to Iceberg legitimately takes long. The wait
+        // ends when the snapshot is persisted, or with an error once the mirror is errored or
+        // dropped; a stuck-but-healthy table handler keeps the caller waiting.
+        TableEventManager::synchronize_force_snapshot_request(rx, target_lsn).await?;
         Ok(())
     }
 
@@ -331,7 +419,7 @@ impl MoonlinkBackend {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
 
-        let mut rx = {
+        let rx = {
             let mut manager = self.replication_manager.write().await;
             let mooncake_table_id = MooncakeTableId { database, table };
             let writer = manager.get_table_event_manager(&mooncake_table_id)?;
@@ -345,10 +433,27 @@ impl MoonlinkBackend {
                     "Unrecognizable table optimization mode `{mode}`, expected one of `data`, `index`, or `full`"
                     )));
                 }
-            }
+            }?
         };
 
-        rx.recv().await.unwrap().unwrap();
+        TableEventManager::synchronize_maintenance_request(rx).await?;
+        Ok(())
+    }
+
+    /// Put a mirror into the errored state, as a runtime failure would.
+    #[cfg(feature = "test-utils")]
+    pub async fn enter_errored_for_testing(
+        &self,
+        database: String,
+        table: String,
+        reason: String,
+    ) -> Result<()> {
+        let mut manager = self.replication_manager.write().await;
+        let mooncake_table_id = MooncakeTableId { database, table };
+        manager
+            .get_table_event_manager(&mooncake_table_id)?
+            .enter_errored(reason)
+            .await?;
         Ok(())
     }
 
@@ -362,14 +467,42 @@ impl MoonlinkBackend {
         validate_not_empty(&database, "database")?;
         validate_not_empty(&table, "table")?;
 
-        let read_state = {
+        let mooncake_table_id = MooncakeTableId { database, table };
+        // Do not hold the manager lock while waiting for the LSN: a queued writer (drop/create
+        // table) would otherwise block every scan of every table behind this wait.
+        let table_reader = {
             let manager = self.replication_manager.read().await;
-            let mooncake_table_id = MooncakeTableId { database, table };
-            let table_reader = manager.get_table_reader(&mooncake_table_id)?;
-            table_reader.try_read(lsn).await?
+            manager.get_table_reader(&mooncake_table_id)?
         };
-
-        Ok(read_state.clone())
+        let timeout = self.lsn_wait_timeout();
+        match tokio::time::timeout(timeout, table_reader.try_read(lsn)).await {
+            Ok(read_state) => Ok(read_state?),
+            Err(_) => {
+                let (snapshot_lsn, commit_lsn, replication_lsn) = table_reader.lsn_status();
+                let snapshot_lsn = if snapshot_lsn == u64::MAX {
+                    "none".to_string()
+                } else {
+                    snapshot_lsn.to_string()
+                };
+                let requested = lsn.unwrap_or_default();
+                if table_reader.lsn_reached(lsn) {
+                    // Replication is there; building the read (another scan's, which this one
+                    // queues behind, or its own) is what did not finish.
+                    return Err(Error::lsn_wait_timeout(format!(
+                        "reading mirror {mooncake_table_id} at LSN {requested} did not finish within \
+                         {timeout:?} (replicated up to {replication_lsn}, snapshot {snapshot_lsn}); \
+                         reading its files is slow or stuck. Retry."
+                    )));
+                }
+                Err(Error::lsn_wait_timeout(format!(
+                    "mirror {mooncake_table_id} did not reach LSN {} within {timeout:?} \
+                     (replicated up to {replication_lsn}, committed {commit_lsn}, snapshot {snapshot_lsn}); \
+                     replication may be stalled or catching up, or src_uri points at a different server \
+                     whose LSNs are not comparable. Retry, or check mooncake.list_tables().",
+                    lsn.unwrap_or_default()
+                )))
+            }
+        }
     }
 
     /// Gracefully shutdown a replication connection identified by its URI.
@@ -473,5 +606,36 @@ mod tests {
             msg.contains("field_name cannot be empty"),
             "Error message does not contain expected string, got: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lsn_wait_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn lsn_wait_timeout_env_value() {
+        assert_eq!(parse_lsn_wait_timeout(None), DEFAULT_LSN_WAIT_TIMEOUT);
+        assert_eq!(
+            parse_lsn_wait_timeout(Some("120")),
+            Duration::from_secs(120)
+        );
+        assert_eq!(parse_lsn_wait_timeout(Some(" 5 ")), Duration::from_secs(5));
+        // Clamped instead of wrapping when converted to milliseconds.
+        for huge in ["86401", "18446744073709551615"] {
+            assert_eq!(parse_lsn_wait_timeout(Some(huge)), MAX_LSN_WAIT_TIMEOUT);
+        }
+        assert_eq!(clamp_lsn_wait_timeout(Duration::MAX), MAX_LSN_WAIT_TIMEOUT);
+        assert_eq!(
+            clamp_lsn_wait_timeout(Duration::from_secs(3600)),
+            Duration::from_secs(3600)
+        );
+        for invalid in ["0", "-1", "30s", ""] {
+            assert_eq!(
+                parse_lsn_wait_timeout(Some(invalid)),
+                DEFAULT_LSN_WAIT_TIMEOUT,
+                "{invalid:?}"
+            );
+        }
     }
 }

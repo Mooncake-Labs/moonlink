@@ -87,6 +87,31 @@ impl FileSystemAccessor {
             .await
     }
 
+    /// On the local filesystem, make the rename that completed an atomic write durable: without
+    /// a directory fsync, a power loss can undo it (e.g. roll back the version hint while the
+    /// replication slot was already acknowledged past it).
+    // Irrefutable when the local filesystem is the only storage backend compiled in.
+    #[allow(irrefutable_let_patterns)]
+    async fn sync_parent_directory(&self, object: &str) -> Result<()> {
+        #[cfg(feature = "storage-fs")]
+        if let crate::storage::filesystem::storage_config::StorageConfig::FileSystem {
+            root_directory,
+            ..
+        } = &self.config.storage_config
+        {
+            let relative = self.sanitize_path(object).trim_start_matches('/');
+            let path = std::path::Path::new(root_directory).join(relative);
+            if let Some(parent) = path.parent() {
+                let parent = parent.to_path_buf();
+                tokio::task::spawn_blocking(move || std::fs::File::open(&parent)?.sync_all())
+                    .await??;
+            }
+        }
+        #[cfg(not(feature = "storage-fs"))]
+        let _ = object;
+        Ok(())
+    }
+
     /// Util function to get local file size.
     async fn get_local_file_size(path: &str) -> Result<u64> {
         let file = tokio::fs::File::open(path).await?;
@@ -175,6 +200,22 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         }
 
         Ok(dirs)
+    }
+
+    async fn list_direct_files(&self, folder: &str) -> Result<Vec<String>> {
+        let sanitized_folder = self.sanitize_path(folder);
+        let prefix = format!("{sanitized_folder}/");
+        let mut files = Vec::new();
+        for cur_entry in self.get_operator().await?.list(&prefix).await?.iter() {
+            if cur_entry.path().ends_with('/') {
+                continue;
+            }
+            let file_name = cur_entry.path().trim_start_matches(&prefix).to_string();
+            if !file_name.is_empty() && !file_name.contains('/') {
+                files.push(file_name);
+            }
+        }
+        Ok(files)
     }
 
     // TODO(hjiang): Remove this test function once fake-gcs fix the sending empty body will be error issue.
@@ -296,8 +337,22 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let sanitized_object = self.sanitize_path(object);
         let operator = self.get_operator().await?;
         let expected_len = content.len();
-        let metadata = operator.write(sanitized_object, content).await?;
+        let mut writer = operator.writer(sanitized_object).await?;
+        let written = match writer.write(content).await {
+            Ok(()) => writer.close().await,
+            Err(e) => Err(e),
+        };
+        let metadata = match written {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                // Remove the partial temp file of an atomic write (e.g. on a full disk), which
+                // would otherwise hold on to the space forever.
+                let _ = writer.abort().await;
+                return Err(e.into());
+            }
+        };
         assert_eq!(metadata.content_length(), expected_len as u64);
+        self.sync_parent_directory(object).await?;
         Ok(metadata)
     }
 
@@ -380,7 +435,10 @@ impl BaseFileSystemAccess for FileSystemAccessor {
                 if n == 0 {
                     break;
                 }
-                tx.send(buffer[..n].to_vec()).await.unwrap();
+                // The writer stopped after an error, which is reported below.
+                if tx.send(buffer[..n].to_vec()).await.is_err() {
+                    break;
+                }
             }
             Ok::<(), std::io::Error>(())
         });
@@ -390,15 +448,28 @@ impl BaseFileSystemAccess for FileSystemAccessor {
         let mut writer = operator
             .writer_options(sanitized_dst, self.get_write_option())
             .await?;
-        while let Some(cur_chunk) = rx.recv().await {
-            let cur_byte_len = cur_chunk.len();
-            writer.write(cur_chunk).await?;
-            total_size += cur_byte_len as u64;
+        let written: std::result::Result<(), opendal::Error> = async {
+            while let Some(cur_chunk) = rx.recv().await {
+                let cur_byte_len = cur_chunk.len();
+                writer.write(cur_chunk).await?;
+                total_size += cur_byte_len as u64;
+            }
+            writer.close().await?;
+            Ok(())
         }
-        writer.close().await?;
+        .await;
+        if let Err(e) = written {
+            // As in write_object: drop the partial temp file of the atomic write.
+            let _ = writer.abort().await;
+            drop(rx);
+            let _ = reader_task_handle.await;
+            return Err(e.into());
+        }
 
         // Wait for reader task to finish.
         reader_task_handle.await??;
+        // Make the new directory entry durable before metadata referencing the file is written.
+        self.sync_parent_directory(dst).await?;
 
         Ok(ObjectMetadata { size: total_size })
     }
@@ -498,6 +569,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(metadata.content_length(), TARGET_FILESIZE as u64);
+    }
+
+    fn atomic_tmp_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = root.join(
+            crate::storage::filesystem::accessor::operator_utils::DEFAULT_ATOMIC_WRITE_SUBDIR,
+        );
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default()
+    }
+
+    /// A write that fails after its temp file was written (here: the final rename, because the
+    /// target is a directory) leaves neither a partial target nor a temp file behind.
+    #[tokio::test]
+    async fn test_failed_atomic_write_leaves_no_temp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor =
+            create_filesystem_accessor(AccessorConfig::new_with_storage_config(storage_config));
+        let target = temp_dir.path().join("t").join("v1.metadata.json");
+        std::fs::create_dir_all(target.join("occupied")).unwrap();
+
+        let res = accessor
+            .write_object("t/v1.metadata.json", vec![7u8; 1 << 20])
+            .await;
+        assert!(res.is_err());
+        assert!(target.is_dir(), "target replaced by a partial file");
+        let leftovers = atomic_tmp_files(temp_dir.path());
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+
+        // Writes go through the temp directory by default.
+        accessor
+            .write_object("t/v2.metadata.json", b"ok".to_vec())
+            .await
+            .unwrap();
+        assert!(atomic_tmp_files(temp_dir.path()).is_empty());
+        assert!(
+            temp_dir
+                .path()
+                .join(crate::storage::filesystem::accessor::operator_utils::DEFAULT_ATOMIC_WRITE_SUBDIR)
+                .is_dir(),
+            "writes do not go through a temp file"
+        );
+        assert_eq!(
+            std::fs::read(temp_dir.path().join("t").join("v2.metadata.json")).unwrap(),
+            b"ok"
+        );
+    }
+
+    /// Same for a file above the block size, which is copied through a streaming writer.
+    #[tokio::test]
+    async fn test_failed_large_copy_leaves_no_temp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor =
+            create_filesystem_accessor(AccessorConfig::new_with_storage_config(storage_config));
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("large.parquet");
+        std::fs::write(&source, vec![7u8; IO_BLOCK_SIZE * 2 + 1]).unwrap();
+        let target = temp_dir.path().join("t").join("data").join("large.parquet");
+        std::fs::create_dir_all(target.join("occupied")).unwrap();
+
+        let res = accessor
+            .copy_from_local_to_remote(source.to_str().unwrap(), "t/data/large.parquet")
+            .await;
+        assert!(res.is_err());
+        assert!(target.is_dir(), "target replaced by a partial file");
+        let leftovers = atomic_tmp_files(temp_dir.path());
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+
+        accessor
+            .copy_from_local_to_remote(source.to_str().unwrap(), "t/data/other.parquet")
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(temp_dir.path().join("t").join("data").join("other.parquet"))
+                .unwrap()
+                .len(),
+            (IO_BLOCK_SIZE * 2 + 1) as u64
+        );
+        assert!(atomic_tmp_files(temp_dir.path()).is_empty());
+    }
+
+    /// Temp files a crash left behind are deleted before this process first writes there.
+    #[tokio::test]
+    async fn test_leftover_atomic_write_files_are_removed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = temp_dir.path().join(
+            crate::storage::filesystem::accessor::operator_utils::DEFAULT_ATOMIC_WRITE_SUBDIR,
+        );
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::write(tmp_dir.join("partial-write"), vec![1u8; 4096]).unwrap();
+        let storage_config = StorageConfig::FileSystem {
+            root_directory: temp_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        };
+        let accessor =
+            create_filesystem_accessor(AccessorConfig::new_with_storage_config(storage_config));
+        accessor
+            .write_object("t/file", b"content".to_vec())
+            .await
+            .unwrap();
+        assert!(atomic_tmp_files(temp_dir.path()).is_empty());
     }
 
     // Test atomic write operation for local filesystem.

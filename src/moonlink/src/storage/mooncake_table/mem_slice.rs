@@ -73,28 +73,30 @@ impl MemSlice {
         }
     }
 
-    /// Find the first non-deleted position for a given lookup key
-    pub async fn find_non_deleted_position(
+    #[must_use]
+    pub(crate) fn try_delete_at_pos(
+        &mut self,
+        pos: (u64, usize),
+    ) -> super::data_batches::DeleteAtPosOutcome {
+        self.column_store.try_delete_at_pos(pos)
+    }
+
+    /// First non-deleted position for the record that is not in `exclude` (positions already
+    /// claimed by pending deletes of the same transaction).
+    pub(crate) fn find_non_deleted_position_excluding(
         &self,
         record: &RawDeletionRecord,
         identity: &IdentityProp,
+        exclude: &std::collections::HashSet<(u64, usize)>,
     ) -> Option<(u64, usize)> {
-        let locations = self.mem_index.find_record(record);
-
-        for location in locations {
-            let ret = self
-                .column_store
-                .find_valid_row_by_record(record, &location, identity);
-            if ret.is_some() {
-                return ret;
-            }
-        }
-        None
-    }
-
-    #[must_use]
-    pub fn try_delete_at_pos(&mut self, pos: (u64, usize)) -> bool {
-        self.column_store.try_delete_at_pos(pos)
+        self.mem_index
+            .find_record(record)
+            .into_iter()
+            .filter_map(|location| {
+                self.column_store
+                    .find_valid_row_by_record(record, &location, identity)
+            })
+            .find(|pos| !exclude.contains(pos))
     }
 
     /// Append the given row into column store buffer and mem index.

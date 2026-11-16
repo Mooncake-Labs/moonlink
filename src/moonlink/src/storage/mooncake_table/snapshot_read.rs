@@ -1,18 +1,25 @@
 use super::data_batches::create_batch_from_rows;
 use crate::error::Result;
+use crate::storage::cache::object_storage::base_cache::CacheTrait;
+use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSystemAccess;
+use crate::storage::io_utils;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
 use crate::storage::mooncake_table::snapshot_read_output::{
-    DataFileForRead, ReadOutput as SnapshotReadOutput,
+    release_abandoned_read, DataFileForRead, ReadOutput as SnapshotReadOutput,
 };
 use crate::storage::mooncake_table::table_status::TableSnapshotStatus;
 use crate::storage::storage_utils::RecordLocation;
+use crate::table_notify::TableEvent;
 use crate::NonEvictableHandle;
+use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use moonlink_table_metadata::{DeletionVector, PositionDelete};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::mpsc::Sender;
 
 impl SnapshotTableState {
     /// =======================
@@ -149,33 +156,34 @@ impl SnapshotTableState {
         )
     }
 
+    /// Prepare and materialize in one step, for tests that hold the snapshot lock anyway.
+    #[cfg(test)]
     pub(crate) async fn request_read(&mut self) -> Result<SnapshotReadOutput> {
-        let mut data_file_paths = self.get_read_files_for_read().await;
-        let mut associated_files = Vec::new();
+        self.prepare_read().await?.materialize().await
+    }
+
+    /// Collect everything a read needs while holding the snapshot lock: data files, pinned
+    /// deletion vectors, and the committed in-memory rows as record batches. No file IO; the
+    /// temporary parquet is written by [`PendingRead::materialize`] after the lock is released,
+    /// so readers don't stall the snapshot task (and ingestion) on disk writes.
+    pub(crate) async fn prepare_read(&mut self) -> Result<PendingRead> {
+        let data_file_paths = self.get_read_files_for_read().await;
         let (puffin_cache_handles, deletion_vectors_at_read, position_deletes) =
             self.get_deletion_records().await;
-
-        // For committed but not persisted records, we create a temporary file for them, which gets deleted after query completion.
-        let file_path = self
-            .current_snapshot
-            .get_name_for_inmemory_file(self.table_instance_id);
-        let filepath_exists = tokio::fs::try_exists(&file_path).await?;
-        if filepath_exists {
-            data_file_paths.push(DataFileForRead::TemporaryDataFile(
-                file_path.to_string_lossy().to_string(),
-            ));
-            associated_files.push(file_path.to_string_lossy().to_string());
-            return Ok(SnapshotReadOutput {
-                data_file_paths,
-                puffin_cache_handles,
-                deletion_vectors: deletion_vectors_at_read,
-                position_deletes,
-                associated_files,
-                object_storage_cache: Some(self.object_storage_cache.clone()),
-                filesystem_accessor: Some(self.filesystem_accessor.clone()),
-                table_notifier: Some(self.table_notify.as_ref().unwrap().clone()),
-            });
-        }
+        let mut pending = PendingRead {
+            data_file_paths,
+            puffin_cache_handles,
+            deletion_vectors: deletion_vectors_at_read,
+            position_deletes,
+            in_memory_batches: Vec::new(),
+            schema: self.current_snapshot.metadata.schema.clone(),
+            temp_file_path: self.current_snapshot.get_name_for_inmemory_file(),
+            object_storage_cache: self.object_storage_cache.clone(),
+            filesystem_accessor: self.filesystem_accessor.clone(),
+            table_notifier: self.table_notify.as_ref().unwrap().clone(),
+            snapshot_seq: self.snapshot_seq.load(std::sync::atomic::Ordering::SeqCst),
+            handed_over: false,
+        };
 
         assert!(matches!(
             self.last_commit,
@@ -183,18 +191,16 @@ impl SnapshotTableState {
         ));
         let (batch_id, row_id) = self.last_commit.clone().into();
         if batch_id > 0 || row_id > 0 {
-            // add all batches
-            let mut filtered_batches = Vec::new();
-            let schema = self.current_snapshot.metadata.schema.clone();
+            let schema = pending.schema.clone();
             for (id, batch) in self.batches.iter() {
                 if *id < batch_id {
                     if let Some(filtered_batch) = batch.get_filtered_batch()? {
-                        filtered_batches.push(filtered_batch);
+                        pending.in_memory_batches.push(filtered_batch);
                     }
                 } else if *id == batch_id && row_id > 0 {
                     if batch.data.is_some() {
                         if let Some(filtered_batch) = batch.get_filtered_batch_with_limit(row_id)? {
-                            filtered_batches.push(filtered_batch);
+                            pending.in_memory_batches.push(filtered_batch);
                         }
                     } else {
                         let rows = self.rows.as_ref().unwrap().get_buffer(row_id);
@@ -205,40 +211,104 @@ impl SnapshotTableState {
                             .expect("batch not found")
                             .deletions;
                         let batch = create_batch_from_rows(rows, schema.clone(), deletions);
-                        filtered_batches.push(batch);
+                        pending.in_memory_batches.push(batch);
                     }
                 }
             }
-
-            // TODO(hjiang): Check whether we could avoid IO operation inside of critical section.
-            if !filtered_batches.is_empty() {
-                // Build a parquet file from current record batches
-                let temp_file = tokio::fs::File::create(&file_path).await?;
-                let props = WriterProperties::builder()
-                    .set_compression(Compression::UNCOMPRESSED)
-                    .set_dictionary_enabled(false)
-                    .set_encoding(Encoding::PLAIN)
-                    .build();
-                let mut parquet_writer = AsyncArrowWriter::try_new(temp_file, schema, Some(props))?;
-                for batch in filtered_batches.iter() {
-                    parquet_writer.write(batch).await?;
-                }
-                parquet_writer.close().await?;
-                data_file_paths.push(DataFileForRead::TemporaryDataFile(
-                    file_path.to_string_lossy().to_string(),
-                ));
-                associated_files.push(file_path.to_string_lossy().to_string());
-            }
         }
+        Ok(pending)
+    }
+}
+
+/// A read prepared under the snapshot lock; see [`SnapshotTableState::prepare_read`].
+pub(crate) struct PendingRead {
+    data_file_paths: Vec<DataFileForRead>,
+    puffin_cache_handles: Vec<NonEvictableHandle>,
+    deletion_vectors: Vec<DeletionVector>,
+    position_deletes: Vec<PositionDelete>,
+    in_memory_batches: Vec<RecordBatch>,
+    schema: Arc<Schema>,
+    temp_file_path: PathBuf,
+    object_storage_cache: Arc<dyn CacheTrait>,
+    filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
+    table_notifier: Sender<TableEvent>,
+    /// Snapshot sequence the read was prepared from (read under the snapshot lock).
+    snapshot_seq: u64,
+    /// Set once the pins and the temp parquet were handed to a [`SnapshotReadOutput`] or released.
+    handed_over: bool,
+}
+
+impl Drop for PendingRead {
+    /// A read dropped before it was materialized (an error or a panic while it was built)
+    /// releases its deletion-vector pins and a partly written temp parquet.
+    fn drop(&mut self) {
+        if self.handed_over {
+            return;
+        }
+        release_abandoned_read(
+            std::mem::take(&mut self.puffin_cache_handles),
+            vec![self.temp_file_path.to_string_lossy().to_string()],
+        );
+    }
+}
+
+impl PendingRead {
+    pub(crate) fn snapshot_seq(&self) -> u64 {
+        self.snapshot_seq
+    }
+
+    /// Write committed in-memory rows to a temporary parquet file (deleted with the ReadState).
+    pub(crate) async fn materialize(mut self) -> Result<SnapshotReadOutput> {
+        let mut associated_files = Vec::new();
+        if !self.in_memory_batches.is_empty() {
+            let path = self.temp_file_path.to_string_lossy().to_string();
+            if let Err(e) = self.write_in_memory_file().await {
+                // Unpin deletion vectors and drop the partial file, then surface the error. Done
+                // here rather than through the table handler, which may be busy or gone.
+                let mut files_to_delete = vec![path];
+                for handle in self.puffin_cache_handles.drain(..) {
+                    files_to_delete.extend(handle.unreference().await);
+                }
+                self.handed_over = true;
+                if let Err(delete_error) = io_utils::delete_local_files(&files_to_delete).await {
+                    tracing::warn!(
+                        ?files_to_delete,
+                        ?delete_error,
+                        "failed to delete files of a failed read"
+                    );
+                }
+                return Err(e);
+            }
+            self.data_file_paths
+                .push(DataFileForRead::TemporaryDataFile(path.clone()));
+            associated_files.push(path);
+        }
+        self.handed_over = true;
         Ok(SnapshotReadOutput {
-            data_file_paths,
-            puffin_cache_handles,
-            deletion_vectors: deletion_vectors_at_read,
-            position_deletes,
+            data_file_paths: std::mem::take(&mut self.data_file_paths),
+            puffin_cache_handles: std::mem::take(&mut self.puffin_cache_handles),
+            deletion_vectors: std::mem::take(&mut self.deletion_vectors),
+            position_deletes: std::mem::take(&mut self.position_deletes),
             associated_files,
             object_storage_cache: Some(self.object_storage_cache.clone()),
             filesystem_accessor: Some(self.filesystem_accessor.clone()),
-            table_notifier: Some(self.table_notify.as_ref().unwrap().clone()),
+            table_notifier: Some(self.table_notifier.clone()),
         })
+    }
+
+    async fn write_in_memory_file(&self) -> Result<()> {
+        let temp_file = tokio::fs::File::create(&self.temp_file_path).await?;
+        let props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
+            .build();
+        let mut parquet_writer =
+            AsyncArrowWriter::try_new(temp_file, self.schema.clone(), Some(props))?;
+        for batch in self.in_memory_batches.iter() {
+            parquet_writer.write(batch).await?;
+        }
+        parquet_writer.close().await?;
+        Ok(())
     }
 }
