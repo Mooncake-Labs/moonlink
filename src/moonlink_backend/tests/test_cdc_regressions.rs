@@ -2898,17 +2898,20 @@ async fn failure_in_a_streamed_transaction_errors_the_mirror(
     mirror(&backend, &tmp, "rv_fill_mc", "public.rv_fill", &uri).await;
     let streamed_before = stream_txns(&client).await;
     stream_large_transactions(&client, true).await;
-    let result = client
-        .simple_query(&format!(
+    run_large_transaction(
+        &client,
+        &format!(
             "BEGIN;
              INSERT INTO rv_fill SELECT i, repeat('f', 500) FROM generate_series(1, 400) i;
              {changes}
              INSERT INTO rv_fill SELECT i, repeat('g', 500) FROM generate_series(401, 800) i;
-             UPDATE rv_fill SET v = 'u' WHERE id % 7 = 0;
-             COMMIT;"
-        ))
-        .await;
-    result.unwrap();
+             UPDATE rv_fill SET v = 'u' WHERE id % 7 = 0;"
+        ),
+        "COMMIT",
+        true,
+        streamed_before,
+    )
+    .await;
     let lsn = current_wal_lsn(&client).await;
     let err = snapshot_error(&backend, "rv_st_mc", lsn)
         .await
@@ -3116,7 +3119,11 @@ async fn empty_copy_with_a_streamed_boundary_commit_can_snapshot(#[case] streame
         .unwrap();
     let lsn = current_wal_lsn(&client).await;
     assert_eq!(scan_ids(&backend, "rv_st_by_mc", lsn).await, Some(vec![1]));
-    let streamed_after = stream_txns(&client).await;
+    let streamed_after = if streamed {
+        wait_until_streamed(&client, streamed_before).await
+    } else {
+        stream_txns(&client).await
+    };
     client
         .simple_query("ALTER SYSTEM RESET logical_decoding_work_mem;")
         .await
@@ -3153,15 +3160,11 @@ async fn empty_copy_with_a_streamed_boundary_commit_can_snapshot(#[case] streame
 /// transaction after its commit and rereads the setting meanwhile, so resetting it earlier can
 /// stop the rest of the transaction from being streamed. With `streamed`, check that it was.
 async fn stop_streaming_large_transactions(client: &Client, streamed: bool, streamed_before: i64) {
-    let mut streamed_after = stream_txns(client).await;
-    // Slot statistics are reported about once a second.
-    for _ in 0..50 {
-        if !streamed || streamed_after > streamed_before {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        streamed_after = stream_txns(client).await;
-    }
+    let streamed_after = if streamed {
+        wait_until_streamed(client, streamed_before).await
+    } else {
+        stream_txns(client).await
+    };
     stream_large_transactions(client, false).await;
     if streamed {
         assert!(
@@ -3169,6 +3172,44 @@ async fn stop_streaming_large_transactions(client: &Client, streamed: bool, stre
             "the large transaction was not streamed"
         );
     }
+}
+
+/// Run a large transaction: `body` (starting with BEGIN) on a connection of its own, then `end`
+/// (COMMIT or ROLLBACK). With `streamed`, the transaction is ended only once postgres has
+/// streamed it, failing if it does not. Decoding can lag the client by seconds, and postgres 18
+/// discards a large transaction that has already aborted when decoding reaches it instead of
+/// streaming it.
+async fn run_large_transaction(
+    client: &Client,
+    body: &str,
+    end: &str,
+    streamed: bool,
+    streamed_before: i64,
+) {
+    let (writer, _connection) = connect_to_postgres(&get_database_uri()).await;
+    writer.simple_query(body).await.unwrap();
+    if streamed {
+        let streamed_after = wait_until_streamed(client, streamed_before).await;
+        assert!(
+            streamed_after > streamed_before,
+            "the large transaction was not streamed before its {end}"
+        );
+    }
+    writer.simple_query(&format!("{end};")).await.unwrap();
+}
+
+/// Wait up to 30 s for postgres to stream a transaction after `streamed_before` streamed ones (slot
+/// statistics are reported about once a second); returns the number streamed.
+async fn wait_until_streamed(client: &Client, streamed_before: i64) -> i64 {
+    let mut streamed = stream_txns(client).await;
+    for _ in 0..150 {
+        if streamed > streamed_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        streamed = stream_txns(client).await;
+    }
+    streamed
 }
 
 async fn stream_txns(client: &Client) -> i64 {
@@ -3524,18 +3565,21 @@ async fn savepoints_in_a_streamed_transaction_apply_exactly_or_error_the_mirror(
     mirror(&backend, &tmp, "rv_sq_mc", "public.rv_sq", &uri).await;
     let streamed_before = stream_txns(&client).await;
     stream_large_transactions(&client, streamed).await;
-    let result = client
-        .simple_query(&format!(
+    run_large_transaction(
+        &client,
+        &format!(
             "BEGIN;
              INSERT INTO rv_sq SELECT i, repeat('a', 500) FROM generate_series(1, 400) i;
              INSERT INTO rv_sp VALUES (0, 'top');
              {savepoint}
              INSERT INTO rv_sq SELECT i, repeat('b', 500) FROM generate_series(401, 800) i;
-             INSERT INTO rv_sp VALUES (1, 'top');
-             {end};"
-        ))
-        .await;
-    result.unwrap();
+             INSERT INTO rv_sp VALUES (1, 'top');"
+        ),
+        end,
+        streamed,
+        streamed_before,
+    )
+    .await;
     // A later small transaction: the mirrors keep following after the large one.
     client
         .simple_query(
@@ -3609,19 +3653,22 @@ async fn rolled_back_savepoint_keeps_the_failures_of_its_streamed_transaction(
     mirror(&backend, &tmp, "rv_fill_mc", "public.rv_fill", &uri).await;
     let streamed_before = stream_txns(&client).await;
     stream_large_transactions(&client, true).await;
-    let result = client
-        .simple_query(&format!(
+    run_large_transaction(
+        &client,
+        &format!(
             "BEGIN;
              INSERT INTO rv_fill SELECT i, repeat('f', 500) FROM generate_series(1, 400) i;
              {changes}
              SAVEPOINT s;
              INSERT INTO rv_st VALUES (30, '2024-01-03');
              ROLLBACK TO SAVEPOINT s;
-             INSERT INTO rv_fill SELECT i, repeat('g', 500) FROM generate_series(401, 800) i;
-             COMMIT;"
-        ))
-        .await;
-    result.unwrap();
+             INSERT INTO rv_fill SELECT i, repeat('g', 500) FROM generate_series(401, 800) i;"
+        ),
+        "COMMIT",
+        true,
+        streamed_before,
+    )
+    .await;
     let lsn = current_wal_lsn(&client).await;
     let err = snapshot_error(&backend, "rv_st_mc", lsn)
         .await
