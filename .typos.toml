@@ -2,8 +2,10 @@
 typ = "typ"
 
 # Identifiers that typos splits into misspellings: "INSERTs" and "UPDATEs" (SQL
-# keywords in the plural) and "caf" from the escaped string "caf\u{e9}" (café).
+# keywords in the plural), "caf" from the escaped string "caf\u{e9}" (café), and
+# a test name that spells "child's" as "childs".
 [default.extend-identifiers]
 INSERTs = "INSERTs"
 UPDATEs = "UPDATEs"
 caf = "caf"
+dropping_a_parents_mirror_keeps_its_childs_mirror_replicating = "dropping_a_parents_mirror_keeps_its_childs_mirror_replicating"
