@@ -17,7 +17,7 @@
 
 // Code adapted from iceberg-rust: https://github.com/apache/iceberg-rust
 
-use iceberg::spec::{Datum, PrimitiveType, SchemaRef, Type};
+use iceberg::spec::{Datum, PrimitiveLiteral, PrimitiveType, SchemaRef, Type};
 use iceberg::Result as IcebergResult;
 use iceberg::{Error, ErrorKind};
 use num_bigint::BigInt;
@@ -25,7 +25,37 @@ use num_traits::cast::ToPrimitive;
 use parquet::file::statistics::Statistics;
 use uuid::Uuid;
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+
+/// Bound for a decimal column from its unscaled value. Built from the raw bytes with the column's
+/// own type: `Datum::decimal` goes through rust_decimal, which panics above 96 bits (decimal(38,s)
+/// holds 127). None when the value does not fit the declared precision, so no wrong bound is
+/// written.
+fn decimal_datum(primitive_type: &PrimitiveType, unscaled: i128) -> Option<Datum> {
+    let PrimitiveType::Decimal { precision, .. } = primitive_type else {
+        return None;
+    };
+    let limit = 10u128.checked_pow(*precision)?;
+    if unscaled.unsigned_abs() >= limit {
+        return None;
+    }
+    Datum::try_from_bytes(&unscaled.to_be_bytes(), primitive_type.clone()).ok()
+}
+
+/// Order of two bounds of the same column. Decimals are compared by their unscaled values (same
+/// type, same scale): `Datum`'s own ordering converts them to rust_decimal, which panics above 96
+/// bits.
+fn compare_bounds(a: &Datum, b: &Datum) -> Option<Ordering> {
+    match (a.literal(), b.literal()) {
+        (PrimitiveLiteral::Int128(x), PrimitiveLiteral::Int128(y))
+            if a.data_type() == b.data_type() =>
+        {
+            Some(x.cmp(y))
+        }
+        _ => a.partial_cmp(b),
+    }
+}
 
 // ================================
 // get_parquet_stat_min_as_datum
@@ -90,9 +120,10 @@ pub(crate) fn get_parquet_stat_min_as_datum(
             let Some(bytes) = stats.min_bytes_opt() else {
                 return Ok(None);
             };
-            // TODO(hjiang): Add unit test.
-            let value = i128::from_be_bytes(bytes.try_into()?);
-            Some(Datum::decimal(value)?)
+            let Ok(bytes) = <[u8; 16]>::try_from(bytes) else {
+                return Ok(None);
+            };
+            decimal_datum(primitive_type, i128::from_be_bytes(bytes))
         }
         (
             PrimitiveType::Decimal {
@@ -104,15 +135,10 @@ pub(crate) fn get_parquet_stat_min_as_datum(
             let Some(bytes) = stats.min_bytes_opt() else {
                 return Ok(None);
             };
-            let unscaled_value = BigInt::from_signed_bytes_be(bytes);
-            // TODO(hjiang): Add unit test.
-            let value = unscaled_value.to_i128().ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!("Can't convert bytes to i128: {bytes:?}"),
-                )
-            })?;
-            Some(Datum::decimal(value)?)
+            let Some(value) = BigInt::from_signed_bytes_be(bytes).to_i128() else {
+                return Ok(None);
+            };
+            decimal_datum(primitive_type, value)
         }
         (
             PrimitiveType::Decimal {
@@ -120,22 +146,18 @@ pub(crate) fn get_parquet_stat_min_as_datum(
                 scale: _,
             },
             Statistics::Int32(stats),
-        ) => stats.min_opt().map(|val| {
-            // TODO(hjiang): Add unit test.
-            let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
-        }),
+        ) => stats
+            .min_opt()
+            .and_then(|val| decimal_datum(primitive_type, i128::from(*val))),
         (
             PrimitiveType::Decimal {
                 precision: _,
                 scale: _,
             },
             Statistics::Int64(stats),
-        ) => stats.min_opt().map(|val| {
-            // TODO(hjiang): Add unit test.
-            let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
-        }),
+        ) => stats
+            .min_opt()
+            .and_then(|val| decimal_datum(primitive_type, i128::from(*val))),
         (PrimitiveType::Uuid, Statistics::FixedLenByteArray(stats)) => {
             let Some(bytes) = stats.min_bytes_opt() else {
                 return Ok(None);
@@ -236,9 +258,10 @@ pub(crate) fn get_parquet_stat_max_as_datum(
             let Some(bytes) = stats.max_bytes_opt() else {
                 return Ok(None);
             };
-            // TODO(hjiang): Add unit test.
-            let value = i128::from_be_bytes(bytes.try_into()?);
-            Some(Datum::decimal(value)?)
+            let Ok(bytes) = <[u8; 16]>::try_from(bytes) else {
+                return Ok(None);
+            };
+            decimal_datum(primitive_type, i128::from_be_bytes(bytes))
         }
         (
             PrimitiveType::Decimal {
@@ -250,15 +273,10 @@ pub(crate) fn get_parquet_stat_max_as_datum(
             let Some(bytes) = stats.max_bytes_opt() else {
                 return Ok(None);
             };
-            // TODO(hjiang): Add unit test.
-            let unscaled_value = BigInt::from_signed_bytes_be(bytes);
-            let value = unscaled_value.to_i128().ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!("Can't convert bytes to i128: {bytes:?}"),
-                )
-            })?;
-            Some(Datum::decimal(value)?)
+            let Some(value) = BigInt::from_signed_bytes_be(bytes).to_i128() else {
+                return Ok(None);
+            };
+            decimal_datum(primitive_type, value)
         }
         (
             PrimitiveType::Decimal {
@@ -266,22 +284,18 @@ pub(crate) fn get_parquet_stat_max_as_datum(
                 scale: _,
             },
             Statistics::Int32(stats),
-        ) => stats.max_opt().map(|val| {
-            // TODO(hjiang): Add unit test.
-            let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
-        }),
+        ) => stats
+            .max_opt()
+            .and_then(|val| decimal_datum(primitive_type, i128::from(*val))),
         (
             PrimitiveType::Decimal {
                 precision: _,
                 scale: _,
             },
             Statistics::Int64(stats),
-        ) => stats.max_opt().map(|val| {
-            // TODO(hjiang): Add unit test.
-            let value = i128::from(*val);
-            Datum::decimal(value).unwrap()
-        }),
+        ) => stats
+            .max_opt()
+            .and_then(|val| decimal_datum(primitive_type, i128::from(*val))),
         (PrimitiveType::Uuid, Statistics::FixedLenByteArray(stats)) => {
             let Some(bytes) = stats.max_bytes_opt() else {
                 return Ok(None);
@@ -327,6 +341,9 @@ pub(crate) fn get_parquet_stat_max_as_datum(
 pub(crate) struct MinMaxColAggregator {
     lower_bounds: HashMap<i32, Datum>,
     upper_bounds: HashMap<i32, Datum>,
+    /// Columns with a row group whose min (or max) is unknown: the file then has no valid bound.
+    no_lower_bound: HashSet<i32>,
+    no_upper_bound: HashSet<i32>,
     schema: SchemaRef,
 }
 
@@ -336,33 +353,67 @@ impl MinMaxColAggregator {
         Self {
             lower_bounds: HashMap::new(),
             upper_bounds: HashMap::new(),
+            no_lower_bound: HashSet::new(),
+            no_upper_bound: HashSet::new(),
             schema,
         }
     }
 
-    pub(crate) fn update_state_min(&mut self, field_id: i32, datum: Datum) {
-        self.lower_bounds
-            .entry(field_id)
-            .and_modify(|e| {
-                if *e < datum {
-                    *e = datum.clone()
-                }
-            })
-            .or_insert(datum);
+    fn merge_bound(
+        bounds: &mut HashMap<i32, Datum>,
+        unknown: &mut HashSet<i32>,
+        field_id: i32,
+        datum: Option<Datum>,
+        keep: Ordering,
+    ) {
+        if unknown.contains(&field_id) {
+            return;
+        }
+        let Some(datum) = datum else {
+            bounds.remove(&field_id);
+            unknown.insert(field_id);
+            return;
+        };
+        let Some(current) = bounds.get(&field_id) else {
+            bounds.insert(field_id, datum);
+            return;
+        };
+        match compare_bounds(&datum, current) {
+            Some(order) if order == keep => {
+                bounds.insert(field_id, datum);
+            }
+            Some(_) => {}
+            None => {
+                bounds.remove(&field_id);
+                unknown.insert(field_id);
+            }
+        }
     }
 
-    pub(crate) fn update_state_max(&mut self, field_id: i32, datum: Datum) {
-        self.upper_bounds
-            .entry(field_id)
-            .and_modify(|e| {
-                if *e > datum {
-                    *e = datum.clone()
-                }
-            })
-            .or_insert(datum);
+    pub(crate) fn update_state_min(&mut self, field_id: i32, datum: Option<Datum>) {
+        Self::merge_bound(
+            &mut self.lower_bounds,
+            &mut self.no_lower_bound,
+            field_id,
+            datum,
+            Ordering::Less,
+        );
     }
 
-    /// Update statistics
+    pub(crate) fn update_state_max(&mut self, field_id: i32, datum: Option<Datum>) {
+        Self::merge_bound(
+            &mut self.upper_bounds,
+            &mut self.no_upper_bound,
+            field_id,
+            datum,
+            Ordering::Greater,
+        );
+    }
+
+    /// Update statistics with one row group's column chunk. A chunk without min/max has no
+    /// non-null values and does not affect the bounds; one whose min or max is inexact or cannot be
+    /// represented leaves the column without that bound (bounds are optional, wrong ones prune
+    /// rows on read).
     pub(crate) fn update(&mut self, field_id: i32, value: Statistics) -> IcebergResult<()> {
         let Some(ty) = self
             .schema
@@ -380,26 +431,21 @@ impl MinMaxColAggregator {
             ));
         };
 
-        if value.min_is_exact() {
-            let Some(min_datum) = get_parquet_stat_min_as_datum(&ty, &value)? else {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    format!("Statistics {value} is not match with field type {ty}."),
-                ));
+        if value.min_bytes_opt().is_some() {
+            let min = if value.min_is_exact() {
+                get_parquet_stat_min_as_datum(&ty, &value)?
+            } else {
+                None
             };
-
-            self.update_state_min(field_id, min_datum);
+            self.update_state_min(field_id, min);
         }
-
-        if value.max_is_exact() {
-            let Some(max_datum) = get_parquet_stat_max_as_datum(&ty, &value)? else {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    format!("Statistics {value} is not match with field type {ty}."),
-                ));
+        if value.max_bytes_opt().is_some() {
+            let max = if value.max_is_exact() {
+                get_parquet_stat_max_as_datum(&ty, &value)?
+            } else {
+                None
             };
-
-            self.update_state_max(field_id, max_datum);
+            self.update_state_max(field_id, max);
         }
 
         Ok(())
@@ -408,5 +454,41 @@ impl MinMaxColAggregator {
     /// Returns lower and upper bounds
     pub(crate) fn produce(self) -> (HashMap<i32, Datum>, HashMap<i32, Datum>) {
         (self.lower_bounds, self.upper_bounds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decimal(precision: u32, scale: u32) -> PrimitiveType {
+        PrimitiveType::Decimal { precision, scale }
+    }
+
+    #[test]
+    fn test_decimal_datum_keeps_the_column_type_and_rejects_values_beyond_its_precision() {
+        let max = 10i128.pow(38) - 1;
+        for value in [max, -max, 0, 1 << 100, -(1 << 100)] {
+            let datum = decimal_datum(&decimal(38, 10), value).unwrap();
+            assert_eq!(datum.data_type(), &decimal(38, 10));
+            assert_eq!(datum.literal(), &PrimitiveLiteral::Int128(value));
+        }
+        assert!(decimal_datum(&decimal(38, 10), max + 1).is_none());
+        assert!(decimal_datum(&decimal(38, 10), i128::MIN).is_none());
+        assert!(decimal_datum(&decimal(9, 2), 1_000_000_000).is_none());
+        assert!(decimal_datum(&decimal(9, 2), -999_999_999).is_some());
+        assert!(decimal_datum(&PrimitiveType::Long, 1).is_none());
+    }
+
+    #[test]
+    fn test_decimal_bounds_beyond_96_bits_compare_by_value() {
+        let big = decimal_datum(&decimal(38, 10), 1 << 120).unwrap();
+        let small = decimal_datum(&decimal(38, 10), -(1 << 120)).unwrap();
+        assert_eq!(compare_bounds(&small, &big), Some(Ordering::Less));
+        assert_eq!(compare_bounds(&big, &small), Some(Ordering::Greater));
+        // Different scales are not compared by unscaled value.
+        let other_scale = decimal_datum(&decimal(38, 0), 1).unwrap();
+        let one = decimal_datum(&decimal(38, 10), 1).unwrap();
+        assert_ne!(compare_bounds(&other_scale, &one), Some(Ordering::Equal));
     }
 }

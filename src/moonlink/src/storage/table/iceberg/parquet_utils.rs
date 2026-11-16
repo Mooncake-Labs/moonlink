@@ -358,4 +358,141 @@ mod tests {
         assert_eq!(data_file.file_format(), DataFileFormat::Parquet);
         assert_eq!(data_file.record_count(), 4);
     }
+
+    /// Bounds of a parquet file written with `max_row_group_size` rows per row group.
+    async fn bounds_of(
+        schema: Arc<arrow::datatypes::Schema>,
+        columns: Vec<arrow_array::ArrayRef>,
+        max_row_group_size: usize,
+    ) -> (
+        HashMap<i32, iceberg::spec::Datum>,
+        HashMap<i32, iceberg::spec::Datum>,
+    ) {
+        let record_batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let tmp_dir = tempdir().unwrap();
+        let local_filepath = tmp_dir.path().join("src.parquet");
+        let file = tokio::fs::File::create(&local_filepath).await.unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(max_row_group_size)
+            .build();
+        let mut writer = AsyncArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+        writer.write(&record_batch).await.unwrap();
+        writer.close().await.unwrap();
+
+        let (parquet_metadata, file_size) = get_parquet_metadata(local_filepath.to_str().unwrap())
+            .await
+            .unwrap();
+        let iceberg_schema = IcebergArrow::arrow_schema_to_schema(&schema).unwrap();
+        let mut builder = parquet_to_data_file_builder(
+            Arc::new(iceberg_schema),
+            Arc::new(parquet_metadata),
+            file_size,
+            "dst.parquet".to_string(),
+            HashMap::new(),
+        )
+        .unwrap();
+        builder.partition_spec_id(0);
+        let data_file = builder.build().unwrap();
+        (
+            data_file.lower_bounds().clone(),
+            data_file.upper_bounds().clone(),
+        )
+    }
+
+    fn field(
+        name: &str,
+        data_type: arrow::datatypes::DataType,
+        id: i32,
+    ) -> arrow::datatypes::Field {
+        arrow::datatypes::Field::new(name, data_type, true).with_metadata(HashMap::from([(
+            "PARQUET:field_id".to_string(),
+            id.to_string(),
+        )]))
+    }
+
+    fn decimal_bound(precision: u8, scale: i8, unscaled: i128) -> iceberg::spec::Datum {
+        iceberg::spec::Datum::try_from_bytes(
+            &unscaled.to_be_bytes(),
+            iceberg::spec::PrimitiveType::Decimal {
+                precision: precision as u32,
+                scale: scale as u32,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Decimal bounds at both extremes of every precision class (INT32, INT64 and 16-byte
+    /// FIXED_LEN_BYTE_ARRAY in parquet), including values beyond rust_decimal's 96 bits, spread over
+    /// several row groups and through a manifest's byte serialization.
+    #[tokio::test]
+    async fn test_decimal_bounds_at_the_extremes() {
+        for (precision, scale) in [(9u8, 2i8), (18, 4), (28, 10), (38, 10), (38, 0)] {
+            let max = 10i128.pow(precision as u32) - 1;
+            let values = vec![
+                Some(1),
+                Some(max),
+                None,
+                Some(-1),
+                Some(-max),
+                Some(0),
+                None,
+            ];
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![field(
+                "c",
+                arrow::datatypes::DataType::Decimal128(precision, scale),
+                1,
+            )]));
+            let column = Arc::new(
+                arrow_array::Decimal128Array::from(values)
+                    .with_precision_and_scale(precision, scale)
+                    .unwrap(),
+            ) as arrow_array::ArrayRef;
+            for rows_per_group in [2, 100] {
+                let (lower, upper) =
+                    bounds_of(schema.clone(), vec![column.clone()], rows_per_group).await;
+                let label = format!("decimal({precision},{scale}), {rows_per_group} rows/group");
+                assert_eq!(
+                    lower.get(&1),
+                    Some(&decimal_bound(precision, scale, -max)),
+                    "{label}"
+                );
+                assert_eq!(
+                    upper.get(&1),
+                    Some(&decimal_bound(precision, scale, max)),
+                    "{label}"
+                );
+                for bound in [&lower[&1], &upper[&1]] {
+                    let bytes = bound.to_bytes().unwrap();
+                    let parsed =
+                        iceberg::spec::Datum::try_from_bytes(&bytes, bound.data_type().clone())
+                            .unwrap();
+                    assert_eq!(&parsed, bound, "{label}: manifest round trip");
+                }
+            }
+        }
+    }
+
+    /// A file's bounds cover every row group: the lowest min and the highest max.
+    #[tokio::test]
+    async fn test_bounds_cover_all_row_groups() {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            field("id", arrow::datatypes::DataType::Int32, 1),
+            field("name", arrow::datatypes::DataType::Utf8, 2),
+        ]));
+        let ids = Arc::new(Int32Array::from(vec![5, 3, 9, 1, 7, 2])) as arrow_array::ArrayRef;
+        let names = Arc::new(arrow_array::StringArray::from(vec![
+            Some("m"),
+            None,
+            None,
+            None,
+            Some("z"),
+            Some("a"),
+        ])) as arrow_array::ArrayRef;
+        let (lower, upper) = bounds_of(schema, vec![ids, names], 2).await;
+        assert_eq!(lower.get(&1), Some(&iceberg::spec::Datum::int(1)));
+        assert_eq!(upper.get(&1), Some(&iceberg::spec::Datum::int(9)));
+        // The all-null row group does not affect the bounds.
+        assert_eq!(lower.get(&2), Some(&iceberg::spec::Datum::string("a")));
+        assert_eq!(upper.get(&2), Some(&iceberg::spec::Datum::string("z")));
+    }
 }

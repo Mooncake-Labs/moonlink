@@ -1250,6 +1250,103 @@ async fn numeric_values_are_exact_or_error_the_mirror() {
     assert!(big.contains("does not fit"), "{big}");
 }
 
+/// Source rows of `table` as id -> `col` as text (Postgres' own rendering of the value).
+async fn source_rows(client: &Client, table: &str, col: &str) -> BTreeMap<i64, Option<String>> {
+    client
+        .query(&format!("SELECT id, {col}::text FROM {table}"), &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, Option<String>>(1)))
+        .collect()
+}
+
+/// numeric(38,s) values at both ends of their range, including unscaled values far beyond 96 bits,
+/// replicate exactly through the initial copy and CDC, persist to iceberg (whose column bounds
+/// must not panic or be wrong) and read back exactly after a restart.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn numeric_38_digit_values_survive_snapshots_and_restart() {
+    const MAX_38_10: &str = "9999999999999999999999999999.9999999999";
+    const MAX_38_0: &str = "99999999999999999999999999999999999999";
+    // 2^96: the first unscaled value rust_decimal cannot hold.
+    const TWO_POW_96: &str = "79228162514264337593543950336";
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(&format!(
+        "DROP TABLE IF EXISTS rv_num38;
+         CREATE TABLE rv_num38 (id BIGINT PRIMARY KEY, n NUMERIC(38, 10), w NUMERIC(38, 0));
+         INSERT INTO rv_num38 VALUES
+           (1, {MAX_38_10}, {MAX_38_0}),
+           (2, -{MAX_38_10}, -{MAX_38_0}),
+           (3, 1234567890123456789012345678.1234567890, NULL),
+           (4, 0, 0);"
+    ))
+    .await;
+    mirror(&backend, &tmp, "rv_num38_mc", "public.rv_num38", &uri).await;
+    client
+        .simple_query(&format!(
+            "INSERT INTO rv_num38 VALUES
+               (5, -1234567890123456789012345678.1234567890, {TWO_POW_96}),
+               (6, 0.0000000001, -{TWO_POW_96}),
+               (7, -0.0000000001, {MAX_38_0});
+             UPDATE rv_num38 SET n = -{MAX_38_10}, w = {MAX_38_0} WHERE id = 4;
+             DELETE FROM rv_num38 WHERE id = 7;"
+        ))
+        .await
+        .unwrap();
+    let source_n = source_rows(&client, "rv_num38", "n").await;
+    let source_w = source_rows(&client, "rv_num38", "w").await;
+    assert_eq!(source_n.len(), 6);
+
+    let timeout = Duration::from_secs(60);
+    let lsn = current_wal_lsn(&client).await;
+    let check = async |backend: &MoonlinkBackend, lsn: u64, when: &str| {
+        let n = scan_rows(backend, "rv_num38_mc", lsn, "n", timeout).await;
+        assert_eq!(n.as_ref(), Some(&source_n), "n {when}");
+        let w = scan_rows(backend, "rv_num38_mc", lsn, "w", timeout).await;
+        assert_eq!(w.as_ref(), Some(&source_w), "w {when}");
+    };
+    check(&backend, lsn, "before the iceberg snapshot").await;
+    assert_eq!(snapshot_error(&backend, "rv_num38_mc", lsn).await, None);
+    check(&backend, lsn, "after the iceberg snapshot").await;
+
+    // Restart: the table is loaded back from iceberg, including its column bounds.
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    check(&backend, lsn, "after a restart").await;
+
+    // A later commit persists another file next to the loaded one.
+    client
+        .simple_query(&format!(
+            "UPDATE rv_num38 SET n = {MAX_38_10} WHERE id = 2;"
+        ))
+        .await
+        .unwrap();
+    let source_n = source_rows(&client, "rv_num38", "n").await;
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(snapshot_error(&backend, "rv_num38_mc", lsn).await, None);
+    let n = scan_rows(&backend, "rv_num38_mc", lsn, "n", timeout).await;
+    assert_eq!(
+        n.as_ref(),
+        Some(&source_n),
+        "n after a commit following the restart"
+    );
+
+    // Compaction rewrites the files (and their bounds); the result loads after another restart.
+    backend
+        .optimize_table(DB.to_string(), "rv_num38_mc".to_string(), "full")
+        .await
+        .unwrap();
+    backend.shutdown_connection(&uri, false).await;
+    drop(backend);
+    let backend = new_backend(&tmp).await.unwrap();
+    let n = scan_rows(&backend, "rv_num38_mc", lsn, "n", timeout).await;
+    assert_eq!(n, Some(source_n), "n after compaction and a restart");
+    let w = scan_rows(&backend, "rv_num38_mc", lsn, "w", timeout).await;
+    assert_eq!(w, Some(source_w), "w after compaction and a restart");
+}
+
 /// Arrays that are not one-dimensional with default bounds cannot be mirrored: a mirror that
 /// receives one is errored (never silently mangled or dropped together with its transaction),
 /// and creating a mirror of a table that holds one fails cleanly.
