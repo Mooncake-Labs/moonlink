@@ -45,6 +45,7 @@ fn spawn_errored_marker_writer(
     mut table_status: watch::Receiver<TableStatus>,
     replication_stopped: Arc<AtomicBool>,
     slot_status: Option<watch::Sender<TableStatus>>,
+    mut connection_shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -57,7 +58,8 @@ fn spawn_errored_marker_writer(
                     warn!(table = %mooncake_table_id, "errored because replication stopped; not persisted, a restart resumes it");
                     return;
                 }
-                // Retried until it succeeds or the mirror is dropped (which aborts this task).
+                // Retried until it succeeds, the mirror is dropped (which aborts this task) or its
+                // connection shuts down.
                 let mut backoff = ERRORED_MARKER_RETRY_INITIAL;
                 loop {
                     match errored_tables::write_marker(&base_path, &mooncake_table_id, &message)
@@ -71,10 +73,15 @@ fn spawn_errored_marker_writer(
                             return;
                         }
                         Err(e) => {
-                            error!(error = %e, table = %mooncake_table_id, retry_in = ?backoff, "failed to persist errored state; the replication slot stays held for this mirror until it is");
+                            error!(error = %e, table = %mooncake_table_id, retry_in = ?backoff, "failed to persist errored state; the replication slot stays held for this mirror until it is persisted");
                         }
                     }
-                    tokio::time::sleep(backoff).await;
+                    // What the table did not apply stays in the slot (it was never released), so
+                    // a restart resumes from there.
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = connection_shutdown.wait_for(|shutdown| *shutdown) => return,
+                    }
                     backoff = (backoff * 2).min(ERRORED_MARKER_RETRY_MAX);
                 }
             }
@@ -98,6 +105,8 @@ pub struct ReplicationConnection {
     replication_started: bool,
     /// Object storage cache.
     object_storage_cache: ObjectStorageCache,
+    /// Set on shutdown, so errored-state writers stop retrying (see [`spawn_errored_marker_writer`]).
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl ReplicationConnection {
@@ -115,6 +124,7 @@ impl ReplicationConnection {
             table_states: HashMap::new(),
             replication_started: false,
             handle: None,
+            shutdown_tx: watch::channel(false).0,
         })
     }
 
@@ -241,6 +251,7 @@ impl ReplicationConnection {
             table_resources.table_event_manager.subscribe_table_status(),
             self.source.replication_stopped(),
             table_resources.slot_status_tx.take(),
+            self.shutdown_tx.subscribe(),
         );
         let table_state = TableState {
             src_table_name: src_table_name.to_string(),
@@ -341,6 +352,8 @@ impl ReplicationConnection {
                 }
                 self.replication_started = false;
             }
+            // A write in progress may still finish; a writer still retrying stops.
+            self.shutdown_tx.send_replace(true);
 
             // Finalize the source connection
             self.source.shutdown(postgres_drop_all).await?;
@@ -372,6 +385,7 @@ mod tests {
             rx,
             Arc::new(AtomicBool::new(replication_stopped)),
             Some(slot_status_tx),
+            watch::channel(false).1,
         );
         tx.send(TableStatus::Errored("broken".to_string())).unwrap();
         writer.await.unwrap();
@@ -408,12 +422,14 @@ mod tests {
         };
         let (tx, rx) = watch::channel(TableStatus::Healthy);
         let (slot_status_tx, mut slot_status_rx) = watch::channel(TableStatus::Healthy);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let writer = spawn_errored_marker_writer(
             base.to_str().unwrap().to_string(),
             id.clone(),
             rx,
             Arc::new(AtomicBool::new(false)),
             Some(slot_status_tx),
+            shutdown_rx,
         );
         tx.send(TableStatus::Errored("broken".to_string())).unwrap();
         tokio::time::sleep(ERRORED_MARKER_RETRY_INITIAL * 3).await;
@@ -436,5 +452,37 @@ mod tests {
                 .as_deref(),
             Some("broken")
         );
+    }
+
+    /// A writer still retrying when its connection shuts down stops, leaving the slot held.
+    #[tokio::test]
+    async fn errored_state_writer_stops_retrying_on_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base");
+        std::fs::write(&base, "").unwrap();
+        let id = MooncakeTableId {
+            database: "db".to_string(),
+            table: "t".to_string(),
+        };
+        let (tx, rx) = watch::channel(TableStatus::Healthy);
+        let (slot_status_tx, slot_status_rx) = watch::channel(TableStatus::Healthy);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let writer = spawn_errored_marker_writer(
+            base.to_str().unwrap().to_string(),
+            id.clone(),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+            Some(slot_status_tx),
+            shutdown_rx,
+        );
+        tx.send(TableStatus::Errored("broken".to_string())).unwrap();
+        tokio::time::sleep(ERRORED_MARKER_RETRY_INITIAL * 3).await;
+        assert!(!writer.is_finished(), "gave up after a failed write");
+        shutdown_tx.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+            .await
+            .expect("kept retrying after the connection shut down")
+            .unwrap();
+        assert_eq!(*slot_status_rx.borrow(), TableStatus::Healthy);
     }
 }
