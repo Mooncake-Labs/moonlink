@@ -61,6 +61,17 @@ pub trait CacheTrait: std::fmt::Debug + Send + Sync {
         InlineEvictedFiles, /*files_to_delete*/
     )>;
 
+    /// Same as [`get_cache_entry`](Self::get_cache_entry), for files that must stay pinned while
+    /// the table references them (file index blocks, deletion vector puffins). The entry is pinned
+    /// even if that exceeds the cache budget, so a handle is always returned on success.
+    #[allow(async_fn_in_trait)]
+    async fn get_cache_entry_pinned(
+        &self,
+        file_id: TableUniqueFileId,
+        remote_filepath: &str,
+        filesystem_accessor: &dyn BaseFileSystemAccess,
+    ) -> Result<(NonEvictableHandle, InlineEvictedFiles)>;
+
     /// Increment reference count by 1 for the given cache handle.
     ///
     /// Precondition: the requested file id already has its cache entry pinned, otherwise panic.

@@ -41,10 +41,14 @@ pub(crate) struct ObjectStorageCacheInternal {
     config: ObjectStorageCacheConfig,
     /// Current number of bytes of all cache entries, which only accounts overall bytes for evictable cache and non-evictable cache.
     pub(crate) cur_bytes: u64,
+    /// Whether the over-budget warning was logged since the cache was last within its budget.
+    over_budget_warned: bool,
     /// Deleted entries, which should be evicted right away after no reference count, and should never be referenced again.
     pub(crate) evicted_entries: HashSet<TableUniqueFileId>,
     /// Evictable object storage cache entries.
     pub(crate) evictable_cache: LruCache<TableUniqueFileId, CacheEntryWrapper>,
+    /// Total file size of [`Self::evictable_cache`].
+    evictable_bytes: u64,
     /// Non-evictable object storage cache entries.
     pub(crate) non_evictable_cache: HashMap<TableUniqueFileId, CacheEntryWrapper>,
 }
@@ -64,18 +68,38 @@ impl ObjectStorageCacheInternal {
         max_bytes: u64,
         tolerate_insufficiency: bool,
     ) -> (bool, Vec<String>) {
-        let mut evicted_files_to_delete = vec![];
-        while self.cur_bytes > max_bytes {
-            if self.evictable_cache.is_empty() {
-                assert!(
-                    tolerate_insufficiency,
-                    "Cannot reduce disk usage by evicting entries."
-                );
+        let evicted_files_to_delete = self.evict_lru_while_above(max_bytes);
+        if self.cur_bytes > max_bytes {
+            if tolerate_insufficiency {
                 return (false, evicted_files_to_delete);
             }
-            let (_, mut cache_entry_wrapper) = self.evictable_cache.pop_lru().unwrap();
+            // The entry must stay pinned (the table references it), so exceed the budget.
+            if !self.over_budget_warned {
+                self.over_budget_warned = true;
+                tracing::warn!(
+                    cur_bytes = self.cur_bytes,
+                    max_bytes,
+                    "object storage cache is over its budget and only pinned entries are left; keeping them"
+                );
+            }
+            return (true, evicted_files_to_delete);
+        }
+        self.over_budget_warned = false;
+        (true, evicted_files_to_delete)
+    }
+
+    /// Evict least recently used entries while the cache holds more than `max_bytes`; returns the
+    /// files to delete.
+    fn evict_lru_while_above(&mut self, max_bytes: u64) -> Vec<String> {
+        let mut evicted_files_to_delete = vec![];
+        while self.cur_bytes > max_bytes {
+            let Some((_, mut cache_entry_wrapper)) = self.evictable_cache.pop_lru() else {
+                break;
+            };
             assert_eq!(cache_entry_wrapper.reference_count, 0);
-            self.cur_bytes -= cache_entry_wrapper.cache_entry.file_metadata.file_size;
+            let file_size = cache_entry_wrapper.cache_entry.file_metadata.file_size;
+            self.cur_bytes -= file_size;
+            self.evictable_bytes -= file_size;
 
             if cache_entry_wrapper.deletable {
                 let cache_filepath =
@@ -83,7 +107,36 @@ impl ObjectStorageCacheInternal {
                 evicted_files_to_delete.push(cache_filepath);
             }
         }
-        (true, evicted_files_to_delete)
+        evicted_files_to_delete
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_evictable_bytes_consistent(&self) {
+        let sum: u64 = self
+            .evictable_cache
+            .iter()
+            .map(|(_, entry)| entry.cache_entry.file_metadata.file_size)
+            .sum();
+        assert_eq!(self.evictable_bytes, sum);
+    }
+
+    /// Insert into the evictable cache.
+    fn push_evictable(
+        &mut self,
+        file_id: TableUniqueFileId,
+        cache_entry_wrapper: CacheEntryWrapper,
+    ) {
+        self.evictable_bytes += cache_entry_wrapper.cache_entry.file_metadata.file_size;
+        if let Some((_, replaced)) = self.evictable_cache.push(file_id, cache_entry_wrapper) {
+            self.evictable_bytes -= replaced.cache_entry.file_metadata.file_size;
+        }
+    }
+
+    /// Remove from the evictable cache.
+    fn pop_evictable(&mut self, file_id: &TableUniqueFileId) -> Option<CacheEntryWrapper> {
+        let cache_entry_wrapper = self.evictable_cache.pop(file_id)?;
+        self.evictable_bytes -= cache_entry_wrapper.cache_entry.file_metadata.file_size;
+        Some(cache_entry_wrapper)
     }
 
     /// Util function to insert into non-evictable cache.
@@ -103,6 +156,14 @@ impl ObjectStorageCacheInternal {
         tolerate_insufficiency: bool,
     ) -> (bool, Vec<String>) {
         assert!(self.evictable_cache.get(&file_id).is_none());
+        // `cur_bytes` already counts the new entry. If the pinned entries and it exceed the budget
+        // it can't be cached; evicting is still worth it, but only back down to the budget.
+        let file_size = cache_entry_wrapper.cache_entry.file_metadata.file_size;
+        if tolerate_insufficiency && self.cur_bytes - self.evictable_bytes > max_bytes {
+            let evicted_files_to_delete =
+                self.evict_lru_while_above(max_bytes.saturating_add(file_size));
+            return (false, evicted_files_to_delete);
+        }
         assert!(self
             .non_evictable_cache
             .insert(file_id, cache_entry_wrapper)
@@ -125,7 +186,7 @@ impl ObjectStorageCacheInternal {
         let mut evicted_files_to_delete: InlineEvictedFiles = InlineEvictedFiles::new();
 
         // If the requested entries are already evictable, remove it directly.
-        if let Some((_, cache_entry_wrapper)) = self.evictable_cache.pop_entry(&file_id) {
+        if let Some(cache_entry_wrapper) = self.pop_evictable(&file_id) {
             assert_eq!(cache_entry_wrapper.reference_count, 0);
             self.cur_bytes -= cache_entry_wrapper.cache_entry.file_metadata.file_size;
 
@@ -174,7 +235,7 @@ impl ObjectStorageCacheInternal {
             }
             // The cache entry is not requested to delete.
             else {
-                self.evictable_cache.push(file_id, cache_entry_wrapper);
+                self.push_evictable(file_id, cache_entry_wrapper);
             }
         }
 
@@ -290,8 +351,10 @@ impl ObjectStorageCache {
             cache: Arc::new(RwLock::new(ObjectStorageCacheInternal {
                 config,
                 cur_bytes: 0,
+                over_budget_warned: false,
                 evicted_entries: HashSet::new(),
                 evictable_cache,
+                evictable_bytes: 0,
                 non_evictable_cache: HashMap::new(),
             })),
         }
@@ -317,6 +380,101 @@ impl ObjectStorageCache {
                 file_size: object_metadata.size,
             },
         })
+    }
+
+    /// Look up or load, and pin, a cache entry. With `must_pin` the entry is pinned even if that
+    /// exceeds the budget; otherwise `None` is returned when there's no room for it.
+    async fn get_cache_entry_impl(
+        &self,
+        file_id: TableUniqueFileId,
+        remote_filepath: &str,
+        filesystem_accessor: &dyn BaseFileSystemAccess,
+        must_pin: bool,
+    ) -> Result<(
+        Option<NonEvictableHandle>,
+        InlineEvictedFiles, /*files_to_delete*/
+    )> {
+        {
+            let mut guard = self.cache.write().await;
+
+            // Check non-evictable cache.
+            let value = guard.non_evictable_cache.get_mut(&file_id);
+            if let Some(value) = value {
+                ma::assert_gt!(value.reference_count, 0);
+                value.reference_count += 1;
+                let cache_entry = value.cache_entry.clone();
+                let non_evictable_handle =
+                    NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
+                return Ok((
+                    Some(non_evictable_handle),
+                    /*files_to_delete=*/ SmallVec::new(),
+                ));
+            }
+
+            // Check evictable cache.
+            let value = guard.pop_evictable(&file_id);
+            if let Some(mut value) = value {
+                assert_eq!(value.reference_count, 0);
+                value.reference_count += 1;
+                let cache_entry = value.cache_entry.clone();
+                // Moving an entry from evictable to pinned doesn't change the cached bytes, so no
+                // eviction is needed; evicting here could even drop this very entry when the cache
+                // is over budget, leaving the returned handle dangling.
+                assert!(guard.non_evictable_cache.insert(file_id, value).is_none());
+                let non_evictable_handle =
+                    NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
+                return Ok((
+                    Some(non_evictable_handle),
+                    /*files_to_delete=*/ SmallVec::new(),
+                ));
+            }
+        }
+
+        // Place IO operation out of critical section.
+        let cache_entry_wrapper = self
+            .get_cache_handle_from_remote(remote_filepath, filesystem_accessor)
+            .await?;
+        let file_size = cache_entry_wrapper.cache_entry.file_metadata.file_size;
+        let downloaded_filepath = cache_entry_wrapper
+            .deletable
+            .then(|| cache_entry_wrapper.cache_entry.cache_filepath.clone());
+        let non_evictable_handle = NonEvictableHandle::new(
+            file_id,
+            cache_entry_wrapper.cache_entry.clone(),
+            self.cache.clone(),
+        );
+
+        let files_to_delete = {
+            let mut guard = self.cache.write().await;
+            guard.cur_bytes += file_size;
+
+            let (cache_succ, files_to_delete) = guard.insert_non_evictable(
+                file_id,
+                cache_entry_wrapper,
+                self.config.max_bytes,
+                /*tolerate_insufficiency=*/ !must_pin,
+            );
+            if cache_succ {
+                return Ok((Some(non_evictable_handle), files_to_delete.into()));
+            }
+
+            // Otherwise, it means cache entry failed to insert.
+            ma::assert_ge!(guard.cur_bytes, file_size);
+            guard.cur_bytes -= file_size;
+            files_to_delete
+        };
+
+        // Nothing references the download; callers read the remote file instead.
+        if let Some(downloaded_filepath) = downloaded_filepath {
+            if let Err(e) = tokio::fs::remove_file(&downloaded_filepath).await {
+                tracing::warn!(
+                    path = downloaded_filepath,
+                    error = %e,
+                    "failed to delete a download the object storage cache had no room for"
+                );
+            }
+        }
+        Ok((None, files_to_delete.into()))
     }
 
     /// Get cache entry from remote filepath [`src`].
@@ -429,78 +587,31 @@ impl CacheTrait for ObjectStorageCache {
         Option<NonEvictableHandle>,
         InlineEvictedFiles, /*files_to_delete*/
     )> {
-        {
-            let mut guard = self.cache.write().await;
-
-            // Check non-evictable cache.
-            let value = guard.non_evictable_cache.get_mut(&file_id);
-            if let Some(value) = value {
-                ma::assert_gt!(value.reference_count, 0);
-                value.reference_count += 1;
-                let cache_entry = value.cache_entry.clone();
-                let non_evictable_handle =
-                    NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
-                return Ok((
-                    Some(non_evictable_handle),
-                    /*files_to_delete=*/ SmallVec::new(),
-                ));
-            }
-
-            // Check evictable cache.
-            let value = guard.evictable_cache.pop(&file_id);
-            if let Some(mut value) = value {
-                assert_eq!(value.reference_count, 0);
-                value.reference_count += 1;
-                let cache_entry = value.cache_entry.clone();
-                let files_to_delete = guard
-                    .insert_non_evictable(
-                        file_id,
-                        value,
-                        self.config.max_bytes,
-                        /*tolerate_insufficiency=*/ true,
-                    )
-                    .1;
-                assert!(files_to_delete.is_empty());
-                let non_evictable_handle =
-                    NonEvictableHandle::new(file_id, cache_entry, self.cache.clone());
-                return Ok((
-                    Some(non_evictable_handle),
-                    /*files_to_delete=*/ SmallVec::new(),
-                ));
-            }
-        }
-
-        // Place IO operation out of critical section.
-        let cache_entry_wrapper = self
-            .get_cache_handle_from_remote(remote_filepath, filesystem_accessor)
-            .await?;
-        let file_size = cache_entry_wrapper.cache_entry.file_metadata.file_size;
-        let non_evictable_handle = NonEvictableHandle::new(
+        self.get_cache_entry_impl(
             file_id,
-            cache_entry_wrapper.cache_entry.clone(),
-            self.cache.clone(),
-        );
+            remote_filepath,
+            filesystem_accessor,
+            /*must_pin=*/ false,
+        )
+        .await
+    }
 
-        {
-            let mut guard = self.cache.write().await;
-            guard.cur_bytes += file_size;
-
-            let (cache_succ, files_to_delete) = guard.insert_non_evictable(
+    async fn get_cache_entry_pinned(
+        &self,
+        file_id: TableUniqueFileId,
+        remote_filepath: &str,
+        filesystem_accessor: &dyn BaseFileSystemAccess,
+    ) -> Result<(NonEvictableHandle, InlineEvictedFiles)> {
+        let (handle, files_to_delete) = self
+            .get_cache_entry_impl(
                 file_id,
-                cache_entry_wrapper,
-                self.config.max_bytes,
-                /*tolerate_insufficiency=*/ true,
-            );
-            if cache_succ {
-                return Ok((Some(non_evictable_handle), files_to_delete.into()));
-            }
-
-            // Otherwise, it means cache entry failed to insert.
-            ma::assert_ge!(guard.cur_bytes, file_size);
-            guard.cur_bytes -= file_size;
-
-            Ok((None, files_to_delete.into()))
-        }
+                remote_filepath,
+                filesystem_accessor,
+                /*must_pin=*/ true,
+            )
+            .await?;
+        // With `must_pin` the entry is inserted even over budget, so a handle is always returned.
+        Ok((handle.expect("must_pin always pins"), files_to_delete))
     }
 
     async fn try_delete_cache_entry(&self, file_id: TableUniqueFileId) -> InlineEvictedFiles {

@@ -74,6 +74,7 @@ impl TestGuard {
             .to_string();
         let table_config = TableConfig {
             mooncake_config: MooncakeConfig {
+                mem_slice_bytes: None,
                 skip_index_merge: true,
                 skip_data_compaction: true,
                 append_only: Some(false),
@@ -469,6 +470,7 @@ pub fn get_serialized_table_config(tmp_dir: &TempDir) -> String {
     let root_directory = tmp_dir.path().to_str().unwrap().to_string();
     let table_config = TableConfig {
         mooncake_config: MooncakeConfig {
+            mem_slice_bytes: None,
             skip_index_merge: true,
             skip_data_compaction: true,
             append_only: Some(false),

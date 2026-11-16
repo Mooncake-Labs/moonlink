@@ -20,7 +20,7 @@ use crate::storage::filesystem::accessor::metadata::ObjectMetadata;
 use crate::storage::filesystem::accessor::operator_utils;
 use crate::storage::filesystem::accessor::unbuffered_stream_writer::UnbufferedStreamWriter;
 use crate::storage::filesystem::accessor_config::AccessorConfig;
-#[cfg(feature = "storage-gcs")]
+#[cfg(any(feature = "storage-gcs", feature = "storage-fs"))]
 use crate::storage::filesystem::storage_config::StorageConfig;
 use crate::Result;
 
@@ -30,6 +30,12 @@ use std::pin::Pin;
 const IO_BLOCK_SIZE: usize = 2 * 1024 * 1024;
 /// Max number of ongoing parallel sub IO operations for one single upload and download operation.
 const MAX_SUB_IO_OPERATION: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: make hard linking report "not possible" to exercise the copy fallback.
+    static FORCE_LINK_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 // TODO(hjiang): Add stats cache for exists, get file size, etc invocation.
 pub struct FileSystemAccessor {
@@ -148,6 +154,73 @@ impl FileSystemAccessor {
         dst_file.write_all(&content).await?;
         dst_file.flush().await?;
         Ok(ObjectMetadata { size: file_size })
+    }
+
+    /// Absolute local path of `path` when the accessor is backed by the local filesystem.
+    #[cfg(feature = "storage-fs")]
+    fn local_absolute_path(&self, path: &str) -> Option<std::path::PathBuf> {
+        match &self.config.storage_config {
+            StorageConfig::FileSystem { root_directory, .. } => {
+                if path.starts_with(root_directory.as_str()) {
+                    Some(std::path::PathBuf::from(path))
+                } else {
+                    Some(std::path::Path::new(root_directory).join(path.trim_start_matches('/')))
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// Publish a local file into a local-filesystem store without copying its bytes: make it
+    /// durable, then hard link it under the destination name. Both names refer to the same
+    /// inode. Moonlink never rewrites a data or index file in place, so readers holding the
+    /// source name are unaffected, and that name is removed later by the normal cache eviction.
+    /// Returns `Ok(None)` when linking isn't possible (e.g. another filesystem), so the caller
+    /// falls back to copying.
+    #[cfg(feature = "storage-fs")]
+    async fn try_hard_link_local(&self, src: &str, dst: &str) -> Result<Option<ObjectMetadata>> {
+        let Some(dst_path) = self.local_absolute_path(dst) else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if FORCE_LINK_FAILURE.with(|f| f.get()) {
+            return Ok(None);
+        }
+        let src_path = std::path::PathBuf::from(src);
+        let linked = tokio::task::spawn_blocking(move || -> std::io::Result<Option<u64>> {
+            let file = std::fs::File::open(&src_path)?;
+            file.sync_all()?;
+            let size = file.metadata()?.len();
+            let parent = dst_path.parent().map(|p| p.to_path_buf());
+            if let Some(parent) = &parent {
+                std::fs::create_dir_all(parent)?;
+            }
+            match std::fs::hard_link(&src_path, &dst_path) {
+                Ok(()) => {}
+                // Already the same file (a previous attempt linked it, or both paths resolve to
+                // one): removing the destination would delete the source too.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && is_same_file(&file, &dst_path)? => {}
+                // A previous attempt (e.g. a retried persistence) may have left the destination.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::remove_file(&dst_path)?;
+                    if std::fs::hard_link(&src_path, &dst_path).is_err() {
+                        return Ok(None);
+                    }
+                }
+                // Cross-device, unsupported by the filesystem, link limits, permissions.
+                Err(_) => return Ok(None),
+            }
+            if let Some(parent) = parent {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(Some(size))
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        Ok(linked.map(|size| ObjectMetadata { size }))
     }
 
     /// Get multi-part upload trigger threshold.
@@ -404,6 +477,11 @@ impl BaseFileSystemAccess for FileSystemAccessor {
     }
 
     async fn copy_from_local_to_remote(&self, src: &str, dst: &str) -> Result<ObjectMetadata> {
+        #[cfg(feature = "storage-fs")]
+        if let Some(metadata) = self.try_hard_link_local(src, dst).await? {
+            return Ok(metadata);
+        }
+
         // For small files, no need to parallelize IO operations.
         let sanitized_dst = self.sanitize_path(dst);
         let file_size = Self::get_local_file_size(src).await?;
@@ -530,6 +608,14 @@ impl BaseFileSystemAccess for FileSystemAccessor {
 
         Ok(ObjectMetadata { size: total_size })
     }
+}
+
+/// Whether `path` names the same inode as the open `file`.
+#[cfg(feature = "storage-fs")]
+fn is_same_file(file: &std::fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (a, b) = (file.metadata()?, std::fs::metadata(path)?);
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
 }
 
 #[cfg(test)]
@@ -827,6 +913,128 @@ mod tests {
             .unwrap();
         assert_eq!(actual_content.len(), expected_content.len());
         assert_eq!(actual_content, expected_content);
+    }
+
+    fn fs_accessor_for_test(root_directory: &str) -> FileSystemAccessor {
+        FileSystemAccessor::new(AccessorConfig::new_with_storage_config(
+            StorageConfig::FileSystem {
+                root_directory: root_directory.to_string(),
+                atomic_write_dir: None,
+            },
+        ))
+    }
+
+    /// On a local filesystem the bytes are not copied: the destination is a hard link to the
+    /// source (same inode), and survives removal of the source name.
+    #[tokio::test]
+    async fn test_copy_from_local_to_remote_hard_links_on_local_fs() {
+        use std::os::unix::fs::MetadataExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let filesystem_accessor = fs_accessor_for_test(&root_directory);
+        let src_filepath = format!("{root_directory}/src");
+        std::fs::write(&src_filepath, b"parquet bytes").unwrap();
+        let dst_filepath = format!("{root_directory}/ns/table/data/dst.parquet");
+        let metadata = filesystem_accessor
+            .copy_from_local_to_remote(&src_filepath, &dst_filepath)
+            .await
+            .unwrap();
+        assert_eq!(metadata.size, 13);
+        let src_md = std::fs::metadata(&src_filepath).unwrap();
+        let dst_md = std::fs::metadata(&dst_filepath).unwrap();
+        assert_eq!(src_md.ino(), dst_md.ino());
+        assert_eq!(dst_md.nlink(), 2);
+        std::fs::remove_file(&src_filepath).unwrap();
+        assert_eq!(std::fs::read(&dst_filepath).unwrap(), b"parquet bytes");
+
+        // Relative destination paths resolve under the root, like opendal does.
+        std::fs::write(&src_filepath, b"x").unwrap();
+        filesystem_accessor
+            .copy_from_local_to_remote(&src_filepath, "rel/dst2")
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(format!("{root_directory}/rel/dst2"))
+                .unwrap()
+                .ino(),
+            std::fs::metadata(&src_filepath).unwrap().ino()
+        );
+    }
+
+    /// A destination left behind by an earlier attempt is replaced.
+    #[tokio::test]
+    async fn test_copy_from_local_to_remote_replaces_existing_destination() {
+        use std::os::unix::fs::MetadataExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let filesystem_accessor = fs_accessor_for_test(&root_directory);
+        let src_filepath = format!("{root_directory}/src");
+        let dst_filepath = format!("{root_directory}/dst");
+        std::fs::write(&src_filepath, b"new").unwrap();
+        std::fs::write(&dst_filepath, b"stale partial").unwrap();
+        let metadata = filesystem_accessor
+            .copy_from_local_to_remote(&src_filepath, &dst_filepath)
+            .await
+            .unwrap();
+        assert_eq!(metadata.size, 3);
+        assert_eq!(std::fs::read(&dst_filepath).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(&src_filepath).unwrap().ino(),
+            std::fs::metadata(&dst_filepath).unwrap().ino()
+        );
+    }
+
+    /// A destination that already is the source (a retried link, or a path resolving to the
+    /// source itself) is kept, not deleted.
+    #[tokio::test]
+    async fn test_copy_from_local_to_remote_keeps_destination_that_is_the_source() {
+        use std::os::unix::fs::MetadataExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let filesystem_accessor = fs_accessor_for_test(&root_directory);
+        let src_filepath = format!("{root_directory}/src");
+        std::fs::write(&src_filepath, b"parquet bytes").unwrap();
+        let ino = std::fs::metadata(&src_filepath).unwrap().ino();
+
+        let dst_filepath = format!("{root_directory}/dst");
+        for _ in 0..2 {
+            let metadata = filesystem_accessor
+                .copy_from_local_to_remote(&src_filepath, &dst_filepath)
+                .await
+                .unwrap();
+            assert_eq!(metadata.size, 13);
+            assert_eq!(std::fs::metadata(&dst_filepath).unwrap().ino(), ino);
+        }
+        let metadata = filesystem_accessor
+            .copy_from_local_to_remote(&src_filepath, "src")
+            .await
+            .unwrap();
+        assert_eq!(metadata.size, 13);
+        assert_eq!(std::fs::read(&src_filepath).unwrap(), b"parquet bytes");
+        assert_eq!(std::fs::metadata(&src_filepath).unwrap().ino(), ino);
+    }
+
+    /// When linking isn't possible (e.g. the store is on another filesystem) the bytes are copied.
+    #[tokio::test]
+    async fn test_copy_from_local_to_remote_falls_back_to_copy() {
+        use std::os::unix::fs::MetadataExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_directory = temp_dir.path().to_str().unwrap().to_string();
+        let filesystem_accessor = fs_accessor_for_test(&root_directory);
+        let src_filepath = format!("{root_directory}/src");
+        std::fs::write(&src_filepath, b"parquet bytes").unwrap();
+        let dst_filepath = format!("{root_directory}/dst");
+        FORCE_LINK_FAILURE.with(|f| f.set(true));
+        let res = filesystem_accessor
+            .copy_from_local_to_remote(&src_filepath, &dst_filepath)
+            .await;
+        FORCE_LINK_FAILURE.with(|f| f.set(false));
+        assert_eq!(res.unwrap().size, 13);
+        assert_eq!(std::fs::read(&dst_filepath).unwrap(), b"parquet bytes");
+        assert_ne!(
+            std::fs::metadata(&src_filepath).unwrap().ino(),
+            std::fs::metadata(&dst_filepath).unwrap().ino()
+        );
     }
 
     #[tokio::test]

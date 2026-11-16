@@ -145,6 +145,17 @@ impl CacheTrait for FailOnceCache {
             .await
     }
 
+    async fn get_cache_entry_pinned(
+        &self,
+        file_id: TableUniqueFileId,
+        remote_filepath: &str,
+        filesystem_accessor: &dyn BaseFileSystemAccess,
+    ) -> crate::Result<(NonEvictableHandle, InlineEvictedFiles)> {
+        self.inner
+            .get_cache_entry_pinned(file_id, remote_filepath, filesystem_accessor)
+            .await
+    }
+
     async fn increment_reference_count(&self, cache_handle: &NonEvictableHandle) {
         self.inner.increment_reference_count(cache_handle).await
     }

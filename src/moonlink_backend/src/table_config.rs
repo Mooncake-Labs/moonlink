@@ -23,6 +23,10 @@ pub struct MooncakeConfig {
     /// Row identity of the table.
     #[serde(default)]
     pub row_identity: Option<IdentityProp>,
+    /// Approximate in-memory bytes per table (and per streamed transaction) at which buffered
+    /// rows are flushed to a data file; unset means the moonlink default.
+    #[serde(default)]
+    pub mem_slice_bytes: Option<usize>,
 }
 
 impl MooncakeConfig {
@@ -65,7 +69,16 @@ impl MooncakeConfig {
             DataCompactionConfig::enabled()
         };
 
+        if self.mem_slice_bytes == Some(0) {
+            return Err(Error::invalid_config(
+                "mem_slice_bytes must be greater than 0".to_string(),
+            ));
+        }
+
         let mut mooncake_table_config = MooncakeTableConfig::new(temp_files_dir);
+        if let Some(mem_slice_bytes) = self.mem_slice_bytes {
+            mooncake_table_config.mem_slice_bytes = mem_slice_bytes;
+        }
         mooncake_table_config.file_index_config = index_merge_config;
         mooncake_table_config.data_compaction_config = data_compaction_config;
         mooncake_table_config.append_only = self.append_only.unwrap();
@@ -153,6 +166,7 @@ mod tests {
                 .unwrap();
         let expected_table_config = TableConfig {
             mooncake_config: MooncakeConfig {
+                mem_slice_bytes: None,
                 skip_index_merge: false,
                 skip_data_compaction: false,
                 append_only: None,
@@ -200,6 +214,7 @@ mod tests {
         .unwrap();
         let expected_table_config = TableConfig {
             mooncake_config: MooncakeConfig {
+                mem_slice_bytes: None,
                 skip_index_merge: true,
                 skip_data_compaction: false,
                 append_only: None,
@@ -256,6 +271,7 @@ mod tests {
         .unwrap();
         let expected_table_config = TableConfig {
             mooncake_config: MooncakeConfig {
+                mem_slice_bytes: None,
                 skip_index_merge: true,
                 skip_data_compaction: false,
                 append_only: None,
@@ -316,6 +332,7 @@ mod tests {
         .unwrap();
         let expected_table_config = TableConfig {
             mooncake_config: MooncakeConfig {
+                mem_slice_bytes: None,
                 skip_index_merge: true,
                 skip_data_compaction: false,
                 append_only: None,
@@ -332,6 +349,41 @@ mod tests {
             )),
         };
         assert_eq!(expected_table_config, actual_table_config);
+    }
+
+    /// `mooncake.mem_slice_bytes` from the user's table config reaches the mooncake table config.
+    #[test]
+    fn test_table_config_mem_slice_bytes() {
+        let table_config = TableConfig::from_json_or_default(
+            r#"{"mooncake": {"mem_slice_bytes": 4194304}}"#,
+            /*default_table_directory=*/ "/tmp/path",
+        )
+        .unwrap();
+        let mut mooncake_config = table_config.mooncake_config;
+        mooncake_config.append_only = Some(false);
+        mooncake_config.row_identity = Some(IdentityProp::FullRow);
+        let mooncake_table_config = mooncake_config
+            .clone()
+            .take_as_mooncake_table_config("/tmp/temp".to_string())
+            .unwrap();
+        assert_eq!(mooncake_table_config.mem_slice_bytes, 4194304);
+
+        // Unset keeps the moonlink default.
+        mooncake_config.mem_slice_bytes = None;
+        let mooncake_table_config = mooncake_config
+            .clone()
+            .take_as_mooncake_table_config("/tmp/temp".to_string())
+            .unwrap();
+        assert_eq!(
+            mooncake_table_config.mem_slice_bytes,
+            MooncakeTableConfig::default_mem_slice_bytes()
+        );
+
+        // Zero would flush after every row; reject it.
+        mooncake_config.mem_slice_bytes = Some(0);
+        assert!(mooncake_config
+            .take_as_mooncake_table_config("/tmp/temp".to_string())
+            .is_err());
     }
 
     #[test]
@@ -355,6 +407,7 @@ mod tests {
         .unwrap();
         let expected_table_config = TableConfig {
             mooncake_config: MooncakeConfig {
+                mem_slice_bytes: None,
                 skip_index_merge: true,
                 skip_data_compaction: true,
                 append_only: Some(true),

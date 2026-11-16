@@ -90,6 +90,12 @@ impl DataCompactionConfig {
         Self::default()
     }
 
+    /// Whether background compaction may run at all; [`Self::disabled`] sets the minimum file
+    /// count out of reach.
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.min_data_file_to_compact != u32::MAX
+    }
+
     /// Return a default config, with data compaction disabled.
     pub fn disabled() -> Self {
         Self {

@@ -2217,6 +2217,7 @@ async fn test_small_batch_size_and_large_parquet_size() {
     let iceberg_table_config = create_iceberg_table_config(warehouse_uri.clone());
     let schema = create_test_arrow_schema();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: false,
         batch_size: 1,
         disk_slice_writer_config: DiskSliceWriterConfig {

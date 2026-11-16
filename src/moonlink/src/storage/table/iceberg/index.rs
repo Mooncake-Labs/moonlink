@@ -133,7 +133,7 @@ impl FileIndex {
                 file_id: FileId(cur_file_id),
             };
             let (cache_handle, cur_evicted_files) = object_storage_cache
-                .get_cache_entry(
+                .get_cache_entry_pinned(
                     table_unique_file_id,
                     &cur_index_block.filepath,
                     filesystem_accessor,
@@ -149,8 +149,6 @@ impl FileIndex {
                 })?;
             evicted_files_to_delete.extend(cur_evicted_files);
 
-            // File indices should always reside in on-disk cache.
-            let cache_handle = cache_handle.unwrap();
             // Transform iceberg index block into mooncake index block.
             let mut cur_index_block = MooncakeIndexBlock::new(
                 cur_index_block.bucket_start_idx,

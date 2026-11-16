@@ -122,6 +122,15 @@ impl MemSlice {
         self.column_store.get_num_rows()
     }
 
+    pub(super) fn get_approx_bytes(&self) -> usize {
+        self.column_store.get_approx_bytes()
+    }
+
+    /// Whether the slice reached either the row or the byte flush threshold.
+    pub(super) fn reached_flush_threshold(&self, max_rows: usize, max_bytes: usize) -> bool {
+        self.get_num_rows() >= max_rows || self.get_approx_bytes() >= max_bytes
+    }
+
     #[allow(clippy::type_complexity)]
     pub(super) fn drain(
         &mut self,

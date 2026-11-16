@@ -60,6 +60,28 @@ pub(super) struct BatchEntry {
     pub(super) batch: InMemoryBatch,
 }
 
+/// Per-row bookkeeping on top of the column payload (offsets, validity, index entry).
+const APPROX_ROW_OVERHEAD_BYTES: usize = 64;
+
+fn approx_value_bytes(value: &RowValue) -> usize {
+    match value {
+        RowValue::Int32(_) | RowValue::Float32(_) => 4,
+        RowValue::Int64(_) | RowValue::Float64(_) => 8,
+        RowValue::Decimal(_) | RowValue::FixedLenByteArray(_) => 16,
+        RowValue::Bool(_) => 1,
+        RowValue::ByteArray(bytes) => bytes.len() + 4,
+        RowValue::Array(values) | RowValue::Struct(values) => {
+            4 + values.iter().map(approx_value_bytes).sum::<usize>()
+        }
+        RowValue::Null => 0,
+    }
+}
+
+/// Approximate memory a buffered row takes, used to bound mem slices by bytes.
+pub(super) fn approx_row_bytes(values: &[RowValue]) -> usize {
+    APPROX_ROW_OVERHEAD_BYTES + values.iter().map(approx_value_bytes).sum::<usize>()
+}
+
 /// A streaming buffered writer for column-oriented data.
 /// Creates new buffers when the current one is full and links them together.
 pub struct ColumnStoreBuffer {
@@ -74,6 +96,8 @@ pub struct ColumnStoreBuffer {
     current_rows: SharedRowBuffer,
     /// Current row count in the current buffer
     current_row_count: usize,
+    /// Approximate in-memory bytes of all rows appended since the last drain.
+    approx_bytes: usize,
     /// Batch ID allocator counter
     batch_id_counter: Arc<BatchIdCounter>,
 }
@@ -107,6 +131,7 @@ impl ColumnStoreBuffer {
             current_batch_builder,
             current_rows: SharedRowBuffer::new(max_rows_per_buffer),
             current_row_count: 0,
+            approx_bytes: 0,
             batch_id_counter,
         }
     }
@@ -131,6 +156,7 @@ impl ColumnStoreBuffer {
             assert!(_res.is_ok());
         });
         self.current_row_count += 1;
+        self.approx_bytes += approx_row_bytes(&values);
 
         Ok((
             self.in_memory_batches.last().unwrap().id,
@@ -157,6 +183,7 @@ impl ColumnStoreBuffer {
             self.current_batch_builder[idx].append_value(cell)?;
         }
         self.current_row_count += 1;
+        self.approx_bytes += approx_row_bytes(&row.values);
         self.current_rows.push(row);
 
         Ok((
@@ -294,7 +321,13 @@ impl ColumnStoreBuffer {
         let last = self.in_memory_batches.pop();
         let current_batch = std::mem::take(&mut self.in_memory_batches);
         self.in_memory_batches.push(last.unwrap());
+        self.approx_bytes = 0;
         current_batch
+    }
+
+    /// Approximate in-memory bytes of the rows held since the last drain.
+    pub(super) fn get_approx_bytes(&self) -> usize {
+        self.approx_bytes
     }
 
     pub(super) fn get_num_rows(&self) -> usize {
@@ -366,6 +399,42 @@ mod tests {
     use arrow::datatypes::{DataType, Field};
     use arrow_array::{Int16Array, Int32Array, StringArray, TimestampMicrosecondArray};
     use std::collections::HashMap;
+
+    /// The byte estimate grows with variable-length payloads and resets once rows are drained.
+    #[test]
+    fn test_column_store_buffer_approx_bytes() -> Result<()> {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
+                "PARQUET:field_id".to_string(),
+                "2".to_string(),
+            )])),
+        ]);
+        let counter = BatchIdCounter::new(false);
+        let mut buffer = ColumnStoreBuffer::new(Arc::new(schema), 2, Arc::new(counter));
+        assert_eq!(buffer.get_approx_bytes(), 0);
+
+        let small = vec![RowValue::Int32(1), RowValue::ByteArray(b"ab".to_vec())];
+        let wide = vec![RowValue::Int32(2), RowValue::ByteArray(vec![b'x'; 10_000])];
+        buffer.append_row(MoonlinkRow::new(small.clone()))?;
+        buffer.append_row(MoonlinkRow::new(wide.clone()))?;
+        // Crosses into a second batch.
+        buffer.append_row(MoonlinkRow::new(vec![RowValue::Int32(3), RowValue::Null]))?;
+        let expected = approx_row_bytes(&small)
+            + approx_row_bytes(&wide)
+            + approx_row_bytes(&[RowValue::Int32(3), RowValue::Null]);
+        assert_eq!(buffer.get_approx_bytes(), expected);
+        assert!(approx_row_bytes(&wide) > 10_000);
+        assert!(approx_row_bytes(&small) < 100);
+
+        buffer.finalize_current_batch()?;
+        buffer.drain();
+        assert_eq!(buffer.get_approx_bytes(), 0);
+        Ok(())
+    }
 
     // TODO(hjiang): Add unit test for ColumnStoreBuffer with deletion, and check record batch content.
     #[test]

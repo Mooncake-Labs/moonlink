@@ -10,4 +10,7 @@ mod state_tests;
 mod local_file_optimization_state_tests;
 
 #[cfg(test)]
+mod budget_overflow_tests;
+
+#[cfg(test)]
 pub(crate) mod test_utils;

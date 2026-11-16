@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 /// This file contains maintenance related features for mooncake snapshot.
+use crate::storage::compaction::size_tiering::{
+    pick_similar_sized, split_similar_sized, SizedCandidate, RECLAIM_MIN_DELETED_BYTES,
+    SIZE_TIER_FLOOR_BYTES,
+};
 use crate::storage::compaction::table_compaction::SingleFileToCompact;
 use crate::storage::index::FileIndex;
 use crate::storage::mooncake_table::snapshot::SnapshotTableState;
@@ -78,9 +82,15 @@ impl SnapshotTableState {
             ),
         };
 
-        // Fast-path: not enough data files to trigger compaction.
+        // Fast-path: not enough data files to trigger compaction. Background compaction may still
+        // reclaim deleted rows from fewer files.
         let all_disk_files = &self.current_snapshot.disk_files;
-        if all_disk_files.len() < min_data_compaction_file_num_threshold {
+        let reclaim_below_min_files =
+            matches!(data_compaction_option, MaintenanceOption::BestEffort(_))
+                && config.is_enabled()
+                && data_file_deletion_percentage_threshold != 0;
+        if all_disk_files.len() < min_data_compaction_file_num_threshold && !reclaim_below_min_files
+        {
             return DataCompactionMaintenanceStatus::Nothing;
         }
 
@@ -109,8 +119,7 @@ impl SnapshotTableState {
             // Every file must be small enough, or deleted enough, to be worth rewriting.
             let all_files_eligible = group.files.iter().all(|f| {
                 f.file_size < data_compaction_file_size_threshold
-                    || (data_file_deletion_percentage_threshold != 0
-                        && f.deletion_percentage >= data_file_deletion_percentage_threshold)
+                    || f.is_deletion_heavy(data_file_deletion_percentage_threshold)
             });
             if all_files_eligible {
                 if group.files.len() > max_data_compaction_file_num_threshold {
@@ -134,17 +143,29 @@ impl SnapshotTableState {
             );
         }
 
-        let chosen_groups = choose_compaction_groups(
-            eligible_groups,
-            min_data_compaction_file_num_threshold,
-            max_data_compaction_file_num_threshold,
-        );
-        let chosen_file_count: usize = chosen_groups.iter().map(|g| g.files.len()).sum();
-        if chosen_file_count < min_data_compaction_file_num_threshold {
+        // Background compaction only merges groups of similar size, so earlier outputs are not
+        // rewritten again with every few new small files; explicit requests merge everything
+        // eligible.
+        let chosen_groups = if matches!(data_compaction_option, MaintenanceOption::BestEffort(_)) {
+            choose_similar_sized_compaction_groups(
+                eligible_groups,
+                min_data_compaction_file_num_threshold,
+                max_data_compaction_file_num_threshold,
+                data_file_deletion_percentage_threshold,
+            )
+        } else {
+            choose_compaction_groups(
+                eligible_groups,
+                min_data_compaction_file_num_threshold,
+                max_data_compaction_file_num_threshold,
+            )
+        };
+        // Both choices return nothing rather than fewer than the minimum number of files, except
+        // when reclaiming deleted rows.
+        if chosen_groups.is_empty() {
             // There're two possibilities here:
             // 1. If due to unpersistence, data compaction should wait until persistence completion.
-            if chosen_file_count + reject_by_unpersistence >= min_data_compaction_file_num_threshold
-            {
+            if reject_by_unpersistence >= min_data_compaction_file_num_threshold {
                 return DataCompactionMaintenanceStatus::Unknown;
             }
             // 2. There're not enough number of small data files to merge.
@@ -282,6 +303,19 @@ impl SnapshotTableState {
         if *index_merge_option == MaintenanceOption::Skip {
             return IndexMergeMaintenanceStatus::Unknown;
         }
+        // Background compaction rewrites the index of every file it may merge, and the indices of
+        // larger files are never merged (see below): merging them in the background as well would
+        // only rewrite them twice, and would glue an earlier output to new small files, so that
+        // compaction rewrites it with them.
+        if matches!(index_merge_option, MaintenanceOption::BestEffort(_))
+            && self
+                .mooncake_table_metadata
+                .config
+                .data_compaction_config
+                .is_enabled()
+        {
+            return IndexMergeMaintenanceStatus::Nothing;
+        }
         let max_index_merge_file_num_threshold = self
             .mooncake_table_metadata
             .config
@@ -353,6 +387,26 @@ impl SnapshotTableState {
             }
 
             assert!(file_indices_to_merge.insert(cur_file_index.clone()));
+        }
+
+        // Background index merges only combine indices of similar size, so a merged index is not
+        // rewritten again with every few new small ones.
+        if matches!(index_merge_option, MaintenanceOption::BestEffort(_)) {
+            let candidates = file_indices_to_merge
+                .into_iter()
+                .map(|file_index| SizedCandidate {
+                    bytes: file_index.get_index_blocks_size(),
+                    weight: 1,
+                    item: file_index,
+                })
+                .collect();
+            file_indices_to_merge = pick_similar_sized(
+                candidates,
+                min_index_merge_file_num_threshold,
+                max_index_merge_file_num_threshold,
+            )
+            .into_iter()
+            .collect();
         }
 
         // To avoid too many small IO operations, only attempt an index merge when accumulated small indices exceeds the threshold.
@@ -507,11 +561,115 @@ pub(crate) struct CompactionGroupFile {
     pub(crate) deletion_percentage: usize,
 }
 
+impl CompactionGroupFile {
+    /// Whether enough of the file's rows are deleted that rewriting it reclaims space; a threshold
+    /// of 0 disables deletion-triggered compaction.
+    fn is_deletion_heavy(&self, deletion_percentage_threshold: usize) -> bool {
+        deletion_percentage_threshold != 0
+            && self.deletion_percentage >= deletion_percentage_threshold
+    }
+
+    /// Bytes of the file's rows that are not deleted.
+    fn live_bytes(&self) -> u64 {
+        (self.file_size * (100 - self.deletion_percentage.min(100)) / 100) as u64
+    }
+}
+
 /// Data files connected through shared file indices; compaction takes a group as a whole.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompactionGroup {
     pub(crate) files: Vec<CompactionGroupFile>,
     pub(crate) file_indices: Vec<FileIndex>,
+}
+
+impl CompactionGroup {
+    fn live_bytes(&self) -> u64 {
+        self.files.iter().map(CompactionGroupFile::live_bytes).sum()
+    }
+
+    fn deleted_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .map(|f| f.file_size as u64 - f.live_bytes())
+            .sum()
+    }
+}
+
+/// Like [`choose_compaction_groups`], restricted so that background compaction rewrites a byte only
+/// a logarithmic number of times (see [`crate::storage::compaction::size_tiering`]).
+///
+/// Groups are sized by their live (not deleted) bytes. Groups without a deletion-heavy file (see
+/// `deletion_percentage_threshold`) merge by size tier. Otherwise the deletion-heavy groups are
+/// compacted to reclaim their deleted rows, which costs no more than the space it frees at the
+/// release threshold of 50%:
+/// - topped up to `min_files` with the smallest other groups, but only those no larger than the
+///   largest deletion-heavy group, so a few deleted rows never pull an earlier, larger output in;
+/// - or on their own when that falls short of `min_files` but they hold at least
+///   [`RECLAIM_MIN_DELETED_BYTES`] of deleted rows.
+pub(crate) fn choose_similar_sized_compaction_groups(
+    eligible: Vec<CompactionGroup>,
+    min_files: usize,
+    max_files: usize,
+    deletion_percentage_threshold: usize,
+) -> Vec<CompactionGroup> {
+    let (deletion_heavy, others): (Vec<_>, Vec<_>) = eligible.into_iter().partition(|group| {
+        group
+            .files
+            .iter()
+            .any(|f| f.is_deletion_heavy(deletion_percentage_threshold))
+    });
+    let sized = |group: CompactionGroup| SizedCandidate {
+        bytes: group.live_bytes(),
+        weight: group.files.len(),
+        item: group,
+    };
+    let (tiered, others) = split_similar_sized(
+        others.into_iter().map(sized).collect(),
+        min_files,
+        max_files,
+    );
+    if !tiered.is_empty() || deletion_heavy.is_empty() {
+        return tiered;
+    }
+
+    // Reclaim the most deleted bytes first.
+    let mut deletion_heavy = deletion_heavy;
+    deletion_heavy.sort_by_key(|group| std::cmp::Reverse(group.deleted_bytes()));
+    let mut chosen = Vec::new();
+    let mut chosen_files = 0;
+    for group in deletion_heavy {
+        if chosen_files + group.files.len() <= max_files {
+            chosen_files += group.files.len();
+            chosen.push(group);
+        }
+    }
+    let deleted_bytes: u64 = chosen.iter().map(CompactionGroup::deleted_bytes).sum();
+    let top_up_limit = chosen
+        .iter()
+        .map(CompactionGroup::live_bytes)
+        .max()
+        .unwrap_or(0)
+        .max(SIZE_TIER_FLOOR_BYTES);
+    let mut top_up = Vec::new();
+    let mut top_up_files = 0;
+    // `others` is sorted smallest first.
+    for candidate in others {
+        if chosen_files + top_up_files >= min_files || candidate.bytes > top_up_limit {
+            break;
+        }
+        if chosen_files + top_up_files + candidate.weight <= max_files {
+            top_up_files += candidate.weight;
+            top_up.push(candidate.item);
+        }
+    }
+    if chosen_files + top_up_files >= min_files {
+        chosen.extend(top_up);
+        return chosen;
+    }
+    if deleted_bytes >= RECLAIM_MIN_DELETED_BYTES {
+        return chosen;
+    }
+    Vec::new()
 }
 
 /// Pick whole groups to compact, up to `max_files` data files in total. Returns an empty list if

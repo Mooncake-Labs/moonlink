@@ -68,6 +68,7 @@ async fn test_table_handler_flush() {
 async fn test_append_with_small_disk_slice() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: false,
         row_identity: IdentityProp::FullRow,
         batch_size: 1, // One mem slice only contains one row.
@@ -629,6 +630,7 @@ async fn test_iceberg_snapshot_creation_for_batch_write() {
     // Set mooncake and iceberg flush and snapshot threshold to huge value, to verify force flush and force snapshot works as expected.
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: false,
         row_identity: IdentityProp::Keys(vec![0]),
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
@@ -839,6 +841,7 @@ async fn test_iceberg_snapshot_creation_for_streaming_write() {
     // Set mooncake and iceberg flush and snapshot threshold to huge value, to verify force flush and force snapshot works as expected.
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: false,
         row_identity: IdentityProp::Keys(vec![0]),
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
@@ -1080,6 +1083,7 @@ async fn test_multiple_snapshot_requests() {
     // Set mooncake and iceberg flush and snapshot threshold to huge value, to verify force flush and force snapshot works as expected.
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: false,
         row_identity: IdentityProp::Keys(vec![0]),
         batch_size: MooncakeTableConfig::DEFAULT_BATCH_SIZE,
@@ -1551,6 +1555,7 @@ async fn test_full_maintenance_with_sufficient_data_files() {
     let temp_dir = tempdir().unwrap();
     // Setup mooncake config, which won't trigger any data compaction or index merge, if not full table maintenance.
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: false,
         row_identity: IdentityProp::Keys(vec![0]),
         data_compaction_config: DataCompactionConfig {
@@ -2172,6 +2177,7 @@ async fn test_append_only_table_full_pipeline() {
     // Create a test environment with append-only configuration
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: true, // Enable append-only mode
         row_identity: IdentityProp::None,
         batch_size: 2,
@@ -2287,6 +2293,7 @@ async fn test_append_only_table_high_volume() {
     // Test append-only table with high volume of data
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: true,
         row_identity: IdentityProp::None,
         batch_size: 10,
@@ -2341,6 +2348,7 @@ async fn test_append_only_table_basic() {
     // Create a test environment with append-only configuration
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: true, // Enable append-only mode
         row_identity: IdentityProp::None,
         batch_size: 2,
@@ -2404,6 +2412,7 @@ async fn test_append_only_table_basic() {
 async fn test_batch_ingestion() {
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: true, // Enable append-only mode
         row_identity: IdentityProp::None,
         batch_size: 2,
@@ -2450,6 +2459,7 @@ async fn test_batch_ingestion_with_gcs() {
 
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: true, // Enable append-only mode
         row_identity: IdentityProp::None,
         batch_size: 2,
@@ -2487,6 +2497,7 @@ async fn test_batch_ingestion_with_s3() {
 
     let temp_dir = tempdir().unwrap();
     let mooncake_table_config = MooncakeTableConfig {
+        mem_slice_bytes: usize::MAX,
         append_only: true, // Enable append-only mode
         row_identity: IdentityProp::None,
         batch_size: 2,

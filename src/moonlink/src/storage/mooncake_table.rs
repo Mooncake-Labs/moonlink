@@ -1329,7 +1329,10 @@ impl MooncakeTable {
     }
 
     pub fn should_flush(&self) -> bool {
-        self.mem_slice.get_num_rows() >= self.metadata.config.mem_slice_size
+        self.mem_slice.reached_flush_threshold(
+            self.metadata.config.mem_slice_size,
+            self.metadata.config.mem_slice_bytes,
+        )
     }
 
     /// Drains the current mem slice and prepares a disk slice for flushing.
@@ -2453,6 +2456,9 @@ mod lookup_key_tests;
 
 #[cfg(test)]
 mod compaction_group_tests;
+
+#[cfg(test)]
+mod size_tiered_compaction_tests;
 
 #[cfg(test)]
 mod catalog_robustness_tests;
