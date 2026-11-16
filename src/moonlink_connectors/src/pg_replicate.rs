@@ -629,21 +629,21 @@ impl PostgresConnection {
     /// snapshot's boundary LSN is streamed; the table handler drops streamed changes up to the
     /// boundary, which the copy already contains. This runs for empty tables too: changes streamed
     /// between joining the publication and the snapshot must still be dropped.
-    /// Returns whether an initial copy was performed.
+    /// Returns the LSN the copied rows are committed at, if the copy loaded any.
     pub async fn perform_initial_copy(
         &self,
         schema: &TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         is_recovery: bool,
         table_base_path: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<u64>> {
         let src_table_id = schema.src_table_id;
         let mut publication_source = PostgresSource::new(&self.uri, None, None, false).await?;
         if is_recovery {
             publication_source
                 .add_table_to_publication(&schema.table_name)
                 .await?;
-            return Ok(false);
+            return Ok(None);
         }
 
         publication_source
@@ -680,7 +680,7 @@ impl PostgresConnection {
             })
             .await?;
 
-        Ok(true)
+        Ok((progress.rows_copied > 0).then_some(progress.boundary_lsn.into()))
     }
 
     pub fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
@@ -1066,7 +1066,7 @@ impl PostgresConnection {
         }
 
         // Perform initial copy
-        let initial_copy_performed = match self
+        table_resources.initial_copy_lsn = match self
             .perform_initial_copy(
                 &table_schema,
                 table_resources.event_sender.clone(),
@@ -1075,7 +1075,7 @@ impl PostgresConnection {
             )
             .await
         {
-            Ok(performed) => performed,
+            Ok(copy_lsn) => copy_lsn,
             Err(e) => {
                 error!(error = ?e, table_name, "initial copy failed, removing the table again");
                 self.undo_add_table(
@@ -1090,7 +1090,7 @@ impl PostgresConnection {
         };
 
         assert!(
-            !(is_recovery && initial_copy_performed),
+            !(is_recovery && table_resources.initial_copy_lsn.is_some()),
             "initial copy should not be performed during recovery"
         );
         self.cmd_tx

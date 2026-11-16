@@ -110,6 +110,9 @@ impl ReplicationManager {
     /// If replication for this `uri` is not yet running a new replication
     /// source will be created.
     ///
+    /// Returns the LSN the rows of a new mirror's initial copy are committed at, if it copied any;
+    /// they are lost on a restart until a snapshot at that LSN is persisted.
+    ///
     /// # Arguments
     ///
     /// * secret_entry: secret necessary to access object storage, use local filesystem if not assigned.
@@ -122,7 +125,7 @@ impl ReplicationManager {
         moonlink_table_config: &mut MoonlinkTableConfig,
         read_state_filepath_remap: ReadStateFilepathRemap,
         is_recovery: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         debug!(%src_uri, table_name, "adding table through manager");
 
         // Error handling: don't allow duplicate mooncake table id be registered.
@@ -157,8 +160,8 @@ impl ReplicationManager {
             }
             Err(e) => Err(e),
         };
-        let src_table_id = match added {
-            Ok(src_table_id) => src_table_id,
+        let (src_table_id, initial_copy_lsn) = match added {
+            Ok(added) => added,
             Err(e) => {
                 // A failed first mirror must not leave a replication slot behind that holds the
                 // source's WAL forever (unless a mirror waiting to be restored needs it).
@@ -178,7 +181,7 @@ impl ReplicationManager {
 
         debug!(src_table_id, "table added through manager");
 
-        Ok(())
+        Ok(initial_copy_lsn)
     }
 
     /// Checks before adding a table through the connection of `key`: a second connection string

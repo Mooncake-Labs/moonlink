@@ -9,8 +9,8 @@ pub mod table_status;
 use arrow_schema::Schema;
 pub use error::{Error, Result};
 use futures::{stream, StreamExt, TryStreamExt};
+use moonlink::MooncakeTableId;
 pub use moonlink::ReadState;
-use moonlink::{MooncakeTableId, MoonlinkTableConfig};
 use moonlink::{ReadStateFilepathRemap, TableEventManager};
 use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::MetadataStoreTrait;
@@ -290,7 +290,7 @@ impl MoonlinkBackend {
         };
 
         // Add mooncake table to replication, and create corresponding mooncake table.
-        let moonlink_table_config: Result<MoonlinkTableConfig> = {
+        let (moonlink_table_config, initial_copy_lsn) = {
             let mut manager = self.replication_manager.write().await;
             let mut cur_moonlink_table_config = config_utils::parse_replication_table_config(
                 &table_config,
@@ -299,18 +299,32 @@ impl MoonlinkBackend {
                 &self.temp_files_dir,
             )?;
             // Moonlink table config will get updated later at replication manager.
-            manager
+            let initial_copy_lsn = manager
                 .add_table(
                     &src_uri,
-                    mooncake_table_id,
+                    mooncake_table_id.clone(),
                     &src_table_name,
                     &mut cur_moonlink_table_config,
                     self.read_state_filepath_remap.clone(),
                     /*is_recovery=*/ false,
                 )
                 .await?;
-            Ok(cur_moonlink_table_config)
+            (cur_moonlink_table_config, initial_copy_lsn)
         };
+
+        // Recovery resumes a recorded mirror from its iceberg table and the replication slot, which
+        // only holds changes after the copy: copied rows that are not persisted yet would be lost
+        // for good. So the mirror is recorded once they are; a restart before that loses the whole
+        // mirror, and create_table fails instead of returning.
+        if let Some(lsn) = initial_copy_lsn {
+            if let Err(e) = self.wait_for_persistence(&mooncake_table_id, lsn).await {
+                let mut manager = self.replication_manager.write().await;
+                if let Err(drop_error) = manager.drop_table(&mooncake_table_id).await {
+                    tracing::warn!(error = %drop_error, table = %mooncake_table_id, "failed to drop a mirror whose initial copy was not persisted");
+                }
+                return Err(e);
+            }
+        }
 
         // Create metadata store entry.
         self.metadata_store_accessor
@@ -319,10 +333,25 @@ impl MoonlinkBackend {
                 &table,
                 &src_table_name,
                 &src_uri,
-                moonlink_table_config?,
+                moonlink_table_config,
             )
             .await?;
 
+        Ok(())
+    }
+
+    /// Wait until the mirror has persisted everything up to `lsn` into iceberg.
+    async fn wait_for_persistence(
+        &self,
+        mooncake_table_id: &MooncakeTableId,
+        lsn: u64,
+    ) -> Result<()> {
+        let rx = {
+            let mut manager = self.replication_manager.write().await;
+            let writer = manager.get_table_event_manager(mooncake_table_id)?;
+            writer.initiate_snapshot(lsn).await
+        };
+        TableEventManager::synchronize_force_snapshot_request(rx, lsn).await?;
         Ok(())
     }
 

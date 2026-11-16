@@ -3,10 +3,12 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::{
-        assert_scan_ids_eq, crash_and_recover_backend_with_guard, current_wal_lsn,
-        get_database_uri, TestGuard, TestGuardMode, DATABASE, TABLE,
+        assert_scan_ids_eq, connect_to_postgres, crash_and_recover_backend_with_guard,
+        create_backend_from_base_path, current_wal_lsn, get_database_uri,
+        get_serialized_table_config, TestGuard, TestGuardMode, DATABASE, TABLE,
     };
     use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, SqliteMetadataStore};
+    use tempfile::TempDir;
 
     use serial_test::serial;
 
@@ -121,6 +123,114 @@ mod tests {
             [1, 2],
         )
         .await;
+    }
+
+    /// Set in the child process of [`test_restart_right_after_create_table_keeps_copied_rows`]:
+    /// the base path and the table config of the backend that creates the mirror.
+    const CRASH_CHILD_BASE_PATH: &str = "MOONLINK_TEST_CRASH_CHILD_BASE_PATH";
+    const CRASH_CHILD_TABLE_CONFIG: &str = "MOONLINK_TEST_CRASH_CHILD_TABLE_CONFIG";
+
+    /// Test scenario: moonlink dies right after create_table returns. Recovery resumes the mirror
+    /// from its iceberg table and the replication slot, which holds no change from before the copy,
+    /// so create_table must not return before the copied rows are persisted. The mirror is created
+    /// in a child process that exits the moment create_table returns: unlike shutting down a backend
+    /// in this process, that also stops its table handlers, as a crash does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_restart_right_after_create_table_keeps_copied_rows() {
+        let uri = get_database_uri();
+        if let Ok(base_path) = std::env::var(CRASH_CHILD_BASE_PATH) {
+            let backend = create_backend_from_base_path(base_path).await;
+            backend
+                .create_table(
+                    DATABASE.to_string(),
+                    TABLE.to_string(),
+                    "public.copy_restart".to_string(),
+                    uri,
+                    std::env::var(CRASH_CHILD_TABLE_CONFIG).unwrap(),
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+            std::process::exit(0);
+        }
+
+        let testing_directory = TempDir::new().unwrap();
+        let base_path = testing_directory.path().to_str().unwrap().to_string();
+        let (client, _) = connect_to_postgres(&uri).await;
+        let _ = client
+            .simple_query(
+                "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots
+                 WHERE slot_name = 'moonlink_slot_postgres';",
+            )
+            .await;
+        let _ = client
+            .simple_query("SELECT pg_drop_replication_slot('moonlink_slot_postgres')")
+            .await;
+        client
+            .simple_query(
+                "DROP TABLE IF EXISTS copy_restart;
+                 CREATE TABLE copy_restart (id BIGINT PRIMARY KEY, name TEXT);
+                 INSERT INTO copy_restart SELECT i, 'row-' || i FROM generate_series(1, 100) AS i;",
+            )
+            .await
+            .unwrap();
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "tests::test_restart_right_after_create_table_keeps_copied_rows",
+                "--test-threads=1",
+            ])
+            .env(CRASH_CHILD_BASE_PATH, &base_path)
+            .env(
+                CRASH_CHILD_TABLE_CONFIG,
+                get_serialized_table_config(&testing_directory),
+            );
+        let status = tokio::task::spawn_blocking(move || child.status().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            status.success(),
+            "the child creating the mirror failed: {status}"
+        );
+
+        let backend = create_backend_from_base_path(base_path).await;
+        let lsn = current_wal_lsn(&client).await;
+        assert_scan_ids_eq(
+            &backend,
+            DATABASE.to_string(),
+            TABLE.to_string(),
+            lsn,
+            1..=100,
+        )
+        .await;
+
+        // The recovered mirror keeps replicating on top of the copy.
+        client
+            .simple_query("INSERT INTO copy_restart VALUES (101, 'row-101');")
+            .await
+            .unwrap();
+        let lsn = current_wal_lsn(&client).await;
+        assert_scan_ids_eq(
+            &backend,
+            DATABASE.to_string(),
+            TABLE.to_string(),
+            lsn,
+            1..=101,
+        )
+        .await;
+
+        backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await
+            .unwrap();
+        backend.shutdown_connection(&uri, true).await;
+        client
+            .simple_query("DROP TABLE IF EXISTS copy_restart;")
+            .await
+            .unwrap();
     }
 
     /// Test scenario: perform a few requests on non-existent databases and tables, make sure error is correctly propagated.

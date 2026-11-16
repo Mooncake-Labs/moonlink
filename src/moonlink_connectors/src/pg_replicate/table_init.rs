@@ -49,6 +49,9 @@ pub struct TableResources {
     /// Status of the table as the replication slot sees it: errored only once that is persisted
     /// (see `spawn_errored_marker_writer`). Set when the table is added to replication.
     pub slot_status_tx: Option<watch::Sender<moonlink::TableStatus>>,
+    /// The LSN the rows of the table's initial copy are committed at, if the copy loaded any.
+    /// They are only in memory until a snapshot at this LSN is persisted.
+    pub initial_copy_lsn: Option<u64>,
 }
 
 /// Util function to delete and re-create the given directory.
@@ -175,6 +178,7 @@ pub async fn build_table_components(
         replication_state: table_replication_state,
         flush_lsn_rx: Some(flush_lsn_rx),
         slot_status_tx: None,
+        initial_copy_lsn: None,
     };
     Ok(table_resource)
 }
