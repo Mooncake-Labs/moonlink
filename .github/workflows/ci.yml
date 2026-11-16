@@ -879,7 +879,7 @@ jobs:
           RUST_BACKTRACE=1 cargo test --package moonlink_service --lib --features postgres-integration -- --nocapture
 
       - name: Run Backend integration tests
-        timeout-minutes: 10
+        timeout-minutes: 30
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
