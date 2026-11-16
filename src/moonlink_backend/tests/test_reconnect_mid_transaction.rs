@@ -23,6 +23,7 @@ fn table_config(tmp: &TempDir) -> String {
     let root = tmp.path().to_str().unwrap().to_string();
     let cfg = TableConfig {
         mooncake_config: MooncakeConfig {
+            mem_slice_bytes: None,
             skip_index_merge: true,
             skip_data_compaction: true,
             append_only: Some(false),
