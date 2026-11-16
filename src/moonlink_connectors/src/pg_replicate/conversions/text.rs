@@ -1,10 +1,13 @@
 use core::str;
 use std::{
+    borrow::Cow,
     fmt::format,
     num::{ParseFloatError, ParseIntError},
+    sync::LazyLock,
 };
 
 use bigdecimal::ParseBigDecimalError;
+use chrono::format::{Item, ParseResult, Parsed, StrftimeItems};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use thiserror::Error;
 use tokio_postgres::types::{Kind, Type};
@@ -65,7 +68,17 @@ pub struct TextFormatConverter;
 /// Postgres prints dates (ISO DateStyle) as `YYYY-MM-DD`, with more year digits after 9999 and a
 /// ` BC` suffix before year 1; chrono uses astronomical years (1 BC is year 0) and wants a sign on
 /// years beyond four digits. Returns the text with the year rewritten for chrono.
-fn chrono_date_text(text: &str) -> Result<String, FromTextError> {
+fn chrono_date_text(text: &str) -> Result<Cow<'_, str>, FromTextError> {
+    // Years 1 to 9999, nearly every value, read the same in chrono without a sign. Borrowing them
+    // keeps an allocation off every date and timestamp a copy converts.
+    let bytes = text.as_bytes();
+    if bytes.len() > 4
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && !text.ends_with(" BC")
+    {
+        return Ok(Cow::Borrowed(text));
+    }
     if matches!(text, "infinity" | "-infinity") {
         return Err(FromTextError::InfiniteDateTime(text.to_string()));
     }
@@ -78,28 +91,53 @@ fn chrono_date_text(text: &str) -> Result<String, FromTextError> {
         .parse()
         .map_err(|_| FromTextError::InvalidDateTime(text.to_string()))?;
     let year = if bc { 1 - year } else { year };
-    Ok(format!("{year:+05}{}", &text[digits..]))
+    Ok(Cow::Owned(format!("{year:+05}{}", &text[digits..])))
+}
+
+/// chrono's items for a format string. Parsed once into these statics: `parse_from_str` parses
+/// its format string again for every value, which costs more than reading the value.
+type ChronoFormat = LazyLock<Vec<Item<'static>>>;
+
+fn chrono_format(format: &'static str) -> Vec<Item<'static>> {
+    StrftimeItems::new(format)
+        .parse()
+        .expect("valid chrono format")
+}
+
+static DATE_FORMAT: ChronoFormat = LazyLock::new(|| chrono_format("%Y-%m-%d"));
+static TIME_FORMAT: ChronoFormat = LazyLock::new(|| chrono_format("%H:%M:%S%.f"));
+static TIMESTAMP_FORMAT: ChronoFormat = LazyLock::new(|| chrono_format("%Y-%m-%d %H:%M:%S%.f"));
+static TIMESTAMPTZ_FORMAT: ChronoFormat =
+    LazyLock::new(|| chrono_format("%Y-%m-%d %H:%M:%S%.f%#z"));
+static TIMESTAMPTZ_COLON_FORMAT: ChronoFormat =
+    LazyLock::new(|| chrono_format("%Y-%m-%d %H:%M:%S%.f%:z"));
+
+/// What `parse_from_str` reads before converting: the fields of `text` in `format`.
+fn parse_fields(format: &ChronoFormat, text: &str) -> ParseResult<Parsed> {
+    let mut parsed = Parsed::new();
+    chrono::format::parse(&mut parsed, text, format.iter())?;
+    Ok(parsed)
 }
 
 pub(crate) fn parse_date(text: &str) -> Result<NaiveDate, FromTextError> {
-    Ok(NaiveDate::parse_from_str(
-        &chrono_date_text(text)?,
-        "%Y-%m-%d",
-    )?)
+    Ok(parse_fields(&DATE_FORMAT, &chrono_date_text(text)?)?.to_naive_date()?)
+}
+
+fn parse_time(text: &str) -> Result<NaiveTime, FromTextError> {
+    Ok(parse_fields(&TIME_FORMAT, text)?.to_naive_time()?)
 }
 
 pub(crate) fn parse_timestamp(text: &str) -> Result<NaiveDateTime, FromTextError> {
-    Ok(NaiveDateTime::parse_from_str(
-        &chrono_date_text(text)?,
-        "%Y-%m-%d %H:%M:%S%.f",
-    )?)
+    // No offset adjustment, as in NaiveDateTime::parse_from_str.
+    Ok(parse_fields(&TIMESTAMP_FORMAT, &chrono_date_text(text)?)?
+        .to_naive_datetime_with_offset(0)?)
 }
 
 pub(crate) fn parse_timestamptz(text: &str) -> Result<DateTime<Utc>, FromTextError> {
     let text = chrono_date_text(text)?;
-    let value = match DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%#z") {
+    let value = match parse_fields(&TIMESTAMPTZ_FORMAT, &text).and_then(|p| p.to_datetime()) {
         Ok(value) => value,
-        Err(_) => DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%:z")?,
+        Err(_) => parse_fields(&TIMESTAMPTZ_COLON_FORMAT, &text)?.to_datetime()?,
     };
     Ok(value.into())
 }
@@ -293,13 +331,10 @@ impl TextFormatConverter {
                 |str| Ok(Some(parse_date(str)?)),
                 ArrayCell::Date,
             ),
-            Type::TIME => {
-                let val = NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?;
-                Ok(Cell::Time(val))
-            }
+            Type::TIME => Ok(Cell::Time(parse_time(str)?)),
             Type::TIME_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?)),
+                |str| Ok(Some(parse_time(str)?)),
                 ArrayCell::Time,
             ),
             Type::TIMESTAMP => Ok(Cell::TimeStamp(parse_timestamp(str)?)),
@@ -1232,6 +1267,178 @@ mod tests {
                 .unwrap()
                 .and_utc()
         );
+    }
+
+    #[test]
+    fn only_years_chrono_reads_differently_are_rewritten() {
+        for text in [
+            "2020-01-02",
+            "0001-01-01",
+            "9999-12-31 23:59:59.999999",
+            "2020-01-01 00:00:00-08",
+            "0044-03-15 12:00:00+05:30",
+        ] {
+            assert!(
+                matches!(chrono_date_text(text).unwrap(), Cow::Borrowed(t) if t == text),
+                "{text}"
+            );
+        }
+        for (text, rewritten) in [
+            ("2040-04-10 BC", "-2039-04-10"),
+            ("0001-01-01 BC", "+0000-01-01"),
+            ("10000-01-01", "+10000-01-01"),
+            ("12345-06-07 01:02:03", "+12345-06-07 01:02:03"),
+            ("0044-03-15 12:00:00+00 BC", "-0043-03-15 12:00:00+00"),
+        ] {
+            assert!(
+                matches!(chrono_date_text(text).unwrap(), Cow::Owned(t) if t == rewritten),
+                "{text}"
+            );
+        }
+    }
+
+    /// The date, time and timestamp parsers as they were: every year rewritten for chrono, and
+    /// chrono's format strings parsed for each value.
+    mod reference {
+        use super::*;
+
+        fn chrono_date_text(text: &str) -> Result<String, FromTextError> {
+            if matches!(text, "infinity" | "-infinity") {
+                return Err(FromTextError::InfiniteDateTime(text.to_string()));
+            }
+            let (text, bc) = match text.strip_suffix(" BC") {
+                Some(rest) => (rest, true),
+                None => (text, false),
+            };
+            let digits = text.find('-').unwrap_or(text.len());
+            let year: i32 = text[..digits]
+                .parse()
+                .map_err(|_| FromTextError::InvalidDateTime(text.to_string()))?;
+            let year = if bc { 1 - year } else { year };
+            Ok(format!("{year:+05}{}", &text[digits..]))
+        }
+
+        pub fn parse_date(text: &str) -> Result<NaiveDate, FromTextError> {
+            Ok(NaiveDate::parse_from_str(
+                &chrono_date_text(text)?,
+                "%Y-%m-%d",
+            )?)
+        }
+
+        pub fn parse_timestamp(text: &str) -> Result<NaiveDateTime, FromTextError> {
+            Ok(NaiveDateTime::parse_from_str(
+                &chrono_date_text(text)?,
+                "%Y-%m-%d %H:%M:%S%.f",
+            )?)
+        }
+
+        pub fn parse_time(text: &str) -> Result<NaiveTime, FromTextError> {
+            Ok(NaiveTime::parse_from_str(text, "%H:%M:%S%.f")?)
+        }
+
+        pub fn parse_timestamptz(text: &str) -> Result<DateTime<Utc>, FromTextError> {
+            let text = chrono_date_text(text)?;
+            let value =
+                match DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%#z") {
+                    Ok(value) => value,
+                    Err(_) => {
+                        DateTime::<FixedOffset>::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%:z")?
+                    }
+                };
+            Ok(value.into())
+        }
+    }
+
+    #[test]
+    fn dates_times_and_timestamps_parse_as_before() {
+        let dates = [
+            "2020-01-02",
+            "0000-01-01",
+            "0001-01-01",
+            "9999-12-31",
+            "2024-02-29",
+            "2023-02-29",
+            "2024-13-01",
+            "2024-1-1",
+            "2024-01-01x",
+            "2024-",
+            "2024",
+            "20240101",
+            "abcd-01-01",
+            "12-01-01",
+            "",
+            "-",
+            "-2024-01-01",
+            "+2024-01-01",
+            " 2024-01-01",
+            "2024-01-01 BC",
+            "2024-01-01 bc",
+            "2040-04-10 BC",
+            "10000-01-01",
+            "5874897-12-31",
+            "99999999999-01-01",
+            "infinity",
+            "-infinity",
+            "２０２４-01-01",
+        ];
+        let times = [
+            "",
+            " 00:00:00",
+            " 23:59:59.999999",
+            " 12:34:56.5",
+            " 24:00:00",
+            " 12:60:00",
+            " 12:00",
+            " 12:00:00.",
+            "T12:00:00",
+        ];
+        let zones = [
+            "",
+            "+00",
+            "-08",
+            "+05:30",
+            "+0530",
+            "+14",
+            "-12:45:30",
+            "Z",
+            " UTC",
+        ];
+        let suffixes = ["", " BC"];
+        for time in times {
+            let time = time.trim_start_matches([' ', 'T']);
+            for suffix in ["", "x", ".000001", "+00"] {
+                let text = format!("{time}{suffix}");
+                assert_eq!(
+                    format!("{:?}", parse_time(&text)),
+                    format!("{:?}", reference::parse_time(&text)),
+                    "{text}"
+                );
+            }
+        }
+        for date in dates {
+            assert_eq!(
+                format!("{:?}", parse_date(date)),
+                format!("{:?}", reference::parse_date(date)),
+                "{date}"
+            );
+            for time in times {
+                for zone in zones {
+                    for suffix in suffixes {
+                        let text = format!("{date}{time}{zone}{suffix}");
+                        assert_eq!(
+                            format!("{:?}", parse_timestamp(&text)),
+                            format!("{:?}", reference::parse_timestamp(&text)),
+                            "{text}"
+                        );
+                        assert_eq!(
+                            format!("{:?}", parse_timestamptz(&text)),
+                            format!("{:?}", reference::parse_timestamptz(&text)),
+                            "{text}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

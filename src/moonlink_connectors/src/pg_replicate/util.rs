@@ -76,6 +76,15 @@ pub(crate) fn normalize_numeric_cell(
     modifier: i32,
     cell: Cell,
 ) -> Result<Cell, String> {
+    // Only these cells can hold numeric values; the rest (most of them) need no type lookup.
+    if !matches!(
+        cell,
+        Cell::Numeric(_)
+            | Cell::Composite(_)
+            | Cell::Array(ArrayCell::Numeric(_) | ArrayCell::Composite(_))
+    ) {
+        return Ok(cell);
+    }
     // A domain's values are those of its base type.
     if let Kind::Domain(base) = typ.kind() {
         return normalize_numeric_cell(base, modifier, cell);
