@@ -363,6 +363,21 @@ mod tests {
             .get(0)
     }
 
+    /// Wait up to 30 s for postgres to have streamed `at_least` transactions for the moonlink slot
+    /// (slot statistics are reported about once a second, and decoding can lag the client by
+    /// seconds); returns the number streamed.
+    async fn wait_until_streamed(client: &Client, at_least: i64) -> i64 {
+        let mut streamed = streamed_transactions_sent(client).await;
+        for _ in 0..150 {
+            if streamed >= at_least {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            streamed = streamed_transactions_sent(client).await;
+        }
+        streamed
+    }
+
     /// Scan `mooncake` at `lsn` and count its rows per id, failing if the mirror stopped applying.
     async fn live_id_counts(
         backend: &MoonlinkBackend,
@@ -408,18 +423,14 @@ mod tests {
                 .await
                 .unwrap();
             // Wait until postgres streams the open transaction, then cut the stream.
-            for _ in 0..100 {
-                if streamed_transactions_sent(&client).await > streamed_before {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            wait_until_streamed(&client, streamed_before + 1).await;
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             terminate_walsender(&client).await;
             writer.simple_query("COMMIT").await.unwrap();
             let lsn = current_wal_lsn(&client).await;
             let got = live_id_counts(&backend, TABLE_A, lsn).await;
-            let streamed = streamed_transactions_sent(&client).await - streamed_before;
+            let streamed =
+                wait_until_streamed(&client, streamed_before + 2).await - streamed_before;
             let dups = got.values().filter(|c| **c > 1).count();
             let missing = (1..=N).filter(|id| !got.contains_key(id)).count();
             if streamed < 2 || dups > 0 || missing > 0 {
@@ -471,7 +482,7 @@ mod tests {
         let applied = current_wal_lsn(&client).await;
         persist(&backend, TABLE_A, applied).await;
         assert_eq!(
-            streamed_transactions_sent(&client).await - streamed_before,
+            wait_until_streamed(&client, streamed_before + 3).await - streamed_before,
             3,
             "the INSERT, UPDATE and DELETE were streamed"
         );
@@ -756,20 +767,23 @@ mod tests {
 
         let _work_mem = LogicalDecodingWorkMem::set("64kB").await;
         let streamed_before = streamed_transactions_sent(&client).await;
-        client
+        // Committed only once postgres has streamed it: decoding can lag the client by seconds.
+        let (writer, _writer_connection) = connect_to_postgres(&get_database_uri()).await;
+        writer
             .simple_query(&format!(
                 "BEGIN; INSERT INTO fp_t (id, pad) SELECT 100 + g, repeat('p', 200) \
-                 FROM generate_series(1, 3000) g; {} {} DELETE FROM fp_t WHERE id > 100; COMMIT;",
+                 FROM generate_series(1, 3000) g; {} {} DELETE FROM fp_t WHERE id > 100;",
                 delete_one(1),
                 delete_one(2)
             ))
             .await
             .unwrap();
-        let after_streamed = current_wal_lsn(&client).await;
         assert!(
-            streamed_transactions_sent(&client).await > streamed_before,
-            "the transaction was streamed"
+            wait_until_streamed(&client, streamed_before + 1).await > streamed_before,
+            "the transaction was not streamed before its commit"
         );
+        writer.simple_query("COMMIT;").await.unwrap();
+        let after_streamed = current_wal_lsn(&client).await;
         let got = live_id_counts(&backend, TABLE_A, after_streamed).await;
         cleanup(&backend, &[TABLE_A]).await;
         let want: HashMap<i64, u64> = [(1, 1), (2, 1), (3, 1)].into_iter().collect();
