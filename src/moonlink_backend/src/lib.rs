@@ -374,8 +374,9 @@ impl MoonlinkBackend {
     }
 
     /// Wait until the mirror has persisted everything up to `lsn` into iceberg. A failed
-    /// persistence is retried by the table handler with backoff, so it does not end the wait; the
-    /// mirror erroring (the handler gives up), stopping, or being dropped does.
+    /// persistence is retried by the table handler with backoff, so it does not end the wait; a
+    /// full disk, the mirror erroring (the handler gives up), stopping, or being dropped does. A
+    /// full disk only clears once someone frees space, and nothing else would end this wait.
     async fn wait_for_persistence(
         &self,
         mooncake_table_id: &MooncakeTableId,
@@ -395,12 +396,20 @@ impl MoonlinkBackend {
             else {
                 return Ok(());
             };
+            if e.is_storage_full() {
+                return Err(Error::disk_full(format!(
+                    "disk full during the initial copy of mirror {mooncake_table_id}: {e}; free \
+                     disk space and create the mirror again"
+                )));
+            }
             if mirror_status.has_changed().is_err()
                 || *mirror_status.borrow() != moonlink::TableStatus::Healthy
             {
                 return Err(e.into());
             }
             tracing::warn!(error = %e, table = %mooncake_table_id, lsn, "persisting the initial copy failed, waiting for the retry");
+            #[cfg(feature = "test-utils")]
+            moonlink::test_hooks::record_persistence_wait_retry();
             // Retries follow the handler's backoff; this only keeps an unexpected immediate
             // failure from spinning.
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -413,18 +422,25 @@ impl MoonlinkBackend {
 
         let mooncake_table_id = MooncakeTableId { database, table };
 
-        let table_exists = {
-            let mut manager = self.replication_manager.write().await;
-            manager.drop_table(&mooncake_table_id).await?
-        };
-        if !table_exists {
+        // Under the manager lock, like create_table's recording, so a drop and a create of the same
+        // name cannot interleave their metadata changes.
+        let mut manager = self.replication_manager.write().await;
+        if !manager.drop_table(&mooncake_table_id).await? {
             return Ok(());
         }
-
-        self.metadata_store_accessor
+        match self
+            .metadata_store_accessor
             .delete_table_metadata(&mooncake_table_id.database, &mooncake_table_id.table)
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(()) => Ok(()),
+            // A mirror dropped while create_table still waits for its copy is not recorded yet.
+            Err(e) if is_missing_metadata(&e) => {
+                tracing::debug!(table = %mooncake_table_id, "dropped a mirror that was not recorded yet");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Get the base directory for all mooncake tables.
@@ -606,6 +622,16 @@ impl MoonlinkBackend {
     pub async fn shutdown_connection(&self, uri: &str, postgres_drop_all: bool) {
         let mut manager = self.replication_manager.write().await;
         manager.shutdown_connection(uri, postgres_drop_all);
+    }
+}
+
+/// Whether deleting a mirror's metadata failed because there is none: no row for it, or no
+/// metadata table yet (it is created with the first recorded mirror).
+fn is_missing_metadata(e: &moonlink_metadata_store::error::Error) -> bool {
+    match e {
+        moonlink_metadata_store::error::Error::SqliteRowCountError(_) => true,
+        moonlink_metadata_store::error::Error::Sqlx(_) => e.to_string().contains("no such table"),
+        _ => false,
     }
 }
 

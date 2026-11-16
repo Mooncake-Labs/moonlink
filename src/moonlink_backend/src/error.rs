@@ -79,6 +79,11 @@ impl Error {
     pub fn io(message: String) -> Self {
         Self::Io(ErrorStruct::new(message, ErrorStatus::Permanent))
     }
+    /// The disk filled up; retrying after freeing space can succeed.
+    #[track_caller]
+    pub fn disk_full(message: String) -> Self {
+        Self::Io(ErrorStruct::new(message, ErrorStatus::Temporary))
+    }
     #[track_caller]
     pub fn insufficient_disk_space(required: u64, actual: u64) -> Self {
         let message = format!(

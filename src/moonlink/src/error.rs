@@ -247,7 +247,7 @@ impl Error {
     }
 
     /// Whether the error was caused by a full disk (ENOSPC), which goes away once space is freed.
-    pub(crate) fn is_storage_full(&self) -> bool {
+    pub fn is_storage_full(&self) -> bool {
         let mut source = self.error_struct().source();
         while let Some(err) = source {
             if let Some(io_err) = err.downcast_ref::<io::Error>() {

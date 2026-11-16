@@ -2192,12 +2192,9 @@ impl MooncakeTable {
         #[cfg(any(test, feature = "test-utils"))]
         let injected_failure = crate::test_hooks::take_injected_persistence_failure();
         #[cfg(not(any(test, feature = "test-utils")))]
-        let injected_failure = false;
-        let iceberg_persistence_res = if injected_failure {
-            Err(crate::Error::from(iceberg::Error::new(
-                iceberg::ErrorKind::Unexpected,
-                "injected transient persistence failure",
-            )))
+        let injected_failure: Option<crate::Error> = None;
+        let iceberg_persistence_res = if let Some(injected_failure) = injected_failure {
+            Err(injected_failure)
         } else {
             iceberg_table_manager
                 .sync_snapshot(snapshot_payload, persistence_file_params)
