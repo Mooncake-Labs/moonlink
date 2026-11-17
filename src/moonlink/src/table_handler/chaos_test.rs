@@ -580,17 +580,21 @@ impl ChaosState {
             return;
         }
 
+        // Between transactions the table is at its latest commit, also after an aborted stream, so a
+        // forced snapshot of that commit has to complete.
+        if self.txn_state == TxnState::Empty
+            && self.cur_lsn - self.non_table_update_cmd_call.force_snapshot_lsn
+                >= NON_UPDATE_COMMAND_INTERVAL_LSN
+        {
+            choices.push(EventKind::ForegroundForceSnapshot);
+            self.non_table_update_cmd_call.force_snapshot_lsn = self.cur_lsn;
+        }
+
         // Foreground table maintenance operations happen after a successfully committed transaction.
         if self.uncommitted_inserted_rows.is_empty()
             && self.uncommitted_inserted_rows.is_empty()
             && self.last_txn_is_committed
         {
-            if self.cur_lsn - self.non_table_update_cmd_call.force_snapshot_lsn
-                >= NON_UPDATE_COMMAND_INTERVAL_LSN
-            {
-                choices.push(EventKind::ForegroundForceSnapshot);
-                self.non_table_update_cmd_call.force_snapshot_lsn = self.cur_lsn;
-            }
             if self.cur_lsn - self.non_table_update_cmd_call.force_index_merge_lsn
                 >= NON_UPDATE_COMMAND_INTERVAL_LSN
             {
@@ -970,38 +974,57 @@ async fn validate_persisted_iceberg_table(
     snapshot_lsn: u64,
     expected_ids: Vec<i32>,
 ) {
-    let (event_sender, _event_receiver) = mpsc::channel(100);
-    let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
-    let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
-    replication_lsn_tx.send(snapshot_lsn).unwrap();
-    last_commit_lsn_tx.send(snapshot_lsn).unwrap();
+    // The validator is a second, read-only view of the live table's warehouse, not one of its
+    // readers: the live table's garbage collection keeps only the current and the previous
+    // iceberg version's files for it. Two more live commits (background maintenance, a retried
+    // persistence) while the view resolves its files can remove some, and then the view loads the
+    // table again. No new rows arrive while the chaos test validates, so a newer version holds the
+    // same rows at `snapshot_lsn`.
+    const MAX_VALIDATION_ATTEMPTS: usize = 10;
+    for attempt in 1..=MAX_VALIDATION_ATTEMPTS {
+        let (event_sender, _event_receiver) = mpsc::channel(100);
+        let (replication_lsn_tx, replication_lsn_rx) = watch::channel(0u64);
+        let (last_commit_lsn_tx, last_commit_lsn_rx) = watch::channel(0u64);
+        replication_lsn_tx.send(snapshot_lsn).unwrap();
+        last_commit_lsn_tx.send(snapshot_lsn).unwrap();
 
-    // Use a fresh new cache for new iceberg table manager.
-    let cache_temp_dir = tempdir().unwrap();
-    let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
+        // Use a fresh new cache for new iceberg table manager.
+        let cache_temp_dir = tempdir().unwrap();
+        let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
-    let mut table = create_mooncake_table_for_validation(
-        mooncake_table_metadata.clone(),
-        iceberg_table_config.clone(),
-        object_storage_cache,
-    )
-    .await;
-    table.register_table_notify(event_sender).await;
+        let mut table = create_mooncake_table_for_validation(
+            mooncake_table_metadata.clone(),
+            iceberg_table_config.clone(),
+            object_storage_cache,
+        )
+        .await;
+        table.register_table_notify(event_sender).await;
 
-    let read_state_filepath_remap = std::sync::Arc::new(|local_filepath: String| local_filepath);
-    let read_state_manager = ReadStateManager::new(
-        &table,
-        replication_lsn_rx.clone(),
-        last_commit_lsn_rx,
-        always_healthy_table_status(),
-        read_state_filepath_remap,
-    );
-    check_read_snapshot(
-        &read_state_manager,
-        Some(snapshot_lsn),
-        /*expected_ids=*/ &expected_ids,
-    )
-    .await;
+        let read_state_filepath_remap =
+            std::sync::Arc::new(|local_filepath: String| local_filepath);
+        let read_state_manager = ReadStateManager::new(
+            &table,
+            replication_lsn_rx.clone(),
+            last_commit_lsn_rx,
+            always_healthy_table_status(),
+            read_state_filepath_remap,
+        );
+        match read_state_manager.try_read(Some(snapshot_lsn)).await {
+            Ok(read_state) => {
+                check_read_state(&read_state, Some(snapshot_lsn), &expected_ids).await;
+                return;
+            }
+            // The resolution error keeps only the message of each file's error.
+            Err(e)
+                if attempt < MAX_VALIDATION_ATTEMPTS && format!("{e:?}").contains("NotFound") =>
+            {
+                eprintln!(
+                    "validation at LSN {snapshot_lsn}: files of the loaded iceberg version are gone, loading again: {e}"
+                );
+            }
+            Err(e) => panic!("validation read at LSN {snapshot_lsn} failed: {e:?}"),
+        }
+    }
 }
 
 async fn chaos_test_impl(mut env: TestEnvironment) {
@@ -1122,8 +1145,9 @@ async fn chaos_test_impl(mut env: TestEnvironment) {
 
     // Print out events in order if chaos test fails.
     if let Err(e) = task_result {
-        // Display all enqueued events for debugging and replay.
-        while let Some(cur_event) = env.handler_event_replay_rx.recv().await {
+        // Display all enqueued events for debugging and replay. The table handler may still be
+        // alive and hold the sender, so take what was recorded instead of waiting for its end.
+        while let Ok(cur_event) = env.handler_event_replay_rx.try_recv() {
             println!("{cur_event:?}");
         }
         // Propagate the panic to fail the test.

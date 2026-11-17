@@ -374,6 +374,41 @@ async fn test_validation_load_does_not_collect() {
     assert!(orphan.exists());
 }
 
+/// Nor does the owner's garbage collection wait for such a view: it is not one of the owner's
+/// readers, so a version it loaded loses its compacted-away files two owner commits later. The
+/// chaos test validator, which is such a view, loads the table again when that happens.
+#[tokio::test]
+async fn test_owner_gc_does_not_wait_for_a_read_only_view() {
+    let context = TestContext::new("gc");
+    let (mut table, mut rx) = open_gc_table(&context).await;
+    write_files(&mut table, &mut rx, 4).await;
+
+    let iceberg_table_config = test_iceberg_table_config(&context, "gc");
+    let mut table_config = test_mooncake_table_config(&context);
+    table_config.row_identity = IdentityProp::FullRow;
+    let cache_dir = tempfile::tempdir().unwrap();
+    let mut view = MooncakeTable::new_without_gc(
+        (*create_test_arrow_schema()).clone(),
+        "gc".to_string(),
+        1,
+        context.path(),
+        iceberg_table_config.clone(),
+        table_config,
+        create_test_object_storage_cache(&cache_dir),
+        create_test_filesystem_accessor(&iceberg_table_config),
+    )
+    .await
+    .unwrap();
+    let (view_notify_tx, _view_notify_rx) = mpsc::channel(100);
+    view.register_table_notify(view_notify_tx).await;
+    assert!(missing_files_in_read(&view).await.is_empty());
+
+    compact_everything(&mut table, &mut rx).await;
+    commit_row(&mut table, &mut rx, 100).await;
+    assert!(missing_files_in_read(&table).await.is_empty());
+    assert_eq!(missing_files_in_read(&view).await.len(), 4);
+}
+
 /// Leftovers of crashes or failed commits are removed when the table is loaded; referenced files
 /// are untouched.
 #[tokio::test]
