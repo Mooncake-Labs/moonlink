@@ -53,8 +53,9 @@ jobs:
       - name: clippy lint
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo deny check
-        run: cargo deny check
+      # Advisories are checked by cargo_deny_advisories.yml: a newly published one must not fail unrelated PRs.
+      - name: cargo deny check (bans, licenses, sources)
+        run: cargo deny check bans licenses sources
 
       - name: cargo dependency format and check
         run: cargo sort --workspace --check
