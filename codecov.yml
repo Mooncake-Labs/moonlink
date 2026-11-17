@@ -1,0 +1,10 @@
+# Coverage is reported on every PR, but doesn't block it: new lines are often test hooks, error paths or feature-gated
+# code that the measured test run doesn't reach.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
