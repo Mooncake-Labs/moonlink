@@ -10,14 +10,20 @@ use moonlink::{
 use moonlink::{ReadStateFilepathRemap, TableStatus, TableStatusReader};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tokio::time::Instant;
+use tracing::{debug, error, info, warn};
 
-/// How long a new connection waits for an earlier connection to the same database to finish
-/// shutting down, before the request fails with a retryable error.
-const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
+/// How long a request waits in all for earlier connections to the same database to finish
+/// shutting down, before it fails with a retryable error. Longer than [`RETRY_TASK_LIMIT`], so a
+/// shutdown that panicked (its retries end within that) or that finishes slowly is waited out.
+pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(45);
+
+/// A shutdown still running after this is taken as hung: it is reported and no longer waited for,
+/// so it cannot block new mirrors of its database until moonlink restarts.
+const SHUTDOWN_TASK_LIMIT: Duration = Duration::from_secs(120);
 
 /// How a background shutdown ended: of a replication connection, or of an errored mirror's
 /// source. It drops its database's publication and slot and finishes its retried removals from
@@ -43,14 +49,24 @@ fn shutdown_ended(end: Option<ShutdownEnd>) -> bool {
 pub struct PendingShutdowns(Vec<ShutdownWatch>);
 
 impl PendingShutdowns {
+    /// Whether all of them ended (checked without waiting).
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|watch| shutdown_ended(*watch.borrow()))
+    }
+
     /// Wait until they ended, at most [`SHUTDOWN_WAIT`]. Cancel-safe: nothing is consumed.
-    pub async fn wait(mut self) -> Result<()> {
+    pub async fn wait(self) -> Result<()> {
+        self.wait_until(Instant::now() + SHUTDOWN_WAIT).await
+    }
+
+    /// Wait until they ended, or fail with a retryable error at `deadline`. Cancel-safe.
+    pub async fn wait_until(mut self, deadline: Instant) -> Result<()> {
         let all_ended = async {
             for watch in self.0.iter_mut() {
                 loop {
                     let end = *watch.borrow_and_update();
                     if let Some(ShutdownEnd::Panicked(at)) = end {
-                        tokio::time::sleep(RETRY_TASK_LIMIT.saturating_sub(at.elapsed())).await;
+                        tokio::time::sleep_until(at + RETRY_TASK_LIMIT).await;
                         break;
                     }
                     // Ended, or its watcher is gone (the runtime is shutting down).
@@ -60,7 +76,7 @@ impl PendingShutdowns {
                 }
             }
         };
-        tokio::time::timeout(SHUTDOWN_WAIT, all_ended)
+        tokio::time::timeout_at(deadline, all_ended)
             .await
             .map_err(|_| Error::source_shutting_down("this database"))
     }
@@ -128,6 +144,17 @@ impl ReplicationManager {
         self.pending_shutdowns(key.map(String::as_str))
     }
 
+    /// The background shutdowns of `src_uri`'s database, found by its source key (contacting the
+    /// source the first time), whatever connection string they were for. For checking under the
+    /// manager lock without waiting there.
+    pub async fn pending_shutdowns_for_source(
+        &mut self,
+        src_uri: &str,
+    ) -> Result<PendingShutdowns> {
+        let key = self.source_key(src_uri).await?;
+        Ok(self.pending_shutdowns(Some(&key)))
+    }
+
     fn pending_shutdowns(&self, key: Option<&str>) -> PendingShutdowns {
         PendingShutdowns(
             key.and_then(|key| self.shutdowns.get(key))
@@ -141,15 +168,24 @@ impl ReplicationManager {
         self.prune_shutdowns();
         let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
-            let end = match task.await {
-                Ok(Ok(())) => ShutdownEnd::Finished,
-                Ok(Err(e)) => {
+            let mut task = task;
+            let end = match tokio::time::timeout(SHUTDOWN_TASK_LIMIT, &mut task).await {
+                Ok(Ok(Ok(()))) => ShutdownEnd::Finished,
+                Ok(Ok(Err(e))) => {
                     warn!(error = ?e, "a replication connection shut down with an error");
                     ShutdownEnd::Finished
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!(error = ?e, "a replication connection's shutdown task failed");
                     ShutdownEnd::Panicked(Instant::now())
+                }
+                Err(_) => {
+                    error!(
+                        "a replication connection's shutdown is still running after \
+                         {SHUTDOWN_TASK_LIMIT:?}; new mirrors of its database no longer wait for it, \
+                         and its publication or slot may need to be dropped by hand"
+                    );
+                    ShutdownEnd::Finished
                 }
             };
             let _ = tx.send(Some(end));
@@ -494,12 +530,18 @@ impl ReplicationManager {
             }
         };
         let needed_by_pending_mirror = self.pending_mirror_needs_slot(&key);
+        let name_has_other_placeholder = self.errored_tables.values().any(|other| {
+            other.src_table_name == errored.src_table_name
+                && self.uri_matches_key(&other.src_uri, &key)
+        });
         let live_connection = self.connections.get_mut(&key);
         if let Some(connection) = live_connection {
             let src_table_id = match src_table_id {
                 Some(src_table_id) => Some(src_table_id),
                 // A mirror recorded before source fingerprints: its table is the one that has its
                 // name now.
+                // Unless another mirror of this database waiting to be restored is for that name.
+                None if name_has_other_placeholder => None,
                 None => match connection.source_table_oid(&errored.src_table_name).await {
                     Ok(src_table_id) => src_table_id,
                     Err(e) => {
@@ -526,19 +568,10 @@ impl ReplicationManager {
         }
         // In the background, tracked like a connection's shutdown: a new connection to this
         // database waits for it.
+        // The whole publication is dropped, so the table needs no removal of its own.
         let src_uri = errored.src_uri.clone();
-        let src_table_name = errored.src_table_name.clone();
         let cleanup = tokio::spawn(async move {
             let mut source = PostgresConnection::new(src_uri).await?;
-            let src_table_id = match src_table_id {
-                Some(src_table_id) => Some(src_table_id),
-                None => source.source_table_oid(&src_table_name).await?,
-            };
-            if let Some(src_table_id) = src_table_id {
-                if let Err(e) = source.remove_table_from_publication(src_table_id).await {
-                    warn!(error = ?e, "failed to remove the dropped mirror's table from the publication");
-                }
-            }
             source.shutdown(/*drop_all=*/ true).await
         });
         self.track_shutdown(&key, vec![errored.src_uri.clone()], cleanup);
@@ -719,5 +752,89 @@ impl ReplicationManager {
             // Directly panic: table connection uri existence here is an invariant.
             .unwrap_or_else(|| panic!("connection {uri} not found"));
         Ok((*src_table_id, connection))
+    }
+}
+
+#[cfg(test)]
+mod shutdown_wait_tests {
+    use super::*;
+    use crate::error::{error_struct_has_cause, is_transient_cause};
+
+    fn manager(dir: &tempfile::TempDir) -> ReplicationManager {
+        let base = dir.path().to_str().unwrap().to_string();
+        ReplicationManager::new(
+            base.clone(),
+            ObjectStorageCache::new(moonlink::ObjectStorageCacheConfig::new(
+                1 << 20,
+                format!("{base}/cache"),
+                true,
+            )),
+        )
+    }
+
+    /// A shutdown of `key` that has not ended, and the sender that ends it.
+    fn pending(manager: &mut ReplicationManager, key: &str) -> watch::Sender<Option<ShutdownEnd>> {
+        let (tx, rx) = watch::channel(None);
+        manager
+            .shutdowns
+            .entry(key.to_string())
+            .or_default()
+            .push(rx);
+        tx
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicked_shutdown_is_waited_out_until_its_retries_have_ended() {
+        let (_tx, rx) = watch::channel(Some(ShutdownEnd::Panicked(Instant::now())));
+        let start = Instant::now();
+        PendingShutdowns(vec![rx]).wait().await.unwrap();
+        assert_eq!(start.elapsed(), RETRY_TASK_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_that_never_ends_fails_the_wait_with_a_retryable_error() {
+        let (_tx, rx) = watch::channel(None);
+        let start = Instant::now();
+        let err = PendingShutdowns(vec![rx]).wait().await.unwrap_err();
+        assert_eq!(start.elapsed(), SHUTDOWN_WAIT);
+        assert_eq!(
+            err.error_struct().status,
+            moonlink_error::ErrorStatus::Temporary
+        );
+        // So a recovery that hits it retries instead of persisting the mirror as errored.
+        assert!(error_struct_has_cause(
+            err.error_struct(),
+            &is_transient_cause
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_wait_leaves_the_shutdown_to_wait_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = manager(&dir);
+        let tx = pending(&mut manager, "a");
+        let first = manager.pending_shutdowns(Some("a")).wait();
+        assert!(tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .is_err());
+        assert!(!manager.pending_shutdowns(Some("a")).is_empty());
+        tx.send(Some(ShutdownEnd::Finished)).unwrap();
+        let start = Instant::now();
+        manager.pending_shutdowns(Some("a")).wait().await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        manager.prune_shutdowns();
+        assert!(manager.shutdowns.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_of_another_database_is_not_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = manager(&dir);
+        let _tx = pending(&mut manager, "a");
+        assert!(manager.pending_shutdowns(Some("b")).is_empty());
+        let start = Instant::now();
+        manager.pending_shutdowns(Some("b")).wait().await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert!(!manager.pending_shutdowns(Some("a")).is_empty());
     }
 }

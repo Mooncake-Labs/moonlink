@@ -441,6 +441,14 @@ pub(crate) fn watch_placeholders(
 mod tests {
     use super::*;
 
+    /// A recovery that times out waiting for an earlier connection's shutdown is retried; the
+    /// mirror is not persisted as errored.
+    #[test]
+    fn waiting_for_a_shutdown_is_transient() {
+        let e = crate::Error::from(moonlink_connectors::Error::source_shutting_down("db"));
+        assert!(is_transient(&e), "{e:?}");
+    }
+
     #[tokio::test]
     async fn panicking_recovery_is_an_error() {
         let err = recover_isolated(async { panic!("index rebuild failed") })

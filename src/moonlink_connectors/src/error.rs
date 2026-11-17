@@ -93,7 +93,11 @@ impl Error {
                  publication, replication slot or a dropped mirror's publication entry); retry"
             ),
             status: ErrorStatus::Temporary,
-            source: None,
+            // A timeout, so recovery (`is_transient_cause`) also treats it as transient.
+            source: Some(Arc::new(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "waiting for the shutdown")
+                    .into(),
+            )),
             location: Some(Location::caller().to_string()),
         })
     }

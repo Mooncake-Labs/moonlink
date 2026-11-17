@@ -12,7 +12,7 @@ use arrow::util::display::array_value_to_string;
 use common::{connect_to_postgres, current_wal_lsn, get_database_uri};
 use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_backend::MoonlinkBackend;
-use moonlink_connectors::pg_replicate::PostgresConnection;
+use moonlink_connectors::pg_replicate::{moved_removal_retries, PostgresConnection};
 use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serial_test::serial;
@@ -87,6 +87,12 @@ async fn setup(ddl: &str) -> (TempDir, MoonlinkBackend, Client) {
     // lock_timeout set, must not leak that setting.
     stream_large_transactions(&client, false).await;
     set_database_lock_timeout(&client, None).await;
+    client
+        .simple_query(
+            "DROP EVENT TRIGGER IF EXISTS rv_px_readd; DROP FUNCTION IF EXISTS rv_px_readd();",
+        )
+        .await
+        .unwrap();
     client.simple_query(ddl).await.unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = new_backend(&tmp).await.unwrap();
@@ -5034,6 +5040,26 @@ async fn a_mirror_re_created_while_its_drop_is_retried_replicates() {
         .unwrap();
 }
 
+/// Wait until a session runs moonlink's removal from the publication and waits for a lock.
+async fn wait_for_blocked_removal(client: &Client) {
+    for _ in 0..200 {
+        let waiting: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE 'DO $moonlink$%'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no removal from the publication waited for its lock");
+}
+
 /// Whether moonlink_pub has the relation with this oid.
 async fn published_oid(client: &Client, oid: u32) -> bool {
     client
@@ -5127,11 +5153,13 @@ async fn publication_removal_rolls_back_if_the_table_stays_published() {
     )
     .await;
     let oid = table_oid(&client, "rv_px").await;
+    let moved_before = moved_removal_retries();
     let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
     conn.remove_table_from_publication(oid).await.unwrap();
     assert_eq!(conn.pending_retry_count(), 1);
     conn.wait_for_pending_retries().await;
     assert!(published_oid(&client, oid).await);
+    assert!(moved_removal_retries() > moved_before);
     client
         .simple_query(
             "DROP EVENT TRIGGER rv_px_readd; DROP FUNCTION rv_px_readd();
@@ -5160,6 +5188,7 @@ async fn a_renamed_sources_name_reused_while_its_drop_is_retried_keeps_the_new_t
     mirror(&backend, &tmp, "rv_rr_keep_mc", "public.rv_rr_keep", &uri).await;
     mirror(&backend, &tmp, "rv_rr_mc", "public.rv_rr", &uri).await;
     let old_oid = table_oid(&client, "rv_rr").await;
+    let moved_before = moved_removal_retries();
 
     set_database_lock_timeout(&client, Some("50ms")).await;
     let (locker, _) = connect_to_postgres(&uri).await;
@@ -5175,7 +5204,8 @@ async fn a_renamed_sources_name_reused_while_its_drop_is_retried_keeps_the_new_t
         .drop_table(DB.to_string(), "rv_rr_mc".to_string())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The retried removal waits for the publication lock, having looked the table's name up.
+    wait_for_blocked_removal(&client).await;
     locker
         .simple_query(
             "ALTER TABLE rv_rr RENAME TO rv_rr_old;
@@ -5200,6 +5230,8 @@ async fn a_renamed_sources_name_reused_while_its_drop_is_retried_keeps_the_new_t
         !published_oid(&client, old_oid).await,
         "the renamed old table is still published"
     );
+    // The name it looked up meant the new table by the time the lock was granted.
+    assert!(moved_removal_retries() > moved_before);
     assert!(published_oid(&client, table_oid(&client, "rv_rr").await).await);
     assert_eq!(snapshot_error(&backend, "rv_rr_mc", lsn).await, None);
     assert_eq!(

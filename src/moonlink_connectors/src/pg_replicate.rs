@@ -722,8 +722,12 @@ impl PostgresConnection {
                     });
                     // A lock held for long (VACUUM, an idle transaction) fails the attempt
                     // instead of blocking it, so the retries end.
+                    // And the statement cannot outlive the retry task on the server.
                     let attempt = match client
-                        .simple_query(&format!("SET lock_timeout = '{RETRY_LOCK_TIMEOUT}';"))
+                        .simple_query(&format!(
+                            "SET lock_timeout = '{RETRY_LOCK_TIMEOUT}'; \
+                             SET statement_timeout = '{RETRY_STATEMENT_TIMEOUT}';"
+                        ))
                         .await
                     {
                         Ok(_) => client.simple_query(drop_query).await,
@@ -732,6 +736,12 @@ impl PostgresConnection {
                     match attempt {
                         Ok(_) => break Ok(()),
                         Err(e) => {
+                            if e.code()
+                                .is_some_and(|code| code.code() == REMOVAL_MOVED_SQLSTATE)
+                            {
+                                MOVED_REMOVAL_RETRIES
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                             match e.code() {
                                 Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) => {
                                     break Ok(());
@@ -882,15 +892,9 @@ impl PostgresConnection {
                     self.retry_handles.push(handle);
                     Ok(vec![])
                 }
-                // The table was renamed or dropped (or its schema) between finding its name and
-                // removing it: the retry looks the name up again.
-                Some(&SqlState::UNDEFINED_TABLE) | Some(&SqlState::INVALID_SCHEMA_NAME) => {
-                    warn!("table renamed or dropped during the cleanup, retrying in background");
-                    let handle = Self::retry_drop(&self.uri, drop_query);
-                    self.retry_handles.push(handle);
-                    Ok(vec![])
-                }
+                // The table moved under its name lookup: the retry looks the name up again.
                 Some(code) if code.code() == REMOVAL_MOVED_SQLSTATE => {
+                    MOVED_REMOVAL_RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     warn!("table renamed or dropped during the cleanup, retrying in background");
                     let handle = Self::retry_drop(&self.uri, drop_query);
                     self.retry_handles.push(handle);
@@ -934,7 +938,10 @@ impl PostgresConnection {
         debug!(table_name, "adding table");
         // A drop of an earlier mirror of this table may still be retrying in the background: if
         // it removed the table from the publication after this mirror added it, this mirror would
-        // receive nothing.
+        // receive nothing. This connection served that mirror (a drop of the database's last
+        // mirror shuts the connection down instead, which a new connection waits for), and the
+        // wait runs under the manager lock; it is short, as each retry ends within
+        // RETRY_TASK_LIMIT and only acts on the dropped table's oid.
         self.wait_for_pending_retries().await;
         self.check_not_inheritance_parent(table_name).await?;
         // A mirror whose source changed since it was recorded is not resumed.
@@ -1542,9 +1549,10 @@ pub struct TableStatusWatch {
 }
 
 /// Removes the table with oid `src_table_id` from moonlink_pub if the publication still has it,
-/// under the name the oid has now. If the oid is still published afterwards (the table was renamed
-/// or dropped between the name lookup and the removal, so the name meant another table or none),
-/// it rolls back and fails with [`REMOVAL_MOVED_SQLSTATE`], to be retried with a fresh lookup.
+/// under the name the oid has now. If the oid is still published afterwards, or the name no longer
+/// means that oid (the table was renamed or dropped between the lookup and the removal, so the name
+/// meant another table or none), it rolls back and fails with [`REMOVAL_MOVED_SQLSTATE`], to be
+/// retried with a fresh lookup.
 /// ONLY: without it postgres also drops the table's inheritance children, which other mirrors may
 /// still need.
 pub(crate) fn remove_from_publication_query(src_table_id: SrcTableId) -> String {
@@ -1563,7 +1571,8 @@ pub(crate) fn remove_from_publication_query(src_table_id: SrcTableId) -> String 
              EXCEPTION WHEN undefined_object OR undefined_table OR invalid_schema_name THEN \
                  NULL; \
              END; \
-             IF EXISTS (SELECT 1 FROM pg_publication_rel WHERE prpubid = pub AND prrelid = {src_table_id}::oid) THEN \
+             IF EXISTS (SELECT 1 FROM pg_publication_rel WHERE prpubid = pub AND prrelid = {src_table_id}::oid) \
+                 OR to_regclass(rel)::oid IS DISTINCT FROM {src_table_id}::oid THEN \
                  RAISE EXCEPTION USING ERRCODE = '{REMOVAL_MOVED_SQLSTATE}', \
                      MESSAGE = 'relation {src_table_id} moved while being removed from moonlink_pub'; \
              END IF; \
@@ -1579,6 +1588,16 @@ const REMOVAL_MOVED_SQLSTATE: &str = "ML001";
 pub(crate) const RETRY_TASK_LIMIT: Duration = Duration::from_secs(30);
 const RETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_LOCK_TIMEOUT: &str = "1s";
+const RETRY_STATEMENT_TIMEOUT: &str = "5s";
+
+static MOVED_REMOVAL_RETRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Removals from the publication retried because the table moved under the name lookup, in this
+/// process (see [`remove_from_publication_query`]).
+pub fn moved_removal_retries() -> usize {
+    MOVED_REMOVAL_RETRIES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// 42704 from a DO statement can also mean plpgsql is not installed, which retrying cannot fix
 /// and must not count as "already removed".
