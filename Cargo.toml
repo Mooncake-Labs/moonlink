@@ -42,7 +42,7 @@ iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "4a6ea15a7dd73
   "storage-fs",
 ] }
 itertools = "0.14"
-lru = "0.16"
+lru = "0.18.2"
 moka = { version = "0.12", features = ["future"] }
 moonlink = { path = "src/moonlink" }
 moonlink_backend = { path = "src/moonlink_backend" }
