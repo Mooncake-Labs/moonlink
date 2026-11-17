@@ -977,8 +977,8 @@ async fn validate_persisted_iceberg_table(
     // The validator is a second, read-only view of the live table's warehouse, not one of its
     // readers: the live table's garbage collection keeps only the current and the previous
     // iceberg version's files for it. Two more live commits (background maintenance, a retried
-    // persistence) while the view resolves its files can remove some, and then the view loads the
-    // table again. No new rows arrive while the chaos test validates, so a newer version holds the
+    // persistence) while the view loads or resolves its files can remove some, and then the view
+    // loads the table again. No new rows arrive while the chaos test validates, so a newer version holds the
     // same rows at `snapshot_lsn`.
     const MAX_VALIDATION_ATTEMPTS: usize = 10;
     for attempt in 1..=MAX_VALIDATION_ATTEMPTS {
@@ -992,12 +992,26 @@ async fn validate_persisted_iceberg_table(
         let cache_temp_dir = tempdir().unwrap();
         let object_storage_cache = create_test_object_storage_cache(&cache_temp_dir);
 
-        let mut table = create_mooncake_table_for_validation(
+        // Loading reads files of the version too (index blocks, deletion vectors), which can be
+        // gone the same way.
+        let mut table = match try_create_mooncake_table_for_validation(
             mooncake_table_metadata.clone(),
             iceberg_table_config.clone(),
             object_storage_cache,
         )
-        .await;
+        .await
+        {
+            Ok(table) => table,
+            Err(e)
+                if attempt < MAX_VALIDATION_ATTEMPTS && format!("{e:?}").contains("NotFound") =>
+            {
+                eprintln!(
+                    "validation at LSN {snapshot_lsn}: files of the loaded iceberg version are gone, loading again: {e}"
+                );
+                continue;
+            }
+            Err(e) => panic!("validation load at LSN {snapshot_lsn} failed: {e:?}"),
+        };
         table.register_table_notify(event_sender).await;
 
         let read_state_filepath_remap =

@@ -455,6 +455,22 @@ pub(crate) async fn create_mooncake_table_for_validation(
     iceberg_table_config: IcebergTableConfig,
     object_storage_cache: Arc<dyn CacheTrait>,
 ) -> MooncakeTable {
+    try_create_mooncake_table_for_validation(
+        mooncake_table_metadata,
+        iceberg_table_config,
+        object_storage_cache,
+    )
+    .await
+    .unwrap()
+}
+
+/// [`create_mooncake_table_for_validation`] that returns the error of loading the table.
+#[allow(dead_code)]
+pub(crate) async fn try_create_mooncake_table_for_validation(
+    mooncake_table_metadata: Arc<MooncakeTableMetadata>,
+    iceberg_table_config: IcebergTableConfig,
+    object_storage_cache: Arc<dyn CacheTrait>,
+) -> crate::Result<MooncakeTable> {
     MooncakeTable::new_without_gc(
         create_test_arrow_schema().as_ref().clone(),
         ICEBERG_TEST_TABLE.to_string(),
@@ -466,7 +482,6 @@ pub(crate) async fn create_mooncake_table_for_validation(
         create_test_filesystem_accessor(&iceberg_table_config),
     )
     .await
-    .unwrap()
 }
 
 /// Test util function to create mooncake table and table notify.
