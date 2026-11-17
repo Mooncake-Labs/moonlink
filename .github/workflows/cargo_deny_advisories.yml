@@ -1,0 +1,62 @@
+name: cargo deny advisories
+
+# RustSec advisories are published independently of moonlink's code, so checking them on every PR lets a new advisory
+# fail unrelated PRs. They are checked where they can change: PRs that touch the dependencies or the cargo-deny config,
+# every push to main and v0.3-dev, and once a day. The other cargo-deny checks (bans, licenses, sources) depend only on
+# the repository and stay in CI's "Format & Clippy" job.
+on:
+  push:
+    branches: [main, v0.3-dev]
+  pull_request:
+    branches: [main, v0.3-dev, 'slim/**']
+    paths:
+      - Cargo.toml
+      - '**/Cargo.toml'
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/cargo_deny_advisories.yml
+  # GitHub runs scheduled workflows on the default branch only.
+  schedule:
+    - cron: "17 3 * * *" # every day at 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-deny-advisories-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  advisories:
+    name: cargo deny advisories
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check advisories
+        run: cargo deny check advisories
+
+  # A separate job, so that a failure found by the daily run (a new advisory) stands out on the Actions page.
+  advisories_daily:
+    name: cargo deny advisories (daily)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check advisories
+        run: cargo deny check advisories
