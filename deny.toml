@@ -9,7 +9,6 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
-    "bzip2-1.0.6",
     "CC0-1.0",
     "CDDL-1.0",
     "CDLA-Permissive-2.0",
@@ -17,7 +16,6 @@ allow = [
     # Moonlink permission.
     "LicenseRef-BSL-1.1",
     "MIT",
-    "MPL-2.0",
     "Unicode-3.0",
 ]
 
@@ -28,57 +26,40 @@ allow-git = [
     "https://github.com/Mooncake-Labs/rust-postgres.git?rev=14c8e599f5551a8caa96ff5023685a6f537a1455",
 ]
 
-# TODO(hjiang): Cleanup these unmaintained crates.
+# Advisories without a fix moonlink can take. Each entry says why it is acceptable; remove it once a fix is reachable.
 [advisories]
 ignore = [
-    "RUSTSEC-2023-0071", # rsa - marvin attack
-    "RUSTSEC-2024-0436", # paste - unmaintained
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained, with no known vulnerability; it only expands macros at compile time" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained, with no known vulnerability; moonlink encodes its own RPC and metadata messages with it" },
+    { id = "RUSTSEC-2026-0459", reason = "the bundled SQLite bug needs a crafted database and -wal file pair; moonlink only opens its own metadata store in its private data directory, and sqlx 0.8 pins libsqlite3-sys 0.30 (sqlx 0.9 needs Rust 1.94 and still caps it below the fix)" },
+    { id = "RUSTSEC-2026-0435", reason = "denial of service on hostile thrift input; parquet uses it for file footers, and moonlink only reads parquet files it wrote itself (load_files is rejected). The fix needs parquet 58.4, an arrow/parquet major bump tied to the iceberg pin" },
+    { id = "RUSTSEC-2026-0194", reason = "CPU denial of service on hostile XML; quick-xml parses responses of the configured object store (opendal and reqsign, pinned by iceberg) and, with the profile-test feature only, pprof's flamegraphs. The fix needs quick-xml 0.41, which none of them accept" },
+    { id = "RUSTSEC-2026-0195", reason = "memory denial of service on hostile XML; same quick-xml users and constraint as RUSTSEC-2026-0194" },
 ]
 
 # TODO(hjiang): Resolve all duplicate dependencies.
 [bans]
 skip = [
-    { name = "axum" },
-    { name = "axum-core" },
     { name = "bitflags" },
-    { name = "bzip2" },
     { name = "darling" },
     { name = "darling_core" },
     { name = "darling_macro" },
     { name = "foldhash" },
     { name = "getrandom" },
     { name = "hashbrown" },
-    { name = "indexmap" },
     { name = "itertools" },
-    { name = "matchit" },
     { name = "nix" },
     { name = "ordered-float" },
-    { name = "petgraph" },
-    { name = "prost" },
-    { name = "prost-derive" },
-    { name = "prost-types" },
     { name = "quick-xml" },
     { name = "rand" },
     { name = "rand_chacha" },
     { name = "rand_core" },
     { name = "spin" },
-    { name = "sqlparser" },
     { name = "socket2" },
-    { name = "tonic" },
-    { name = "tower" },
     { name = "typed-builder" },
     { name = "typed-builder-macro" },
     { name = "windows-link" },
     { name = "windows-sys" },
-    { name = "windows-targets" },
-    { name = "windows_aarch64_gnullvm" },
-    { name = "windows_aarch64_msvc" },
-    { name = "windows_i686_gnu" },
-    { name = "windows_i686_gnullvm" },
-    { name = "windows_i686_msvc" },
     { name = "windows-result" },
     { name = "windows-strings" },
-    { name = "windows_x86_64_gnu" },
-    { name = "windows_x86_64_gnullvm" },
-    { name = "windows_x86_64_msvc" },
 ]
