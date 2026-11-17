@@ -687,7 +687,19 @@ impl PostgresConnection {
         let uri = uri.to_string();
         let drop_query = drop_query.to_string();
         tokio::spawn(async move {
-            let result = Self::retry_drop_impl(&uri, &drop_query).await;
+            let result = match tokio::time::timeout(
+                RETRY_TASK_LIMIT,
+                Self::retry_drop_impl(&uri, &drop_query),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(PostgresSourceError::Io(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!("cleanup statement still failing after {RETRY_TASK_LIMIT:?}"),
+                ))
+                .into()),
+            };
             if let Err(e) = &result {
                 warn!(error = ?e, drop_query, "gave up retrying a cleanup statement");
             }
@@ -699,21 +711,32 @@ impl PostgresConnection {
         let mut retry_count = 0;
         loop {
             let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
-            match connect(uri, tls).await {
+            let mut config: Config = uri.parse().map_err(PostgresSourceError::from)?;
+            config.connect_timeout(RETRY_CONNECT_TIMEOUT);
+            match config.connect(tls).await {
                 Ok((client, connection)) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
                             warn!("connection error: {}", e);
                         }
                     });
-                    match client.simple_query(drop_query).await {
+                    // A lock held for long (VACUUM, an idle transaction) fails the attempt
+                    // instead of blocking it, so the retries end.
+                    let attempt = match client
+                        .simple_query(&format!("SET lock_timeout = '{RETRY_LOCK_TIMEOUT}';"))
+                        .await
+                    {
+                        Ok(_) => client.simple_query(drop_query).await,
+                        Err(e) => Err(e),
+                    };
+                    match attempt {
                         Ok(_) => break Ok(()),
                         Err(e) => {
                             match e.code() {
                                 Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) => {
                                     break Ok(());
                                 }
-                                Some(&SqlState::UNDEFINED_OBJECT) => {
+                                Some(&SqlState::UNDEFINED_OBJECT) if !is_missing_language(&e) => {
                                     break Ok(());
                                 }
                                 _ => {}
@@ -859,13 +882,23 @@ impl PostgresConnection {
                     self.retry_handles.push(handle);
                     Ok(vec![])
                 }
-                Some(&SqlState::UNDEFINED_TABLE) => {
-                    warn!("table already dropped, skipping");
+                // The table was renamed or dropped (or its schema) between finding its name and
+                // removing it: the retry looks the name up again.
+                Some(&SqlState::UNDEFINED_TABLE) | Some(&SqlState::INVALID_SCHEMA_NAME) => {
+                    warn!("table renamed or dropped during the cleanup, retrying in background");
+                    let handle = Self::retry_drop(&self.uri, drop_query);
+                    self.retry_handles.push(handle);
                     Ok(vec![])
                 }
-                Some(&SqlState::UNDEFINED_OBJECT) => {
-                    // Object not present in publication (e.g., relation not part of publication)
-                    warn!("object not present (idempotent), skipping");
+                Some(code) if code.code() == REMOVAL_MOVED_SQLSTATE => {
+                    warn!("table renamed or dropped during the cleanup, retrying in background");
+                    let handle = Self::retry_drop(&self.uri, drop_query);
+                    self.retry_handles.push(handle);
+                    Ok(vec![])
+                }
+                Some(&SqlState::UNDEFINED_OBJECT) if !is_missing_language(&e) => {
+                    // The publication is gone, or the table is no longer in it.
+                    debug!("object not present (idempotent), skipping");
                     Ok(vec![])
                 }
                 opt if is_transport_like(opt) => {
@@ -1191,15 +1224,26 @@ impl PostgresConnection {
         if let Some(watch) = self.fingerprint_watch.take() {
             watch.abort();
         }
+        let mut first_error = None;
         if drop_all {
-            self.drop_publication().await?;
-            self.drop_replication_slot().await?;
+            if let Err(e) = self.drop_publication().await {
+                first_error.get_or_insert(e);
+            }
+            if let Err(e) = self.drop_replication_slot().await {
+                first_error.get_or_insert(e);
+            }
         }
-        // Wait for any pending retry operations to complete
+        // Always: a retried drop must not outlive the shutdown, which a new connection to this
+        // database waits for.
         self.wait_for_pending_retries().await;
 
         debug!("replication connection shut down");
-        Ok(())
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Background retries of cleanup statements not finished yet (or not yet collected).
+    pub fn pending_retry_count(&self) -> usize {
+        self.retry_handles.len()
     }
 
     /// Spawn replication task
@@ -1498,24 +1542,49 @@ pub struct TableStatusWatch {
 }
 
 /// Removes the table with oid `src_table_id` from moonlink_pub if the publication still has it,
-/// under the name the oid has now, and fails (rolling back) if that name took out another table.
+/// under the name the oid has now. If the oid is still published afterwards (the table was renamed
+/// or dropped between the name lookup and the removal, so the name meant another table or none),
+/// it rolls back and fails with [`REMOVAL_MOVED_SQLSTATE`], to be retried with a fresh lookup.
 /// ONLY: without it postgres also drops the table's inheritance children, which other mirrors may
 /// still need.
-fn remove_from_publication_query(src_table_id: SrcTableId) -> String {
+pub(crate) fn remove_from_publication_query(src_table_id: SrcTableId) -> String {
     format!(
         "DO $moonlink$ \
-         DECLARE pub oid; rel regclass; \
+         DECLARE pub oid; rel text; \
          BEGIN \
-             SELECT p.oid, r.prrelid::regclass INTO pub, rel FROM pg_publication p \
+             SELECT p.oid, format('%I.%I', n.nspname, c.relname) INTO pub, rel FROM pg_publication p \
                  JOIN pg_publication_rel r ON r.prpubid = p.oid \
-                 WHERE p.pubname = 'moonlink_pub' AND r.prrelid = {src_table_id}; \
+                 JOIN pg_class c ON c.oid = r.prrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE p.pubname = 'moonlink_pub' AND r.prrelid = {src_table_id}::oid; \
              IF rel IS NULL THEN RETURN; END IF; \
-             EXECUTE format('ALTER PUBLICATION moonlink_pub DROP TABLE ONLY %s', rel); \
-             IF EXISTS (SELECT 1 FROM pg_publication_rel WHERE prpubid = pub AND prrelid = {src_table_id}) THEN \
-                 RAISE EXCEPTION 'removing relation {src_table_id} from moonlink_pub took out another table'; \
+             BEGIN \
+                 EXECUTE format('ALTER PUBLICATION moonlink_pub DROP TABLE ONLY %s', rel); \
+             EXCEPTION WHEN undefined_object OR undefined_table OR invalid_schema_name THEN \
+                 NULL; \
+             END; \
+             IF EXISTS (SELECT 1 FROM pg_publication_rel WHERE prpubid = pub AND prrelid = {src_table_id}::oid) THEN \
+                 RAISE EXCEPTION USING ERRCODE = '{REMOVAL_MOVED_SQLSTATE}', \
+                     MESSAGE = 'relation {src_table_id} moved while being removed from moonlink_pub'; \
              END IF; \
          END $moonlink$;"
     )
+}
+
+/// Raised by [`remove_from_publication_query`] when the table moved under its name lookup.
+const REMOVAL_MOVED_SQLSTATE: &str = "ML001";
+
+/// Each background retry of a cleanup statement ends within this, so shutdowns (which wait for
+/// them) end too.
+pub(crate) const RETRY_TASK_LIMIT: Duration = Duration::from_secs(30);
+const RETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const RETRY_LOCK_TIMEOUT: &str = "1s";
+
+/// 42704 from a DO statement can also mean plpgsql is not installed, which retrying cannot fix
+/// and must not count as "already removed".
+fn is_missing_language(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error()
+        .is_some_and(|db| db.message().starts_with("language "))
 }
 
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]

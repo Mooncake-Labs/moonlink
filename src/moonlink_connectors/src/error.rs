@@ -84,6 +84,20 @@ impl Error {
         error_struct_has_cause(self.error_struct(), &is_transient_cause)
     }
 
+    /// A new connection to a source must wait for an earlier one to finish shutting down.
+    #[track_caller]
+    pub fn source_shutting_down(source: &str) -> Self {
+        Error::Io(ErrorStruct {
+            message: format!(
+                "an earlier connection to {source} is still shutting down (dropping its \
+                 publication, replication slot or a dropped mirror's publication entry); retry"
+            ),
+            status: ErrorStatus::Temporary,
+            source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+
     #[track_caller]
     pub fn table_not_found(table_name: String) -> Self {
         Error::TableNotFound(ErrorStruct {

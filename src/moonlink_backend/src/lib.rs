@@ -289,6 +289,15 @@ impl MoonlinkBackend {
             table: table.clone(),
         };
 
+        // An earlier connection to this source may still be shutting down; wait for it without
+        // the manager lock, which every other request needs (bounded; a retryable error then).
+        let pending_shutdowns = self
+            .replication_manager
+            .read()
+            .await
+            .pending_shutdowns_for_uri(&src_uri);
+        pending_shutdowns.wait().await?;
+
         // Add mooncake table to replication, and create corresponding mooncake table.
         let (moonlink_table_config, initial_copy_lsn, mirror_status) = {
             let mut manager = self.replication_manager.write().await;

@@ -1,7 +1,7 @@
 use crate::errored_tables::{self, ErroredTable};
 use crate::pg_replicate::source_fingerprint;
 use crate::pg_replicate::table::SrcTableId;
-use crate::pg_replicate::{PostgresConnection, SourceIdentity};
+use crate::pg_replicate::{PostgresConnection, SourceIdentity, RETRY_TASK_LIMIT};
 use crate::ReplicationConnection;
 use crate::{Error, Result};
 use moonlink::{
@@ -10,9 +10,61 @@ use moonlink::{
 use moonlink::{ReadStateFilepathRemap, TableStatus, TableStatusReader};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
+
+/// How long a new connection waits for an earlier connection to the same database to finish
+/// shutting down, before the request fails with a retryable error.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
+
+/// How a background shutdown ended: of a replication connection, or of an errored mirror's
+/// source. It drops its database's publication and slot and finishes its retried removals from
+/// the publication, which a new connection to that database shares.
+#[derive(Clone, Copy, Debug)]
+enum ShutdownEnd {
+    Finished,
+    /// It panicked: retries it started may still run until [`RETRY_TASK_LIMIT`] after this.
+    Panicked(Instant),
+}
+
+type ShutdownWatch = watch::Receiver<Option<ShutdownEnd>>;
+
+fn shutdown_ended(end: Option<ShutdownEnd>) -> bool {
+    match end {
+        Some(ShutdownEnd::Finished) => true,
+        Some(ShutdownEnd::Panicked(at)) => at.elapsed() >= RETRY_TASK_LIMIT,
+        None => false,
+    }
+}
+
+/// The background shutdowns a new connection to a database has to wait for.
+pub struct PendingShutdowns(Vec<ShutdownWatch>);
+
+impl PendingShutdowns {
+    /// Wait until they ended, at most [`SHUTDOWN_WAIT`]. Cancel-safe: nothing is consumed.
+    pub async fn wait(mut self) -> Result<()> {
+        let all_ended = async {
+            for watch in self.0.iter_mut() {
+                loop {
+                    let end = *watch.borrow_and_update();
+                    if let Some(ShutdownEnd::Panicked(at)) = end {
+                        tokio::time::sleep(RETRY_TASK_LIMIT.saturating_sub(at.elapsed())).await;
+                        break;
+                    }
+                    // Ended, or its watcher is gone (the runtime is shutting down).
+                    if shutdown_ended(end) || watch.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(SHUTDOWN_WAIT, all_ended)
+            .await
+            .map_err(|_| Error::source_shutting_down("this database"))
+    }
+}
 
 /// Manage replication sources, one per source database.
 ///
@@ -43,8 +95,11 @@ pub struct ReplicationManager {
     table_base_path: String,
     /// Object storage cache.
     object_storage_cache: ObjectStorageCache,
-    /// Background shutdown handles.
-    shutdown_handles: Vec<JoinHandle<Result<()>>>,
+    /// Background shutdowns per source key (see [`ShutdownEnd`]).
+    shutdowns: HashMap<String, Vec<ShutdownWatch>>,
+    /// The source keys of the connection strings of background shutdowns, so a request can wait
+    /// for them by connection string before it takes the manager lock.
+    shutdown_uri_keys: HashMap<String, String>,
 }
 
 impl ReplicationManager {
@@ -58,8 +113,62 @@ impl ReplicationManager {
             hold_all_slots: false,
             table_base_path,
             object_storage_cache,
-            shutdown_handles: Vec::new(),
+            shutdowns: HashMap::new(),
+            shutdown_uri_keys: HashMap::new(),
         }
+    }
+
+    /// The background shutdowns a new connection for `src_uri` has to wait for, as far as this
+    /// connection string is known. For waiting without holding the manager lock.
+    pub fn pending_shutdowns_for_uri(&self, src_uri: &str) -> PendingShutdowns {
+        let key = self
+            .uri_keys
+            .get(src_uri)
+            .or_else(|| self.shutdown_uri_keys.get(src_uri));
+        self.pending_shutdowns(key.map(String::as_str))
+    }
+
+    fn pending_shutdowns(&self, key: Option<&str>) -> PendingShutdowns {
+        PendingShutdowns(
+            key.and_then(|key| self.shutdowns.get(key))
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Track a background shutdown of the database with source key `key`.
+    fn track_shutdown(&mut self, key: &str, uris: Vec<String>, task: JoinHandle<Result<()>>) {
+        self.prune_shutdowns();
+        let (tx, rx) = watch::channel(None);
+        tokio::spawn(async move {
+            let end = match task.await {
+                Ok(Ok(())) => ShutdownEnd::Finished,
+                Ok(Err(e)) => {
+                    warn!(error = ?e, "a replication connection shut down with an error");
+                    ShutdownEnd::Finished
+                }
+                Err(e) => {
+                    warn!(error = ?e, "a replication connection's shutdown task failed");
+                    ShutdownEnd::Panicked(Instant::now())
+                }
+            };
+            let _ = tx.send(Some(end));
+        });
+        self.shutdowns.entry(key.to_string()).or_default().push(rx);
+        for uri in uris {
+            self.shutdown_uri_keys.insert(uri, key.to_string());
+        }
+    }
+
+    /// Forget background shutdowns that ended.
+    fn prune_shutdowns(&mut self) {
+        self.shutdowns.retain(|_, watches| {
+            watches.retain(|watch| !shutdown_ended(*watch.borrow()));
+            !watches.is_empty()
+        });
+        let shutdowns = &self.shutdowns;
+        self.shutdown_uri_keys
+            .retain(|_, key| shutdowns.contains_key(key));
     }
 
     /// Resolve a connection string to its source key, contacting the source the first time.
@@ -81,8 +190,10 @@ impl ReplicationManager {
             debug!(%src_uri, "creating replication connection");
             // An earlier connection to this database may still be shutting down: dropping its
             // publication and slot, or retrying the removal of a dropped mirror's table from the
-            // publication. Both are shared with the new connection.
-            Self::wait_for_shutdowns(&mut self.shutdown_handles).await;
+            // publication. Both are shared with the new connection. Callers usually waited for
+            // this before taking the manager lock already (see pending_shutdowns_for_uri).
+            self.pending_shutdowns(Some(&key)).wait().await?;
+            self.prune_shutdowns();
 
             tokio::fs::create_dir_all(&self.table_base_path).await?;
             let base_path = tokio::fs::canonicalize(&self.table_base_path).await?;
@@ -385,10 +496,19 @@ impl ReplicationManager {
         let needed_by_pending_mirror = self.pending_mirror_needs_slot(&key);
         let live_connection = self.connections.get_mut(&key);
         if let Some(connection) = live_connection {
-            // Without the source table's oid (a mirror recorded by an older version) it cannot be
-            // told apart from a table re-created under its name, so it stays published.
+            let src_table_id = match src_table_id {
+                Some(src_table_id) => Some(src_table_id),
+                // A mirror recorded before source fingerprints: its table is the one that has its
+                // name now.
+                None => match connection.source_table_oid(&errored.src_table_name).await {
+                    Ok(src_table_id) => src_table_id,
+                    Err(e) => {
+                        warn!(error = ?e, "cannot look up the dropped mirror's source table; leaving it in the publication");
+                        None
+                    }
+                },
+            };
             let Some(src_table_id) = src_table_id else {
-                info!(table = errored.src_table_name, "the dropped mirror's source table is not known by oid; leaving it in the publication");
                 return;
             };
             // The same source table can be mirrored again while the placeholder exists; that
@@ -404,16 +524,24 @@ impl ReplicationManager {
         if needed_by_pending_mirror {
             return;
         }
-        let cleanup = async {
-            let mut source = PostgresConnection::new(errored.src_uri.clone()).await?;
+        // In the background, tracked like a connection's shutdown: a new connection to this
+        // database waits for it.
+        let src_uri = errored.src_uri.clone();
+        let src_table_name = errored.src_table_name.clone();
+        let cleanup = tokio::spawn(async move {
+            let mut source = PostgresConnection::new(src_uri).await?;
+            let src_table_id = match src_table_id {
+                Some(src_table_id) => Some(src_table_id),
+                None => source.source_table_oid(&src_table_name).await?,
+            };
             if let Some(src_table_id) = src_table_id {
-                source.remove_table_from_publication(src_table_id).await?;
+                if let Err(e) = source.remove_table_from_publication(src_table_id).await {
+                    warn!(error = ?e, "failed to remove the dropped mirror's table from the publication");
+                }
             }
             source.shutdown(/*drop_all=*/ true).await
-        };
-        if let Err(e) = cleanup.await {
-            warn!(error = ?e, "failed to drop the slot and publication of the dropped mirror's source");
-        }
+        });
+        self.track_shutdown(&key, vec![errored.src_uri.clone()], cleanup);
     }
 
     fn check_not_errored(&self, mooncake_table_id: &MooncakeTableId) -> Result<()> {
@@ -562,12 +690,15 @@ impl ReplicationManager {
     }
 
     fn shutdown_connection_by_key(&mut self, key: &str, postgres_drop_all: bool) {
-        // Clean up completed shutdown handles first
-        self.cleanup_completed_shutdowns();
-
         if let Some(conn) = self.connections.remove(key) {
             let shutdown_handle = conn.shutdown(postgres_drop_all);
-            self.shutdown_handles.push(shutdown_handle);
+            let uris = self
+                .uri_keys
+                .iter()
+                .filter(|(_, k)| k.as_str() == key)
+                .map(|(uri, _)| uri.clone())
+                .collect();
+            self.track_shutdown(key, uris, shutdown_handle);
             self.table_info.retain(|_, (k, _)| k != key);
             self.uri_keys.retain(|_, k| k != key);
         }
@@ -588,24 +719,5 @@ impl ReplicationManager {
             // Directly panic: table connection uri existence here is an invariant.
             .unwrap_or_else(|| panic!("connection {uri} not found"));
         Ok((*src_table_id, connection))
-    }
-
-    /// Clean up completed shutdown handles.
-    async fn wait_for_shutdowns(shutdown_handles: &mut Vec<JoinHandle<Result<()>>>) {
-        for handle in std::mem::take(shutdown_handles) {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    warn!(error = ?e, "an earlier replication connection shut down with an error")
-                }
-                Err(e) => {
-                    warn!(error = ?e, "an earlier replication connection's shutdown task failed")
-                }
-            }
-        }
-    }
-
-    fn cleanup_completed_shutdowns(&mut self) {
-        self.shutdown_handles.retain(|handle| !handle.is_finished());
     }
 }
