@@ -151,9 +151,14 @@ mod tests {
             .unwrap();
 
         // Call remove_table_from_publication: should return quickly and schedule background retry
-        conn.remove_table_from_publication("public.retry_drop")
+        let oid: u32 = admin
+            .query_one("SELECT 'public.retry_drop'::regclass::oid::text", &[])
             .await
+            .unwrap()
+            .get::<_, String>(0)
+            .parse()
             .unwrap();
+        conn.remove_table_from_publication(oid).await.unwrap();
 
         // Wait for background retries to complete, then assert membership removed
         conn.wait_for_pending_retries().await;

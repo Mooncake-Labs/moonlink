@@ -8,7 +8,6 @@ use moonlink::{
     MooncakeTableId, MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableEventManager,
 };
 use moonlink::{ReadStateFilepathRemap, TableStatus, TableStatusReader};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -78,31 +77,30 @@ impl ReplicationManager {
         src_uri: &str,
     ) -> Result<&mut ReplicationConnection> {
         let key = self.source_key(src_uri).await?;
-        let replication_connection = match self.connections.entry(key) {
-            Entry::Occupied(entry) => {
-                if entry.get().uri() != src_uri {
-                    info!(
-                        "reusing the replication connection already open for this database; \
-                         its connection string is used for the new table too"
-                    );
-                }
-                entry.into_mut()
-            }
-            Entry::Vacant(entry) => {
-                debug!(%src_uri, "creating replication connection");
+        if !self.connections.contains_key(&key) {
+            debug!(%src_uri, "creating replication connection");
+            // An earlier connection to this database may still be shutting down: dropping its
+            // publication and slot, or retrying the removal of a dropped mirror's table from the
+            // publication. Both are shared with the new connection.
+            Self::wait_for_shutdowns(&mut self.shutdown_handles).await;
 
-                tokio::fs::create_dir_all(&self.table_base_path).await?;
-                let base_path = tokio::fs::canonicalize(&self.table_base_path).await?;
-                let replication_connection = ReplicationConnection::new(
-                    src_uri.to_string(),
-                    base_path.to_str().unwrap().to_string(),
-                    self.object_storage_cache.clone(),
-                )
-                .await?;
-                entry.insert(replication_connection)
-            }
-        };
-
+            tokio::fs::create_dir_all(&self.table_base_path).await?;
+            let base_path = tokio::fs::canonicalize(&self.table_base_path).await?;
+            let replication_connection = ReplicationConnection::new(
+                src_uri.to_string(),
+                base_path.to_str().unwrap().to_string(),
+                self.object_storage_cache.clone(),
+            )
+            .await?;
+            self.connections.insert(key.clone(), replication_connection);
+        }
+        let replication_connection = self.connections.get_mut(&key).unwrap();
+        if replication_connection.uri() != src_uri {
+            info!(
+                "reusing the replication connection already open for this database; \
+                 its connection string is used for the new table too"
+            );
+        }
         Ok(replication_connection)
     }
 
@@ -372,7 +370,11 @@ impl ReplicationManager {
     /// After dropping a placeholder: take its table out of the publication, and if no live
     /// mirror of its database remains, drop the database's slot and publication as dropping the
     /// last live mirror would (placeholders never resume, so nothing needs them). Best effort.
-    async fn release_errored_source(&mut self, errored: &ErroredTable) {
+    async fn release_errored_source(
+        &mut self,
+        errored: &ErroredTable,
+        src_table_id: Option<SrcTableId>,
+    ) {
         let key = match self.source_key(&errored.src_uri).await {
             Ok(key) => key,
             Err(e) => {
@@ -383,23 +385,18 @@ impl ReplicationManager {
         let needed_by_pending_mirror = self.pending_mirror_needs_slot(&key);
         let live_connection = self.connections.get_mut(&key);
         if let Some(connection) = live_connection {
-            // The same source table can be mirrored again (re-created) while the placeholder
-            // exists; that mirror still needs it published.
-            match connection
-                .mirrors_source_table(&errored.src_table_name)
-                .await
-            {
-                Ok(false) => {}
-                Ok(true) => return,
-                Err(e) => {
-                    warn!(error = ?e, "cannot tell whether a live mirror uses the dropped mirror's table; keeping it published");
-                    return;
-                }
+            // Without the source table's oid (a mirror recorded by an older version) it cannot be
+            // told apart from a table re-created under its name, so it stays published.
+            let Some(src_table_id) = src_table_id else {
+                info!(table = errored.src_table_name, "the dropped mirror's source table is not known by oid; leaving it in the publication");
+                return;
+            };
+            // The same source table can be mirrored again while the placeholder exists; that
+            // mirror still needs it published.
+            if connection.mirrors_source_oid(src_table_id) {
+                return;
             }
-            if let Err(e) = connection
-                .remove_table_from_publication(&errored.src_table_name)
-                .await
-            {
+            if let Err(e) = connection.remove_table_from_publication(src_table_id).await {
                 warn!(error = ?e, "failed to remove the dropped mirror's table from the publication");
             }
             return;
@@ -409,9 +406,9 @@ impl ReplicationManager {
         }
         let cleanup = async {
             let mut source = PostgresConnection::new(errored.src_uri.clone()).await?;
-            source
-                .remove_table_from_publication(&errored.src_table_name)
-                .await?;
+            if let Some(src_table_id) = src_table_id {
+                source.remove_table_from_publication(src_table_id).await?;
+            }
             source.shutdown(/*drop_all=*/ true).await
         };
         if let Err(e) = cleanup.await {
@@ -448,8 +445,13 @@ impl ReplicationManager {
             // Best effort: the mirror is gone from moonlink either way.
             let _ = errored_tables::drop_iceberg_table_files(&errored.iceberg_table_config).await;
             errored_tables::remove_marker(&self.table_base_path, mooncake_table_id).await;
+            // The source table's oid, so its publication entry is removed only if it is that
+            // table's, and not one re-created under the same name.
+            let src_table_id = source_fingerprint::read(&self.table_base_path, mooncake_table_id)
+                .await
+                .map(|fingerprint| fingerprint.relid);
             source_fingerprint::remove(&self.table_base_path, mooncake_table_id).await;
-            self.release_errored_source(&errored).await;
+            self.release_errored_source(&errored, src_table_id).await;
             return Ok(true);
         }
         let (table_uri, src_table_id) = match self.table_info.get(mooncake_table_id) {
@@ -589,6 +591,20 @@ impl ReplicationManager {
     }
 
     /// Clean up completed shutdown handles.
+    async fn wait_for_shutdowns(shutdown_handles: &mut Vec<JoinHandle<Result<()>>>) {
+        for handle in std::mem::take(shutdown_handles) {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!(error = ?e, "an earlier replication connection shut down with an error")
+                }
+                Err(e) => {
+                    warn!(error = ?e, "an earlier replication connection's shutdown task failed")
+                }
+            }
+        }
+    }
+
     fn cleanup_completed_shutdowns(&mut self) {
         self.shutdown_handles.retain(|handle| !handle.is_finished());
     }

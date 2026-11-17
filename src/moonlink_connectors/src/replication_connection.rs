@@ -284,18 +284,17 @@ impl ReplicationConnection {
         self.source.source_table_oid(src_table_name).await
     }
 
-    /// Whether a mirror served by this connection replicates the source table `src_table_name`.
-    pub async fn mirrors_source_table(&mut self, src_table_name: &str) -> Result<bool> {
-        let Some(oid) = self.source.source_table_oid(src_table_name).await? else {
-            return Ok(false);
-        };
-        Ok(self.table_states.keys().any(|id| id.src_table_id == oid))
+    /// Whether a mirror served by this connection replicates the source table with this oid.
+    pub fn mirrors_source_oid(&self, src_table_id: SrcTableId) -> bool {
+        self.table_states
+            .keys()
+            .any(|id| id.src_table_id == src_table_id)
     }
 
     /// Take a source table out of the publication (for a mirror this connection does not serve).
-    pub async fn remove_table_from_publication(&mut self, src_table_name: &str) -> Result<()> {
+    pub async fn remove_table_from_publication(&mut self, src_table_id: SrcTableId) -> Result<()> {
         self.source
-            .remove_table_from_publication(src_table_name)
+            .remove_table_from_publication(src_table_id)
             .await
     }
 

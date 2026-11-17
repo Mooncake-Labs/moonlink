@@ -687,46 +687,54 @@ impl PostgresConnection {
         let uri = uri.to_string();
         let drop_query = drop_query.to_string();
         tokio::spawn(async move {
-            let mut retry_count = 0;
-            loop {
-                let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
-                match connect(&uri, tls).await {
-                    Ok((client, connection)) => {
-                        tokio::spawn(async move {
-                            if let Err(e) = connection.await {
-                                warn!("connection error: {}", e);
-                            }
-                        });
-                        match client.simple_query(&drop_query).await {
-                            Ok(_) => break Ok(()),
-                            Err(e) => {
-                                match e.code() {
-                                    Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) => {
-                                        break Ok(());
-                                    }
-                                    Some(&SqlState::UNDEFINED_OBJECT) => {
-                                        break Ok(());
-                                    }
-                                    _ => {}
-                                }
-                                if retry_count >= 3 {
-                                    break Err(e.into());
-                                }
-                                retry_count += 1;
-                                sleep(Duration::from_secs(1)).await;
-                            }
+            let result = Self::retry_drop_impl(&uri, &drop_query).await;
+            if let Err(e) = &result {
+                warn!(error = ?e, drop_query, "gave up retrying a cleanup statement");
+            }
+            result
+        })
+    }
+
+    async fn retry_drop_impl(uri: &str, drop_query: &str) -> Result<()> {
+        let mut retry_count = 0;
+        loop {
+            let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+            match connect(uri, tls).await {
+                Ok((client, connection)) => {
+                    tokio::spawn(async move {
+                        if let Err(e) = connection.await {
+                            warn!("connection error: {}", e);
                         }
-                    }
-                    Err(e) => {
-                        if retry_count >= 3 {
-                            break Err(e.into());
+                    });
+                    match client.simple_query(drop_query).await {
+                        Ok(_) => break Ok(()),
+                        Err(e) => {
+                            match e.code() {
+                                Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) => {
+                                    break Ok(());
+                                }
+                                Some(&SqlState::UNDEFINED_OBJECT) => {
+                                    break Ok(());
+                                }
+                                _ => {}
+                            }
+                            if retry_count >= 3 {
+                                break Err(e.into());
+                            }
+                            retry_count += 1;
+                            sleep(Duration::from_secs(1)).await;
                         }
-                        retry_count += 1;
-                        sleep(Duration::from_secs(1)).await;
                     }
                 }
+                Err(e) => {
+                    if retry_count >= 3 {
+                        break Err(e.into());
+                    }
+                    retry_count += 1;
+                    sleep(Duration::from_secs(1)).await;
+                }
             }
-        })
+        }
     }
 
     pub async fn drop_replication_slot(&mut self) -> Result<()> {
@@ -758,17 +766,13 @@ impl PostgresConnection {
         Ok(())
     }
 
-    pub async fn remove_table_from_publication(&mut self, table_name: &str) -> Result<()> {
-        let ident = match TableName::parse_schema_name(table_name) {
-            Ok((schema, name)) => {
-                format!("{}.{}", quote_identifier(&schema), quote_identifier(&name))
-            }
-            Err(_) => quote_identifier(table_name).into_owned(),
-        };
-        // ONLY: without it postgres also drops the table's inheritance children, which other
-        // mirrors may still need.
-        let drop_query = format!("ALTER PUBLICATION moonlink_pub DROP TABLE ONLY {};", ident);
-        self.attempt_drop_else_retry(&drop_query).await?;
+    /// Take the source table with oid `src_table_id` out of the publication, if it is still in it.
+    /// By oid, not by name: a removal retried after the mirror is gone must not take out a table
+    /// re-created under the same name (and mirrored again), and finds nothing to do once the table
+    /// or its schema is gone.
+    pub async fn remove_table_from_publication(&mut self, src_table_id: SrcTableId) -> Result<()> {
+        self.attempt_drop_else_retry(&remove_from_publication_query(src_table_id))
+            .await?;
         Ok(())
     }
 
@@ -1133,7 +1137,7 @@ impl PostgresConnection {
         if let Err(e) = table_resources.table_event_manager.drop_table().await {
             warn!(error = ?e, table_name, "failed to drop table handler");
         }
-        if let Err(e) = self.remove_table_from_publication(table_name).await {
+        if let Err(e) = self.remove_table_from_publication(src_table_id).await {
             warn!(error = ?e, table_name, "failed to remove table from publication");
         }
         let copy_dir = crate::pg_replicate::initial_copy::initial_copy_output_dir(
@@ -1154,7 +1158,7 @@ impl PostgresConnection {
         // Not compared with its source any more: leaving the publication would error it.
         self.watched_tables.lock().unwrap().remove(&src_table_id);
         // Remove table from publication as the first step, to prevent further events.
-        self.remove_table_from_publication(table_name).await?;
+        self.remove_table_from_publication(src_table_id).await?;
 
         // Send command to drop table from replication. If the loop is gone there is nothing to
         // unregister, and the drop must still succeed.
@@ -1491,6 +1495,27 @@ fn errored_table_names(
 pub struct TableStatusWatch {
     pub table: watch::Receiver<TableStatus>,
     pub slot: watch::Receiver<TableStatus>,
+}
+
+/// Removes the table with oid `src_table_id` from moonlink_pub if the publication still has it,
+/// under the name the oid has now, and fails (rolling back) if that name took out another table.
+/// ONLY: without it postgres also drops the table's inheritance children, which other mirrors may
+/// still need.
+fn remove_from_publication_query(src_table_id: SrcTableId) -> String {
+    format!(
+        "DO $moonlink$ \
+         DECLARE pub oid; rel regclass; \
+         BEGIN \
+             SELECT p.oid, r.prrelid::regclass INTO pub, rel FROM pg_publication p \
+                 JOIN pg_publication_rel r ON r.prpubid = p.oid \
+                 WHERE p.pubname = 'moonlink_pub' AND r.prrelid = {src_table_id}; \
+             IF rel IS NULL THEN RETURN; END IF; \
+             EXECUTE format('ALTER PUBLICATION moonlink_pub DROP TABLE ONLY %s', rel); \
+             IF EXISTS (SELECT 1 FROM pg_publication_rel WHERE prpubid = pub AND prrelid = {src_table_id}) THEN \
+                 RAISE EXCEPTION 'removing relation {src_table_id} from moonlink_pub took out another table'; \
+             END IF; \
+         END $moonlink$;"
+    )
 }
 
 /// Compute the lsn to send to postgres as the `confirmed_flush_lsn` [https://www.postgresql.org/docs/current/view-pg-replication-slots.html]
