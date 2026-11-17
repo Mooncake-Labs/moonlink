@@ -291,7 +291,7 @@ impl MoonlinkBackend {
 
         // Add mooncake table to replication, and create corresponding mooncake table.
         let (moonlink_table_config, initial_copy_lsn, mirror_status) = {
-            let mut manager = self.replication_manager.write().await;
+            let mut manager = self.lock_manager_for_new_mirror(&src_uri).await?;
             let mut cur_moonlink_table_config = config_utils::parse_replication_table_config(
                 &table_config,
                 &mooncake_table_id,
@@ -371,6 +371,33 @@ impl MoonlinkBackend {
             )
             .await?;
         Ok(())
+    }
+
+    /// The manager, write-locked once no earlier connection to `src_uri`'s database is shutting
+    /// down. Such a shutdown is waited for without the lock, which every other request needs; it is
+    /// found by connection string first and then, under the lock, by the database's source key
+    /// (another connection string for the same database, or a shutdown that began meanwhile). All
+    /// waits share one deadline, after which the request fails with a retryable error.
+    async fn lock_manager_for_new_mirror(
+        &self,
+        src_uri: &str,
+    ) -> Result<tokio::sync::RwLockWriteGuard<'_, ReplicationManager>> {
+        let deadline = tokio::time::Instant::now() + moonlink_connectors::SHUTDOWN_WAIT;
+        let pending = self
+            .replication_manager
+            .read()
+            .await
+            .pending_shutdowns_for_uri(src_uri);
+        pending.wait_until(deadline).await?;
+        loop {
+            let mut manager = self.replication_manager.write().await;
+            let pending = manager.pending_shutdowns_for_source(src_uri).await?;
+            if pending.is_empty() {
+                return Ok(manager);
+            }
+            drop(manager);
+            pending.wait_until(deadline).await?;
+        }
     }
 
     /// Wait until the mirror has persisted everything up to `lsn` into iceberg. A failed

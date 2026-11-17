@@ -12,7 +12,7 @@ use arrow::util::display::array_value_to_string;
 use common::{connect_to_postgres, current_wal_lsn, get_database_uri};
 use moonlink_backend::table_config::{MooncakeConfig, TableConfig};
 use moonlink_backend::MoonlinkBackend;
-use moonlink_connectors::pg_replicate::PostgresConnection;
+use moonlink_connectors::pg_replicate::{moved_removal_retries, PostgresConnection};
 use moonlink_metadata_store::SqliteMetadataStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serial_test::serial;
@@ -83,8 +83,16 @@ async fn setup(ddl: &str) -> (TempDir, MoonlinkBackend, Client) {
         )
         .await
         .unwrap();
-    // A test that failed while forcing large transactions to stream must not leak that setting.
+    // A test that failed while forcing large transactions to stream, or with a database
+    // lock_timeout set, must not leak that setting.
     stream_large_transactions(&client, false).await;
+    set_database_lock_timeout(&client, None).await;
+    client
+        .simple_query(
+            "DROP EVENT TRIGGER IF EXISTS rv_px_readd; DROP FUNCTION IF EXISTS rv_px_readd();",
+        )
+        .await
+        .unwrap();
     client.simple_query(ddl).await.unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = new_backend(&tmp).await.unwrap();
@@ -2058,12 +2066,19 @@ async fn mirror_that_failed_recovery_is_not_resumed_with_a_gap() {
 /// Dropping an errored placeholder releases what it held on the source: its table leaves the
 /// publication, and when it was the database's last mirror the slot and publication are dropped
 /// (otherwise the source retains WAL forever).
+/// A mirror recorded before source fingerprints (`legacy`) has no source table oid; its table is
+/// the one that has its name when the placeholder is dropped.
 #[rstest::rstest]
-#[case::last_mirror(false)]
-#[case::database_still_has_a_live_mirror(true)]
+#[case::last_mirror(false, false)]
+#[case::database_still_has_a_live_mirror(true, false)]
+#[case::legacy_last_mirror(false, true)]
+#[case::legacy_database_still_has_a_live_mirror(true, true)]
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn dropping_an_errored_placeholder_releases_the_source(#[case] keep_live_mirror: bool) {
+async fn dropping_an_errored_placeholder_releases_the_source(
+    #[case] keep_live_mirror: bool,
+    #[case] legacy: bool,
+) {
     let uri = get_database_uri();
     let (tmp, backend, client) = setup(
         "DROP TABLE IF EXISTS rv_t, rv_live;
@@ -2084,6 +2099,9 @@ async fn dropping_an_errored_placeholder_releases_the_source(#[case] keep_live_m
     tokio::time::sleep(Duration::from_millis(500)).await;
     backend.shutdown_connection(&uri, false).await;
     drop(backend);
+    if legacy {
+        remove_source_fingerprint(&tmp, "rv_t_mc");
+    }
 
     let backend = new_backend(&tmp).await.unwrap();
     assert!(scan_error(&backend, "rv_t_mc").await.is_some());
@@ -2092,14 +2110,15 @@ async fn dropping_an_errored_placeholder_releases_the_source(#[case] keep_live_m
         .drop_table(DB.to_string(), "rv_t_mc".to_string())
         .await
         .unwrap();
-    let published: i64 = client
-        .query_one(
-            "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'moonlink_pub' AND tablename = 'rv_t'",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
+    // The last mirror's source is released in the background.
+    let mut published = 1;
+    for _ in 0..100 {
+        published = published_count(&client, "rv_t").await;
+        if published == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(published, 0, "dropped mirror's table is still published");
     if keep_live_mirror {
         assert_eq!(slot_count(&client).await, 1);
@@ -2112,6 +2131,15 @@ async fn dropping_an_errored_placeholder_releases_the_source(#[case] keep_live_m
     } else {
         wait_for_no_slots(&client).await;
     }
+}
+
+/// Delete a mirror's recorded source fingerprint, as for a mirror an older moonlink recorded.
+fn remove_source_fingerprint(tmp: &TempDir, mirror: &str) {
+    let name: String = format!("{DB}.{mirror}")
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::fs::remove_file(tmp.path().join("source_fingerprints").join(name)).unwrap();
 }
 
 /// Restart moonlink (keeping its data) with `ddl` run on the source while it is down.
@@ -5010,6 +5038,277 @@ async fn a_mirror_re_created_while_its_drop_is_retried_replicates() {
         .simple_query("DROP TABLE rv_rd, rv_rd_keep;")
         .await
         .unwrap();
+}
+
+/// Wait until a session runs moonlink's removal from the publication and waits for a lock.
+async fn wait_for_blocked_removal(client: &Client) {
+    for _ in 0..200 {
+        let waiting: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE 'DO $moonlink$%'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no removal from the publication waited for its lock");
+}
+
+/// Whether moonlink_pub has the relation with this oid.
+async fn published_oid(client: &Client, oid: u32) -> bool {
+    client
+        .query_one(
+            "SELECT count(*) FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid \
+             WHERE p.pubname = 'moonlink_pub' AND r.prrelid = $1::text::oid",
+            &[&oid.to_string()],
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0)
+        == 1
+}
+
+async fn table_oid(client: &Client, table: &str) -> u32 {
+    client
+        .query_one("SELECT $1::text::regclass::oid::text", &[&table])
+        .await
+        .unwrap()
+        .get::<_, String>(0)
+        .parse()
+        .unwrap()
+}
+
+/// Taking a dropped mirror's table out of the publication acts on that table, by oid: a table
+/// re-created under the same name stays published, and once the table and its schema are gone
+/// there is nothing to remove, so nothing is retried.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn publication_removal_acts_on_the_dropped_table_only() {
+    let uri = get_database_uri();
+    let (_tmp, _backend, client) = setup(
+        "DROP SCHEMA IF EXISTS rv_po CASCADE;
+         CREATE SCHEMA rv_po;
+         CREATE TABLE rv_po.t (id BIGINT PRIMARY KEY);
+         CREATE PUBLICATION moonlink_pub FOR TABLE rv_po.t;",
+    )
+    .await;
+    let old_oid = table_oid(&client, "rv_po.t").await;
+    client
+        .simple_query(
+            "DROP TABLE rv_po.t;
+             CREATE TABLE rv_po.t (id BIGINT PRIMARY KEY);
+             ALTER PUBLICATION moonlink_pub ADD TABLE rv_po.t;",
+        )
+        .await
+        .unwrap();
+    let new_oid = table_oid(&client, "rv_po.t").await;
+    assert_ne!(old_oid, new_oid);
+
+    let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
+    conn.remove_table_from_publication(old_oid).await.unwrap();
+    assert!(published_oid(&client, new_oid).await);
+    conn.remove_table_from_publication(new_oid).await.unwrap();
+    assert!(!published_oid(&client, new_oid).await);
+    client
+        .simple_query(
+            "ALTER PUBLICATION moonlink_pub ADD TABLE rv_po.t; DROP SCHEMA rv_po CASCADE;",
+        )
+        .await
+        .unwrap();
+    conn.remove_table_from_publication(new_oid).await.unwrap();
+    assert_eq!(conn.pending_retry_count(), 0);
+    client
+        .simple_query("DROP PUBLICATION IF EXISTS moonlink_pub;")
+        .await
+        .unwrap();
+}
+
+/// A removal after which the table is still published (its name meant another table by then)
+/// rolls back and is retried, never leaving another table removed. Here an event trigger puts the
+/// table back right after every removal, so every attempt rolls back until the retries end.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn publication_removal_rolls_back_if_the_table_stays_published() {
+    let uri = get_database_uri();
+    let (_tmp, _backend, client) = setup(
+        "DROP EVENT TRIGGER IF EXISTS rv_px_readd;
+         DROP TABLE IF EXISTS rv_px;
+         CREATE TABLE rv_px (id BIGINT PRIMARY KEY);
+         CREATE PUBLICATION moonlink_pub FOR TABLE rv_px;
+         CREATE OR REPLACE FUNCTION rv_px_readd() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                            WHERE pubname = 'moonlink_pub' AND tablename = 'rv_px') THEN
+                 ALTER PUBLICATION moonlink_pub ADD TABLE rv_px;
+             END IF;
+         END $$;
+         CREATE EVENT TRIGGER rv_px_readd ON ddl_command_end WHEN TAG IN ('ALTER PUBLICATION')
+             EXECUTE FUNCTION rv_px_readd();",
+    )
+    .await;
+    let oid = table_oid(&client, "rv_px").await;
+    let moved_before = moved_removal_retries();
+    let mut conn = PostgresConnection::new(uri.clone()).await.unwrap();
+    conn.remove_table_from_publication(oid).await.unwrap();
+    assert_eq!(conn.pending_retry_count(), 1);
+    conn.wait_for_pending_retries().await;
+    assert!(published_oid(&client, oid).await);
+    assert!(moved_removal_retries() > moved_before);
+    client
+        .simple_query(
+            "DROP EVENT TRIGGER rv_px_readd; DROP FUNCTION rv_px_readd();
+             DROP TABLE rv_px; DROP PUBLICATION IF EXISTS moonlink_pub;",
+        )
+        .await
+        .unwrap();
+}
+
+/// The removal retried after a drop acts on the dropped mirror's table by oid, also when that table
+/// was renamed and a new table took its name and was mirrored: the old table leaves the
+/// publication and the new one stays in it. Another mirror keeps the connection (and so the
+/// publication) alive, so the old table's removal is what is checked.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_renamed_sources_name_reused_while_its_drop_is_retried_keeps_the_new_table_published() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_rr, rv_rr_old, rv_rr_keep;
+         CREATE TABLE rv_rr (id BIGINT PRIMARY KEY);
+         CREATE TABLE rv_rr_keep (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_rr VALUES (1);",
+    )
+    .await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_rr_keep_mc", "public.rv_rr_keep", &uri).await;
+    mirror(&backend, &tmp, "rv_rr_mc", "public.rv_rr", &uri).await;
+    let old_oid = table_oid(&client, "rv_rr").await;
+    let moved_before = moved_removal_retries();
+
+    set_database_lock_timeout(&client, Some("50ms")).await;
+    let (locker, _) = connect_to_postgres(&uri).await;
+    locker
+        .simple_query(
+            "BEGIN;
+             CREATE TABLE rv_rr_hold (id BIGINT);
+             ALTER PUBLICATION moonlink_pub ADD TABLE rv_rr_hold;",
+        )
+        .await
+        .unwrap();
+    backend
+        .drop_table(DB.to_string(), "rv_rr_mc".to_string())
+        .await
+        .unwrap();
+    // The retried removal waits for the publication lock, having looked the table's name up.
+    wait_for_blocked_removal(&client).await;
+    locker
+        .simple_query(
+            "ALTER TABLE rv_rr RENAME TO rv_rr_old;
+             CREATE TABLE rv_rr (id BIGINT PRIMARY KEY);
+             INSERT INTO rv_rr VALUES (10);
+             DROP TABLE rv_rr_hold;
+             COMMIT;",
+        )
+        .await
+        .unwrap();
+    try_mirror(&backend, &tmp, "rv_rr_mc", "public.rv_rr", &uri)
+        .await
+        .unwrap();
+    set_database_lock_timeout(&client, None).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    client
+        .simple_query("INSERT INTO rv_rr VALUES (11);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert!(
+        !published_oid(&client, old_oid).await,
+        "the renamed old table is still published"
+    );
+    // The name it looked up meant the new table by the time the lock was granted.
+    assert!(moved_removal_retries() > moved_before);
+    assert!(published_oid(&client, table_oid(&client, "rv_rr").await).await);
+    assert_eq!(snapshot_error(&backend, "rv_rr_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_rr_mc", lsn).await,
+        Some(vec![10, 11])
+    );
+    client
+        .simple_query("DROP TABLE rv_rr, rv_rr_old, rv_rr_keep;")
+        .await
+        .unwrap();
+}
+
+/// The same when the dropped mirror was its source's only one, so its drop also shuts the
+/// replication connection down (dropping the publication and slot), and the source table is
+/// dropped and re-created under its name right away: the old connection's cleanup must neither
+/// take the new table out of the publication nor drop the publication or slot its new mirror uses.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_re_created_table_mirrored_while_its_only_mirrors_drop_is_retried_replicates() {
+    let uri = get_database_uri();
+    let (tmp, backend, client) = setup(
+        "DROP TABLE IF EXISTS rv_rn;
+         CREATE TABLE rv_rn (id BIGINT PRIMARY KEY);
+         INSERT INTO rv_rn VALUES (1);",
+    )
+    .await;
+    set_database_lock_timeout(&client, None).await;
+    let backend = Arc::new(backend);
+    mirror(&backend, &tmp, "rv_rn_mc", "public.rv_rn", &uri).await;
+
+    // A transaction that changed the publication holds it locked, so both the table's removal
+    // from it and the publication's drop (the source has no mirror left) time out and are retried
+    // in the background after the drop returns.
+    set_database_lock_timeout(&client, Some("50ms")).await;
+    let (locker, _) = connect_to_postgres(&uri).await;
+    locker
+        .simple_query(
+            "BEGIN;
+             CREATE TABLE rv_rn_hold (id BIGINT);
+             ALTER PUBLICATION moonlink_pub ADD TABLE rv_rn_hold;",
+        )
+        .await
+        .unwrap();
+    backend
+        .drop_table(DB.to_string(), "rv_rn_mc".to_string())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Re-created in the transaction that held the lock: a retry by name finds the new table, and
+    // a retried publication drop finds the publication, as soon as it commits.
+    locker
+        .simple_query(
+            "DROP TABLE rv_rn, rv_rn_hold;
+             CREATE TABLE rv_rn (id BIGINT PRIMARY KEY);
+             INSERT INTO rv_rn VALUES (10);
+             COMMIT;",
+        )
+        .await
+        .unwrap();
+    try_mirror(&backend, &tmp, "rv_rn_mc", "public.rv_rn", &uri)
+        .await
+        .unwrap();
+    set_database_lock_timeout(&client, None).await;
+    // Past every retry.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    client
+        .simple_query("INSERT INTO rv_rn VALUES (11);")
+        .await
+        .unwrap();
+    let lsn = current_wal_lsn(&client).await;
+    assert_eq!(published_count(&client, "rv_rn").await, 1);
+    assert_eq!(snapshot_error(&backend, "rv_rn_mc", lsn).await, None);
+    assert_eq!(
+        scan_ids(&backend, "rv_rn_mc", lsn).await,
+        Some(vec![10, 11])
+    );
+    client.simple_query("DROP TABLE rv_rn;").await.unwrap();
 }
 
 /// The initial copy reads NULL only from the null marker as COPY sends it: a text value that is
