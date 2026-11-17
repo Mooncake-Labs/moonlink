@@ -13,6 +13,7 @@ use crate::storage::mooncake_table::{
     table_creation_test_utils::*, FileIndiceMergeResult, PersistenceSnapshotResult,
 };
 use crate::storage::mooncake_table_config::DiskSliceWriterConfig;
+use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::table_handler::chaos_table_metadata::ReplayTableMetadata;
 use crate::table_handler::test_utils::check_read_snapshot;
 use crate::table_notify::{TableEvent, TableMaintenanceStatus};
@@ -189,6 +190,26 @@ async fn validate_persisted_iceberg_table(
     .await;
 }
 
+/// Ids of the iceberg snapshots the source run initiated. The table handler forces an empty
+/// persistence payload from its own state (a flush that persisted no rows while a force snapshot
+/// is pending), which the dump does not record; a recorded initiation shows that the source
+/// snapshot built a payload, so the replay forces one for that snapshot too.
+async fn read_initiated_iceberg_snapshots(replay_filepath: &str) -> HashSet<uuid::Uuid> {
+    let file = tokio::fs::File::open(replay_filepath).await.unwrap();
+    let mut lines = tokio::io::BufReader::new(file).lines();
+    // The first line holds the table metadata.
+    lines.next_line().await.unwrap().unwrap();
+    let mut initiated = HashSet::new();
+    while let Some(serialized_event) = lines.next_line().await.unwrap() {
+        if let MooncakeTableEvent::IcebergSnapshotInitiation(event) =
+            serde_json::from_str(&serialized_event).unwrap()
+        {
+            initiated.insert(event.uuid);
+        }
+    }
+    initiated
+}
+
 /// Waits for the event reader to announce a completed background event. The reader asserts on
 /// every event it handles; if it panics or stops, no further notification can arrive, so fail
 /// with its result instead of waiting forever.
@@ -213,6 +234,8 @@ pub(crate) async fn replay(replay_filepath: &str) {
         table_temp_dir,
         iceberg_temp_dir,
     };
+
+    let initiated_iceberg_snapshots = read_initiated_iceberg_snapshots(replay_filepath).await;
 
     // Table event reader.
     let file = tokio::fs::File::open(replay_filepath).await.unwrap();
@@ -572,6 +595,13 @@ pub(crate) async fn replay(replay_filepath: &str) {
                 assert!(ongoing_mooncake_snapshot_id.insert(snapshot_initiation_event.uuid));
                 let mut snapshot_option = snapshot_initiation_event.option.clone();
                 snapshot_option.dump_snapshot = true;
+                if let IcebergSnapshotOption::BestEffort(iceberg_snapshot_id) =
+                    &snapshot_option.iceberg_snapshot_option
+                {
+                    if initiated_iceberg_snapshots.contains(iceberg_snapshot_id) {
+                        table.force_empty_persistence_payload();
+                    }
+                }
                 // Event only recorded when snapshot gets created in source run.
                 assert!(table.try_create_mooncake_snapshot(snapshot_option));
             }
@@ -740,4 +770,57 @@ pub(crate) async fn replay(replay_filepath: &str) {
             }
         }
     }
+}
+
+/// The source run persisted an empty iceberg snapshot for its second mooncake snapshot (as after a
+/// flush that wrote no rows while a force snapshot was pending); nothing changed since the first
+/// one, so the replay builds that payload only if it forces it as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replays_an_iceberg_snapshot_of_a_forced_empty_payload() {
+    let table_dir = tempdir().unwrap();
+    let metadata = ReplayTableMetadata {
+        config: MooncakeTableConfig::new(table_dir.path().to_str().unwrap().to_string()),
+        local_filesystem_optimization_enabled: false,
+        storage_config: StorageConfig::FileSystem {
+            root_directory: table_dir.path().to_str().unwrap().to_string(),
+            atomic_write_dir: None,
+        },
+        is_upsert_table: false,
+    };
+    let flush = uuid::Uuid::new_v4();
+    let [first_snapshot, first_iceberg, second_snapshot, second_iceberg] =
+        std::array::from_fn(|_| uuid::Uuid::new_v4());
+    let snapshot_initiation = |id: uuid::Uuid, iceberg_id: uuid::Uuid, force_create: bool| {
+        format!(
+            r#"{{"MooncakeSnapshotInitiation":{{"uuid":"{id}","option":{{"uuid":"{id}","dump_snapshot":false,"force_create":{force_create},"iceberg_snapshot_option":{{"BestEffort":"{iceberg_id}"}},"index_merge_option":"Skip","data_compaction_option":"Skip"}}}}}}"#
+        )
+    };
+    let iceberg_snapshot = |id: uuid::Uuid| {
+        [
+            format!(
+                r#"{{"IcebergSnapshotInitiation":{{"uuid":"{id}","flush_lsn":1,"committed_deletion_logs":[],"import_payload":{{"data_files":[],"new_deletion_vector":{{}},"file_indices":[]}},"index_merge_payload":{{"new_file_indices":[],"old_file_indices":[]}},"data_compaction_payload":{{"new_data_files_to_import":[],"old_data_files_to_remove":[],"new_file_indices_to_import":[],"old_file_indices_to_remove":[]}}}}}}"#
+            ),
+            format!(r#"{{"IcebergSnapshotCompletion":{{"uuid":"{id}","lsn":1}}}}"#),
+        ]
+    };
+    let mut dump = vec![
+        serde_json::to_string(&metadata).unwrap(),
+        r#"{"Append":{"row":{"values":[{"Int32":0},{"ByteArray":[117,115,101,114]},{"Int32":0}]},"xact_id":null}}"#.to_string(),
+        r#"{"Commit":{"xact_id":null,"lsn":1}}"#.to_string(),
+        format!(r#"{{"FlushInitiation":{{"uuid":"{flush}","xact_id":null,"lsn":1,"commit_check_point":{{"MemoryBatch":[0,1]}}}}}}"#),
+        format!(r#"{{"FlushCompletion":{{"uuid":"{flush}","file_ids":[]}}}}"#),
+        snapshot_initiation(first_snapshot, first_iceberg, false),
+        format!(r#"{{"MooncakeSnapshotCompletion":{{"uuid":"{first_snapshot}","lsn":1}}}}"#),
+    ];
+    dump.extend(iceberg_snapshot(first_iceberg));
+    dump.push(snapshot_initiation(second_snapshot, second_iceberg, true));
+    dump.push(format!(
+        r#"{{"MooncakeSnapshotCompletion":{{"uuid":"{second_snapshot}","lsn":1}}}}"#
+    ));
+    dump.extend(iceberg_snapshot(second_iceberg));
+    let dump_dir = tempdir().unwrap();
+    let dump_filepath = dump_dir.path().join("events");
+    std::fs::write(&dump_filepath, dump.join("\n") + "\n").unwrap();
+
+    replay(dump_filepath.to_str().unwrap()).await;
 }
